@@ -9,11 +9,15 @@ import { agents } from "@/lib/agents/agents.config";
 
 export function ChatShell() {
   const [activeAgent, setActiveAgent] = useState(agents[0]?.id ?? "");
-  const [threadId, setThreadId] = useState(() => crypto.randomUUID());
+  const [threadIds, setThreadIds] = useState<Record<string, string>>(() =>
+    Object.fromEntries(agents.map((a) => [a.id, crypto.randomUUID()]))
+  );
+
+  const threadId = threadIds[activeAgent];
 
   const handleNewChat = useCallback(() => {
-    setThreadId(crypto.randomUUID());
-  }, []);
+    setThreadIds((prev) => ({ ...prev, [activeAgent]: crypto.randomUUID() }));
+  }, [activeAgent]);
 
   return (
     <div className="flex h-screen w-full overflow-hidden bg-zinc-50 dark:bg-black">
