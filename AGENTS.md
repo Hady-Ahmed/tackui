@@ -30,7 +30,7 @@ Type checking: `npx tsc --noEmit`
 
 ```
 app/
-  api/copilotkit/route.ts   # CopilotKit runtime endpoint (server-side agent registry)
+  api/copilotkit/[[...path]]/route.ts  # CopilotKit runtime (catch-all — matches /api/copilotkit and all sub-paths)
   layout.tsx                 # Root layout — wraps app in CopilotKitProvider
   page.tsx                   # Main chat page (client component)
   globals.css               # Global styles + Tailwind
