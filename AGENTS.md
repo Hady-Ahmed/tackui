@@ -94,7 +94,7 @@ directly — it talks to the runtime, making agents pluggable.
 - Streaming chat (token streaming, multi-turn, cancel/resume)
 - Human-in-the-loop interrupts (`useInterrupt`)
 - Generative UI / shared state (`useCoAgent`)
-- Multi-agent switching (`<CopilotChat key={agentId} agentId={agentId} />`)
+- Multi-agent switching with per-agent threads (`<CopilotChat key={activeAgent + threadId} agentId={activeAgent} threadId={threadId} />` — each agent gets its own threadId to prevent duplicate messages on switch)
 - Tool-call visualization (`useRenderTool`)
 - In-memory thread runner (no persistence)
 - LangGraph + Agno backends wired first
@@ -110,7 +110,9 @@ directly — it talks to the runtime, making agents pluggable.
 - Next.js 16 has breaking changes vs prior versions. Read docs in
   `node_modules/next/dist/docs/` before modifying framework-level code.
 - CopilotKit v2 API: import runtime from `@copilotkit/runtime/v2`, React components
-  from `@copilotkit/react-core`.
-- `CopilotChat` is imported from `@copilotkit/react-core` (v2 version with
+  from `@copilotkit/react-core/v2` (NOT `@copilotkit/react-core` — the v1 and v2
+  exports are split across subpath exports; v2 has `CopilotKitProvider`, `CopilotChat`
+  with `agentId`/`threadId` props, `useInterrupt`, `useRenderTool`).
+- `CopilotChat` is imported from `@copilotkit/react-core/v2` (v2 version with
   `agentId`/`threadId` props), NOT from `@copilotkit/react-ui` (which exports
-  the v1 version without those props).
+  the v1 version without those props) or `@copilotkit/react-core` (v1 root).
