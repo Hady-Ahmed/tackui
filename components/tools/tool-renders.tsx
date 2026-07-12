@@ -10,7 +10,6 @@ export function ToolRenders({ agentId }: ToolRendersProps) {
   useRenderTool(
     {
       name: "*",
-      agentId,
       render: ({ name, status, result }) => {
         if (status === "inProgress" || status === "executing") {
           return (
