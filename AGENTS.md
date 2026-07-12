@@ -89,12 +89,41 @@ The CopilotKit runtime is a thin server-side proxy that holds the `agents` map.
 Each agent speaks AG-UI to its backend. The frontend never talks to backends
 directly — it talks to the runtime, making agents pluggable.
 
+### Conversation History Contract
+
+Per the [AG-UI protocol](https://docs.ag-ui.com/concepts/events#runstarted),
+this frontend sends the **full conversation history** (`input.messages`) on every
+`/run` request. This is the source of truth for message history — the frontend
+(CopilotKit's `agent.messages` + `InMemoryAgentRunner`) stores and manages all
+messages.
+
+Agent backends have two valid options for handling `input.messages`:
+
+1. **Stateless (read history):** Read `input.messages` from the request body and
+   pass them to the LLM as conversation context. No server-side storage needed.
+   This is the simplest approach and works for any AG-UI-compliant backend.
+
+2. **Stateful (self-managed history):** Maintain their own conversation storage
+   (e.g., Agno's session DB, LangGraph checkpoints) and ignore the frontend
+   history. The frontend sending full history is redundant but harmless — the
+   backend reads only what it needs (typically the last user message).
+
+Either approach works. The frontend does not assume which one a backend uses, so
+contributors can connect any AG-UI-compatible backend without frontend changes.
+
+**When adding a new agent backend**, document in that backend's own repo which
+strategy it uses so users know whether server-side session storage is required.
+
 ## v1 Scope
 
 - Streaming chat (token streaming, multi-turn, cancel/resume)
 - Human-in-the-loop interrupts (`useInterrupt`)
 - Generative UI / shared state (`useCoAgent`)
-- Multi-agent switching with per-agent threads (`<CopilotChat key={activeAgent + threadId} agentId={activeAgent} threadId={threadId} />` — each agent gets its own threadId to prevent duplicate messages on switch)
+- Multi-agent switching with per-agent threads (`AgentChat` wrapper in
+  `chat-shell.tsx` keys `CopilotChat` by `agentId + threadId` and clears the
+  agent's in-memory messages on unmount — this prevents duplicate messages on
+  switch, since CopilotKit's `/connect` replays all historic events and
+  `AbstractAgent.apply()` appends content to existing messages)
 - Tool-call visualization (`useRenderTool`)
 - In-memory thread runner (no persistence)
 - LangGraph + Agno backends wired first
@@ -116,3 +145,8 @@ directly — it talks to the runtime, making agents pluggable.
 - `CopilotChat` is imported from `@copilotkit/react-core/v2` (v2 version with
   `agentId`/`threadId` props), NOT from `@copilotkit/react-ui` (which exports
   the v1 version without those props) or `@copilotkit/react-core` (v1 root).
+- AG-UI protocol spec: https://docs.ag-ui.com — see
+  [Events](https://docs.ag-ui.com/concepts/events),
+  [Messages](https://docs.ag-ui.com/concepts/messages), and
+  [Build a server](https://docs.ag-ui.com/quickstart/server) for the backend
+  contract.
