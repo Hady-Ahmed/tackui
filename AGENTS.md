@@ -62,17 +62,21 @@ Agents are configured in `lib/agents/agents.config.ts`. To add a new agent:
 
 | Kind       | Adapter                        | Endpoint format                          |
 | ---------- | ------------------------------ | ---------------------------------------- |
-| `langgraph`| `LangGraphAgent`               | LangGraph deployment URL (e.g. `:8123`)  |
+| `langgraph`| `LangGraphAgent`               | LangGraph Platform API URL (e.g. `:8123`)|
 | `agno`     | `HttpAgent` (from @ag-ui/client) | AG-UI endpoint (e.g. `:8000/agui`)     |
 | `agui`     | `HttpAgent` (from @ag-ui/client) | Any AG-UI-speaking endpoint             |
+
+> **Note:** If your LangGraph backend uses `ag-ui-langgraph` (AG-UI protocol
+> directly, not the LangGraph Platform API), use `kind: "agui"` instead of
+> `"langgraph"`. The `LangGraphAgent` adapter expects the LangGraph Platform API
+> (`/assistants/search`, `/threads`, etc.), while `ag-ui-langgraph` exposes a
+> raw AG-UI endpoint.
 
 ## Environment Variables
 
 See `.env.example`. Copy to `.env.local` and fill in:
 
-- `LANGGRAPH_URL` — LangGraph server URL
-- `LANGGRAPH_GRAPH_ID` — LangGraph graph ID
-- `LANGSMITH_API_KEY` — LangSmith API key (optional)
+- `LANGGRAPH_URL` — LangGraph AG-UI endpoint URL
 - `AGNO_URL` — Agno AG-UI endpoint URL
 
 ## Architecture

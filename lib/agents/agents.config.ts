@@ -15,10 +15,8 @@ export const agents: AgentEntry[] = [
     id: "research",
     name: "Research Agent",
     description: "LangGraph-powered web research assistant",
-    kind: "langgraph",
-    endpoint: process.env.LANGGRAPH_URL || "http://localhost:8123",
-    graphId: process.env.LANGGRAPH_GRAPH_ID || "agent",
-    langsmithApiKey: process.env.LANGSMITH_API_KEY,
+    kind: "agui",
+    endpoint: process.env.LANGGRAPH_URL || "http://localhost:8001/agent",
   },
   {
     id: "assistant",

@@ -1,19 +1,25 @@
 "use client";
 
+import { useEffect, useRef } from "react";
+import { useThreads, useAgent } from "@copilotkit/react-core/v2";
 import type { AgentEntry } from "@/lib/agents/agents.config";
 
 interface AgentSidebarProps {
   agents: AgentEntry[];
   activeAgent: string;
+  activeThreadId: string;
   onSelectAgent: (id: string) => void;
   onNewChat: () => void;
+  onSelectThread: (threadId: string) => void;
 }
 
 export function AgentSidebar({
   agents,
   activeAgent,
+  activeThreadId,
   onSelectAgent,
   onNewChat,
+  onSelectThread,
 }: AgentSidebarProps) {
   return (
     <aside className="flex w-64 flex-col border-r border-zinc-200 bg-white dark:border-zinc-800 dark:bg-zinc-950">
@@ -61,7 +67,88 @@ export function AgentSidebar({
             </li>
           ))}
         </ul>
+
+        <ConversationList
+          agentId={activeAgent}
+          activeThreadId={activeThreadId}
+          onSelectThread={onSelectThread}
+        />
       </nav>
     </aside>
+  );
+}
+
+function ConversationList({
+  agentId,
+  activeThreadId,
+  onSelectThread,
+}: {
+  agentId: string;
+  activeThreadId: string;
+  onSelectThread: (threadId: string) => void;
+}) {
+  const { threads, isLoading, refetchThreads } = useThreads({ agentId });
+  const { agent } = useAgent({ agentId });
+  const refetchRef = useRef(refetchThreads);
+
+  useEffect(() => {
+    refetchRef.current = refetchThreads;
+  }, [refetchThreads]);
+
+  useEffect(() => {
+    if (!agent) return;
+    const subscription = agent.subscribe({
+      onRunFinalized: () => refetchRef.current(),
+      onRunFailed: () => refetchRef.current(),
+    });
+    return () => subscription.unsubscribe();
+  }, [agent]);
+
+  if (isLoading) {
+    return (
+      <div className="mt-4">
+        <p className="px-2 py-1 text-xs font-medium uppercase tracking-wide text-zinc-400">
+          Conversations
+        </p>
+        <div className="px-3 py-2 text-xs text-zinc-400">Loading...</div>
+      </div>
+    );
+  }
+
+  if (!threads || threads.length === 0) {
+    return (
+      <div className="mt-4">
+        <p className="px-2 py-1 text-xs font-medium uppercase tracking-wide text-zinc-400">
+          Conversations
+        </p>
+        <div className="px-3 py-2 text-xs text-zinc-400">
+          No conversations yet
+        </div>
+      </div>
+    );
+  }
+
+  return (
+    <div className="mt-4">
+      <p className="px-2 py-1 text-xs font-medium uppercase tracking-wide text-zinc-400">
+        Conversations
+      </p>
+      <ul className="space-y-0.5">
+        {threads.map((thread) => (
+          <li key={thread.id}>
+            <button
+              onClick={() => onSelectThread(thread.id)}
+              className={`w-full truncate rounded-lg px-3 py-2 text-left text-sm transition-colors ${
+                activeThreadId === thread.id
+                  ? "bg-zinc-100 font-medium text-zinc-900 dark:bg-zinc-800 dark:text-zinc-50"
+                  : "text-zinc-600 hover:bg-zinc-50 dark:text-zinc-400 dark:hover:bg-zinc-900"
+              }`}
+            >
+              {thread.name || "New conversation"}
+            </button>
+          </li>
+        ))}
+      </ul>
+    </div>
   );
 }

@@ -9,50 +9,42 @@ import { agents } from "@/lib/agents/agents.config";
 
 export function ChatShell() {
   const [activeAgent, setActiveAgent] = useState(agents[0]?.id ?? "");
-  const [threadIds, setThreadIds] = useState<Record<string, string>>(() =>
-    Object.fromEntries(agents.map((a) => [a.id, crypto.randomUUID()]))
+  const [activeThreadId, setActiveThreadId] = useState(() =>
+    crypto.randomUUID(),
   );
 
-  const threadId = threadIds[activeAgent];
+  const handleSelectAgent = useCallback((id: string) => {
+    setActiveAgent(id);
+    setActiveThreadId(crypto.randomUUID());
+  }, []);
 
   const handleNewChat = useCallback(() => {
-    setThreadIds((prev) => ({ ...prev, [activeAgent]: crypto.randomUUID() }));
-  }, [activeAgent]);
+    setActiveThreadId(crypto.randomUUID());
+  }, []);
+
+  const handleSelectThread = useCallback((threadId: string) => {
+    setActiveThreadId(threadId);
+  }, []);
 
   return (
     <div className="flex h-screen w-full overflow-hidden bg-zinc-50 dark:bg-black">
       <AgentSidebar
         agents={agents}
         activeAgent={activeAgent}
-        onSelectAgent={setActiveAgent}
+        activeThreadId={activeThreadId}
+        onSelectAgent={handleSelectAgent}
         onNewChat={handleNewChat}
+        onSelectThread={handleSelectThread}
       />
       <main className="flex flex-1 flex-col overflow-hidden">
         <HitlHandlers agentId={activeAgent} />
         <ToolRenders agentId={activeAgent} />
-        <AgentChat agentId={activeAgent} threadId={threadId} />
+        <AgentChat agentId={activeAgent} threadId={activeThreadId} />
       </main>
     </div>
   );
 }
 
-/**
- * Keyed wrapper around CopilotChat that clears the agent's in-memory messages
- * on unmount.
- *
- * Why: CopilotKit's InMemoryAgentRunner /connect replays ALL historic events on
- * every connect (no cursor). AbstractAgent.apply() handles TEXT_MESSAGE_CONTENT
- * by appending the delta to an existing message's content. So if the agent
- * already has messages (from a prior connect or /run), the replay appends a
- * second copy of the text — and compounds on every subsequent connect.
- *
- * React StrictMode (Next.js dev default) double-invokes the connect effect
- * (mount → cleanup → remount), which doubles the duplication rate in dev.
- *
- * Clearing messages on unmount ensures every connect replay starts from an
- * empty list and builds exactly one copy. The key ensures this cleanup fires
- * on every agent switch AND between StrictMode's double-mount.
- */
 function AgentChat({ agentId, threadId }: { agentId: string; threadId: string }) {
   const { copilotkit } = useCopilotKit();
 
