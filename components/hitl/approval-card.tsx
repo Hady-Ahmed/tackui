@@ -9,7 +9,7 @@ interface HitlHandlersProps {
 export function HitlHandlers({ agentId }: HitlHandlersProps) {
   useInterrupt({
     agentId,
-    render: ({ event, interrupt, resolve, cancel }) => {
+    render: ({ event, interrupt, resolve }) => {
       let title = interrupt?.reason;
       let description = interrupt?.message;
 

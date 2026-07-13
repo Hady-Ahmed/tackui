@@ -39,10 +39,11 @@ lib/
   agents/
     agents.config.ts         # Static agent registry config (add agents here)
     registry.ts              # getAgents() — builds agents map for CopilotRuntime
+    persistent-runner.ts     # PersistentAgentRunner — SQLite-backed runner with thread endpoints
 
 components/
-  agent-sidebar.tsx          # Agent picker + thread sidebar
-  chat-shell.tsx             # Chat layout with agent switching
+  agent-sidebar.tsx          # Agent picker + conversation list sidebar (useThreads)
+  chat-shell.tsx             # Chat layout with agent switching + AgentChat wrapper
   hitl/
     approval-card.tsx        # Human-in-the-loop interrupt handlers
   tools/
@@ -98,7 +99,7 @@ directly — it talks to the runtime, making agents pluggable.
 Per the [AG-UI protocol](https://docs.ag-ui.com/concepts/events#runstarted),
 this frontend sends the **full conversation history** (`input.messages`) on every
 `/run` request. This is the source of truth for message history — the frontend
-(CopilotKit's `agent.messages` + `InMemoryAgentRunner`) stores and manages all
+(CopilotKit's `agent.messages` + `PersistentAgentRunner`) stores and manages all
 messages.
 
 Agent backends have two valid options for handling `input.messages`:
@@ -122,18 +123,22 @@ strategy it uses so users know whether server-side session storage is required.
 
 - Streaming chat (token streaming, multi-turn, cancel/resume)
 - Human-in-the-loop interrupts (`useInterrupt`)
-- Generative UI / shared state (`useCoAgent`)
 - Multi-agent switching with per-agent threads (`AgentChat` wrapper in
   `chat-shell.tsx` keys `CopilotChat` by `agentId + threadId` and clears the
   agent's in-memory messages on unmount — this prevents duplicate messages on
   switch, since CopilotKit's `/connect` replays all historic events and
   `AbstractAgent.apply()` appends content to existing messages)
 - Tool-call visualization (`useRenderTool`)
-- In-memory thread runner (no persistence)
+- SQLite-backed thread runner with conversation persistence
+  (`PersistentAgentRunner` in `lib/agents/persistent-runner.ts` — extends
+  `SqliteAgentRunner` with local thread endpoints for `useThreads`)
+- Multi-conversation sidebar (`useThreads` + auto-refetch on run completion)
 - LangGraph + Agno backends wired first
 
 ## Future (structured for easy upgrade)
 
+- Generative UI / shared state (`useCoAgent`) — requires backend to emit
+  `STATE_SNAPSHOT`/`STATE_DELTA` events; neither backend currently does
 - Dynamic agent registry (DB-backed `getAgents()` + admin UI)
 - Persistent thread runner (swap `InMemoryAgentRunner`)
 - Additional backends (CrewAI, Mastra, Pydantic AI, Google ADK, AWS Strands, etc.)
