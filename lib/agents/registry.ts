@@ -1,21 +1,27 @@
 import { LangGraphAgent } from "@copilotkit/runtime/langgraph";
 import { HttpAgent } from "@ag-ui/client";
 import type { AbstractAgent } from "@ag-ui/client";
-import { agents } from "./agents.config";
+import type { AgentEntry } from "./agents.config";
+import { listAgents } from "./agent-store";
 
 export type AgentsMap = Record<string, AbstractAgent>;
 
 export function getAgents(): AgentsMap {
-  const map: AgentsMap = {};
-
-  for (const entry of agents) {
-    map[entry.id] = createAgent(entry);
+  const entries = listAgents();
+  if (entries.length === 0) {
+    throw new Error(
+      "No agents configured. Add agents via the /agents admin page or seed agents.config.ts.",
+    );
   }
 
+  const map: AgentsMap = {};
+  for (const entry of entries) {
+    map[entry.id] = createAgent(entry);
+  }
   return map;
 }
 
-function createAgent(entry: (typeof agents)[number]): AbstractAgent {
+function createAgent(entry: AgentEntry): AbstractAgent {
   switch (entry.kind) {
     case "langgraph":
       return new LangGraphAgent({

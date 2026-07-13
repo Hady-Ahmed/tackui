@@ -1,6 +1,7 @@
 "use client";
 
 import { useEffect, useRef } from "react";
+import Link from "next/link";
 import { useThreads, useAgent } from "@copilotkit/react-core/v2";
 import type { AgentEntry } from "@/lib/agents/agents.config";
 
@@ -68,12 +69,23 @@ export function AgentSidebar({
           ))}
         </ul>
 
-        <ConversationList
-          agentId={activeAgent}
-          activeThreadId={activeThreadId}
-          onSelectThread={onSelectThread}
-        />
+        {activeAgent && (
+          <ConversationList
+            agentId={activeAgent}
+            activeThreadId={activeThreadId}
+            onSelectThread={onSelectThread}
+          />
+        )}
       </nav>
+
+      <div className="border-t border-zinc-200 p-3 dark:border-zinc-800">
+        <Link
+          href="/agents"
+          className="flex w-full items-center justify-center rounded-lg px-3 py-2 text-sm font-medium text-zinc-600 transition-colors hover:bg-zinc-100 dark:text-zinc-400 dark:hover:bg-zinc-800"
+        >
+          Manage agents
+        </Link>
+      </div>
     </aside>
   );
 }

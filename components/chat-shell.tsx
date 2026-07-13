@@ -5,13 +5,35 @@ import { CopilotChat, useCopilotKit } from "@copilotkit/react-core/v2";
 import { AgentSidebar } from "./agent-sidebar";
 import { HitlHandlers } from "./hitl/approval-card";
 import { ToolRenders } from "./tools/tool-renders";
-import { agents } from "@/lib/agents/agents.config";
+import type { AgentEntry } from "@/lib/agents/agents.config";
 
 export function ChatShell() {
-  const [activeAgent, setActiveAgent] = useState(agents[0]?.id ?? "");
+  const [agents, setAgents] = useState<AgentEntry[]>([]);
+  const [activeAgent, setActiveAgent] = useState("");
   const [activeThreadId, setActiveThreadId] = useState(() =>
     crypto.randomUUID(),
   );
+
+  useEffect(() => {
+    let cancelled = false;
+    const load = async () => {
+      const res = await fetch("/api/agents");
+      if (cancelled || !res.ok) return;
+      const list: AgentEntry[] = await res.json();
+      setAgents(list);
+      setActiveAgent((prev) => {
+        const stillExists = list.some((a) => a.id === prev);
+        return stillExists ? prev : list[0]?.id ?? "";
+      });
+    };
+    load();
+    const onFocus = () => load();
+    window.addEventListener("focus", onFocus);
+    return () => {
+      cancelled = true;
+      window.removeEventListener("focus", onFocus);
+    };
+  }, []);
 
   const handleSelectAgent = useCallback((id: string) => {
     setActiveAgent(id);
@@ -37,9 +59,17 @@ export function ChatShell() {
         onSelectThread={handleSelectThread}
       />
       <main className="flex flex-1 flex-col overflow-hidden">
-        <HitlHandlers agentId={activeAgent} />
-        <ToolRenders agentId={activeAgent} />
-        <AgentChat agentId={activeAgent} threadId={activeThreadId} />
+        {activeAgent ? (
+          <>
+            <HitlHandlers agentId={activeAgent} />
+            <ToolRenders agentId={activeAgent} />
+            <AgentChat agentId={activeAgent} threadId={activeThreadId} />
+          </>
+        ) : (
+          <div className="flex flex-1 items-center justify-center text-sm text-zinc-400">
+            Loading agents...
+          </div>
+        )}
       </main>
     </div>
   );

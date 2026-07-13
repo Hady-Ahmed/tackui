@@ -6,7 +6,7 @@ import { getAgents } from "@/lib/agents/registry";
 import { PersistentAgentRunner } from "@/lib/agents/persistent-runner";
 
 const runtime = new CopilotRuntime({
-  agents: getAgents(),
+  agents: () => getAgents(),
   runner: new PersistentAgentRunner({ dbPath: "./data/agent-state.db" }),
 });
 
