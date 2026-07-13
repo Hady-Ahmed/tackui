@@ -170,4 +170,34 @@ export class PersistentAgentRunner extends SqliteAgentRunner {
     this.database.prepare("DELETE FROM thread_messages").run();
     this.database.prepare("DELETE FROM thread_metadata").run();
   }
+
+  deleteThread(threadId: string): boolean {
+    const check = this.database
+      .prepare(`SELECT 1 FROM thread_metadata WHERE thread_id = ?`)
+      .get(threadId);
+    if (!check) return false;
+
+    this.database
+      .prepare("DELETE FROM agent_runs WHERE thread_id = ?")
+      .run(threadId);
+    this.database
+      .prepare("DELETE FROM run_state WHERE thread_id = ?")
+      .run(threadId);
+    this.database
+      .prepare("DELETE FROM thread_messages WHERE thread_id = ?")
+      .run(threadId);
+    this.database
+      .prepare("DELETE FROM thread_metadata WHERE thread_id = ?")
+      .run(threadId);
+    return true;
+  }
+
+  renameThread(threadId: string, title: string): boolean {
+    const result = this.database
+      .prepare(
+        `UPDATE thread_metadata SET title = ?, updated_at = ? WHERE thread_id = ?`,
+      )
+      .run(title, Date.now(), threadId);
+    return result.changes > 0;
+  }
 }

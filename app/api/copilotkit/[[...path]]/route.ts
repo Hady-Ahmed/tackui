@@ -3,11 +3,11 @@ import {
   createCopilotRuntimeHandler,
 } from "@copilotkit/runtime/v2";
 import { getAgents } from "@/lib/agents/registry";
-import { PersistentAgentRunner } from "@/lib/agents/persistent-runner";
+import { runner } from "@/lib/agents/runner-instance";
 
 const runtime = new CopilotRuntime({
   agents: () => getAgents(),
-  runner: new PersistentAgentRunner({ dbPath: "./data/agent-state.db" }),
+  runner,
 });
 
 const handler = createCopilotRuntimeHandler({

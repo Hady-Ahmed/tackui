@@ -1,6 +1,7 @@
 "use client";
 
 import { useState, useCallback, useEffect } from "react";
+import Link from "next/link";
 import { CopilotChat, useCopilotKit } from "@copilotkit/react-core/v2";
 import { AgentSidebar } from "./agent-sidebar";
 import { HitlHandlers } from "./hitl/approval-card";
@@ -9,6 +10,7 @@ import type { AgentEntry } from "@/lib/agents/agents.config";
 
 export function ChatShell() {
   const [agents, setAgents] = useState<AgentEntry[]>([]);
+  const [hasLoaded, setHasLoaded] = useState(false);
   const [activeAgent, setActiveAgent] = useState("");
   const [activeThreadId, setActiveThreadId] = useState(() =>
     crypto.randomUUID(),
@@ -21,6 +23,7 @@ export function ChatShell() {
       if (cancelled || !res.ok) return;
       const list: AgentEntry[] = await res.json();
       setAgents(list);
+      setHasLoaded(true);
       setActiveAgent((prev) => {
         const stillExists = list.some((a) => a.id === prev);
         return stillExists ? prev : list[0]?.id ?? "";
@@ -65,6 +68,18 @@ export function ChatShell() {
             <ToolRenders agentId={activeAgent} />
             <AgentChat agentId={activeAgent} threadId={activeThreadId} />
           </>
+        ) : hasLoaded ? (
+          <div className="flex flex-1 flex-col items-center justify-center gap-4 text-center">
+            <p className="text-sm text-zinc-400">
+              No agents configured yet.
+            </p>
+            <Link
+              href="/agents"
+              className="rounded-lg bg-blue-600 px-4 py-2 text-sm font-medium text-white transition-colors hover:bg-blue-700"
+            >
+              Add your first agent →
+            </Link>
+          </div>
         ) : (
           <div className="flex flex-1 items-center justify-center text-sm text-zinc-400">
             Loading agents...

@@ -212,6 +212,7 @@ export function AgentSidebar({
             agentId={activeAgent}
             activeThreadId={activeThreadId}
             onSelectThread={onSelectThread}
+            onNewChat={onNewChat}
           />
         )}
       </nav>
@@ -232,14 +233,20 @@ function ConversationList({
   agentId,
   activeThreadId,
   onSelectThread,
+  onNewChat,
 }: {
   agentId: string;
   activeThreadId: string;
   onSelectThread: (threadId: string) => void;
+  onNewChat: () => void;
 }) {
   const { threads, isLoading, refetchThreads } = useThreads({ agentId });
   const { agent } = useAgent({ agentId });
   const refetchRef = useRef(refetchThreads);
+  const [editingId, setEditingId] = useState<string | null>(null);
+  const [editValue, setEditValue] = useState("");
+  const [error, setError] = useState<string | null>(null);
+  const editInputRef = useRef<HTMLInputElement>(null);
 
   useEffect(() => {
     refetchRef.current = refetchThreads;
@@ -253,6 +260,67 @@ function ConversationList({
     });
     return () => subscription.unsubscribe();
   }, [agent]);
+
+  useEffect(() => {
+    if (editingId && editInputRef.current) {
+      editInputRef.current.focus();
+      editInputRef.current.select();
+    }
+  }, [editingId]);
+
+  const startRename = (threadId: string, currentName: string) => {
+    setEditingId(threadId);
+    setEditValue(currentName || "");
+    setError(null);
+  };
+
+  const cancelRename = () => {
+    setEditingId(null);
+    setEditValue("");
+    setError(null);
+  };
+
+  const submitRename = async (threadId: string) => {
+    const title = editValue.trim();
+    if (!title) {
+      cancelRename();
+      return;
+    }
+    const res = await fetch(`/api/threads/${threadId}`, {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ title }),
+    });
+    if (!res.ok) {
+      const data = await res.json().catch(() => ({}));
+      setError(
+        (typeof data === "object" && data && "error" in data
+          ? String((data as { error: unknown }).error)
+          : null) || "Rename failed",
+      );
+      return;
+    }
+    cancelRename();
+    refetchThreads();
+  };
+
+  const handleDelete = async (threadId: string) => {
+    if (!confirm("Delete this conversation? This cannot be undone.")) return;
+    const res = await fetch(`/api/threads/${threadId}`, {
+      method: "DELETE",
+    });
+    if (!res.ok) {
+      const data = await res.json().catch(() => ({}));
+      setError(
+        (typeof data === "object" && data && "error" in data
+          ? String((data as { error: unknown }).error)
+          : null) || "Delete failed",
+      );
+      return;
+    }
+    if (threadId === activeThreadId) onNewChat();
+    refetchThreads();
+  };
 
   if (isLoading) {
     return (
@@ -283,21 +351,114 @@ function ConversationList({
       <p className="px-2 py-1 text-xs font-medium uppercase tracking-wide text-zinc-400">
         Conversations
       </p>
+      {error && (
+        <p className="mx-2 mb-1 rounded bg-red-50 px-2 py-1 text-[11px] text-red-600 dark:bg-red-950 dark:text-red-400">
+          {error}
+        </p>
+      )}
       <ul className="space-y-0.5">
-        {threads.map((thread) => (
-          <li key={thread.id}>
-            <button
-              onClick={() => onSelectThread(thread.id)}
-              className={`w-full truncate rounded-lg px-3 py-2 text-left text-sm transition-colors ${
+        {threads.map((thread) => {
+          const isEditing = editingId === thread.id;
+          const name = thread.name || "New conversation";
+
+          if (isEditing) {
+            return (
+              <li
+                key={thread.id}
+                className="flex items-center gap-1 rounded-lg px-2 py-1"
+              >
+                <input
+                  ref={editInputRef}
+                  value={editValue}
+                  onChange={(e) => setEditValue(e.target.value)}
+                  onKeyDown={(e) => {
+                    if (e.key === "Enter") {
+                      e.preventDefault();
+                      submitRename(thread.id);
+                    } else if (e.key === "Escape") {
+                      e.preventDefault();
+                      cancelRename();
+                    }
+                  }}
+                  maxLength={200}
+                  className="w-full rounded border border-blue-400 bg-white px-2 py-1 text-sm outline-none dark:bg-zinc-900 dark:text-zinc-50"
+                />
+                <button
+                  onClick={() => submitRename(thread.id)}
+                  title="Save"
+                  className="shrink-0 text-xs font-medium text-green-600 hover:underline dark:text-green-400"
+                >
+                  ✓
+                </button>
+                <button
+                  onClick={cancelRename}
+                  title="Cancel"
+                  className="shrink-0 text-xs font-medium text-zinc-400 hover:underline"
+                >
+                  ✕
+                </button>
+              </li>
+            );
+          }
+
+          return (
+            <li
+              key={thread.id}
+              className={`group flex items-center gap-1 rounded-lg pr-1 transition-colors ${
                 activeThreadId === thread.id
-                  ? "bg-zinc-100 font-medium text-zinc-900 dark:bg-zinc-800 dark:text-zinc-50"
-                  : "text-zinc-600 hover:bg-zinc-50 dark:text-zinc-400 dark:hover:bg-zinc-900"
+                  ? "bg-zinc-100 dark:bg-zinc-800"
+                  : "hover:bg-zinc-50 dark:hover:bg-zinc-900"
               }`}
             >
-              {thread.name || "New conversation"}
-            </button>
-          </li>
-        ))}
+              <button
+                onClick={() => onSelectThread(thread.id)}
+                className={`flex-1 truncate px-3 py-2 text-left text-sm ${
+                  activeThreadId === thread.id
+                    ? "font-medium text-zinc-900 dark:text-zinc-50"
+                    : "text-zinc-600 dark:text-zinc-400"
+                }`}
+              >
+                {name}
+              </button>
+              <span className="flex shrink-0 items-center opacity-0 transition-opacity group-hover:opacity-100">
+                <button
+                  onClick={() => startRename(thread.id, name)}
+                  title="Rename"
+                  className="px-1 py-1 text-xs text-zinc-400 hover:text-zinc-700 dark:hover:text-zinc-200"
+                >
+                  <svg
+                    xmlns="http://www.w3.org/2000/svg"
+                    viewBox="0 0 16 16"
+                    fill="currentColor"
+                    className="h-3.5 w-3.5"
+                    aria-hidden="true"
+                  >
+                    <path d="M11.06.94a1.5 1.5 0 0 0-2.12 0l-7.5 7.5a1.5 1.5 0 0 0-.44 1.06v2.5a.75.75 0 0 0 .75.75h2.5a1.5 1.5 0 0 0 1.06-.44l7.5-7.5a1.5 1.5 0 0 0 0-2.12l-1.75-1.75ZM3.75 12L9 6.75 10.25 8 5 13.25H3.75V12Z" />
+                  </svg>
+                </button>
+                <button
+                  onClick={() => handleDelete(thread.id)}
+                  title="Delete"
+                  className="px-1 py-1 text-xs text-zinc-400 hover:text-red-600 dark:hover:text-red-400"
+                >
+                  <svg
+                    xmlns="http://www.w3.org/2000/svg"
+                    viewBox="0 0 16 16"
+                    fill="currentColor"
+                    className="h-3.5 w-3.5"
+                    aria-hidden="true"
+                  >
+                    <path
+                      fillRule="evenodd"
+                      d="M5 2.5A.5.5 0 0 1 5.5 2H10.5a.5.5 0 0 1 .5.5V4h2.5a.5.5 0 0 1 0 1H13v8a1 1 0 0 1-1 1H4a1 1 0 0 1-1-1V5h-.5a.5.5 0 0 1 0-1H5V2.5Zm1 1V4h4V3.5H6ZM5 6.5a.5.5 0 0 1 1 0v5a.5.5 0 0 1-1 0v-5Zm3 0a.5.5 0 0 1 1 0v5a.5.5 0 0 1-1 0v-5Zm3 0a.5.5 0 0 1 1 0v5a.5.5 0 0 1-1 0v-5Z"
+                      clipRule="evenodd"
+                    />
+                  </svg>
+                </button>
+              </span>
+            </li>
+          );
+        })}
       </ul>
     </div>
   );
