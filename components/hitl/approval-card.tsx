@@ -9,14 +9,35 @@ interface HitlHandlersProps {
 export function HitlHandlers({ agentId }: HitlHandlersProps) {
   useInterrupt({
     agentId,
-    render: ({ event, interrupt, resolve, cancel }) => (
-      <ApprovalCard
-        title={interrupt?.reason ?? event.name ?? "Approval Required"}
-        description={interrupt?.message ?? "The agent is requesting your approval to proceed."}
-        onApprove={() => resolve({ approved: true })}
-        onDeny={() => cancel()}
-      />
-    ),
+    render: ({ event, interrupt, resolve, cancel }) => {
+      let title = interrupt?.reason;
+      let description = interrupt?.message;
+
+      if ((!title || !description) && event?.value) {
+        try {
+          const value =
+            typeof event.value === "string"
+              ? JSON.parse(event.value)
+              : event.value;
+          title = title ?? value?.reason;
+          description = description ?? value?.message;
+        } catch {
+          // value isn't JSON, fall through to defaults
+        }
+      }
+
+      return (
+        <ApprovalCard
+          title={title ?? event.name ?? "Approval Required"}
+          description={
+            description ??
+            "The agent is requesting your approval to proceed."
+          }
+          onApprove={() => resolve({ approved: true })}
+          onDeny={() => resolve({ approved: false })}
+        />
+      );
+    },
   });
 
   return null;
