@@ -10,7 +10,7 @@ export function getAgents(): AgentsMap {
   const entries = listAgents();
   if (entries.length === 0) {
     throw new Error(
-      "No agents configured. Add agents via the /agents admin page or seed agents.config.ts.",
+      "No agents configured. Add agents via the /agents admin page.",
     );
   }
 

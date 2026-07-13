@@ -31,33 +31,65 @@ Type checking: `npx tsc --noEmit`
 ```
 app/
   api/copilotkit/[[...path]]/route.ts  # CopilotKit runtime (catch-all — matches /api/copilotkit and all sub-paths)
-  layout.tsx                 # Root layout — wraps app in CopilotKitProvider
-  page.tsx                   # Main chat page (client component)
-  globals.css               # Global styles + Tailwind
+  api/agents/route.ts          # REST: GET/POST /api/agents (list, create)
+  api/agents/[id]/route.ts     # REST: GET/PATCH/DELETE /api/agents/[id]
+  api/agents/test/route.ts     # REST: POST /api/agents/test (reachability probe)
+  agents/page.tsx              # Admin UI — add/edit/delete agents + test connection
+  layout.tsx                   # Root layout — wraps app in CopilotKitProvider
+  page.tsx                     # Main chat page (client component)
+  globals.css                  # Global styles + Tailwind
 
 lib/
   agents/
-    agents.config.ts         # Static agent registry config (add agents here)
-    registry.ts              # getAgents() — builds agents map for CopilotRuntime
-    persistent-runner.ts     # PersistentAgentRunner — SQLite-backed runner with thread endpoints
+    agents.config.ts           # AgentEntry / AgentKind types (no runtime config)
+    agent-store.ts             # SQLite CRUD for agents table (zod-validated)
+    registry.ts                # getAgents() factory — reads DB, builds agents map
+    persistent-runner.ts       # PersistentAgentRunner — SQLite-backed runner with thread endpoints
 
 components/
-  agent-sidebar.tsx          # Agent picker + conversation list sidebar (useThreads)
-  chat-shell.tsx             # Chat layout with agent switching + AgentChat wrapper
+  agent-sidebar.tsx            # Agent picker + conversation list + status dots (useThreads)
+  chat-shell.tsx               # Chat layout with agent switching + AgentChat wrapper
   hitl/
-    approval-card.tsx        # Human-in-the-loop interrupt handlers
+    approval-card.tsx          # Human-in-the-loop interrupt handlers
   tools/
-    tool-renders.tsx          # Tool-call visualization (useRenderTool)
+    tool-renders.tsx           # Tool-call visualization (useRenderTool)
 ```
 
 ## Agent Registry
 
-Agents are configured in `lib/agents/agents.config.ts`. To add a new agent:
+Agents are stored in a SQLite table (`agents` in `./data/agent-state.db`, shared
+with the thread runner) and managed at runtime via the `/agents` admin page or
+the `/api/agents` REST API. No restart is needed when adding, editing, or
+removing agents — `CopilotRuntime` receives `getAgents` as a factory function,
+called per-request, so DB changes reflect immediately on the next `/run`.
 
-1. Add an entry to the `agents` array with `id`, `name`, `description`, `kind`,
-   `endpoint`, and optional framework-specific fields.
-2. Add the corresponding env var to `.env.local`.
-3. That's it — no UI or runtime code changes needed.
+`lib/agents/agents.config.ts` exports only the `AgentEntry` / `AgentKind` types
+— it no longer holds runtime configuration.
+
+### Adding an agent
+
+Via the admin UI (`/agents` page → "Add agent" form) or `POST /api/agents` with:
+
+```json
+{
+  "id": "research",
+  "name": "Research Agent",
+  "description": "LangGraph-powered web research assistant",
+  "kind": "agui",
+  "endpoint": "http://localhost:8001/agent"
+}
+```
+
+Optional fields: `graphId` (langgraph only), `langsmithApiKey` (langgraph only).
+
+### Test connection
+
+Both the admin form and the agents table have a "Test connection" button that
+hits `POST /api/agents/test`. This performs a server-side `GET` to the endpoint
+with a 5s timeout and reports reachability. It catches URL typos and down
+servers — it does **not** validate auth, AG-UI protocol compliance, or that the
+agent will actually run. The sidebar also shows a status dot per agent (gray =
+untested, green = reachable, red = unreachable), re-tested on window focus.
 
 ### Supported agent kinds
 
@@ -75,10 +107,11 @@ Agents are configured in `lib/agents/agents.config.ts`. To add a new agent:
 
 ## Environment Variables
 
-See `.env.example`. Copy to `.env.local` and fill in:
+Agents are managed via the `/agents` admin page (stored in SQLite) — no env
+vars are required to add or configure agents.
 
-- `LANGGRAPH_URL` — LangGraph AG-UI endpoint URL
-- `AGNO_URL` — Agno AG-UI endpoint URL
+See `.env.example` for optional backend URLs (useful for documentation or
+scripts only; the frontend reads endpoints from the DB).
 
 ## Architecture
 
@@ -133,14 +166,14 @@ strategy it uses so users know whether server-side session storage is required.
   (`PersistentAgentRunner` in `lib/agents/persistent-runner.ts` — extends
   `SqliteAgentRunner` with local thread endpoints for `useThreads`)
 - Multi-conversation sidebar (`useThreads` + auto-refetch on run completion)
+- Dynamic agent registry (DB-backed `getAgents()` factory + `/agents` admin UI
+  with add/edit/delete + test connection + sidebar status dots)
 - LangGraph + Agno backends wired first
 
 ## Future (structured for easy upgrade)
 
 - Generative UI / shared state (`useCoAgent`) — requires backend to emit
   `STATE_SNAPSHOT`/`STATE_DELTA` events; neither backend currently does
-- Dynamic agent registry (DB-backed `getAgents()` + admin UI)
-- Persistent thread runner (swap `InMemoryAgentRunner`)
 - Additional backends (CrewAI, Mastra, Pydantic AI, Google ADK, AWS Strands, etc.)
 
 ## Notes
