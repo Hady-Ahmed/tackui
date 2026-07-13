@@ -1,9 +1,70 @@
 "use client";
 
-import { useEffect, useRef } from "react";
+import { useEffect, useRef, useState } from "react";
 import Link from "next/link";
 import { useThreads, useAgent } from "@copilotkit/react-core/v2";
-import type { AgentEntry } from "@/lib/agents/agents.config";
+import type { AgentEntry, AgentKind } from "@/lib/agents/agents.config";
+
+type TestStatus = "idle" | "loading" | "ok" | "fail";
+type TestResult = { status: TestStatus; message?: string };
+
+const TEST_HELP =
+  "Tests only that the server is reachable (an HTTP request succeeds). " +
+  "A success does NOT validate auth, AG-UI protocol compliance, or that the agent will actually run. " +
+  "A failure usually means the URL is wrong or the server is down.";
+
+async function testEndpoint(
+  endpoint: string,
+  kind: AgentKind,
+): Promise<TestResult> {
+  try {
+    const res = await fetch("/api/agents/test", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ endpoint, kind }),
+    });
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok) {
+      return {
+        status: "fail",
+        message:
+          (typeof data === "object" && data && "error" in data
+            ? String((data as { error: unknown }).error)
+            : `Validation failed (${res.status})`),
+      };
+    }
+    return {
+      status: data.ok ? "ok" : "fail",
+      message: data.message as string,
+    };
+  } catch {
+    return { status: "fail", message: "Network error talking to /api/agents/test" };
+  }
+}
+
+function dotClass(status: TestStatus): string {
+  switch (status) {
+    case "loading":
+      return "bg-zinc-400 animate-pulse";
+    case "ok":
+      return "bg-green-500";
+    case "fail":
+      return "bg-red-500";
+    default:
+      return "bg-zinc-300 dark:bg-zinc-600";
+  }
+}
+
+function dotTitle(status: TestStatus, message?: string): string {
+  switch (status) {
+    case "idle":
+      return "Not tested yet";
+    case "loading":
+      return "Testing connection...";
+    default:
+      return message || "";
+  }
+}
 
 interface AgentSidebarProps {
   agents: AgentEntry[];
@@ -22,6 +83,47 @@ export function AgentSidebar({
   onNewChat,
   onSelectThread,
 }: AgentSidebarProps) {
+  const [statuses, setStatuses] = useState<Record<string, TestResult>>({});
+
+  useEffect(() => {
+    let cancelled = false;
+    const testAll = async () => {
+      const entries = agents.map((a) => ({
+        id: a.id,
+        endpoint: a.endpoint,
+        kind: a.kind,
+      }));
+      setStatuses((prev) => {
+        const next: Record<string, TestResult> = {};
+        for (const e of entries) next[e.id] = { status: "loading" };
+        for (const id of Object.keys(prev)) {
+          if (!next[id]) next[id] = prev[id];
+        }
+        return next;
+      });
+
+      const results = await Promise.all(
+        entries.map(async (e) => ({
+          id: e.id,
+          result: await testEndpoint(e.endpoint, e.kind),
+        })),
+      );
+      if (cancelled) return;
+      setStatuses((prev) => {
+        const next = { ...prev };
+        for (const r of results) next[r.id] = r.result;
+        return next;
+      });
+    };
+    testAll();
+    const onFocus = () => testAll();
+    window.addEventListener("focus", onFocus);
+    return () => {
+      cancelled = true;
+      window.removeEventListener("focus", onFocus);
+    };
+  }, [agents]);
+
   return (
     <aside className="flex w-64 flex-col border-r border-zinc-200 bg-white dark:border-zinc-800 dark:bg-zinc-950">
       <div className="border-b border-zinc-200 p-4 dark:border-zinc-800">
@@ -43,9 +145,30 @@ export function AgentSidebar({
       </div>
 
       <nav className="flex-1 overflow-y-auto px-2 pb-4">
-        <p className="px-2 py-1 text-xs font-medium uppercase tracking-wide text-zinc-400">
-          Agents
-        </p>
+        <div className="flex items-center gap-1 px-2 py-1">
+          <p className="text-xs font-medium uppercase tracking-wide text-zinc-400">
+            Agents
+          </p>
+          <span
+            className="inline-flex cursor-help text-zinc-400 transition-colors hover:text-zinc-600 dark:hover:text-zinc-300"
+            title={TEST_HELP}
+            aria-label="What do the status dots mean?"
+          >
+            <svg
+              xmlns="http://www.w3.org/2000/svg"
+              viewBox="0 0 16 16"
+              fill="currentColor"
+              className="h-3.5 w-3.5"
+              aria-hidden="true"
+            >
+              <path
+                fillRule="evenodd"
+                d="M8 15A7 7 0 1 0 8 1a7 7 0 0 0 0 14Zm0-9a1 1 0 1 1-2 0 1 1 0 0 1 2 0ZM7 7a.75.75 0 0 0 0 1.5h.25v2.5H7a.75.75 0 0 0 0 1.5h2a.75.75 0 0 0 0-1.5h-.25v-3A.75.75 0 0 0 8 7H7Z"
+                clipRule="evenodd"
+              />
+            </svg>
+          </span>
+        </div>
         <ul className="space-y-0.5">
           {agents.map((agent) => (
             <li key={agent.id}>
@@ -57,7 +180,22 @@ export function AgentSidebar({
                     : "text-zinc-700 hover:bg-zinc-100 dark:text-zinc-300 dark:hover:bg-zinc-800"
                 }`}
               >
-                <span className="text-sm font-medium">{agent.name}</span>
+                <div className="flex w-full items-center gap-2">
+                  <span
+                    className={`inline-block h-2 w-2 shrink-0 rounded-full ${dotClass(
+                      (statuses[agent.id] ?? { status: "idle" }).status,
+                    )}`}
+                    title={dotTitle(
+                      (statuses[agent.id] ?? { status: "idle" }).status,
+                      statuses[agent.id]?.message,
+                    )}
+                    aria-label={`Connection status: ${dotTitle(
+                      (statuses[agent.id] ?? { status: "idle" }).status,
+                      statuses[agent.id]?.message,
+                    )}`}
+                  />
+                  <span className="text-sm font-medium">{agent.name}</span>
+                </div>
                 <span className="mt-0.5 text-xs text-zinc-400">
                   {agent.description}
                 </span>
