@@ -26,6 +26,44 @@ const emptyForm: FormState = {
   langsmithApiKey: "",
 };
 
+type TestStatus = "idle" | "loading" | "ok" | "fail";
+type TestResult = { status: TestStatus; message?: string };
+
+const TEST_HELP =
+  "Tests only that the server is reachable (an HTTP request succeeds). " +
+  "A success does NOT validate auth, AG-UI protocol compliance, or that the agent will actually run. " +
+  "A failure usually means the URL is wrong or the server is down.";
+
+async function testEndpoint(
+  endpoint: string,
+  kind: AgentKind,
+): Promise<TestResult> {
+  try {
+    const res = await fetch("/api/agents/test", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ endpoint, kind }),
+    });
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok) {
+      return {
+        status: "fail",
+        message:
+          (typeof data === "object" && data && "error" in data
+            ? String((data as { error: unknown }).error)
+            : `Request failed (${res.status})`) ||
+          "Validation failed — check the URL.",
+      };
+    }
+    return {
+      status: data.ok ? "ok" : "fail",
+      message: data.message as string,
+    };
+  } catch {
+    return { status: "fail", message: "Network error talking to /api/agents/test" };
+  }
+}
+
 export default function AgentsPage() {
   const [agents, setAgents] = useState<AgentEntry[]>([]);
   const [loading, setLoading] = useState(true);
@@ -33,6 +71,8 @@ export default function AgentsPage() {
   const [editingId, setEditingId] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [submitting, setSubmitting] = useState(false);
+  const [formTest, setFormTest] = useState<TestResult>({ status: "idle" });
+  const [rowTests, setRowTests] = useState<Record<string, TestResult>>({});
 
   const fetchAgents = useCallback(async () => {
     setLoading(true);
@@ -50,6 +90,11 @@ export default function AgentsPage() {
     fetchRef.current();
   }, []);
 
+  const updateForm = (patch: Partial<FormState>) => {
+    setForm((prev) => ({ ...prev, ...patch }));
+    setFormTest({ status: "idle" });
+  };
+
   const startEdit = (agent: AgentEntry) => {
     setEditingId(agent.id);
     setForm({
@@ -62,12 +107,27 @@ export default function AgentsPage() {
       langsmithApiKey: agent.langsmithApiKey ?? "",
     });
     setError(null);
+    setFormTest({ status: "idle" });
   };
 
   const resetForm = () => {
     setForm(emptyForm);
     setEditingId(null);
     setError(null);
+    setFormTest({ status: "idle" });
+  };
+
+  const handleTestForm = async () => {
+    if (!form.endpoint) return;
+    setFormTest({ status: "loading" });
+    const result = await testEndpoint(form.endpoint, form.kind);
+    setFormTest(result);
+  };
+
+  const handleTestRow = async (agent: AgentEntry) => {
+    setRowTests((prev) => ({ ...prev, [agent.id]: { status: "loading" } }));
+    const result = await testEndpoint(agent.endpoint, agent.kind);
+    setRowTests((prev) => ({ ...prev, [agent.id]: result }));
   };
 
   const handleSubmit = async (e: React.FormEvent) => {
@@ -86,9 +146,7 @@ export default function AgentsPage() {
     };
 
     try {
-      const url = editingId
-        ? `/api/agents/${editingId}`
-        : "/api/agents";
+      const url = editingId ? `/api/agents/${editingId}` : "/api/agents";
       const method = editingId ? "PATCH" : "POST";
       const res = await fetch(url, {
         method,
@@ -160,7 +218,7 @@ export default function AgentsPage() {
               <Field label="ID" hint="lowercase kebab-case, immutable after creation">
                 <input
                   value={form.id}
-                  onChange={(e) => setForm({ ...form, id: e.target.value })}
+                  onChange={(e) => updateForm({ id: e.target.value })}
                   disabled={!!editingId}
                   required
                   pattern="[a-z0-9-]+"
@@ -171,7 +229,7 @@ export default function AgentsPage() {
               <Field label="Name">
                 <input
                   value={form.name}
-                  onChange={(e) => setForm({ ...form, name: e.target.value })}
+                  onChange={(e) => updateForm({ name: e.target.value })}
                   required
                   className={inputClass()}
                   placeholder="Research Agent"
@@ -182,9 +240,7 @@ export default function AgentsPage() {
             <Field label="Description">
               <input
                 value={form.description}
-                onChange={(e) =>
-                  setForm({ ...form, description: e.target.value })
-                }
+                onChange={(e) => updateForm({ description: e.target.value })}
                 className={inputClass()}
                 placeholder="LangGraph-powered web research assistant"
               />
@@ -195,7 +251,7 @@ export default function AgentsPage() {
                 <select
                   value={form.kind}
                   onChange={(e) =>
-                    setForm({ ...form, kind: e.target.value as AgentKind })
+                    updateForm({ kind: e.target.value as AgentKind })
                   }
                   className={inputClass()}
                 >
@@ -209,9 +265,7 @@ export default function AgentsPage() {
               <Field label="Endpoint" hint="full URL including port">
                 <input
                   value={form.endpoint}
-                  onChange={(e) =>
-                    setForm({ ...form, endpoint: e.target.value })
-                  }
+                  onChange={(e) => updateForm({ endpoint: e.target.value })}
                   required
                   type="url"
                   className={inputClass()}
@@ -224,9 +278,7 @@ export default function AgentsPage() {
               <Field label="Graph ID" hint="langgraph only, optional">
                 <input
                   value={form.graphId}
-                  onChange={(e) =>
-                    setForm({ ...form, graphId: e.target.value })
-                  }
+                  onChange={(e) => updateForm({ graphId: e.target.value })}
                   className={inputClass()}
                   placeholder="agent"
                 />
@@ -235,7 +287,7 @@ export default function AgentsPage() {
                 <input
                   value={form.langsmithApiKey}
                   onChange={(e) =>
-                    setForm({ ...form, langsmithApiKey: e.target.value })
+                    updateForm({ langsmithApiKey: e.target.value })
                   }
                   type="password"
                   className={inputClass()}
@@ -244,7 +296,7 @@ export default function AgentsPage() {
               </Field>
             </div>
 
-            <div className="flex gap-2 pt-2">
+            <div className="flex flex-wrap items-center gap-2 pt-2">
               <button
                 type="submit"
                 disabled={submitting}
@@ -265,6 +317,37 @@ export default function AgentsPage() {
                   Cancel
                 </button>
               )}
+              <button
+                type="button"
+                onClick={handleTestForm}
+                disabled={
+                  formTest.status === "loading" || !form.endpoint
+                }
+                className="rounded-lg border border-zinc-200 px-4 py-2 text-sm font-medium text-zinc-700 transition-colors hover:bg-zinc-100 disabled:opacity-50 dark:border-zinc-700 dark:text-zinc-300 dark:hover:bg-zinc-800"
+                title={TEST_HELP}
+              >
+                {formTest.status === "loading" ? "Testing..." : "Test connection"}
+              </button>
+              <span
+                className="ml-1 inline-flex cursor-help text-zinc-400 transition-colors hover:text-zinc-600 dark:hover:text-zinc-300"
+                title={TEST_HELP}
+                aria-label="What does Test connection check?"
+              >
+                <svg
+                  xmlns="http://www.w3.org/2000/svg"
+                  viewBox="0 0 16 16"
+                  fill="currentColor"
+                  className="h-4 w-4"
+                  aria-hidden="true"
+                >
+                  <path
+                    fillRule="evenodd"
+                    d="M8 15A7 7 0 1 0 8 1a7 7 0 0 0 0 14Zm0-9a1 1 0 1 1-2 0 1 1 0 0 1 2 0ZM7 7a.75.75 0 0 0 0 1.5h.25v2.5H7a.75.75 0 0 0 0 1.5h2a.75.75 0 0 0 0-1.5h-.25v-3A.75.75 0 0 0 8 7H7Z"
+                    clipRule="evenodd"
+                  />
+                </svg>
+              </span>
+              <TestBadge result={formTest} />
             </div>
           </form>
         </section>
@@ -293,41 +376,53 @@ export default function AgentsPage() {
                   </tr>
                 </thead>
                 <tbody className="divide-y divide-zinc-200 dark:divide-zinc-800">
-                  {agents.map((agent) => (
-                    <tr
-                      key={agent.id}
-                      className="bg-white dark:bg-zinc-950"
-                    >
-                      <td className="px-4 py-3 font-mono text-xs text-zinc-600 dark:text-zinc-400">
-                        {agent.id}
-                      </td>
-                      <td className="px-4 py-3 font-medium text-zinc-900 dark:text-zinc-50">
-                        {agent.name}
-                      </td>
-                      <td className="px-4 py-3">
-                        <span className="rounded bg-zinc-100 px-1.5 py-0.5 text-[10px] font-medium uppercase text-zinc-500 dark:bg-zinc-800 dark:text-zinc-400">
-                          {agent.kind}
-                        </span>
-                      </td>
-                      <td className="px-4 py-3 font-mono text-xs text-zinc-600 dark:text-zinc-400">
-                        {agent.endpoint}
-                      </td>
-                      <td className="px-4 py-3 text-right">
-                        <button
-                          onClick={() => startEdit(agent)}
-                          className="mr-2 text-xs font-medium text-blue-600 hover:underline dark:text-blue-400"
-                        >
-                          Edit
-                        </button>
-                        <button
-                          onClick={() => handleDelete(agent.id)}
-                          className="text-xs font-medium text-red-600 hover:underline dark:text-red-400"
-                        >
-                          Delete
-                        </button>
-                      </td>
-                    </tr>
-                  ))}
+                  {agents.map((agent) => {
+                    const rowTest = rowTests[agent.id] ?? { status: "idle" };
+                    return (
+                      <tr
+                        key={agent.id}
+                        className="bg-white dark:bg-zinc-950"
+                      >
+                        <td className="px-4 py-3 font-mono text-xs text-zinc-600 dark:text-zinc-400">
+                          {agent.id}
+                        </td>
+                        <td className="px-4 py-3 font-medium text-zinc-900 dark:text-zinc-50">
+                          {agent.name}
+                        </td>
+                        <td className="px-4 py-3">
+                          <span className="rounded bg-zinc-100 px-1.5 py-0.5 text-[10px] font-medium uppercase text-zinc-500 dark:bg-zinc-800 dark:text-zinc-400">
+                            {agent.kind}
+                          </span>
+                        </td>
+                        <td className="px-4 py-3 font-mono text-xs text-zinc-600 dark:text-zinc-400">
+                          {agent.endpoint}
+                        </td>
+                        <td className="px-4 py-3 text-right">
+                          <button
+                            onClick={() => startEdit(agent)}
+                            className="mr-2 text-xs font-medium text-blue-600 hover:underline dark:text-blue-400"
+                          >
+                            Edit
+                          </button>
+                          <button
+                            onClick={() => handleTestRow(agent)}
+                            disabled={rowTest.status === "loading"}
+                            className="mr-2 text-xs font-medium text-zinc-600 hover:underline disabled:opacity-50 dark:text-zinc-400"
+                            title={TEST_HELP}
+                          >
+                            {rowTest.status === "loading" ? "Testing..." : "Test"}
+                          </button>
+                          <button
+                            onClick={() => handleDelete(agent.id)}
+                            className="text-xs font-medium text-red-600 hover:underline dark:text-red-400"
+                          >
+                            Delete
+                          </button>
+                          <TestBadge result={rowTest} inline />
+                        </td>
+                      </tr>
+                    );
+                  })}
                 </tbody>
               </table>
             </div>
@@ -335,6 +430,39 @@ export default function AgentsPage() {
         </section>
       </div>
     </div>
+  );
+}
+
+function TestBadge({
+  result,
+  inline = false,
+}: {
+  result: TestResult;
+  inline?: boolean;
+}) {
+  if (result.status === "idle" || result.status === "loading") {
+    if (result.status === "loading") {
+      return (
+        <span className={`${inline ? "ml-2" : ""} text-xs text-zinc-400`}>
+          ...
+        </span>
+      );
+    }
+    return null;
+  }
+
+  const ok = result.status === "ok";
+  return (
+    <span
+      className={`${inline ? "ml-2" : ""} text-xs font-medium ${
+        ok
+          ? "text-green-600 dark:text-green-400"
+          : "text-red-600 dark:text-red-400"
+      }`}
+      title={result.message}
+    >
+      {ok ? "✓" : "✗"} {result.message}
+    </span>
   );
 }
 
