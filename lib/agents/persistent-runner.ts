@@ -172,12 +172,7 @@ export class PersistentAgentRunner extends SqliteAgentRunner {
   }
 
   deleteThread(threadId: string): boolean {
-    const check = this.database
-      .prepare(`SELECT 1 FROM thread_metadata WHERE thread_id = ?`)
-      .get(threadId);
-    if (!check) return false;
-
-    this.database
+    const r1 = this.database
       .prepare("DELETE FROM agent_runs WHERE thread_id = ?")
       .run(threadId);
     this.database
@@ -186,10 +181,10 @@ export class PersistentAgentRunner extends SqliteAgentRunner {
     this.database
       .prepare("DELETE FROM thread_messages WHERE thread_id = ?")
       .run(threadId);
-    this.database
+    const r4 = this.database
       .prepare("DELETE FROM thread_metadata WHERE thread_id = ?")
       .run(threadId);
-    return true;
+    return r1.changes > 0 || r4.changes > 0;
   }
 
   renameThread(threadId: string, title: string): boolean {

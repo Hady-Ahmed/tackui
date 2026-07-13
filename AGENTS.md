@@ -34,6 +34,7 @@ app/
   api/agents/route.ts          # REST: GET/POST /api/agents (list, create)
   api/agents/[id]/route.ts     # REST: GET/PATCH/DELETE /api/agents/[id]
   api/agents/test/route.ts     # REST: POST /api/agents/test (reachability probe)
+  api/threads/[id]/route.ts    # REST: PATCH/DELETE /api/threads/[id] (rename, delete conversations)
   agents/page.tsx              # Admin UI — add/edit/delete agents + test connection
   layout.tsx                   # Root layout — wraps app in CopilotKitProvider
   page.tsx                     # Main chat page (client component)
@@ -45,10 +46,11 @@ lib/
     agent-store.ts             # SQLite CRUD for agents table (zod-validated)
     registry.ts                # getAgents() factory — reads DB, builds agents map
     persistent-runner.ts       # PersistentAgentRunner — SQLite-backed runner with thread endpoints
+    runner-instance.ts         # Shared runner singleton (used by runtime + thread API)
 
 components/
-  agent-sidebar.tsx            # Agent picker + conversation list + status dots (useThreads)
-  chat-shell.tsx               # Chat layout with agent switching + AgentChat wrapper
+  agent-sidebar.tsx            # Agent picker + conversation list + status dots + rename/delete (useThreads)
+  chat-shell.tsx               # Chat layout with agent switching + empty-state CTA + AgentChat wrapper
   hitl/
     approval-card.tsx          # Human-in-the-loop interrupt handlers
   tools/
@@ -165,7 +167,10 @@ strategy it uses so users know whether server-side session storage is required.
 - SQLite-backed thread runner with conversation persistence
   (`PersistentAgentRunner` in `lib/agents/persistent-runner.ts` — extends
   `SqliteAgentRunner` with local thread endpoints for `useThreads`)
-- Multi-conversation sidebar (`useThreads` + auto-refetch on run completion)
+- Multi-conversation sidebar (`useThreads` + auto-refetch on run completion) with
+  inline rename + delete (`PATCH/DELETE /api/threads/[id]` — the runner exposes
+  `renameThread`/`deleteThread` since the local SSE runner doesn't support
+  CopilotKit's Intelligence-platform-only `useThreads` mutations)
 - Dynamic agent registry (DB-backed `getAgents()` factory + `/agents` admin UI
   with add/edit/delete + test connection + sidebar status dots)
 - LangGraph + Agno backends wired first
