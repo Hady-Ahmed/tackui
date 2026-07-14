@@ -1,4 +1,6 @@
 import Database from "better-sqlite3";
+import { mkdirSync } from "node:fs";
+import { dirname } from "node:path";
 import { z } from "zod";
 import type { AgentEntry, AgentKind } from "./agents.config";
 
@@ -35,6 +37,7 @@ let dbInstance: Database.Database | null = null;
 
 function getDb(): Database.Database {
   if (!dbInstance) {
+    mkdirSync(dirname(DB_PATH), { recursive: true });
     dbInstance = new Database(DB_PATH);
     dbInstance.pragma("journal_mode = WAL");
     dbInstance.exec(`

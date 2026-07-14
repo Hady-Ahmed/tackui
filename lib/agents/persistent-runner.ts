@@ -3,6 +3,8 @@ import { compactEvents, EventType } from "@ag-ui/client";
 import type { BaseEvent, Message } from "@ag-ui/core";
 import type { Observable } from "rxjs";
 import type Database from "better-sqlite3";
+import { mkdirSync } from "node:fs";
+import { dirname } from "node:path";
 
 interface ThreadSummary {
   id: string;
@@ -35,6 +37,10 @@ export class PersistentAgentRunner extends SqliteAgentRunner {
   }
 
   constructor(options?: { dbPath?: string }) {
+    const dbPath = options?.dbPath;
+    if (dbPath && dbPath !== ":memory:") {
+      mkdirSync(dirname(dbPath), { recursive: true });
+    }
     super(options);
     this.database.exec(`
       CREATE TABLE IF NOT EXISTS thread_messages (
