@@ -74,8 +74,8 @@ lib/
     runner-instance.ts         # Shared runner singleton (used by runtime + thread API)
 
 components/
-  agent-sidebar.tsx            # Agent picker + conversation list + status dots + rename/delete (useThreads)
-  chat-shell.tsx               # Chat layout with agent switching + empty-state CTA + AgentChat wrapper
+  agent-sidebar.tsx            # Agent picker + conversation list + status dots + rename/delete + collapsible (useThreads)
+  chat-shell.tsx               # Chat layout with agent switching + empty-state CTA + collapsible sidebar state + AgentChat wrapper
   hitl/
     approval-card.tsx          # Human-in-the-loop interrupt handlers
   tools/
@@ -198,6 +198,8 @@ strategy it uses so users know whether server-side session storage is required.
   CopilotKit's Intelligence-platform-only `useThreads` mutations)
 - Dynamic agent registry (DB-backed `getAgents()` factory + `/agents` admin UI
   with add/edit/delete + test connection + sidebar status dots)
+- Collapsible sidebar (icon-only mode with smooth width transition, persisted
+  to localStorage)
 - LangGraph + Agno backends wired first
 
 ## Future (structured for easy upgrade)

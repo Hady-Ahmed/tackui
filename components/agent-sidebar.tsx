@@ -73,6 +73,8 @@ interface AgentSidebarProps {
   onSelectAgent: (id: string) => void;
   onNewChat: () => void;
   onSelectThread: (threadId: string) => void;
+  collapsed: boolean;
+  onToggleCollapse: () => void;
 }
 
 export function AgentSidebar({
@@ -82,6 +84,8 @@ export function AgentSidebar({
   onSelectAgent,
   onNewChat,
   onSelectThread,
+  collapsed,
+  onToggleCollapse,
 }: AgentSidebarProps) {
   const [statuses, setStatuses] = useState<Record<string, TestResult>>({});
 
@@ -125,14 +129,85 @@ export function AgentSidebar({
   }, [agents]);
 
   return (
-    <aside className="flex w-64 flex-col border-r border-zinc-200 bg-white dark:border-zinc-800 dark:bg-zinc-950">
-      <div className="border-b border-zinc-200 p-4 dark:border-zinc-800">
-        <h1 className="text-sm font-semibold text-zinc-900 dark:text-zinc-50">
-          AG-UI Chat
-        </h1>
-        <p className="mt-0.5 text-xs text-zinc-500 dark:text-zinc-400">
-          Unified agent frontend
-        </p>
+    <aside
+      className={`flex flex-col overflow-hidden border-r border-zinc-200 bg-white transition-[width] duration-200 ease-in-out dark:border-zinc-800 dark:bg-zinc-950 ${
+        collapsed ? "w-14 items-center py-3" : "w-64"
+      }`}
+    >
+      {collapsed ? (
+        <CollapsedContent
+          agents={agents}
+          activeAgent={activeAgent}
+          statuses={statuses}
+          onSelectAgent={onSelectAgent}
+          onNewChat={onNewChat}
+          onToggleCollapse={onToggleCollapse}
+        />
+      ) : (
+        <ExpandedContent
+          agents={agents}
+          activeAgent={activeAgent}
+          activeThreadId={activeThreadId}
+          statuses={statuses}
+          onSelectAgent={onSelectAgent}
+          onNewChat={onNewChat}
+          onSelectThread={onSelectThread}
+          onToggleCollapse={onToggleCollapse}
+        />
+      )}
+    </aside>
+  );
+}
+
+function ExpandedContent({
+  agents,
+  activeAgent,
+  activeThreadId,
+  statuses,
+  onSelectAgent,
+  onNewChat,
+  onSelectThread,
+  onToggleCollapse,
+}: {
+  agents: AgentEntry[];
+  activeAgent: string;
+  activeThreadId: string;
+  statuses: Record<string, TestResult>;
+  onSelectAgent: (id: string) => void;
+  onNewChat: () => void;
+  onSelectThread: (threadId: string) => void;
+  onToggleCollapse: () => void;
+}) {
+  return (
+    <>
+      <div className="flex items-center justify-between border-b border-zinc-200 p-4 dark:border-zinc-800">
+        <div>
+          <h1 className="text-sm font-semibold text-zinc-900 dark:text-zinc-50">
+            AG-UI Chat
+          </h1>
+          <p className="mt-0.5 text-xs text-zinc-500 dark:text-zinc-400">
+            Unified agent frontend
+          </p>
+        </div>
+        <button
+          onClick={onToggleCollapse}
+          title="Collapse sidebar"
+          className="shrink-0 rounded p-1 text-zinc-400 transition-colors hover:bg-zinc-100 hover:text-zinc-700 dark:hover:bg-zinc-800 dark:hover:text-zinc-200"
+          aria-label="Collapse sidebar"
+        >
+          <svg
+            xmlns="http://www.w3.org/2000/svg"
+            viewBox="0 0 16 16"
+            fill="currentColor"
+            className="h-4 w-4"
+          >
+            <path
+              fillRule="evenodd"
+              d="M9.78 4.22a.75.75 0 0 1 0 1.06L7.06 8l2.72 2.72a.75.75 0 1 1-1.06 1.06L5.47 8.53a.75.75 0 0 1 0-1.06l3.25-3.25a.75.75 0 0 1 1.06 0Z"
+              clipRule="evenodd"
+            />
+          </svg>
+        </button>
       </div>
 
       <div className="p-3">
@@ -225,7 +300,103 @@ export function AgentSidebar({
           Manage agents
         </Link>
       </div>
-    </aside>
+    </>
+  );
+}
+
+function CollapsedContent({
+  agents,
+  activeAgent,
+  statuses,
+  onSelectAgent,
+  onNewChat,
+  onToggleCollapse,
+}: {
+  agents: AgentEntry[];
+  activeAgent: string;
+  statuses: Record<string, TestResult>;
+  onSelectAgent: (id: string) => void;
+  onNewChat: () => void;
+  onToggleCollapse: () => void;
+}) {
+  return (
+    <>
+      <button
+        onClick={onToggleCollapse}
+        title="Expand sidebar"
+        className="mb-3 rounded p-1.5 text-zinc-400 transition-colors hover:bg-zinc-100 hover:text-zinc-700 dark:hover:bg-zinc-800 dark:hover:text-zinc-200"
+        aria-label="Expand sidebar"
+      >
+        <svg
+          xmlns="http://www.w3.org/2000/svg"
+          viewBox="0 0 16 16"
+          fill="currentColor"
+          className="h-4 w-4"
+        >
+          <path
+            fillRule="evenodd"
+            d="M6.22 4.22a.75.75 0 0 1 1.06 0l3.25 3.25a.75.75 0 0 1 0 1.06L7.28 11.78a.75.75 0 1 1-1.06-1.06L8.94 8 6.22 5.28a.75.75 0 0 1 0-1.06Z"
+            clipRule="evenodd"
+          />
+        </svg>
+      </button>
+
+      <button
+        onClick={onNewChat}
+        title="New chat"
+        className="mb-3 flex h-9 w-9 items-center justify-center rounded-lg border border-zinc-200 text-lg text-zinc-700 transition-colors hover:bg-zinc-100 dark:border-zinc-700 dark:text-zinc-300 dark:hover:bg-zinc-800"
+        aria-label="New chat"
+      >
+        +
+      </button>
+
+      <nav className="flex flex-1 flex-col items-center gap-1 overflow-y-auto">
+        {agents.map((agent) => {
+          const st = statuses[agent.id] ?? { status: "idle" as TestStatus };
+          const isActive = activeAgent === agent.id;
+          return (
+            <button
+              key={agent.id}
+              onClick={() => onSelectAgent(agent.id)}
+              title={agent.name}
+              className={`relative flex h-9 w-9 items-center justify-center rounded-full text-sm font-medium transition-colors ${
+                isActive
+                  ? "bg-blue-100 text-blue-700 dark:bg-blue-950 dark:text-blue-300"
+                  : "text-zinc-600 hover:bg-zinc-100 dark:text-zinc-400 dark:hover:bg-zinc-800"
+              }`}
+              aria-label={agent.name}
+            >
+              {agent.name.charAt(0).toUpperCase()}
+              <span
+                className={`absolute bottom-0.5 right-0.5 h-2 w-2 rounded-full border border-white dark:border-zinc-950 ${dotClass(
+                  st.status,
+                )}`}
+              />
+            </button>
+          );
+        })}
+      </nav>
+
+      <Link
+        href="/agents"
+        title="Manage agents"
+        className="mt-2 flex h-9 w-9 items-center justify-center rounded-lg text-zinc-500 transition-colors hover:bg-zinc-100 dark:text-zinc-400 dark:hover:bg-zinc-800"
+        aria-label="Manage agents"
+      >
+        <svg
+          xmlns="http://www.w3.org/2000/svg"
+          viewBox="0 0 16 16"
+          fill="currentColor"
+          className="h-4 w-4"
+        >
+          <path
+            fillRule="evenodd"
+            d="M8 1a2.5 2.5 0 0 1 2.45 2.01l.05.24.24.05a2.5 2.5 0 0 1 1.7 3.7l-.12.21.12.21a2.5 2.5 0 0 1-1.7 3.7l-.24.05-.05.24a2.5 2.5 0 0 1-4.9 0l-.05-.24-.24-.05a2.5 2.5 0 0 1-1.7-3.7l.12-.21-.12-.21a2.5 2.5 0 0 1 1.7-3.7l.24-.05.05-.24A2.5 2.5 0 0 1 8 1Zm0 4.5a2.5 2.5 0 1 0 0 5 2.5 2.5 0 0 0 0-5Z"
+            clipRule="evenodd"
+          />
+        </svg>
+      </Link>
+    </>
   );
 }
 

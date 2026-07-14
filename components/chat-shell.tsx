@@ -15,6 +15,10 @@ export function ChatShell() {
   const [activeThreadId, setActiveThreadId] = useState(() =>
     crypto.randomUUID(),
   );
+  const [sidebarCollapsed, setSidebarCollapsed] = useState(() => {
+    if (typeof window === "undefined") return false;
+    return localStorage.getItem("sidebarCollapsed") === "true";
+  });
 
   useEffect(() => {
     let cancelled = false;
@@ -51,6 +55,14 @@ export function ChatShell() {
     setActiveThreadId(threadId);
   }, []);
 
+  const toggleSidebar = useCallback(() => {
+    setSidebarCollapsed((prev) => {
+      const next = !prev;
+      localStorage.setItem("sidebarCollapsed", String(next));
+      return next;
+    });
+  }, []);
+
   return (
     <div className="flex h-screen w-full overflow-hidden bg-zinc-50 dark:bg-black">
       <AgentSidebar
@@ -60,6 +72,8 @@ export function ChatShell() {
         onSelectAgent={handleSelectAgent}
         onNewChat={handleNewChat}
         onSelectThread={handleSelectThread}
+        collapsed={sidebarCollapsed}
+        onToggleCollapse={toggleSidebar}
       />
       <main className="flex flex-1 flex-col overflow-hidden">
         {activeAgent ? (

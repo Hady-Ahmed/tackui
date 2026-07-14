@@ -11,6 +11,7 @@ A unified frontend for custom agents speaking the [AG-UI protocol](https://docs.
 - **Conversation persistence** — SQLite-backed threads with inline rename and delete
 - **Dynamic agent registry** — add, edit, and remove agents via the admin UI with no restart
 - **Test connection** — server-side reachability probe with sidebar status indicators
+- **Collapsible sidebar** — icon-only mode with smooth transition, persists across reloads
 - **Dark mode** — follows system preference
 
 ## Quick Start
