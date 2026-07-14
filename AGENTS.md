@@ -22,9 +22,34 @@ npm run dev      # Start dev server (http://localhost:3000)
 npm run build    # Production build
 npm run start    # Start production server
 npm run lint     # ESLint
+npm run test     # Run tests (vitest)
+npm run test:watch  # Run tests in watch mode
 ```
 
 Type checking: `npx tsc --noEmit`
+
+Tests use [vitest](https://vitest.dev) with an in-memory SQLite database
+(`:memory:`) — no file I/O, no cleanup needed between runs. See
+`vitest.config.ts` and `vitest.setup.ts` for configuration.
+
+### Testing conventions
+
+When adding new functionality, add tests alongside it:
+
+- **API routes** — test each exported handler (`GET`, `POST`, `PATCH`,
+  `DELETE`) for success, not-found, and validation-failure cases. Construct
+  `Request` objects directly and assert on `res.status` + `await res.json()`.
+  Use `beforeEach` to clear the DB via the store's public API.
+- **Store / library functions** — unit-test each exported function. Cover
+  happy paths, edge cases (missing records, duplicates), and zod validation
+  rejections.
+- **Test files** — place `*.test.ts` next to the file under test (e.g.
+  `lib/agents/agent-store.test.ts`, `app/api/agents/route.test.ts`).
+- **External calls** — mock with `vi.stubGlobal` (e.g. `fetch` in
+  `/api/agents/test` tests). Restore in `afterEach`.
+- **No production code changes for testability** — the in-memory SQLite
+  (`AGENT_DB_PATH=:memory:`) + vitest's `isolate: true` handle DB isolation
+  without needing test-only exports.
 
 ## Project Structure
 

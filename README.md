@@ -82,6 +82,8 @@ Optional fields: `graphId` (langgraph only), `langsmithApiKey` (langgraph only).
 | `npm run build` | Production build |
 | `npm run start` | Start production server |
 | `npm run lint` | ESLint |
+| `npm run test` | Run tests (vitest) |
+| `npm run test:watch` | Run tests in watch mode |
 | `npx tsc --noEmit` | Type checking |
 
 ## Contributing
