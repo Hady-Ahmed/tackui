@@ -1,36 +1,93 @@
-This is a [Next.js](https://nextjs.org) project bootstrapped with [`create-next-app`](https://nextjs.org/docs/app/api-reference/cli/create-next-app).
+# AG-UI Chat
 
-## Getting Started
+A unified frontend for custom agents speaking the [AG-UI protocol](https://docs.ag-ui.com). Built on [CopilotKit](https://copilotkit.ai) with a pluggable agent registry — add any AG-UI-compatible backend with zero UI code changes.
 
-First, run the development server:
+## Features
+
+- **Streaming chat** — token streaming, multi-turn conversations, cancel/resume
+- **Multi-agent switching** — per-agent conversation threads with sidebar picker
+- **Human-in-the-loop interrupts** — approve/deny cards for agent actions
+- **Tool-call visualization** — expandable cards with arguments, results, copy button, error detection
+- **Conversation persistence** — SQLite-backed threads with inline rename and delete
+- **Dynamic agent registry** — add, edit, and remove agents via the admin UI with no restart
+- **Test connection** — server-side reachability probe with sidebar status indicators
+- **Dark mode** — follows system preference
+
+## Quick Start
 
 ```bash
+git clone <repo-url>
+cd agent-front-end
+npm install
 npm run dev
-# or
-yarn dev
-# or
-pnpm dev
-# or
-bun dev
 ```
 
-Open [http://localhost:3000](http://localhost:3000) with your browser to see the result.
+Open [http://localhost:3000](http://localhost:3000).
 
-You can start editing the page by modifying `app/page.tsx`. The page auto-updates as you edit the file.
+The app starts with no agents configured. Navigate to the **Manage agents** link in the sidebar (or `/agents`) to add your first agent backend.
 
-This project uses [`next/font`](https://nextjs.org/docs/app/building-your-application/optimizing/fonts) to automatically optimize and load [Geist](https://vercel.com/font), a new font family for Vercel.
+## Architecture
 
-## Learn More
+```
+Browser → Next.js App → /api/copilotkit (CopilotRuntime)
+                              ↓ AG-UI event stream (SSE)
+                    ┌─────────┼──────────┐
+                    ▼         ▼          ▼
+              LangGraph   Agno     any AG-UI server
+```
 
-To learn more about Next.js, take a look at the following resources:
+The CopilotKit runtime is a thin server-side proxy that holds the `agents` map. Each agent speaks AG-UI to its backend. The frontend never talks to backends directly — it talks to the runtime, making agents pluggable.
 
-- [Next.js Documentation](https://nextjs.org/docs) - learn about Next.js features and API.
-- [Learn Next.js](https://nextjs.org/learn) - an interactive Next.js tutorial.
+Agent configurations are stored in a SQLite database (`./data/agent-state.db`) and managed at runtime via the `/agents` admin page or the `/api/agents` REST API. No restart is needed when adding, editing, or removing agents.
 
-You can check out [the Next.js GitHub repository](https://github.com/vercel/next.js) - your feedback and contributions are welcome!
+## Adding Agents
 
-## Deploy on Vercel
+Via the admin UI (`/agents` page → "Add agent" form) or `POST /api/agents`:
 
-The easiest way to deploy your Next.js app is to use the [Vercel Platform](https://vercel.com/new?utm_medium=default-template&filter=next.js&utm_source=create-next-app&utm_campaign=create-next-app-readme) from the creators of Next.js.
+```json
+{
+  "id": "research",
+  "name": "Research Agent",
+  "description": "LangGraph-powered web research assistant",
+  "kind": "agui",
+  "endpoint": "http://localhost:8001/agent"
+}
+```
 
-Check out our [Next.js deployment documentation](https://nextjs.org/docs/app/building-your-application/deploying) for more details.
+Optional fields: `graphId` (langgraph only), `langsmithApiKey` (langgraph only).
+
+### Supported Backends
+
+| Kind | Adapter | Endpoint format |
+| --- | --- | --- |
+| `langgraph` | `LangGraphAgent` | LangGraph Platform API URL (e.g. `:8123`) |
+| `agno` | `HttpAgent` (from @ag-ui/client) | AG-UI endpoint (e.g. `:8000/agui`) |
+| `agui` | `HttpAgent` (from @ag-ui/client) | Any AG-UI-speaking endpoint |
+
+> If your LangGraph backend uses `ag-ui-langgraph` (AG-UI protocol directly, not the LangGraph Platform API), use `kind: "agui"` instead of `"langgraph"`.
+
+## Tech Stack
+
+- [Next.js 16](https://nextjs.org) (App Router, TypeScript, Tailwind CSS v4)
+- [CopilotKit v2](https://copilotkit.ai) (AG-UI client + runtime)
+- [AG-UI Protocol](https://docs.ag-ui.com) (event-based agent communication)
+- SQLite (conversation persistence + agent registry via `better-sqlite3`)
+- [Zod](https://zod.dev) (runtime validation)
+
+## Development
+
+| Command | Description |
+| --- | --- |
+| `npm run dev` | Start dev server (`http://localhost:3000`) |
+| `npm run build` | Production build |
+| `npm run start` | Start production server |
+| `npm run lint` | ESLint |
+| `npx tsc --noEmit` | Type checking |
+
+## Contributing
+
+See [AGENTS.md](AGENTS.md) for architecture details, development conventions, and the full project structure. PRs welcome.
+
+## License
+
+Apache License 2.0 — see [LICENSE](LICENSE).
