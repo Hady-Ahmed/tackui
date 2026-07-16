@@ -1,6 +1,7 @@
 import { NextResponse } from "next/server";
 import { z } from "zod";
 import { runner } from "@/lib/agents/runner-instance";
+import { getCurrentUser } from "@/lib/auth/context";
 
 const renameSchema = z.object({
   title: z.string().min(1).max(200),
@@ -10,6 +11,11 @@ export async function PATCH(
   request: Request,
   { params }: { params: Promise<{ id: string }> },
 ) {
+  const user = await getCurrentUser();
+  if (!user) {
+    return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
+  }
+
   const { id } = await params;
   let body: unknown;
   try {
@@ -26,7 +32,7 @@ export async function PATCH(
     );
   }
 
-  const ok = runner.renameThread(id, parsed.data.title);
+  const ok = runner.renameThread(id, parsed.data.title, user.id);
   if (!ok) {
     return NextResponse.json(
       { error: "Thread not found" },
@@ -40,8 +46,13 @@ export async function DELETE(
   _request: Request,
   { params }: { params: Promise<{ id: string }> },
 ) {
+  const user = await getCurrentUser();
+  if (!user) {
+    return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
+  }
+
   const { id } = await params;
-  const ok = runner.deleteThread(id);
+  const ok = runner.deleteThread(id, user.id);
   if (!ok) {
     return NextResponse.json(
       { error: "Thread not found" },

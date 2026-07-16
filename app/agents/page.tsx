@@ -3,6 +3,7 @@
 import { useState, useEffect, useCallback, useRef } from "react";
 import Link from "next/link";
 import type { AgentEntry, AgentKind } from "@/lib/agents/agents.config";
+import { UsersAdmin } from "@/components/users-admin";
 
 const KINDS: AgentKind[] = ["langgraph", "agno", "agui"];
 
@@ -428,6 +429,8 @@ export default function AgentsPage() {
             </div>
           )}
         </section>
+
+        <UsersAdmin />
       </div>
     </div>
   );

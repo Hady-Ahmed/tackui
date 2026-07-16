@@ -1,5 +1,6 @@
 import { NextResponse } from "next/server";
 import { z } from "zod";
+import { getCurrentUser } from "@/lib/auth/context";
 
 const testSchema = z.object({
   endpoint: z.string().url(),
@@ -7,6 +8,14 @@ const testSchema = z.object({
 });
 
 export async function POST(request: Request) {
+  const user = await getCurrentUser();
+  if (!user) {
+    return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
+  }
+  if (user.role !== "admin") {
+    return NextResponse.json({ error: "Forbidden" }, { status: 403 });
+  }
+
   let body: unknown;
   try {
     body = await request.json();

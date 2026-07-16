@@ -5,6 +5,7 @@ import {
   deleteAgent,
   agentEntrySchema,
 } from "@/lib/agents/agent-store";
+import { getCurrentUser } from "@/lib/auth/context";
 
 const partialSchema = agentEntrySchema.partial();
 
@@ -12,6 +13,10 @@ export async function GET(
   _request: Request,
   { params }: { params: Promise<{ id: string }> },
 ) {
+  const user = await getCurrentUser();
+  if (!user) {
+    return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
+  }
   const { id } = await params;
   const agent = getAgent(id);
   if (!agent) {
@@ -24,6 +29,14 @@ export async function PATCH(
   request: Request,
   { params }: { params: Promise<{ id: string }> },
 ) {
+  const user = await getCurrentUser();
+  if (!user) {
+    return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
+  }
+  if (user.role !== "admin") {
+    return NextResponse.json({ error: "Forbidden" }, { status: 403 });
+  }
+
   const { id } = await params;
   let body: unknown;
   try {
@@ -51,6 +64,14 @@ export async function DELETE(
   _request: Request,
   { params }: { params: Promise<{ id: string }> },
 ) {
+  const user = await getCurrentUser();
+  if (!user) {
+    return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
+  }
+  if (user.role !== "admin") {
+    return NextResponse.json({ error: "Forbidden" }, { status: 403 });
+  }
+
   const { id } = await params;
   const ok = deleteAgent(id);
   if (!ok) {

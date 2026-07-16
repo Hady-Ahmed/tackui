@@ -6,7 +6,8 @@ import { listAgents } from "./agent-store";
 
 export type AgentsMap = Record<string, AbstractAgent>;
 
-export function getAgents(): AgentsMap {
+export function getAgents(request?: Request): AgentsMap {
+  void request;
   const entries = listAgents();
   if (entries.length === 0) {
     throw new Error(

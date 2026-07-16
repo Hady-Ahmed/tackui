@@ -4,12 +4,25 @@ import {
   createAgent,
   agentEntrySchema,
 } from "@/lib/agents/agent-store";
+import { getCurrentUser } from "@/lib/auth/context";
 
 export async function GET() {
+  const user = await getCurrentUser();
+  if (!user) {
+    return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
+  }
   return NextResponse.json(listAgents());
 }
 
 export async function POST(request: Request) {
+  const user = await getCurrentUser();
+  if (!user) {
+    return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
+  }
+  if (user.role !== "admin") {
+    return NextResponse.json({ error: "Forbidden" }, { status: 403 });
+  }
+
   let body: unknown;
   try {
     body = await request.json();

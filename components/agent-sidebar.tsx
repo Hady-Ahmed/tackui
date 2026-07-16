@@ -4,6 +4,7 @@ import { useEffect, useRef, useState } from "react";
 import Link from "next/link";
 import { useThreads, useAgent } from "@copilotkit/react-core/v2";
 import type { AgentEntry, AgentKind } from "@/lib/agents/agents.config";
+import { AccountMenu } from "./account-menu";
 
 type TestStatus = "idle" | "loading" | "ok" | "fail";
 type TestResult = { status: TestStatus; message?: string };
@@ -293,9 +294,10 @@ function ExpandedContent({
       </nav>
 
       <div className="border-t border-zinc-200 p-3 dark:border-zinc-800">
+        <AccountMenu />
         <Link
           href="/agents"
-          className="flex w-full items-center justify-center rounded-lg px-3 py-2 text-sm font-medium text-zinc-600 transition-colors hover:bg-zinc-100 dark:text-zinc-400 dark:hover:bg-zinc-800"
+          className="mt-2 flex w-full items-center justify-center rounded-lg px-3 py-2 text-sm font-medium text-zinc-600 transition-colors hover:bg-zinc-100 dark:text-zinc-400 dark:hover:bg-zinc-800"
         >
           Manage agents
         </Link>
@@ -396,6 +398,10 @@ function CollapsedContent({
           />
         </svg>
       </Link>
+
+      <div className="mt-2">
+        <AccountMenu />
+      </div>
     </>
   );
 }

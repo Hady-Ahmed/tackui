@@ -3,6 +3,7 @@ import { mkdirSync } from "node:fs";
 import { dirname } from "node:path";
 import { z } from "zod";
 import type { AgentEntry, AgentKind } from "./agents.config";
+import { addColumnIfMissing } from "@/lib/db/migrations";
 
 const DB_PATH = process.env.AGENT_DB_PATH || "./data/agent-state.db";
 
@@ -50,9 +51,11 @@ function getDb(): Database.Database {
         graph_id TEXT,
         langsmith_api_key TEXT,
         created_at INTEGER NOT NULL,
-        updated_at INTEGER NOT NULL
+        updated_at INTEGER NOT NULL,
+        org_id TEXT
       )
     `);
+    addColumnIfMissing(dbInstance, "agents", "org_id", "TEXT");
   }
   return dbInstance;
 }

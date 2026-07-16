@@ -8,13 +8,15 @@
     "start": "next start",
     "lint": "eslint",
     "test": "vitest run",
-    "test:watch": "vitest"
+    "test:watch": "vitest",
+    "create-admin": "npx tsx scripts/create-admin.ts"
   },
   "dependencies": {
     "@copilotkit/react-core": "^1.62.3",
     "@copilotkit/react-ui": "^1.62.3",
     "@copilotkit/runtime": "^1.62.3",
     "@copilotkit/sqlite-runner": "^1.62.3",
+    "better-auth": "^1.6.23",
     "better-sqlite3": "^12.11.1",
     "hono": "^4.12.29",
     "next": "16.2.10",

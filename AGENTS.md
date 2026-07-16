@@ -14,16 +14,19 @@ UI code changes.
 - **Client:** CopilotKit v1.62+ (`@copilotkit/react-core`, `@copilotkit/react-ui`)
 - **Runtime:** CopilotKit Runtime v2 (`@copilotkit/runtime/v2`)
 - **AG-UI Client SDK:** `@ag-ui/client` (for generic AG-UI HTTP agents)
+- **Auth:** Better Auth (`better-auth`) — email/password, OAuth (Google/GitHub),
+  OIDC SSO (`genericOAuth` plugin), admin roles (`admin` plugin)
 
 ## Commands
 
 ```bash
-npm run dev      # Start dev server (http://localhost:3000)
-npm run build    # Production build
-npm run start    # Start production server
-npm run lint     # ESLint
-npm run test     # Run tests (vitest)
-npm run test:watch  # Run tests in watch mode
+npm run dev          # Start dev server (http://localhost:3000)
+npm run build        # Production build
+npm run start        # Start production server
+npm run lint         # ESLint
+npm run test         # Run tests (vitest)
+npm run test:watch   # Run tests in watch mode
+npm run create-admin # Create/promote an admin user (npm run create-admin <email> <password> [name])
 ```
 
 Type checking: `npx tsc --noEmit`
@@ -59,8 +62,12 @@ app/
   api/agents/route.ts          # REST: GET/POST /api/agents (list, create)
   api/agents/[id]/route.ts     # REST: GET/PATCH/DELETE /api/agents/[id]
   api/agents/test/route.ts     # REST: POST /api/agents/test (reachability probe)
+  api/auth/[...all]/route.ts   # Better Auth handler (signup, signin, callback)
+  api/auth/config/route.ts     # GET enabled providers (for self-configuring login UI)
   api/threads/[id]/route.ts    # REST: PATCH/DELETE /api/threads/[id] (rename, delete conversations)
-  agents/page.tsx              # Admin UI — add/edit/delete agents + test connection
+  agents/page.tsx              # Admin UI — add/edit/delete agents + test connection + user management
+  login/page.tsx               # Login (email/password + social + SSO)
+  signup/page.tsx              # Sign up (email/password + social + SSO)
   layout.tsx                   # Root layout — wraps app in CopilotKitProvider
   page.tsx                     # Main chat page (client component)
   globals.css                  # Global styles + Tailwind
@@ -72,14 +79,27 @@ lib/
     registry.ts                # getAgents() factory — reads DB, builds agents map
     persistent-runner.ts       # PersistentAgentRunner — SQLite-backed runner with thread endpoints
     runner-instance.ts         # Shared runner singleton (used by runtime + thread API)
+  auth/
+    auth.ts                    # Better Auth instance (SQLite adapter, plugins, first-user-is-admin)
+    auth-client.ts             # Better Auth React client (signIn, signUp, useSession)
+    context.ts                 # getCurrentUser / getRequestUser (session → RequestUser)
+    request-context.ts         # AsyncLocalStorage for per-request user (read by runner)
+  db/
+    migrations.ts              # Idempotent ALTER TABLE helpers
 
 components/
   agent-sidebar.tsx            # Agent picker + conversation list + status dots + rename/delete + collapsible (useThreads)
+  account-menu.tsx             # User avatar, name, email, sign out (useSession)
   chat-shell.tsx               # Chat layout with agent switching + empty-state CTA + collapsible sidebar state + AgentChat wrapper
+  users-admin.tsx              # Admin user management (list, set role, ban/unban)
   hitl/
     approval-card.tsx          # Human-in-the-loop interrupt handlers
   tools/
     tool-renders.tsx           # Tool-call visualization (useRenderTool)
+
+proxy.ts                       # Next.js proxy (cookie gate + AUTH_DISABLED bypass)
+scripts/
+  create-admin.ts              # CLI: create/promote an admin user
 ```
 
 ## Agent Registry
@@ -140,10 +160,87 @@ vars are required to add or configure agents.
 See `.env.example` for optional backend URLs (useful for documentation or
 scripts only; the frontend reads endpoints from the DB).
 
+### Auth environment variables
+
+Required unless `AUTH_DISABLED=true`:
+
+- `BETTER_AUTH_SECRET` — secret for signing session cookies (generate with
+  `openssl rand -hex 32`)
+- `BETTER_AUTH_URL` — public base URL of the app (e.g.
+  `http://localhost:3000`)
+
+Optional social providers (omit any you don't want):
+
+- `GOOGLE_CLIENT_ID` / `GOOGLE_CLIENT_SECRET` — Google OAuth
+- `GITHUB_CLIENT_ID` / `GITHUB_CLIENT_SECRET` — GitHub OAuth
+- `OIDC_CLIENT_ID` / `OIDC_CLIENT_SECRET` / `OIDC_ISSUER` — external OIDC
+  SSO (Keycloak, Authentik, Okta, Entra, etc.)
+
+Solo / no-auth mode:
+
+- `AUTH_DISABLED=true` — skips login entirely; everyone is the single admin.
+  No other auth env vars needed. Useful for local dev or single-user
+  self-hosted deployments.
+
+## Authentication
+
+Auth is powered by [Better Auth](https://better-auth.com) with:
+
+- **Email/password** sign-up/sign-in
+- **Social login** (Google, GitHub) — only enabled if env vars are set
+- **OIDC SSO** via `genericOAuth` plugin — for self-hosters with their own IdP
+  (Keycloak, Authentik, Okta, Entra, etc.)
+- **Admin roles** via `admin` plugin — `admin` and `user` roles
+- **Auth-disabled mode** — `AUTH_DISABLED=true` makes everyone the single admin
+
+### Auth architecture
+
+```
+Browser → proxy.ts (cookie gate) → Next.js App
+                                       ↓
+                          /api/auth/*     → Better Auth (signup, signin, callback)
+                          /api/copilotkit → CopilotRuntime (auth + ALS wrapping)
+                          /api/agents*    → REST (getCurrentUser checks)
+                          /api/threads*   → REST (getCurrentUser + userId scoping)
+```
+
+**Request user resolution:**
+
+- `getCurrentUser()` (`lib/auth/context.ts`) — resolves the user from the
+  session cookie via `auth.api.getSession()`. Used by REST API routes. Returns
+  the synthetic admin when `AUTH_DISABLED=true`.
+- `getRequestUser(request)` — same but takes a `Request` object. Used by the
+  CopilotKit runtime route.
+- `getRunnerUser()` (`lib/auth/request-context.ts`) — reads the user from
+  `AsyncLocalStorage`. Used by `PersistentAgentRunner` (which has no access to
+  the request). The ALS context is set by wrapping the CopilotKit handler in
+  `runWithUserAsync()` in the runtime route.
+
+**First user becomes admin:** The `databaseHooks.user.create.after` hook in
+`lib/auth/auth.ts` promotes the first user to `admin` role. The
+`npm run create-admin` script can also create/promote an admin explicitly.
+
+### Access control
+
+- **Admin role:** Can add/edit/delete agents, test connections, manage users.
+- **User role:** Can use all agents and their own conversations; cannot manage
+  agents.
+- **Thread scoping:** Threads are scoped per user via `user_id` on
+  `thread_metadata`. `listThreads` filters by the current user via ALS.
+  `deleteThread`/`renameThread` check ownership.
+
+### Postgres portability
+
+Better Auth has a Postgres adapter — swap `new Database(path)` to
+`new Pool(...)` in `lib/auth/auth.ts` when migrating. The auth tables are
+managed by Better Auth automatically. Agent/thread SQL uses standard types
+(avoid SQLite-specifics) to keep the migration cheap.
+
 ## Architecture
 
 ```
-Browser → Next.js App → /api/copilotkit (CopilotRuntime)
+Browser → proxy.ts (cookie gate) → Next.js App → /api/copilotkit (CopilotRuntime)
+                                                    ↓ auth + ALS wrapping
                               ↓ AG-UI event stream (SSE)
                     ┌─────────┼──────────┐
                     ▼         ▼          ▼
@@ -152,7 +249,9 @@ Browser → Next.js App → /api/copilotkit (CopilotRuntime)
 
 The CopilotKit runtime is a thin server-side proxy that holds the `agents` map.
 Each agent speaks AG-UI to its backend. The frontend never talks to backends
-directly — it talks to the runtime, making agents pluggable.
+directly — it talks to the runtime, making agents pluggable. The runtime
+handler resolves the user from the session cookie and wraps the entire request
+in `AsyncLocalStorage` so the runner can scope threads per user.
 
 ### Conversation History Contract
 
@@ -201,12 +300,23 @@ strategy it uses so users know whether server-side session storage is required.
 - Collapsible sidebar (icon-only mode with smooth width transition, persisted
   to localStorage)
 - LangGraph + Agno backends wired first
+- Authentication (Better Auth): email/password, Google/GitHub OAuth, OIDC SSO,
+  admin/member roles, per-user thread scoping, `AUTH_DISABLED` solo mode,
+  first-user-is-admin bootstrap, user management admin UI
+- Schema future-proofed: nullable `org_id` on `agents` + `thread_metadata`
+  for future multi-tenant SaaS migration
 
 ## Future (structured for easy upgrade)
 
 - Generative UI / shared state (`useCoAgent`) — requires backend to emit
   `STATE_SNAPSHOT`/`STATE_DELTA` events; neither backend currently does
 - Additional backends (CrewAI, Mastra, Pydantic AI, Google ADK, AWS Strands, etc.)
+- Per-agent ACL (`agent_acl` table) so specific agents can be restricted to
+  specific users/groups (e.g. HR agent only visible to HR team)
+- Multi-tenant SaaS (populate `org_id` on `agents` + `thread_metadata`,
+  scope queries by org) — schema is already nullable-ready
+- Postgres migration (swap `better-sqlite3` adapter for `pg` Pool in
+  `lib/auth/auth.ts` + agent store)
 
 ## Notes
 
