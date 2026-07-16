@@ -1,6 +1,7 @@
 "use client";
 
 import { useState, useCallback, useEffect } from "react";
+import { useRouter } from "next/navigation";
 import Link from "next/link";
 import { CopilotChat, useCopilotKit } from "@copilotkit/react-core/v2";
 import { AgentSidebar } from "./agent-sidebar";
@@ -9,6 +10,7 @@ import { ToolRenders } from "./tools/tool-renders";
 import type { AgentEntry } from "@/lib/agents/agents.config";
 
 export function ChatShell() {
+  const router = useRouter();
   const [agents, setAgents] = useState<AgentEntry[]>([]);
   const [hasLoaded, setHasLoaded] = useState(false);
   const [activeAgent, setActiveAgent] = useState("");
@@ -24,7 +26,12 @@ export function ChatShell() {
     let cancelled = false;
     const load = async () => {
       const res = await fetch("/api/agents");
-      if (cancelled || !res.ok) return;
+      if (cancelled) return;
+      if (res.status === 401) {
+        router.push("/login");
+        return;
+      }
+      if (!res.ok) return;
       const list: AgentEntry[] = await res.json();
       setAgents(list);
       setHasLoaded(true);
@@ -40,7 +47,7 @@ export function ChatShell() {
       cancelled = true;
       window.removeEventListener("focus", onFocus);
     };
-  }, []);
+  }, [router]);
 
   const handleSelectAgent = useCallback((id: string) => {
     setActiveAgent(id);

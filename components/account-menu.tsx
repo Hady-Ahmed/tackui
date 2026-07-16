@@ -20,6 +20,12 @@ export function AccountMenu() {
     return () => document.removeEventListener("mousedown", onClick);
   }, []);
 
+  useEffect(() => {
+    if (!isPending && !session) {
+      router.push("/login");
+    }
+  }, [session, isPending, router]);
+
   if (isPending) {
     return <div className="h-8" />;
   }

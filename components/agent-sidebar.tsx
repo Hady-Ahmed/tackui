@@ -5,6 +5,7 @@ import Link from "next/link";
 import { useThreads, useAgent } from "@copilotkit/react-core/v2";
 import type { AgentEntry, AgentKind } from "@/lib/agents/agents.config";
 import { AccountMenu } from "./account-menu";
+import { authClient } from "@/lib/auth/auth-client";
 
 type TestStatus = "idle" | "loading" | "ok" | "fail";
 type TestResult = { status: TestStatus; message?: string };
@@ -89,6 +90,8 @@ export function AgentSidebar({
   onToggleCollapse,
 }: AgentSidebarProps) {
   const [statuses, setStatuses] = useState<Record<string, TestResult>>({});
+  const { data: session } = authClient.useSession();
+  const isAdmin = session?.user.role === "admin";
 
   useEffect(() => {
     let cancelled = false;
@@ -143,6 +146,7 @@ export function AgentSidebar({
           onSelectAgent={onSelectAgent}
           onNewChat={onNewChat}
           onToggleCollapse={onToggleCollapse}
+          isAdmin={isAdmin}
         />
       ) : (
         <ExpandedContent
@@ -154,6 +158,7 @@ export function AgentSidebar({
           onNewChat={onNewChat}
           onSelectThread={onSelectThread}
           onToggleCollapse={onToggleCollapse}
+          isAdmin={isAdmin}
         />
       )}
     </aside>
@@ -169,6 +174,7 @@ function ExpandedContent({
   onNewChat,
   onSelectThread,
   onToggleCollapse,
+  isAdmin,
 }: {
   agents: AgentEntry[];
   activeAgent: string;
@@ -178,6 +184,7 @@ function ExpandedContent({
   onNewChat: () => void;
   onSelectThread: (threadId: string) => void;
   onToggleCollapse: () => void;
+  isAdmin: boolean;
 }) {
   return (
     <>
@@ -295,12 +302,14 @@ function ExpandedContent({
 
       <div className="border-t border-zinc-200 p-3 dark:border-zinc-800">
         <AccountMenu />
-        <Link
-          href="/agents"
-          className="mt-2 flex w-full items-center justify-center rounded-lg px-3 py-2 text-sm font-medium text-zinc-600 transition-colors hover:bg-zinc-100 dark:text-zinc-400 dark:hover:bg-zinc-800"
-        >
-          Manage agents
-        </Link>
+        {isAdmin && (
+          <Link
+            href="/agents"
+            className="mt-2 flex w-full items-center justify-center rounded-lg px-3 py-2 text-sm font-medium text-zinc-600 transition-colors hover:bg-zinc-100 dark:text-zinc-400 dark:hover:bg-zinc-800"
+          >
+            Manage agents
+          </Link>
+        )}
       </div>
     </>
   );
@@ -313,6 +322,7 @@ function CollapsedContent({
   onSelectAgent,
   onNewChat,
   onToggleCollapse,
+  isAdmin,
 }: {
   agents: AgentEntry[];
   activeAgent: string;
@@ -320,6 +330,7 @@ function CollapsedContent({
   onSelectAgent: (id: string) => void;
   onNewChat: () => void;
   onToggleCollapse: () => void;
+  isAdmin: boolean;
 }) {
   return (
     <>
@@ -379,25 +390,27 @@ function CollapsedContent({
         })}
       </nav>
 
-      <Link
-        href="/agents"
-        title="Manage agents"
-        className="mt-2 flex h-9 w-9 items-center justify-center rounded-lg text-zinc-500 transition-colors hover:bg-zinc-100 dark:text-zinc-400 dark:hover:bg-zinc-800"
-        aria-label="Manage agents"
-      >
-        <svg
-          xmlns="http://www.w3.org/2000/svg"
-          viewBox="0 0 16 16"
-          fill="currentColor"
-          className="h-4 w-4"
+      {isAdmin && (
+        <Link
+          href="/agents"
+          title="Manage agents"
+          className="mt-2 flex h-9 w-9 items-center justify-center rounded-lg text-zinc-500 transition-colors hover:bg-zinc-100 dark:text-zinc-400 dark:hover:bg-zinc-800"
+          aria-label="Manage agents"
         >
-          <path
-            fillRule="evenodd"
-            d="M8 1a2.5 2.5 0 0 1 2.45 2.01l.05.24.24.05a2.5 2.5 0 0 1 1.7 3.7l-.12.21.12.21a2.5 2.5 0 0 1-1.7 3.7l-.24.05-.05.24a2.5 2.5 0 0 1-4.9 0l-.05-.24-.24-.05a2.5 2.5 0 0 1-1.7-3.7l.12-.21-.12-.21a2.5 2.5 0 0 1 1.7-3.7l.24-.05.05-.24A2.5 2.5 0 0 1 8 1Zm0 4.5a2.5 2.5 0 1 0 0 5 2.5 2.5 0 0 0 0-5Z"
-            clipRule="evenodd"
-          />
-        </svg>
-      </Link>
+          <svg
+            xmlns="http://www.w3.org/2000/svg"
+            viewBox="0 0 16 16"
+            fill="currentColor"
+            className="h-4 w-4"
+          >
+            <path
+              fillRule="evenodd"
+              d="M8 1a2.5 2.5 0 0 1 2.45 2.01l.05.24.24.05a2.5 2.5 0 0 1 1.7 3.7l-.12.21.12.21a2.5 2.5 0 0 1-1.7 3.7l-.24.05-.05.24a2.5 2.5 0 0 1-4.9 0l-.05-.24-.24-.05a2.5 2.5 0 0 1-1.7-3.7l.12-.21-.12-.21a2.5 2.5 0 0 1 1.7-3.7l.24-.05.05-.24A2.5 2.5 0 0 1 8 1Zm0 4.5a2.5 2.5 0 1 0 0 5 2.5 2.5 0 0 0 0-5Z"
+              clipRule="evenodd"
+            />
+          </svg>
+        </Link>
+      )}
 
       <div className="mt-2">
         <AccountMenu />

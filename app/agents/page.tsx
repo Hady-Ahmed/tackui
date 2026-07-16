@@ -1,9 +1,11 @@
 "use client";
 
 import { useState, useEffect, useCallback, useRef } from "react";
+import { useRouter } from "next/navigation";
 import Link from "next/link";
 import type { AgentEntry, AgentKind } from "@/lib/agents/agents.config";
 import { UsersAdmin } from "@/components/users-admin";
+import { authClient } from "@/lib/auth/auth-client";
 
 const KINDS: AgentKind[] = ["langgraph", "agno", "agui"];
 
@@ -66,6 +68,8 @@ async function testEndpoint(
 }
 
 export default function AgentsPage() {
+  const router = useRouter();
+  const { data: session, isPending } = authClient.useSession();
   const [agents, setAgents] = useState<AgentEntry[]>([]);
   const [loading, setLoading] = useState(true);
   const [form, setForm] = useState<FormState>(emptyForm);
@@ -74,6 +78,15 @@ export default function AgentsPage() {
   const [submitting, setSubmitting] = useState(false);
   const [formTest, setFormTest] = useState<TestResult>({ status: "idle" });
   const [rowTests, setRowTests] = useState<Record<string, TestResult>>({});
+
+  useEffect(() => {
+    if (isPending) return;
+    if (!session) {
+      router.push("/login");
+    } else if (session.user.role !== "admin") {
+      router.push("/");
+    }
+  }, [session, isPending, router]);
 
   const fetchAgents = useCallback(async () => {
     setLoading(true);
@@ -179,6 +192,14 @@ export default function AgentsPage() {
     if (editingId === id) resetForm();
     await fetchAgents();
   };
+
+  if (isPending || !session || session.user.role !== "admin") {
+    return (
+      <div className="flex min-h-screen items-center justify-center bg-zinc-50 dark:bg-black">
+        <p className="text-sm text-zinc-400">Loading...</p>
+      </div>
+    );
+  }
 
   return (
     <div className="min-h-screen bg-zinc-50 dark:bg-black">
