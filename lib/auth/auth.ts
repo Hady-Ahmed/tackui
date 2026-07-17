@@ -68,6 +68,13 @@ export const auth = betterAuth({
   secret: process.env.BETTER_AUTH_SECRET || "dev-secret-change-me-in-production",
   emailAndPassword: { enabled: true },
   socialProviders: buildSocialProviders(),
+  account: {
+    accountLinking: {
+      enabled: true,
+      trustedProviders: ["google", "github", "oidc"],
+      requireLocalEmailVerified: false,
+    },
+  },
   plugins: buildPlugins(),
   databaseHooks: {
     user: {

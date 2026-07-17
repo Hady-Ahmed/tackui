@@ -317,6 +317,13 @@ strategy it uses so users know whether server-side session storage is required.
   scope queries by org) — schema is already nullable-ready
 - Postgres migration (swap `better-sqlite3` adapter for `pg` Pool in
   `lib/auth/auth.ts` + agent store)
+- Email verification + conditional account linking security: when SMTP is
+  configured, enable email verification on signup and set
+  `requireLocalEmailVerified: true` (secure auto-linking). When SMTP is not
+  configured (common for self-hosters), keep `requireLocalEmailVerified: false`
+  (graceful fallback — `trustedProviders` mitigates the risk). Requires SMTP
+  env vars (`SMTP_URL`, etc.) + `sendVerificationEmail` callback + verification
+  callback page.
 
 ## Notes
 
