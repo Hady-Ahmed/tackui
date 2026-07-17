@@ -324,6 +324,10 @@ strategy it uses so users know whether server-side session storage is required.
   (graceful fallback — `trustedProviders` mitigates the risk). Requires SMTP
   env vars (`SMTP_URL`, etc.) + `sendVerificationEmail` callback + verification
   callback page.
+- Account settings page (link/unlink providers): let signed-in users add
+  password access to a social-only account, or link additional social providers
+  to a password account. Better Auth supports this server-side via
+  `/api/auth/link-password` and `/api/auth/link-social` — needs UI.
 
 ## Notes
 
