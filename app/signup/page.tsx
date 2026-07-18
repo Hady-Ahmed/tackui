@@ -47,9 +47,11 @@ export default function SignupPage() {
     await authClient.signIn.social({ provider, callbackURL: "/" });
   };
 
-  if (config?.authDisabled) {
-    router.push("/");
-  }
+  useEffect(() => {
+    if (config?.authDisabled) {
+      router.push("/");
+    }
+  }, [config?.authDisabled, router]);
 
   return (
     <div className="flex min-h-screen items-center justify-center bg-zinc-50 px-4 dark:bg-black">

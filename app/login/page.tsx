@@ -30,6 +30,12 @@ function LoginContent() {
 
   const redirect = params.get("redirect") || "/";
 
+  useEffect(() => {
+    if (config?.authDisabled) {
+      router.push(redirect);
+    }
+  }, [config?.authDisabled, redirect, router]);
+
   const handleEmailSignIn = async (e: React.FormEvent) => {
     e.preventDefault();
     setLoading(true);
@@ -51,10 +57,6 @@ function LoginContent() {
       callbackURL: redirect,
     });
   };
-
-  if (config?.authDisabled) {
-    router.push(redirect);
-  }
 
   return (
     <div className="flex min-h-screen items-center justify-center bg-zinc-50 px-4 dark:bg-black">
