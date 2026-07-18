@@ -70,7 +70,15 @@ export class PersistentAgentRunner extends SqliteAgentRunner {
 
     observable.subscribe({
       complete: () => this.captureThreadData(request),
-      error: () => this.captureThreadData(request),
+      error: (err) => {
+        console.error("[runner] run failed", {
+          agentId: request.agent.agentId ?? "default",
+          threadId: request.threadId,
+          runId: request.input?.runId,
+          error: err instanceof Error ? err.message : String(err),
+        });
+        this.captureThreadData(request);
+      },
     });
 
     return observable;

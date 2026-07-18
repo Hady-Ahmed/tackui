@@ -19,14 +19,24 @@ const innerHandler = createCopilotRuntimeHandler({
 });
 
 async function handler(request: Request): Promise<Response> {
-  if (!isAuthDisabled()) {
-    const user = await getRequestUser(request);
-    if (!user) {
-      return Response.json({ error: "Unauthorized" }, { status: 401 });
+  try {
+    if (!isAuthDisabled()) {
+      const user = await getRequestUser(request);
+      if (!user) {
+        return Response.json({ error: "Unauthorized" }, { status: 401 });
+      }
+      return runWithUserAsync(user, () => innerHandler(request));
     }
-    return runWithUserAsync(user, () => innerHandler(request));
+    return runWithUserAsync(SYNTHETIC_ADMIN, () => innerHandler(request));
+  } catch (err) {
+    console.error("[copilotkit] handler error", {
+      method: request.method,
+      url: request.url,
+      error: err instanceof Error ? err.message : String(err),
+      stack: err instanceof Error ? err.stack : undefined,
+    });
+    throw err;
   }
-  return runWithUserAsync(SYNTHETIC_ADMIN, () => innerHandler(request));
 }
 
 export const POST = handler;
