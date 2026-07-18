@@ -45,6 +45,8 @@ npm run dev
 
 Open [http://localhost:3000](http://localhost:3000). The first user to sign up becomes the admin.
 
+> **Env changes require a restart.** Next.js reads `.env.local` at boot and does not hot-reload env vars. After editing `.env.local`, stop the dev server (`Ctrl+C`) and run `npm run dev` again.
+
 > **No agents configured?** Navigate to **Manage agents** in the sidebar (or `/agents`) to add your first agent backend. Only admins see this link.
 
 ## Authentication
