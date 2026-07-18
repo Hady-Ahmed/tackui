@@ -66,6 +66,8 @@ app/
   api/auth/config/route.ts     # GET enabled providers (for self-configuring login UI)
   api/threads/[id]/route.ts    # REST: PATCH/DELETE /api/threads/[id] (rename, delete conversations)
   agents/page.tsx              # Admin UI — add/edit/delete agents + test connection + user management
+  error.tsx                    # Route error boundary — render-crash recovery (centered card + Reload)
+  global-error.tsx             # Root error boundary — catches layout-level failures (renders own <html>)
   login/page.tsx               # Login (email/password + social + SSO)
   signup/page.tsx              # Sign up (email/password + social + SSO)
   layout.tsx                   # Root layout — wraps app in CopilotKitProvider + FOUC-free theme init script
@@ -307,6 +309,19 @@ strategy it uses so users know whether server-side session storage is required.
   first-user-is-admin bootstrap, user management admin UI
 - Schema future-proofed: nullable `org_id` on `agents` + `thread_metadata`
   for future multi-tenant SaaS migration
+- Error boundaries (`app/error.tsx` + `app/global-error.tsx`) — render-crash
+  recovery UI; `error.tsx` handles child-segment errors inside the layout,
+  `global-error.tsx` catches root layout failures (replaces `<html>`/`<body>`)
+- Non-admin empty-state CTA gating — `chat-shell.tsx` role-checks via
+  `authClient.useSession()`; admins see "Add your first agent →", non-admins
+  see "ask your administrator to add one" (previously misleading link that
+  bounced on the `/agents` admin redirect)
+- Server-side structured logging — `[copilotkit] handler error` in the
+  runtime route's try/catch around `innerHandler`, and `[runner] run failed`
+  in `PersistentAgentRunner.run()` error callback (previously silently
+  swallowed). No logging library — `console.error` with JSON context
+- Login/signup auth-disabled redirect fix — moved `router.push(redirect)`
+  from render into `useEffect` to avoid React warnings + brief form flash
 
 ## Future (structured for easy upgrade)
 
@@ -354,6 +369,11 @@ strategy it uses so users know whether server-side session storage is required.
 
 ## Notes
 
+- Env changes require dev server restart — Next.js reads `.env.local` at boot
+  and does not hot-reload env vars. After editing `.env.local`, stop the dev
+  server (`Ctrl+C`) and run `npm run dev` again. Module-level `const X =
+  process.env.X === "true"` patterns in `proxy.ts` and `lib/auth/auth.ts` are
+  evaluated once at boot. Documented in `.env.example` + README Quick Start.
 - Next.js 16 has breaking changes vs prior versions. Read docs in
   `node_modules/next/dist/docs/` before modifying framework-level code.
 - CopilotKit v2 API: import runtime from `@copilotkit/runtime/v2`, React components
