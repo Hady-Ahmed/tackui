@@ -68,9 +68,9 @@ app/
   agents/page.tsx              # Admin UI — add/edit/delete agents + test connection + user management
   login/page.tsx               # Login (email/password + social + SSO)
   signup/page.tsx              # Sign up (email/password + social + SSO)
-  layout.tsx                   # Root layout — wraps app in CopilotKitProvider
+  layout.tsx                   # Root layout — wraps app in CopilotKitProvider + FOUC-free theme init script
   page.tsx                     # Main chat page (client component)
-  globals.css                  # Global styles + Tailwind
+  globals.css                  # Global styles + Tailwind (class-based dark mode via @custom-variant)
 
 lib/
   agents/
@@ -86,10 +86,12 @@ lib/
     request-context.ts         # AsyncLocalStorage for per-request user (read by runner)
   db/
     migrations.ts              # Idempotent ALTER TABLE helpers
+  theme.ts                     # useTheme() hook — class-based light/dark, persists to localStorage (useSyncExternalStore)
 
 components/
   agent-sidebar.tsx            # Agent picker + conversation list + status dots + rename/delete + collapsible (useThreads)
   account-menu.tsx             # User avatar, name, email, sign out (useSession)
+  theme-toggle.tsx             # Light/dark toggle button (sidebar footer, icon + label)
   chat-shell.tsx               # Chat layout with agent switching + empty-state CTA + collapsible sidebar state + AgentChat wrapper
   users-admin.tsx              # Admin user management (list, set role, ban/unban)
   hitl/

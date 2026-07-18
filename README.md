@@ -16,7 +16,7 @@ A unified frontend for custom agents speaking the [AG-UI protocol](https://docs.
 - **Roles & user management** — admin/member roles, first user is admin, ban/unban, set roles
 - **Per-user scoping** — each user only sees their own conversations
 - **Solo mode** — `AUTH_DISABLED=true` skips login entirely for single-user deployments
-- **Dark mode** — follows system preference
+- **Light/dark mode** — toggle in the sidebar footer; defaults to system preference, then remembers your choice
 
 ## Quick Start
 

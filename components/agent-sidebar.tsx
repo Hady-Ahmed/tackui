@@ -5,6 +5,7 @@ import Link from "next/link";
 import { useThreads, useAgent } from "@copilotkit/react-core/v2";
 import type { AgentEntry, AgentKind } from "@/lib/agents/agents.config";
 import { AccountMenu } from "./account-menu";
+import { ThemeToggle } from "./theme-toggle";
 import { authClient } from "@/lib/auth/auth-client";
 
 type TestStatus = "idle" | "loading" | "ok" | "fail";
@@ -302,6 +303,7 @@ function ExpandedContent({
 
       <div className="border-t border-zinc-200 p-3 dark:border-zinc-800">
         <AccountMenu />
+        <ThemeToggle />
         {isAdmin && (
           <Link
             href="/agents"
@@ -412,7 +414,8 @@ function CollapsedContent({
         </Link>
       )}
 
-      <div className="mt-2">
+      <div className="mt-2 flex flex-col items-center gap-1">
+        <ThemeToggle collapsed />
         <AccountMenu />
       </div>
     </>
