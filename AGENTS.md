@@ -77,7 +77,7 @@ lib/
     agents.config.ts           # AgentEntry / AgentKind types (no runtime config)
     agent-store.ts             # SQLite CRUD for agents table (zod-validated)
     registry.ts                # getAgents() factory — reads DB, builds agents map
-    persistent-runner.ts       # PersistentAgentRunner — SQLite-backed runner with thread endpoints
+    persistent-runner.ts       # PersistentAgentRunner — SQLite-backed runner with thread endpoints (see "Thread history recovery on revisit" in Future for a known connect() replay bug to fix)
     runner-instance.ts         # Shared runner singleton (used by runtime + thread API)
   auth/
     auth.ts                    # Better Auth instance (SQLite adapter, plugins, first-user-is-admin)
@@ -330,6 +330,27 @@ strategy it uses so users know whether server-side session storage is required.
   password access to a social-only account, or link additional social providers
   to a password account. Better Auth supports this server-side via
   `/api/auth/link-password` and `/api/auth/link-social` — needs UI.
+- Thread history recovery on revisit: when a run fails (e.g. backend
+  unreachable), `SqliteAgentRunner.connect()` replays stored events from
+  `agent_runs` — if those events contain a `RUN_ERROR` (or duplicate
+  `RUN_ERROR`s from `finalizeRunEvents`), AG-UI's verifier locks and rejects
+  all subsequent events, causing the ENTIRE thread to load empty on refresh
+  (not just the failed message). The thread stays permanently unreadable
+  even after the URL is fixed and new runs succeed, because the bad run's
+  events are concatenated before the good runs' in the replay. The fix is
+  to override `connect()` in `PersistentAgentRunner` to emit a single
+  `MESSAGES_SNAPSHOT` event from `thread_messages` (our snapshot table,
+  populated by `captureThreadData` on both success and failure) instead of
+  calling `super.connect()` (which reads from `agent_runs`). This sidesteps
+  the verifier entirely. Trade-off: loses live-bridging (connecting while a
+  run is active — `ACTIVE_CONNECTIONS` is module-private in
+  `sqlite-runner.mjs`) and intermediate event history (`STATE_*`,
+  `REASONING_*`, `STEP_*` events — only `thread_messages` snapshots are
+  replayed, not the raw event stream). Neither affects current backends.
+  See `lib/agents/persistent-runner.ts` and
+  `node_modules/@copilotkit/sqlite-runner/dist/sqlite-runner.mjs:211`
+  (`connect()` method) + `:109` (`run()` catch block + `finalizeRunEvents`
+  at `node_modules/@copilotkit/shared/dist/finalize-events.mjs`).
 
 ## Notes
 
