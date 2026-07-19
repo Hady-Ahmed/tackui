@@ -1,5 +1,6 @@
-import { describe, it, expect, beforeEach } from "vitest";
+import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import { query } from "@/lib/db/pg";
+import { getEnabledProviders } from "./auth";
 
 // Re-extract the databaseHooks from auth.options. We can't import `auth` itself
 // in tests because constructing the Better Auth instance pulls in plugins and
@@ -106,5 +107,43 @@ describe("databaseHooks.user.create.after — first-user-is-admin", () => {
       ["only"],
     );
     expect(result.rows[0].role).toBe("admin");
+  });
+});
+
+describe("getEnabledProviders — synthetic admin in solo mode", () => {
+  const originalAuthDisabled = process.env.AUTH_DISABLED;
+
+  afterEach(() => {
+    // Restore — vitest.setup.ts sets AUTH_DISABLED=true for the suite.
+    if (originalAuthDisabled === undefined) {
+      delete process.env.AUTH_DISABLED;
+    } else {
+      process.env.AUTH_DISABLED = originalAuthDisabled;
+    }
+    vi.resetModules();
+  });
+
+  it("returns the synthetic admin when AUTH_DISABLED=true", () => {
+    // vitest.setup.ts already sets AUTH_DISABLED=true; auth.ts captured it
+    // at module load. The static import above reflects that.
+    process.env.AUTH_DISABLED = "true";
+    const config = getEnabledProviders();
+    expect(config.authDisabled).toBe(true);
+    expect(config.user).toEqual({
+      id: "local",
+      name: "Local user",
+      role: "admin",
+    });
+  });
+
+  it("returns user: null when AUTH_DISABLED is not true", async () => {
+    // auth.ts captures AUTH_DISABLED at module load, so we must reset modules
+    // and re-import to pick up the new env value.
+    process.env.AUTH_DISABLED = "false";
+    vi.resetModules();
+    const { getEnabledProviders: freshGetEnabledProviders } = await import("./auth");
+    const config = freshGetEnabledProviders();
+    expect(config.authDisabled).toBe(false);
+    expect(config.user).toBeNull();
   });
 });

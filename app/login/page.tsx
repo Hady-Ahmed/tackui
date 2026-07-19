@@ -4,13 +4,7 @@ import { useState, useEffect, Suspense } from "react";
 import { useRouter, useSearchParams } from "next/navigation";
 import Link from "next/link";
 import { authClient } from "@/lib/auth/auth-client";
-
-interface AuthConfig {
-  emailAndPassword: boolean;
-  social: string[];
-  oidc: boolean;
-  authDisabled: boolean;
-}
+import { useAuthConfig } from "@/lib/auth/use-auth-config";
 
 function LoginContent() {
   const router = useRouter();
@@ -19,14 +13,7 @@ function LoginContent() {
   const [password, setPassword] = useState("");
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
-  const [config, setConfig] = useState<AuthConfig | null>(null);
-
-  useEffect(() => {
-    fetch("/api/auth/config")
-      .then((r) => r.json())
-      .then(setConfig)
-      .catch(() => {});
-  }, []);
+  const { config } = useAuthConfig();
 
   const redirect = params.get("redirect") || "/";
 

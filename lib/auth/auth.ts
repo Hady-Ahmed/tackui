@@ -100,5 +100,12 @@ export function getEnabledProviders() {
       !!process.env.OIDC_CLIENT_SECRET &&
       !!process.env.OIDC_ISSUER,
     authDisabled: AUTH_DISABLED,
+    // When AUTH_DISABLED=true, the server treats every request as the
+    // synthetic admin (see SYNTHETIC_ADMIN in lib/auth/context.ts). Expose
+    // that same identity to the client via /api/auth/config so client
+    // components can render the admin UI without a real session.
+    user: AUTH_DISABLED
+      ? { id: "local", name: "Local user", role: "admin" }
+      : null,
   };
 }

@@ -7,6 +7,7 @@ import type { AgentEntry, AgentKind } from "@/lib/agents/agents.config";
 import { AccountMenu } from "./account-menu";
 import { ThemeToggle } from "./theme-toggle";
 import { authClient } from "@/lib/auth/auth-client";
+import { useAuthConfig } from "@/lib/auth/use-auth-config";
 
 type TestStatus = "idle" | "loading" | "ok" | "fail";
 type TestResult = { status: TestStatus; message?: string };
@@ -92,7 +93,9 @@ export function AgentSidebar({
 }: AgentSidebarProps) {
   const [statuses, setStatuses] = useState<Record<string, TestResult>>({});
   const { data: session } = authClient.useSession();
-  const isAdmin = session?.user.role === "admin";
+  const { config } = useAuthConfig();
+  // Admin = real session admin role OR solo mode (synthetic admin from server).
+  const isAdmin = session?.user.role === "admin" || (config?.authDisabled ?? false);
 
   useEffect(() => {
     let cancelled = false;

@@ -8,11 +8,13 @@ import { AgentSidebar } from "./agent-sidebar";
 import { HitlHandlers } from "./hitl/approval-card";
 import { ToolRenders } from "./tools/tool-renders";
 import { authClient } from "@/lib/auth/auth-client";
+import { useAuthConfig } from "@/lib/auth/use-auth-config";
 import type { AgentEntry } from "@/lib/agents/agents.config";
 
 export function ChatShell() {
   const router = useRouter();
   const { data: session } = authClient.useSession();
+  const { config } = useAuthConfig();
   const [agents, setAgents] = useState<AgentEntry[]>([]);
   const [hasLoaded, setHasLoaded] = useState(false);
   const [activeAgent, setActiveAgent] = useState("");
@@ -24,7 +26,8 @@ export function ChatShell() {
     return localStorage.getItem("sidebarCollapsed") === "true";
   });
 
-  const isAdmin = session?.user.role === "admin";
+  // Admin = real session admin role OR solo mode (synthetic admin from server).
+  const isAdmin = session?.user.role === "admin" || (config?.authDisabled ?? false);
 
   useEffect(() => {
     let cancelled = false;
@@ -32,6 +35,7 @@ export function ChatShell() {
       const res = await fetch("/api/agents");
       if (cancelled) return;
       if (res.status === 401) {
+        // Solo mode never 401s, so this only fires when auth is enabled.
         router.push("/login");
         return;
       }

@@ -156,6 +156,27 @@ untested, green = reachable, red = unreachable), re-tested on window focus.
 > (`/assistants/search`, `/threads`, etc.), while `ag-ui-langgraph` exposes a
 > raw AG-UI endpoint.
 
+### Smoke testing the agent registry
+
+After running migrations, add an agent via the admin UI (`/agents`) or REST:
+
+```bash
+# AUTH_DISABLED=true (solo mode) — no session cookie needed.
+# Otherwise sign in first and pass `-b cookies.txt` (see Option B in README).
+curl -X POST http://localhost:3000/api/agents \
+  -H 'Content-Type: application/json' \
+  -d '{"id":"test","name":"Test","description":"smoke test","kind":"agui","endpoint":"http://localhost:8000/agent"}'
+
+curl http://localhost:3000/api/agents                 # list
+curl -X PATCH http://localhost:3000/api/agents/test \
+  -H 'Content-Type: application/json' \
+  -d '{"name":"Renamed"}'                              # update
+curl -X DELETE http://localhost:3000/api/agents/test   # delete
+```
+
+`description` is required (zod-validated). `id` must be lowercase kebab-case
+and is immutable after creation.
+
 ## Environment Variables
 
 Agents are managed via the `/agents` admin page (stored in SQLite) — no env

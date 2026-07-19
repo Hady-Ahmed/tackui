@@ -3,9 +3,11 @@
 import { useState, useRef, useEffect } from "react";
 import { useRouter } from "next/navigation";
 import { authClient } from "@/lib/auth/auth-client";
+import { useAuthConfig } from "@/lib/auth/use-auth-config";
 
 export function AccountMenu() {
   const { data: session, isPending } = authClient.useSession();
+  const { config } = useAuthConfig();
   const router = useRouter();
   const [open, setOpen] = useState(false);
   const ref = useRef<HTMLDivElement>(null);
@@ -20,14 +22,41 @@ export function AccountMenu() {
     return () => document.removeEventListener("mousedown", onClick);
   }, []);
 
+  // Only redirect to /login when auth is actually enabled. In solo mode
+  // (AUTH_DISABLED=true) there's no real session — render the synthetic
+  // admin identity from /api/auth/config instead of bouncing to /login.
   useEffect(() => {
-    if (!isPending && !session) {
+    if (!isPending && !session && !config?.authDisabled) {
       router.push("/login");
     }
-  }, [session, isPending, router]);
+  }, [session, isPending, router, config?.authDisabled]);
 
-  if (isPending) {
+  if (isPending || (!session && !config?.authDisabled)) {
     return <div className="h-8" />;
+  }
+
+  // Solo mode: render the synthetic admin identity. No sign-out button
+  // since there's no real session to sign out of.
+  if (!session && config?.authDisabled) {
+    const synth = config.user;
+    const initials = (synth?.name || "?").charAt(0).toUpperCase();
+    return (
+      <div className="rounded-lg px-2 py-1.5">
+        <div className="flex w-full items-center gap-2">
+          <div className="flex h-8 w-8 shrink-0 items-center justify-center rounded-full bg-blue-600 text-sm font-medium text-white">
+            {initials}
+          </div>
+          <div className="min-w-0 flex-1">
+            <p className="truncate text-sm font-medium text-zinc-900 dark:text-zinc-50">
+              {synth?.name ?? "Local user"}
+            </p>
+            <span className="text-xs font-medium uppercase tracking-wide text-blue-600 dark:text-blue-400">
+              Admin
+            </span>
+          </div>
+        </div>
+      </div>
+    );
   }
 
   if (!session) {

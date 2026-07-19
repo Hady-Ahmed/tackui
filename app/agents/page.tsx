@@ -6,6 +6,7 @@ import Link from "next/link";
 import type { AgentEntry, AgentKind } from "@/lib/agents/agents.config";
 import { UsersAdmin } from "@/components/users-admin";
 import { authClient } from "@/lib/auth/auth-client";
+import { useAuthConfig } from "@/lib/auth/use-auth-config";
 
 const KINDS: AgentKind[] = ["langgraph", "agno", "agui"];
 
@@ -70,6 +71,7 @@ async function testEndpoint(
 export default function AgentsPage() {
   const router = useRouter();
   const { data: session, isPending } = authClient.useSession();
+  const { config } = useAuthConfig();
   const [agents, setAgents] = useState<AgentEntry[]>([]);
   const [loading, setLoading] = useState(true);
   const [form, setForm] = useState<FormState>(emptyForm);
@@ -80,13 +82,16 @@ export default function AgentsPage() {
   const [rowTests, setRowTests] = useState<Record<string, TestResult>>({});
 
   useEffect(() => {
-    if (isPending) return;
+    if (isPending || !config) return;
+    // In solo mode (AUTH_DISABLED=true) the server treats every visitor
+    // as the synthetic admin — grant full access without redirecting.
+    if (config.authDisabled) return;
     if (!session) {
       router.push("/login");
     } else if (session.user.role !== "admin") {
       router.push("/");
     }
-  }, [session, isPending, router]);
+  }, [session, isPending, router, config]);
 
   const fetchAgents = useCallback(async () => {
     setLoading(true);
@@ -193,7 +198,7 @@ export default function AgentsPage() {
     await fetchAgents();
   };
 
-  if (isPending || !session || session.user.role !== "admin") {
+  if (isPending || !config || (!session && !config.authDisabled) || (!config.authDisabled && (!session || session.user.role !== "admin"))) {
     return (
       <div className="flex min-h-screen items-center justify-center bg-zinc-50 dark:bg-black">
         <p className="text-sm text-zinc-400">Loading...</p>
