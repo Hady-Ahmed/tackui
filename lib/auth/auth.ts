@@ -1,18 +1,8 @@
 import { betterAuth, type BetterAuthPlugin } from "better-auth";
 import { admin, genericOAuth } from "better-auth/plugins";
-import Database from "better-sqlite3";
-import { mkdirSync } from "node:fs";
-import { dirname } from "node:path";
+import { getPoolOrTestClient, query } from "@/lib/db/pg";
 
-const DB_PATH = process.env.AGENT_DB_PATH || "./data/agent-state.db";
 const AUTH_DISABLED = process.env.AUTH_DISABLED === "true";
-
-if (DB_PATH !== ":memory:") {
-  mkdirSync(dirname(DB_PATH), { recursive: true });
-}
-
-export const authDb = new Database(DB_PATH);
-authDb.pragma("journal_mode = WAL");
 
 function buildSocialProviders() {
   const providers: Record<
@@ -63,7 +53,7 @@ function buildPlugins(): BetterAuthPlugin[] {
 }
 
 export const auth = betterAuth({
-  database: authDb,
+  database: getPoolOrTestClient(),
   baseURL: process.env.BETTER_AUTH_URL || "http://localhost:3000",
   secret: process.env.BETTER_AUTH_SECRET || "dev-secret-change-me-in-production",
   emailAndPassword: { enabled: true },
@@ -80,13 +70,16 @@ export const auth = betterAuth({
     user: {
       create: {
         async after(user) {
-          const row = authDb
-            .prepare("SELECT COUNT(*) as count FROM user")
-            .get() as { count: number };
-          if (row.count === 1) {
-            authDb
-              .prepare("UPDATE user SET role = ? WHERE id = ?")
-              .run("admin", user.id);
+          // Promote the first user to admin (bootstrap).
+          // "user" is a reserved word in Postgres and must be double-quoted.
+          const row = await query<{ count: number }>(
+            `SELECT COUNT(*)::int as count FROM "user"`,
+          );
+          if ((row.rows[0]?.count ?? 0) === 1) {
+            await query(
+              `UPDATE "user" SET role = $1 WHERE id = $2`,
+              ["admin", user.id],
+            );
           }
         },
       },

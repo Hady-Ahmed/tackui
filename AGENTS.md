@@ -82,7 +82,7 @@ lib/
     persistent-runner.ts       # PersistentAgentRunner — SQLite-backed runner with thread endpoints (see "Thread history recovery on revisit" in Future for a known connect() replay bug to fix)
     runner-instance.ts         # Shared runner singleton (used by runtime + thread API)
   auth/
-    auth.ts                    # Better Auth instance (SQLite adapter, plugins, first-user-is-admin)
+    auth.ts                    # Better Auth instance (Postgres Pool adapter, plugins, first-user-is-admin)
     auth-client.ts             # Better Auth React client (signIn, signUp, useSession)
     context.ts                 # getCurrentUser / getRequestUser (session → RequestUser)
     request-context.ts         # AsyncLocalStorage for per-request user (read by runner)
@@ -233,12 +233,21 @@ Browser → proxy.ts (cookie gate) → Next.js App
   `thread_metadata`. `listThreads` filters by the current user via ALS.
   `deleteThread`/`renameThread` check ownership.
 
-### Postgres portability
+### Postgres (auth + agent store)
 
-Better Auth has a Postgres adapter — swap `new Database(path)` to
-`new Pool(...)` in `lib/auth/auth.ts` when migrating. The auth tables are
-managed by Better Auth automatically. Agent/thread SQL uses standard types
-(avoid SQLite-specifics) to keep the migration cheap.
+Auth and agent storage share a single `pg.Pool` (see `lib/db/pg.ts`),
+constructed from `DATABASE_URL`. Better Auth receives the pool via
+`betterAuth({ database: getPool(), ... })` and wraps it in Kysely's
+`PostgresDialect` internally. The `databaseHooks.user.create.after` hook
+(first-user-is-admin bootstrap) runs raw `query()` calls against the same
+pool — note `"user"` is a reserved word in Postgres and must be
+double-quoted in all raw SQL.
+
+Better Auth's tables (`user`, `session`, `account`, `verification`) are
+created via `npx @better-auth/cli migrate --config lib/auth/auth.ts`. The
+app's own tables (`agents`, `agent_runs`, `run_state`, `thread_messages`,
+`thread_metadata`) are created via `npm run migrate` (see
+`lib/db/migrations/`). Each command owns its own tables.
 
 ## Architecture
 

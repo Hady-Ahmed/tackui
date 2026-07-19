@@ -1,4 +1,5 @@
-import { auth, authDb } from "../lib/auth/auth";
+import { auth } from "../lib/auth/auth";
+import { query, closePool } from "../lib/db/pg";
 
 const email = process.argv[2];
 const password = process.argv[3];
@@ -28,14 +29,20 @@ async function main() {
     }
   }
 
-  authDb
-    .prepare("UPDATE user SET role = ? WHERE email = ?")
-    .run("admin", email);
+  // "user" is a reserved word in Postgres and must be double-quoted.
+  await query(
+    `UPDATE "user" SET role = $1 WHERE email = $2`,
+    ["admin", email],
+  );
 
   console.log(`Admin user ready: ${email}`);
 }
 
-main().catch((err) => {
-  console.error("Failed:", err);
-  process.exit(1);
-});
+main()
+  .catch((err) => {
+    console.error("Failed:", err);
+    process.exit(1);
+  })
+  .finally(async () => {
+    await closePool();
+  });

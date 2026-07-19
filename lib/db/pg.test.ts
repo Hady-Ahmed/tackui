@@ -5,6 +5,7 @@ import {
   withTransaction,
   setTestDb,
   closePool,
+  getPool,
   type PgClient,
 } from "./pg";
 
@@ -14,8 +15,6 @@ function installTestDb() {
   db = newDb();
   const { Pool } = db.adapters.createPg();
   const pool = new Pool();
-  // pg-mem's Pool already implements query(); we just need to add a no-op
-  // release() to satisfy the PgClient interface used by withTransaction.
   const client = Object.assign(pool, { release: () => {} }) as unknown as PgClient;
   setTestDb(client);
 }
@@ -115,6 +114,6 @@ describe("getPool / DATABASE_URL", () => {
     await closePool();
     delete process.env.DATABASE_URL;
 
-    await expect(query("SELECT 1")).rejects.toThrow(/DATABASE_URL is not set/);
+    expect(() => getPool()).toThrow(/DATABASE_URL is not set/);
   });
 });
