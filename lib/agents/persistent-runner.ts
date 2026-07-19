@@ -5,7 +5,6 @@ import type { Observable } from "rxjs";
 import type Database from "better-sqlite3";
 import { mkdirSync } from "node:fs";
 import { dirname } from "node:path";
-import { addColumnIfMissing } from "@/lib/db/migrations";
 import { getRunnerUser } from "@/lib/auth/request-context";
 
 interface ThreadSummary {
@@ -61,8 +60,6 @@ export class PersistentAgentRunner extends SqliteAgentRunner {
         org_id TEXT
       )
     `);
-    addColumnIfMissing(this.database, "thread_metadata", "user_id", "TEXT");
-    addColumnIfMissing(this.database, "thread_metadata", "org_id", "TEXT");
   }
 
   override run(request: RunRequest): Observable<BaseEvent> {

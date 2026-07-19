@@ -8,6 +8,7 @@ import {
   agentEntrySchema,
 } from "./agent-store";
 import type { CreateAgentInput } from "./agent-store";
+import { runMigrations } from "@/lib/db/migrate";
 
 const validInput: CreateAgentInput = {
   id: "test-agent",
@@ -17,11 +18,17 @@ const validInput: CreateAgentInput = {
   endpoint: "http://localhost:8000/agent",
 };
 
-function cleanup() {
-  for (const a of listAgents()) deleteAgent(a.id);
+async function cleanup() {
+  for (const a of await listAgents()) await deleteAgent(a.id);
 }
 
-beforeEach(() => cleanup());
+beforeEach(async () => {
+  // Ensure the agents table exists (no-op if already created by an earlier
+  // test file in this module registry). pg-mem recreates the DB per file
+  // because vitest's isolate:true gives each file its own module registry.
+  await runMigrations();
+  await cleanup();
+});
 
 describe("agentEntrySchema", () => {
   it("accepts a valid entry", () => {
@@ -80,16 +87,16 @@ describe("agentEntrySchema", () => {
 });
 
 describe("createAgent", () => {
-  it("creates an agent and returns it", () => {
-    const created = createAgent(validInput);
+  it("creates an agent and returns it", async () => {
+    const created = await createAgent(validInput);
     expect(created.id).toBe("test-agent");
     expect(created.name).toBe("Test Agent");
     expect(created.kind).toBe("agui");
     expect(created.endpoint).toBe("http://localhost:8000/agent");
   });
 
-  it("stores optional fields", () => {
-    const created = createAgent({
+  it("stores optional fields", async () => {
+    const created = await createAgent({
       ...validInput,
       graphId: "my-graph",
       langsmithApiKey: "ls-key",
@@ -98,25 +105,31 @@ describe("createAgent", () => {
     expect(created.langsmithApiKey).toBe("ls-key");
   });
 
-  it("throws on duplicate ID", () => {
-    createAgent(validInput);
-    expect(() => createAgent(validInput)).toThrow();
+  it("throws on duplicate ID (PG unique-violation 23505)", async () => {
+    await createAgent(validInput);
+    let errCode: string | undefined;
+    try {
+      await createAgent(validInput);
+    } catch (e) {
+      errCode = (e as { code?: string }).code;
+    }
+    expect(errCode).toBe("23505");
   });
 });
 
 describe("listAgents", () => {
-  it("returns empty array when no agents", () => {
-    expect(listAgents()).toEqual([]);
+  it("returns empty array when no agents", async () => {
+    expect(await listAgents()).toEqual([]);
   });
 
-  it("returns all agents ordered by created_at", () => {
-    createAgent(validInput);
-    createAgent({
+  it("returns all agents ordered by created_at", async () => {
+    await createAgent(validInput);
+    await createAgent({
       ...validInput,
       id: "second-agent",
       name: "Second",
     });
-    const list = listAgents();
+    const list = await listAgents();
     expect(list).toHaveLength(2);
     expect(list[0].id).toBe("test-agent");
     expect(list[1].id).toBe("second-agent");
@@ -124,55 +137,61 @@ describe("listAgents", () => {
 });
 
 describe("getAgent", () => {
-  it("returns agent by ID", () => {
-    createAgent(validInput);
-    const agent = getAgent("test-agent");
+  it("returns agent by ID", async () => {
+    await createAgent(validInput);
+    const agent = await getAgent("test-agent");
     expect(agent).not.toBeNull();
     expect(agent!.name).toBe("Test Agent");
   });
 
-  it("returns null for missing ID", () => {
-    expect(getAgent("nonexistent")).toBeNull();
+  it("returns null for missing ID", async () => {
+    expect(await getAgent("nonexistent")).toBeNull();
   });
 });
 
 describe("updateAgent", () => {
-  it("updates fields and returns the updated agent", () => {
-    createAgent(validInput);
-    const updated = updateAgent("test-agent", { name: "Renamed" });
+  it("updates fields and returns the updated agent", async () => {
+    await createAgent(validInput);
+    const updated = await updateAgent("test-agent", { name: "Renamed" });
     expect(updated).not.toBeNull();
     expect(updated!.name).toBe("Renamed");
     expect(updated!.endpoint).toBe("http://localhost:8000/agent");
   });
 
-  it("updates endpoint", () => {
-    createAgent(validInput);
-    const updated = updateAgent("test-agent", {
+  it("updates endpoint", async () => {
+    await createAgent(validInput);
+    const updated = await updateAgent("test-agent", {
       endpoint: "http://localhost:9000/new",
     });
     expect(updated!.endpoint).toBe("http://localhost:9000/new");
   });
 
-  it("returns null for missing agent", () => {
-    expect(updateAgent("nonexistent", { name: "X" })).toBeNull();
+  it("returns null for missing agent", async () => {
+    expect(await updateAgent("nonexistent", { name: "X" })).toBeNull();
   });
 
-  it("validates merged result", () => {
-    createAgent(validInput);
-    expect(() =>
+  it("validates merged result", async () => {
+    await createAgent(validInput);
+    await expect(
       updateAgent("test-agent", { endpoint: "not-a-url" }),
-    ).toThrow();
+    ).rejects.toThrow();
+  });
+
+  it("does not throw on missing id — returns null cleanly", async () => {
+    // Confirms RETURNING * with no matching row resolves to null, not throw.
+    const result = await updateAgent("totally-missing", { name: "X" });
+    expect(result).toBeNull();
   });
 });
 
 describe("deleteAgent", () => {
-  it("deletes an agent and returns true", () => {
-    createAgent(validInput);
-    expect(deleteAgent("test-agent")).toBe(true);
-    expect(getAgent("test-agent")).toBeNull();
+  it("deletes an agent and returns true", async () => {
+    await createAgent(validInput);
+    expect(await deleteAgent("test-agent")).toBe(true);
+    expect(await getAgent("test-agent")).toBeNull();
   });
 
-  it("returns false for missing agent", () => {
-    expect(deleteAgent("nonexistent")).toBe(false);
+  it("returns false for missing agent", async () => {
+    expect(await deleteAgent("nonexistent")).toBe(false);
   });
 });

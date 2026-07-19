@@ -1,11 +1,6 @@
-import Database from "better-sqlite3";
-import { mkdirSync } from "node:fs";
-import { dirname } from "node:path";
+import { query } from "@/lib/db/pg";
 import { z } from "zod";
 import type { AgentEntry, AgentKind } from "./agents.config";
-import { addColumnIfMissing } from "@/lib/db/migrations";
-
-const DB_PATH = process.env.AGENT_DB_PATH || "./data/agent-state.db";
 
 const agentKindSchema = z.enum(["langgraph", "agno", "agui"]);
 
@@ -30,34 +25,6 @@ interface AgentRow {
   endpoint: string;
   graph_id: string | null;
   langsmith_api_key: string | null;
-  created_at: number;
-  updated_at: number;
-}
-
-let dbInstance: Database.Database | null = null;
-
-function getDb(): Database.Database {
-  if (!dbInstance) {
-    mkdirSync(dirname(DB_PATH), { recursive: true });
-    dbInstance = new Database(DB_PATH);
-    dbInstance.pragma("journal_mode = WAL");
-    dbInstance.exec(`
-      CREATE TABLE IF NOT EXISTS agents (
-        id TEXT PRIMARY KEY,
-        name TEXT NOT NULL,
-        description TEXT,
-        kind TEXT NOT NULL,
-        endpoint TEXT NOT NULL,
-        graph_id TEXT,
-        langsmith_api_key TEXT,
-        created_at INTEGER NOT NULL,
-        updated_at INTEGER NOT NULL,
-        org_id TEXT
-      )
-    `);
-    addColumnIfMissing(dbInstance, "agents", "org_id", "TEXT");
-  }
-  return dbInstance;
 }
 
 function rowToEntry(row: AgentRow): AgentEntry {
@@ -72,28 +39,29 @@ function rowToEntry(row: AgentRow): AgentEntry {
   };
 }
 
-export function listAgents(): AgentEntry[] {
-  const rows = getDb()
-    .prepare(`SELECT * FROM agents ORDER BY created_at ASC`)
-    .all() as AgentRow[];
-  return rows.map(rowToEntry);
+export async function listAgents(): Promise<AgentEntry[]> {
+  const result = await query<AgentRow>(
+    `SELECT id, name, description, kind, endpoint, graph_id, langsmith_api_key
+     FROM agents ORDER BY created_at ASC`,
+  );
+  return result.rows.map(rowToEntry);
 }
 
-export function getAgent(id: string): AgentEntry | null {
-  const row = getDb()
-    .prepare(`SELECT * FROM agents WHERE id = ?`)
-    .get(id) as AgentRow | undefined;
-  return row ? rowToEntry(row) : null;
+export async function getAgent(id: string): Promise<AgentEntry | null> {
+  const result = await query<AgentRow>(
+    `SELECT id, name, description, kind, endpoint, graph_id, langsmith_api_key
+     FROM agents WHERE id = $1`,
+    [id],
+  );
+  return result.rows[0] ? rowToEntry(result.rows[0]) : null;
 }
 
-export function createAgent(input: CreateAgentInput): AgentEntry {
-  const now = Date.now();
-  getDb()
-    .prepare(
-      `INSERT INTO agents (id, name, description, kind, endpoint, graph_id, langsmith_api_key, created_at, updated_at)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-    )
-    .run(
+export async function createAgent(input: CreateAgentInput): Promise<AgentEntry> {
+  const result = await query<AgentRow>(
+    `INSERT INTO agents (id, name, description, kind, endpoint, graph_id, langsmith_api_key)
+     VALUES ($1, $2, $3, $4, $5, $6, $7)
+     RETURNING id, name, description, kind, endpoint, graph_id, langsmith_api_key`,
+    [
       input.id,
       input.name,
       input.description,
@@ -101,35 +69,39 @@ export function createAgent(input: CreateAgentInput): AgentEntry {
       input.endpoint,
       input.graphId ?? null,
       input.langsmithApiKey ?? null,
-      now,
-      now,
-    );
-  return getAgent(input.id)!;
+    ],
+  );
+  return rowToEntry(result.rows[0]);
 }
 
-export function updateAgent(id: string, patch: UpdateAgentInput): AgentEntry | null {
-  const existing = getAgent(id);
+export async function updateAgent(
+  id: string,
+  patch: UpdateAgentInput,
+): Promise<AgentEntry | null> {
+  const existing = await getAgent(id);
   if (!existing) return null;
   const merged = { ...existing, ...patch, id };
   const parsed = agentEntrySchema.parse(merged);
-  getDb()
-    .prepare(
-      `UPDATE agents SET name = ?, description = ?, kind = ?, endpoint = ?, graph_id = ?, langsmith_api_key = ?, updated_at = ? WHERE id = ?`,
-    )
-    .run(
+  const result = await query<AgentRow>(
+    `UPDATE agents
+     SET name = $1, description = $2, kind = $3, endpoint = $4,
+         graph_id = $5, langsmith_api_key = $6, updated_at = now()
+     WHERE id = $7
+     RETURNING id, name, description, kind, endpoint, graph_id, langsmith_api_key`,
+    [
       parsed.name,
       parsed.description,
       parsed.kind,
       parsed.endpoint,
       parsed.graphId ?? null,
       parsed.langsmithApiKey ?? null,
-      Date.now(),
       id,
-    );
-  return getAgent(id);
+    ],
+  );
+  return result.rows[0] ? rowToEntry(result.rows[0]) : null;
 }
 
-export function deleteAgent(id: string): boolean {
-  const result = getDb().prepare(`DELETE FROM agents WHERE id = ?`).run(id);
-  return result.changes > 0;
+export async function deleteAgent(id: string): Promise<boolean> {
+  const result = await query(`DELETE FROM agents WHERE id = $1`, [id]);
+  return (result.rowCount ?? 0) > 0;
 }

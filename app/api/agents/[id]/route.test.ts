@@ -2,9 +2,10 @@ import { describe, it, expect, beforeEach } from "vitest";
 import { GET, PATCH, DELETE } from "./route";
 import { listAgents, createAgent, deleteAgent } from "@/lib/agents/agent-store";
 import type { CreateAgentInput } from "@/lib/agents/agent-store";
+import { runMigrations } from "@/lib/db/migrate";
 
-function cleanup() {
-  for (const a of listAgents()) deleteAgent(a.id);
+async function cleanup() {
+  for (const a of await listAgents()) await deleteAgent(a.id);
 }
 
 const validInput: CreateAgentInput = {
@@ -19,9 +20,10 @@ function makeParams(id: string) {
   return { params: Promise.resolve({ id }) };
 }
 
-beforeEach(() => {
-  cleanup();
-  createAgent(validInput);
+beforeEach(async () => {
+  await runMigrations();
+  await cleanup();
+  await createAgent(validInput);
 });
 
 describe("GET /api/agents/[id]", () => {

@@ -6,9 +6,9 @@ import { listAgents } from "./agent-store";
 
 export type AgentsMap = Record<string, AbstractAgent>;
 
-export function getAgents(request?: Request): AgentsMap {
+export async function getAgents(request?: Request): Promise<AgentsMap> {
   void request;
-  const entries = listAgents();
+  const entries = await listAgents();
   if (entries.length === 0) {
     throw new Error(
       "No agents configured. Add agents via the /agents admin page.",

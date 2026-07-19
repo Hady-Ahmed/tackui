@@ -18,7 +18,7 @@ export async function GET(
     return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
   }
   const { id } = await params;
-  const agent = getAgent(id);
+  const agent = await getAgent(id);
   if (!agent) {
     return NextResponse.json({ error: "Agent not found" }, { status: 404 });
   }
@@ -53,7 +53,7 @@ export async function PATCH(
     );
   }
 
-  const updated = updateAgent(id, parsed.data);
+  const updated = await updateAgent(id, parsed.data);
   if (!updated) {
     return NextResponse.json({ error: "Agent not found" }, { status: 404 });
   }
@@ -73,7 +73,7 @@ export async function DELETE(
   }
 
   const { id } = await params;
-  const ok = deleteAgent(id);
+  const ok = await deleteAgent(id);
   if (!ok) {
     return NextResponse.json({ error: "Agent not found" }, { status: 404 });
   }

@@ -11,7 +11,7 @@ export async function GET() {
   if (!user) {
     return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
   }
-  return NextResponse.json(listAgents());
+  return NextResponse.json(await listAgents());
 }
 
 export async function POST(request: Request) {
@@ -39,16 +39,17 @@ export async function POST(request: Request) {
   }
 
   try {
-    const created = createAgent(parsed.data);
+    const created = await createAgent(parsed.data);
     return NextResponse.json(created, { status: 201 });
   } catch (err) {
-    const message = err instanceof Error ? err.message : "Unknown error";
-    if (message.includes("UNIQUE")) {
+    // PG unique-violation SQLSTATE = 23505
+    if ((err as { code?: string }).code === "23505") {
       return NextResponse.json(
         { error: `Agent with id "${parsed.data.id}" already exists` },
         { status: 409 },
       );
     }
+    const message = err instanceof Error ? err.message : "Unknown error";
     return NextResponse.json({ error: message }, { status: 500 });
   }
 }

@@ -1,12 +1,16 @@
 import { describe, it, expect, beforeEach } from "vitest";
 import { GET, POST } from "./route";
 import { listAgents, deleteAgent } from "@/lib/agents/agent-store";
+import { runMigrations } from "@/lib/db/migrate";
 
-function cleanup() {
-  for (const a of listAgents()) deleteAgent(a.id);
+async function cleanup() {
+  for (const a of await listAgents()) await deleteAgent(a.id);
 }
 
-beforeEach(() => cleanup());
+beforeEach(async () => {
+  await runMigrations();
+  await cleanup();
+});
 
 const validBody = {
   id: "test-agent",
