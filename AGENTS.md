@@ -31,8 +31,8 @@ npm run create-admin # Create/promote an admin user (npm run create-admin <email
 
 Type checking: `npx tsc --noEmit`
 
-Tests use [vitest](https://vitest.dev) with an in-memory SQLite database
-(`:memory:`) — no file I/O, no cleanup needed between runs. See
+Tests use [vitest](https://vitest.dev) with an in-memory Postgres emulator
+(`pg-mem`) — no Docker required, no cleanup needed between runs. See
 `vitest.config.ts` and `vitest.setup.ts` for configuration.
 
 ### Testing conventions
@@ -49,10 +49,12 @@ When adding new functionality, add tests alongside it:
 - **Test files** — place `*.test.ts` next to the file under test (e.g.
   `lib/agents/agent-store.test.ts`, `app/api/agents/route.test.ts`).
 - **External calls** — mock with `vi.stubGlobal` (e.g. `fetch` in
-  `/api/agents/test` tests). Restore in `afterEach`.
-- **No production code changes for testability** — the in-memory SQLite
-  (`AGENT_DB_PATH=:memory:`) + vitest's `isolate: true` handle DB isolation
-  without needing test-only exports.
+  `/api/agents/reachability-probe` tests). Restore in `afterEach`.
+- **No production code changes for testability** — the in-memory pg-mem
+  emulator + vitest's `isolate: true` handle DB isolation without needing
+  test-only exports. pg-mem doesn't support `WITH RECURSIVE` CTEs or
+  cross-statement `ROLLBACK` — those paths have skipped tests, to be
+  covered by a future testcontainers integration suite.
 
 ## Project Structure
 
@@ -61,7 +63,7 @@ app/
   api/copilotkit/[[...path]]/route.ts  # CopilotKit runtime (catch-all — matches /api/copilotkit and all sub-paths)
   api/agents/route.ts          # REST: GET/POST /api/agents (list, create)
   api/agents/[id]/route.ts     # REST: GET/PATCH/DELETE /api/agents/[id]
-  api/agents/test/route.ts     # REST: POST /api/agents/test (reachability probe)
+  api/agents/reachability-probe/route.ts  # REST: POST /api/agents/reachability-probe (reachability probe)
   api/auth/[...all]/route.ts   # Better Auth handler (signup, signin, callback)
   api/auth/config/route.ts     # GET enabled providers (for self-configuring login UI)
   api/threads/[id]/route.ts    # REST: PATCH/DELETE /api/threads/[id] (rename, delete conversations)
@@ -77,17 +79,21 @@ app/
 lib/
   agents/
     agents.config.ts           # AgentEntry / AgentKind types (no runtime config)
-    agent-store.ts             # SQLite CRUD for agents table (zod-validated)
-    registry.ts                # getAgents() factory — reads DB, builds agents map
-    persistent-runner.ts       # PersistentAgentRunner — SQLite-backed runner with thread endpoints (see "Thread history recovery on revisit" in Future for a known connect() replay bug to fix)
+    agent-store.ts             # Async CRUD for agents table (zod-validated, pg.Pool-backed)
+    registry.ts                # getAgents() factory — reads DB, builds agents map (async)
+    pg-runner.ts               # PostgresAgentRunner — AgentRunner impl with thread endpoints + smart-replay connect() (RUN_ERROR filtering) + in-memory cache bridging sync interface to async PG
     runner-instance.ts         # Shared runner singleton (used by runtime + thread API)
   auth/
     auth.ts                    # Better Auth instance (Postgres Pool adapter, plugins, first-user-is-admin)
     auth-client.ts             # Better Auth React client (signIn, signUp, useSession)
     context.ts                 # getCurrentUser / getRequestUser (session → RequestUser)
     request-context.ts         # AsyncLocalStorage for per-request user (read by runner)
+    use-auth-config.ts         # useAuthConfig() hook — fetches /api/auth/config once per page load
   db/
-    migrations.ts              # Idempotent ALTER TABLE helpers
+    pg.ts                       # Shared pg.Pool singleton (DATABASE_URL) + query/withTransaction helpers
+    migrate.ts                  # Versioned SQL migration runner (lib/db/migrations/*.sql)
+    migrations/                 # Versioned .sql files tracked in schema_migrations
+      0001_init.sql             # Initial schema: agents, agent_runs, run_state, thread_messages, thread_metadata
   theme.ts                     # useTheme() hook — class-based light/dark, persists to localStorage (useSyncExternalStore)
 
 components/
@@ -108,11 +114,12 @@ scripts/
 
 ## Agent Registry
 
-Agents are stored in a SQLite table (`agents` in `./data/agent-state.db`, shared
-with the thread runner) and managed at runtime via the `/agents` admin page or
-the `/api/agents` REST API. No restart is needed when adding, editing, or
-removing agents — `CopilotRuntime` receives `getAgents` as a factory function,
-called per-request, so DB changes reflect immediately on the next `/run`.
+Agents are stored in a Postgres table (`agents`, shared with the thread
+runner + Better Auth via the same `pg.Pool` — see `lib/db/pg.ts`) and managed
+at runtime via the `/agents` admin page or the `/api/agents` REST API. No
+restart is needed when adding, editing, or removing agents — `CopilotRuntime`
+receives `getAgents` as a factory function, called per-request, so DB changes
+reflect immediately on the next `/run`.
 
 `lib/agents/agents.config.ts` exports only the `AgentEntry` / `AgentKind` types
 — it no longer holds runtime configuration.
@@ -136,7 +143,7 @@ Optional fields: `graphId` (langgraph only), `langsmithApiKey` (langgraph only).
 ### Test connection
 
 Both the admin form and the agents table have a "Test connection" button that
-hits `POST /api/agents/test`. This performs a server-side `GET` to the endpoint
+hits `POST /api/agents/reachability-probe`. This performs a server-side `GET` to the endpoint
 with a 5s timeout and reports reachability. It catches URL typos and down
 servers — it does **not** validate auth, AG-UI protocol compliance, or that the
 agent will actually run. The sidebar also shows a status dot per agent (gray =
@@ -179,7 +186,7 @@ and is immutable after creation.
 
 ## Environment Variables
 
-Agents are managed via the `/agents` admin page (stored in SQLite) — no env
+Agents are managed via the `/agents` admin page (stored in Postgres) — no env
 vars are required to add or configure agents.
 
 See `.env.example` for optional backend URLs (useful for documentation or
@@ -270,6 +277,40 @@ app's own tables (`agents`, `agent_runs`, `run_state`, `thread_messages`,
 `thread_metadata`) are created via `npm run migrate` (see
 `lib/db/migrations/`). Each command owns its own tables.
 
+### In-memory cache (sync interface bridge)
+
+CopilotKit's `LocalThreadEndpointRunner` interface requires the 5 thread
+methods (`listThreads`, `getThreadMessages`, `getThreadEvents`,
+`getThreadState`, `clearThreads`) to be **synchronous** — they return
+concrete values, not Promises. But `pg` (node-postgres) is async-only.
+There is no maintained sync Postgres driver for Node.js.
+
+`PostgresAgentRunner` bridges this with 3 in-memory `Map`s (`threadCache`,
+`messageCache`, `eventsCache`) that act as a read-through cache. **PG is
+always the source of truth:**
+
+1. **Write-through:** write paths (`captureThreadData`, `deleteThread`,
+   `renameThread`) update PG FIRST, then the cache. If the cache update
+   fails, PG is still correct.
+2. **Read-through on async paths:** `connect()` and `run()` (both async
+   via fire-and-forget Observable pattern) fetch from PG INTO the cache
+   before completing.
+3. **Sync methods read cache ONLY** — no DB I/O, no Promises.
+
+Single-instance deployments (OSS self-hosters, solo mode) have no
+staleness — every write updates the local cache synchronously after the
+DB write. `useThreads` refetches on run completion and on window focus,
+so the sidebar always reflects the latest cache state.
+
+**Multi-instance SaaS caveat:** each instance has its OWN in-memory cache.
+A thread created on instance A won't appear in instance B's cache until B
+refreshes from PG (on the next `connect()`/`run()` for that thread, or on
+restart). The `deleteThread`/`renameThread` ownership check reads cache
+first — if a thread exists in PG but not in this process's cache (created
+on another instance), the check fails. This is acceptable for single-
+instance OSS deploys. For multi-instance SaaS, see the Future section
+below.
+
 ## Architecture
 
 ```
@@ -322,9 +363,13 @@ strategy it uses so users know whether server-side session storage is required.
   switch, since CopilotKit's `/connect` replays all historic events and
   `AbstractAgent.apply()` appends content to existing messages)
 - Tool-call visualization (`useRenderTool`)
-- SQLite-backed thread runner with conversation persistence
-  (`PersistentAgentRunner` in `lib/agents/persistent-runner.ts` — extends
-  `SqliteAgentRunner` with local thread endpoints for `useThreads`)
+- Postgres-backed thread runner with conversation persistence
+  (`PostgresAgentRunner` in `lib/agents/pg-runner.ts` — extends `AgentRunner`
+  from `@copilotkit/runtime/v2`, owns its `ACTIVE_CONNECTIONS` Map for
+  live-bridging, smart-replay `connect()` filters `RUN_ERROR` events before
+  `compactEvents` to avoid the AG-UI verifier lock bug, in-memory cache
+  bridges the sync `LocalThreadEndpointRunner` interface to async PG — see
+  "In-memory cache" section below)
 - Multi-conversation sidebar (`useThreads` + auto-refetch on run completion) with
   inline rename + delete (`PATCH/DELETE /api/threads/[id]` — the runner exposes
   `renameThread`/`deleteThread` since the local SSE runner doesn't support
@@ -362,8 +407,16 @@ strategy it uses so users know whether server-side session storage is required.
   specific users/groups (e.g. HR agent only visible to HR team)
 - Multi-tenant SaaS (populate `org_id` on `agents` + `thread_metadata`,
   scope queries by org) — schema is already nullable-ready
-- Postgres migration (swap `better-sqlite3` adapter for `pg` Pool in
-  `lib/auth/auth.ts` + agent store)
+- **Redis-backed cache for multi-instance SaaS:** the in-memory `Map`s in
+  `PostgresAgentRunner` (`threadCache`, `messageCache`, `eventsCache`)
+  are per-process. For horizontal scaling (multiple Next.js instances),
+  replace them with a shared Redis cache. The interface stays the same —
+  `cache.get(id)` becomes `await redis.get(id)` wrapped in a sync
+  fallback, or (better) CopilotKit v2.x may ship an async
+  `LocalThreadEndpointRunner` variant by then. Alternatives:
+  PG LISTEN/NOTIFY for cross-instance invalidation, polling refresh on a
+  timer, or sticky sessions at the load balancer. Not needed for single-
+  instance OSS deploys.
 - Email verification + conditional account linking security: when SMTP is
   configured, enable email verification on signup and set
   `requireLocalEmailVerified: true` (secure auto-linking). When SMTP is not
@@ -375,27 +428,11 @@ strategy it uses so users know whether server-side session storage is required.
   password access to a social-only account, or link additional social providers
   to a password account. Better Auth supports this server-side via
   `/api/auth/link-password` and `/api/auth/link-social` — needs UI.
-- Thread history recovery on revisit: when a run fails (e.g. backend
-  unreachable), `SqliteAgentRunner.connect()` replays stored events from
-  `agent_runs` — if those events contain a `RUN_ERROR` (or duplicate
-  `RUN_ERROR`s from `finalizeRunEvents`), AG-UI's verifier locks and rejects
-  all subsequent events, causing the ENTIRE thread to load empty on refresh
-  (not just the failed message). The thread stays permanently unreadable
-  even after the URL is fixed and new runs succeed, because the bad run's
-  events are concatenated before the good runs' in the replay. The fix is
-  to override `connect()` in `PersistentAgentRunner` to emit a single
-  `MESSAGES_SNAPSHOT` event from `thread_messages` (our snapshot table,
-  populated by `captureThreadData` on both success and failure) instead of
-  calling `super.connect()` (which reads from `agent_runs`). This sidesteps
-  the verifier entirely. Trade-off: loses live-bridging (connecting while a
-  run is active — `ACTIVE_CONNECTIONS` is module-private in
-  `sqlite-runner.mjs`) and intermediate event history (`STATE_*`,
-  `REASONING_*`, `STEP_*` events — only `thread_messages` snapshots are
-  replayed, not the raw event stream). Neither affects current backends.
-  See `lib/agents/persistent-runner.ts` and
-  `node_modules/@copilotkit/sqlite-runner/dist/sqlite-runner.mjs:211`
-  (`connect()` method) + `:109` (`run()` catch block + `finalizeRunEvents`
-  at `node_modules/@copilotkit/shared/dist/finalize-events.mjs`).
+- Integration test suite (testcontainers + real Postgres): pg-mem doesn't
+  support `WITH RECURSIVE` CTEs (used by `PostgresAgentRunner.getHistoricRuns`)
+  or cross-statement `ROLLBACK`. The 7 skipped tests in `lib/agents/pg-runner.test.ts`
+  + `lib/db/pg.test.ts` cover these paths. A testcontainers-based integration
+  suite would run them against a real PG container in CI.
 
 ## Notes
 

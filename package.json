@@ -16,9 +16,7 @@
     "@copilotkit/react-core": "^1.62.3",
     "@copilotkit/react-ui": "^1.62.3",
     "@copilotkit/runtime": "^1.62.3",
-    "@copilotkit/sqlite-runner": "^1.62.3",
     "better-auth": "^1.6.23",
-    "better-sqlite3": "^12.11.1",
     "hono": "^4.12.29",
     "next": "16.2.10",
     "pg": "^8.22.0",
@@ -28,7 +26,6 @@
   },
   "devDependencies": {
     "@tailwindcss/postcss": "^4",
-    "@types/better-sqlite3": "^7.6.13",
     "@types/node": "^20",
     "@types/pg": "^8.20.0",
     "@types/react": "^19",

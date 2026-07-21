@@ -20,7 +20,7 @@ afterEach(() => {
 });
 
 function makeRequest(body: unknown) {
-  return new Request("http://localhost/api/agents/test", {
+  return new Request("http://localhost/api/agents/reachability-probe", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(body),
@@ -32,7 +32,7 @@ const validBody = {
   kind: "agui" as const,
 };
 
-describe("POST /api/agents/test", () => {
+describe("POST /api/agents/reachability-probe", () => {
   it("returns ok when server responds", async () => {
     mockFetchOk(200);
     const res = await POST(makeRequest(validBody));
@@ -88,7 +88,7 @@ describe("POST /api/agents/test", () => {
 
   it("returns 400 for invalid JSON", async () => {
     const res = await POST(
-      new Request("http://localhost/api/agents/test", {
+      new Request("http://localhost/api/agents/reachability-probe", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: "not json",

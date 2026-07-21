@@ -43,7 +43,7 @@ async function testEndpoint(
   kind: AgentKind,
 ): Promise<TestResult> {
   try {
-    const res = await fetch("/api/agents/test", {
+    const res = await fetch("/api/agents/reachability-probe", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ endpoint, kind }),
@@ -64,7 +64,7 @@ async function testEndpoint(
       message: data.message as string,
     };
   } catch {
-    return { status: "fail", message: "Network error talking to /api/agents/test" };
+    return { status: "fail", message: "Network error talking to /api/agents/reachability-probe" };
   }
 }
 
