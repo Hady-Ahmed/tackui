@@ -244,7 +244,7 @@ Browser → proxy.ts (cookie gate) → Next.js App
 - `getRequestUser(request)` — same but takes a `Request` object. Used by the
   CopilotKit runtime route.
 - `getRunnerUser()` (`lib/auth/request-context.ts`) — reads the user from
-  `AsyncLocalStorage`. Used by `PersistentAgentRunner` (which has no access to
+  `AsyncLocalStorage`. Used by `PostgresAgentRunner` (which has no access to
   the request). The ALS context is set by wrapping the CopilotKit handler in
   `runWithUserAsync()` in the runtime route.
 
@@ -333,7 +333,7 @@ in `AsyncLocalStorage` so the runner can scope threads per user.
 Per the [AG-UI protocol](https://docs.ag-ui.com/concepts/events#runstarted),
 this frontend sends the **full conversation history** (`input.messages`) on every
 `/run` request. This is the source of truth for message history — the frontend
-(CopilotKit's `agent.messages` + `PersistentAgentRunner`) stores and manages all
+(CopilotKit's `agent.messages` + `PostgresAgentRunner`) stores and manages all
 messages.
 
 Agent backends have two valid options for handling `input.messages`:
@@ -393,7 +393,7 @@ strategy it uses so users know whether server-side session storage is required.
   bounced on the `/agents` admin redirect)
 - Server-side structured logging — `[copilotkit] handler error` in the
   runtime route's try/catch around `innerHandler`, and `[runner] run failed`
-  in `PersistentAgentRunner.run()` error callback (previously silently
+  in `PostgresAgentRunner.run()` error callback (previously silently
   swallowed). No logging library — `console.error` with JSON context
 - Login/signup auth-disabled redirect fix — moved `router.push(redirect)`
   from render into `useEffect` to avoid React warnings + brief form flash
