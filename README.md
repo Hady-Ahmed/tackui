@@ -20,6 +20,20 @@ A unified frontend for custom agents speaking the [AG-UI protocol](https://docs.
 
 ## Quick Start
 
+### Option A: Docker Compose (easiest)
+
+```bash
+git clone <repo-url>
+cd agent-front-end
+docker-compose up
+```
+
+Open [http://localhost:3000](http://localhost:3000). That's it — Postgres,
+migrations, and the app all start automatically. Auth is disabled by default
+(solo mode); see [Self-hosting](#self-hosting-with-docker) to enable it.
+
+### Option B: Manual setup
+
 ```bash
 git clone <repo-url>
 cd agent-front-end
@@ -62,6 +76,65 @@ Open [http://localhost:3000](http://localhost:3000). The first user to sign up b
 > **Env changes require a restart.** Next.js reads `.env.local` at boot and does not hot-reload env vars. After editing `.env.local`, stop the dev server (`Ctrl+C`) and run `npm run dev` again.
 
 > **No agents configured?** Navigate to **Manage agents** in the sidebar (or `/agents`) to add your first agent backend. Only admins see this link.
+
+## Self-hosting with Docker
+
+The bundled `docker-compose.yml` runs the app + Postgres with one command.
+Migrations run automatically on boot (via `instrumentation.ts`) — no manual
+`npm run migrate` needed.
+
+### Solo mode (default)
+
+```bash
+docker-compose up
+```
+
+Auth is disabled (`AUTH_DISABLED=true`). Everyone is the admin. Good for
+local dev, trying the app, or single-user self-hosted deployments.
+
+### With auth enabled
+
+```bash
+BETTER_AUTH_SECRET=$(openssl rand -hex 32) \
+AUTH_DISABLED=false \
+docker-compose up
+```
+
+The first user to sign up becomes the admin. Configure social login providers
+by passing their env vars:
+
+```bash
+BETTER_AUTH_SECRET=$(openssl rand -hex 32) \
+AUTH_DISABLED=false \
+GITHUB_CLIENT_ID=your_id \
+GITHUB_CLIENT_SECRET=your_secret \
+docker-compose up
+```
+
+### Data persistence
+
+Postgres data is stored in a named Docker volume (`pg_data`) and persists
+across `docker-compose down` + `up`. To wipe all data:
+
+```bash
+docker-compose down -v
+```
+
+### Updating
+
+```bash
+git pull
+docker-compose up --build
+```
+
+The app re-runs migrations on boot — new schema changes apply automatically.
+
+### Custom port
+
+```bash
+APP_PORT=8080 docker-compose up
+# → http://localhost:8080
+```
 
 ## Authentication
 

@@ -1,0 +1,32 @@
+# Dependencies
+node_modules
+
+# Next.js build output
+.next
+
+# Git
+.git
+.gitignore
+
+# Environment files (secrets — must not be in the image)
+.env*
+!.env.example
+
+# Data (orphaned SQLite from before PR4 — shouldn't exist, just in case)
+data
+
+# Tests + coverage
+coverage
+**/*.test.ts
+**/*.test.tsx
+vitest.config.ts
+vitest.setup.ts
+
+# Misc
+*.md
+!README.md
+LICENSE
+.eslintrc*
+eslint.config.mjs
+tsconfig.tsbuildinfo
+CLAUDE.md

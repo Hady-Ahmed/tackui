@@ -1,10 +1,13 @@
 import { readdirSync } from "node:fs";
 import { readFile } from "node:fs/promises";
-import { join, dirname } from "node:path";
-import { fileURLToPath } from "node:url";
+import { join } from "node:path";
 import { withTransaction, query, type PgQueryable } from "./pg";
 
-const MIGRATIONS_DIR = join(dirname(fileURLToPath(import.meta.url)), "migrations");
+// Use process.cwd() instead of import.meta.url — more portable across
+// dev, test, and Next.js standalone production builds. In all three,
+// process.cwd() resolves to the app root and lib/db/migrations/ is
+// relative to that.
+const MIGRATIONS_DIR = join(process.cwd(), "lib", "db", "migrations");
 const MIGRATION_FILENAME_RE = /^(\d{4})_([a-z0-9_]+)\.sql$/i;
 
 interface MigrationFile {
