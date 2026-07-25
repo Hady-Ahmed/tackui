@@ -5,7 +5,7 @@ import {
   deleteAgent,
   agentEntrySchema,
 } from "@/lib/agents/agent-store";
-import { getCurrentUser } from "@/lib/auth/context";
+import { getCurrentUser, canManageAgents } from "@/lib/auth/context";
 
 const partialSchema = agentEntrySchema.partial();
 
@@ -18,7 +18,7 @@ export async function GET(
     return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
   }
   const { id } = await params;
-  const agent = await getAgent(id);
+  const agent = await getAgent(id, user.orgId);
   if (!agent) {
     return NextResponse.json({ error: "Agent not found" }, { status: 404 });
   }
@@ -33,7 +33,7 @@ export async function PATCH(
   if (!user) {
     return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
   }
-  if (user.role !== "admin") {
+  if (!(await canManageAgents(user))) {
     return NextResponse.json({ error: "Forbidden" }, { status: 403 });
   }
 
@@ -53,7 +53,7 @@ export async function PATCH(
     );
   }
 
-  const updated = await updateAgent(id, parsed.data);
+  const updated = await updateAgent(id, parsed.data, user.orgId);
   if (!updated) {
     return NextResponse.json({ error: "Agent not found" }, { status: 404 });
   }
@@ -68,12 +68,12 @@ export async function DELETE(
   if (!user) {
     return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
   }
-  if (user.role !== "admin") {
+  if (!(await canManageAgents(user))) {
     return NextResponse.json({ error: "Forbidden" }, { status: 403 });
   }
 
   const { id } = await params;
-  const ok = await deleteAgent(id);
+  const ok = await deleteAgent(id, user.orgId);
   if (!ok) {
     return NextResponse.json({ error: "Agent not found" }, { status: 404 });
   }

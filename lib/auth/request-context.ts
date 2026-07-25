@@ -5,6 +5,7 @@ export interface RequestUser {
   role: string;
   name: string;
   email: string | null;
+  orgId: string;
 }
 
 const requestUserStorage = new AsyncLocalStorage<RequestUser>();

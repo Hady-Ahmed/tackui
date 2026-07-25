@@ -66,6 +66,7 @@ app/
   api/agents/reachability-probe/route.ts  # REST: POST /api/agents/reachability-probe (reachability probe)
   api/auth/[...all]/route.ts   # Better Auth handler (signup, signin, callback)
   api/auth/config/route.ts     # GET enabled providers (for self-configuring login UI)
+  api/auth/can-manage-agents/route.ts  # GET — returns whether user can manage agents (org owner/admin or platform admin)
   api/threads/[id]/route.ts    # REST: PATCH/DELETE /api/threads/[id] (rename, delete conversations)
   agents/page.tsx              # Admin UI — add/edit/delete agents + test connection + user management
   error.tsx                    # Route error boundary — render-crash recovery (centered card + Reload)
@@ -86,14 +87,17 @@ lib/
   auth/
     auth.ts                    # Better Auth instance (Postgres Pool adapter, plugins, first-user-is-admin)
     auth-client.ts             # Better Auth React client (signIn, signUp, useSession)
-    context.ts                 # getCurrentUser / getRequestUser (session → RequestUser)
+    context.ts                 # getCurrentUser / getRequestUser / getSyntheticAdmin (session → RequestUser)
     request-context.ts         # AsyncLocalStorage for per-request user (read by runner)
+    solo-org.ts                # ensureSoloOrg / getSoloOrgId — creates real org row on boot for solo mode
     use-auth-config.ts         # useAuthConfig() hook — fetches /api/auth/config once per page load
+    use-can-manage-agents.ts   # useCanManageAgents() hook — fetches /api/auth/can-manage-agents once per page load
   db/
     pg.ts                       # Shared pg.Pool singleton (DATABASE_URL) + query/withTransaction helpers
     migrate.ts                  # Versioned SQL migration runner (lib/db/migrations/*.sql)
     migrations/                 # Versioned .sql files tracked in schema_migrations
       0001_init.sql             # Initial schema: agents, agent_runs, run_state, thread_messages, thread_metadata
+      0002_org_id_not_null.sql  # Makes org_id NOT NULL (wipe-and-restart for existing deploys)
   theme.ts                     # useTheme() hook — class-based light/dark, persists to localStorage (useSyncExternalStore)
 
 components/
@@ -222,8 +226,15 @@ Auth is powered by [Better Auth](https://better-auth.com) with:
 - **Social login** (Google, GitHub) — only enabled if env vars are set
 - **OIDC SSO** via `genericOAuth` plugin — for self-hosters with their own IdP
   (Keycloak, Authentik, Okta, Entra, etc.)
-- **Admin roles** via `admin` plugin — `admin` and `user` roles
-- **Auth-disabled mode** — `AUTH_DISABLED=true` makes everyone the single admin
+- **Organizations** via `organization` plugin — personal-org pattern: every
+  user gets a personal workspace on signup. Agents and threads are scoped to
+  the active org. Enables future team invites + multi-workspace switching.
+- **Admin roles** via `admin` plugin — `admin` (platform superuser) and `user`
+  roles. Org-scoped roles (owner/admin/member) come from the `organization`
+  plugin.
+- **Auth-disabled mode** — `AUTH_DISABLED=true` makes everyone the single
+  admin. A real solo org row is created on boot so `org_id` is always
+  populated (NOT NULL on all tables).
 
 ### Auth architecture
 
@@ -233,33 +244,64 @@ Browser → proxy.ts (cookie gate) → Next.js App
                           /api/auth/*     → Better Auth (signup, signin, callback)
                           /api/copilotkit → CopilotRuntime (auth + ALS wrapping)
                           /api/agents*    → REST (getCurrentUser checks)
-                          /api/threads*   → REST (getCurrentUser + userId scoping)
+                          /api/threads*   → REST (getCurrentUser + userId + orgId scoping)
 ```
 
 **Request user resolution:**
 
 - `getCurrentUser()` (`lib/auth/context.ts`) — resolves the user from the
   session cookie via `auth.api.getSession()`. Used by REST API routes. Returns
-  the synthetic admin when `AUTH_DISABLED=true`.
+  `getSyntheticAdmin()` (async, resolves the solo org id) when
+  `AUTH_DISABLED=true`.
 - `getRequestUser(request)` — same but takes a `Request` object. Used by the
   CopilotKit runtime route.
 - `getRunnerUser()` (`lib/auth/request-context.ts`) — reads the user from
   `AsyncLocalStorage`. Used by `PostgresAgentRunner` (which has no access to
   the request). The ALS context is set by wrapping the CopilotKit handler in
-  `runWithUserAsync()` in the runtime route.
+  `runWithUserAsync()` in the runtime route. Carries `orgId` alongside
+  `id`/`role`/`name`/`email`.
+- `getSyntheticAdmin()` (`lib/auth/context.ts`) — async, resolves the solo
+  org id from the DB on first call (see `lib/auth/solo-org.ts`). The synthetic
+  admin has `orgId` populated so all scoping code works identically in solo
+  mode and SaaS mode.
 
 **First user becomes admin:** The `databaseHooks.user.create.after` hook in
-`lib/auth/auth.ts` promotes the first user to `admin` role. The
+`lib/auth/auth.ts` promotes the first user to `admin` role (bootstrap only).
+Personal org + owner membership creation happens in the
+`databaseHooks.session.create.before` hook — it checks if the user already
+has an owner membership; if not (first signup — `user.create.after` is
+deferred to post-transaction by Better Auth so it hasn't run yet), it
+creates the org + member rows in-transaction, then sets
+`activeOrganizationId` on the session. This ensures every auth path (email
+signup, login, social, OIDC) gets a correct `activeOrganizationId`. The
 `npm run create-admin` script can also create/promote an admin explicitly.
 
 ### Access control
 
-- **Admin role:** Can add/edit/delete agents, test connections, manage users.
-- **User role:** Can use all agents and their own conversations; cannot manage
-  agents.
-- **Thread scoping:** Threads are scoped per user via `user_id` on
-  `thread_metadata`. `listThreads` filters by the current user via ALS.
-  `deleteThread`/`renameThread` check ownership.
+- **Platform admin** (`admin` role from the `admin` plugin): Superuser for
+  user management (ban/unban, set roles across all orgs). Can manage agents
+  in their own org (same as org owners). Does NOT bypass org scoping for
+  threads or agents — sees only their own org's data. When the org switcher
+  ships, platform admins will be able to switch to other orgs and manage
+  their agents.
+- **Org owner/admin** (from the `organization` plugin's `member` table): Can
+  manage agents (create/edit/delete) in their own org. Can use all agents and
+  see their own threads in the org. Cannot manage users (platform-level).
+- **Org member** (future team orgs): Can use agents and their own threads.
+  Cannot manage agents.
+- **Agent management authorization:** `canManageAgents(user)` in
+  `lib/auth/context.ts` — returns true for platform admins (short-circuit) or
+  org owners/admins (via `member` table lookup). Used by POST/PATCH/DELETE
+  `/api/agents` routes. The client mirrors this via
+  `GET /api/auth/can-manage-agents` → `useCanManageAgents()` hook.
+- **Org scoping:** Agents and threads are scoped by `org_id` (NOT NULL on
+  `agents` + `thread_metadata`). `listAgents(orgId)`, `getAgent(id, orgId)`,
+  `listThreads()` (filters cache by `organizationId === orgId`) all scope by
+  the user's active org. No bypass for any role.
+- **Thread scoping:** Threads are scoped per user + per org. `listThreads`
+  filters by `createdById === userId && organizationId === orgId` via ALS.
+  `deleteThread`/`renameThread` check ownership (owner or org-mate). No
+  bypass for any role.
 
 ### Postgres (auth + agent store)
 
@@ -271,8 +313,10 @@ constructed from `DATABASE_URL`. Better Auth receives the pool via
 pool — note `"user"` is a reserved word in Postgres and must be
 double-quoted in all raw SQL.
 
-Better Auth's tables (`user`, `session`, `account`, `verification`) are
-created via `npx @better-auth/cli migrate --config lib/auth/auth.ts`. The
+Better Auth's tables (`user`, `session`, `account`, `verification`,
+`organization`, `member`, `invitation`) are created via
+`npx @better-auth/cli migrate --config lib/auth/auth.ts` (or automatically
+on boot via `ensureAuthTables()` in `instrumentation.ts`). The
 app's own tables (`agents`, `agent_runs`, `run_state`, `thread_messages`,
 `thread_metadata`) are created via `npm run migrate` (see
 `lib/db/migrations/`). Each command owns its own tables.
@@ -380,17 +424,19 @@ strategy it uses so users know whether server-side session storage is required.
   to localStorage)
 - LangGraph + Agno backends wired first
 - Authentication (Better Auth): email/password, Google/GitHub OAuth, OIDC SSO,
-  admin/member roles, per-user thread scoping, `AUTH_DISABLED` solo mode,
-  first-user-is-admin bootstrap, user management admin UI
-- Schema future-proofed: nullable `org_id` on `agents` + `thread_metadata`
-  for future multi-tenant SaaS migration
+  admin/member roles, per-user + per-org thread scoping, `AUTH_DISABLED` solo
+  mode, first-user-is-admin bootstrap, user management admin UI, personal-org
+  pattern (every user gets a workspace on signup via the `organization` plugin)
+- Multi-tenant org scoping: `org_id` NOT NULL on `agents` + `thread_metadata`,
+  all queries scope by the user's active org, org-level agent management
+  (`canManageAgents` — org owners/admins can manage their workspace's agents),
+  solo mode creates a real org row on boot
 - Error boundaries (`app/error.tsx` + `app/global-error.tsx`) — render-crash
   recovery UI; `error.tsx` handles child-segment errors inside the layout,
   `global-error.tsx` catches root layout failures (replaces `<html>`/`<body>`)
-- Non-admin empty-state CTA gating — `chat-shell.tsx` role-checks via
-  `authClient.useSession()`; admins see "Add your first agent →", non-admins
-  see "ask your administrator to add one" (previously misleading link that
-  bounced on the `/agents` admin redirect)
+- Non-admin empty-state CTA gating — `chat-shell.tsx` uses
+  `useCanManageAgents()`; org owners/admins see "Add your first agent →",
+  others see "ask your administrator to add one"
 - Server-side structured logging — `[copilotkit] handler error` in the
   runtime route's try/catch around `innerHandler`, and `[runner] run failed`
   in `PostgresAgentRunner.run()` error callback (previously silently
@@ -404,19 +450,21 @@ strategy it uses so users know whether server-side session storage is required.
   `STATE_SNAPSHOT`/`STATE_DELTA` events; neither backend currently does
 - Additional backends (CrewAI, Mastra, Pydantic AI, Google ADK, AWS Strands, etc.)
 - Per-agent ACL (`agent_acl` table) so specific agents can be restricted to
-  specific users/groups (e.g. HR agent only visible to HR team)
-- Multi-tenant SaaS (populate `org_id` on `agents` + `thread_metadata`,
-  scope queries by org) — schema is already nullable-ready
-- **Redis-backed cache for multi-instance SaaS:** the in-memory `Map`s in
-  `PostgresAgentRunner` (`threadCache`, `messageCache`, `eventsCache`)
+  specific users/groups (e.g. HR agent only visible to HR team). Group
+  resolution should delegate to the IdP (OIDC token claims) when SSO is
+  configured, falling back to an app-managed group table for email/password
+  only. Separate from org_id (which is isolation, not sharing).
+- Team invitations + org switcher UI — the `organization` plugin supports
+  invites server-side; needs client-side invite flow + org-switcher dropdown
+  in the account menu. Personal-org users (the majority at launch) have one
+  org and never need to switch.
+- **PG LISTEN/NOTIFY cache invalidation for multi-instance:** the in-memory
+  `Map`s in `PostgresAgentRunner` (`threadCache`, `messageCache`, `eventsCache`)
   are per-process. For horizontal scaling (multiple Next.js instances),
-  replace them with a shared Redis cache. The interface stays the same —
-  `cache.get(id)` becomes `await redis.get(id)` wrapped in a sync
-  fallback, or (better) CopilotKit v2.x may ship an async
-  `LocalThreadEndpointRunner` variant by then. Alternatives:
-  PG LISTEN/NOTIFY for cross-instance invalidation, polling refresh on a
-  timer, or sticky sessions at the load balancer. Not needed for single-
-  instance OSS deploys.
+  add a dedicated LISTEN connection that evicts cache entries on NOTIFY from
+  other instances. Keeps self-host at one dependency (PG). Redis only needed
+  if you go multi-region or add it for another reason (rate limiting, jobs).
+  Not needed for single-instance OSS deploys.
 - Email verification + conditional account linking security: when SMTP is
   configured, enable email verification on signup and set
   `requireLocalEmailVerified: true` (secure auto-linking). When SMTP is not
@@ -430,9 +478,9 @@ strategy it uses so users know whether server-side session storage is required.
   `/api/auth/link-password` and `/api/auth/link-social` — needs UI.
 - Integration test suite (testcontainers + real Postgres): pg-mem doesn't
   support `WITH RECURSIVE` CTEs (used by `PostgresAgentRunner.getHistoricRuns`)
-  or cross-statement `ROLLBACK`. The 7 skipped tests in `lib/agents/pg-runner.test.ts`
-  + `lib/db/pg.test.ts` cover these paths. A testcontainers-based integration
-  suite would run them against a real PG container in CI.
+  or cross-statement `ROLLBACK`. The 5 skipped tests in `lib/agents/pg-runner.test.ts`
+  cover these paths. A testcontainers-based integration suite would run them
+  against a real PG container in CI.
 
 ## Notes
 

@@ -457,13 +457,18 @@ export class PostgresAgentRunner extends AgentRunner {
   listThreads(): LocalThreadEndpointRecord[] {
     const user = getRunnerUser();
     const userId = user?.id;
+    const orgId = user?.orgId;
     const all = Array.from(this.threadCache.values());
     if (!userId) return all;
-    // Filter at read time — the cache contains all users' threads (same
-    // as the original PersistentAgentRunner SQL `WHERE user_id = $1 OR
-    // user_id IS NULL`).
+    // Filter at read time — the cache contains threads across orgs.
+    // Scope by orgId (required, never null) + allow ownership of own
+    // threads. Platform admins do NOT bypass this filter — they see only
+    // their own threads in their active org, same as everyone else. Admin
+    // powers are limited to agent/user management, not thread browsing.
     return all.filter(
-      (t) => t.createdById === userId || t.createdById === "",
+      (t) =>
+        (t.organizationId === orgId || t.organizationId === "") &&
+        (t.createdById === userId || t.createdById === ""),
     );
   }
 
@@ -518,13 +523,15 @@ export class PostgresAgentRunner extends AgentRunner {
       agent_id: string | null;
       title: string | null;
       user_id: string | null;
+      org_id: string | null;
     }>(`SELECT
            ar.thread_id,
            ar.first_created,
            ar.last_created,
            tm.agent_id,
            tm.title,
-           tm.user_id
+           tm.user_id,
+           tm.org_id
          FROM (
            SELECT thread_id, MIN(created_at) AS first_created, MAX(created_at) AS last_created
            FROM agent_runs
@@ -540,7 +547,7 @@ export class PostgresAgentRunner extends AgentRunner {
         id: row.thread_id,
         name: row.title,
         agentId: row.agent_id ?? "default",
-        organizationId: "",
+        organizationId: row.org_id ?? "",
         createdById: row.user_id ?? "",
         archived: false,
         createdAt: new Date(row.first_created).toISOString(),
@@ -571,8 +578,9 @@ export class PostgresAgentRunner extends AgentRunner {
 
   // ─── Thread mutations (used by /api/threads/[id] route) ───────────────
 
-  async deleteThread(threadId: string, userId?: string): Promise<boolean> {
+  async deleteThread(threadId: string, userId?: string, orgId?: string): Promise<boolean> {
     const uid = userId ?? getRunnerUser()?.id;
+    const oid = orgId ?? getRunnerUser()?.orgId;
     if (uid) {
       // Ownership check reads from cache (sync) — the cache is the
       // source of truth for what this process can see. If a thread
@@ -580,9 +588,14 @@ export class PostgresAgentRunner extends AgentRunner {
       // another instance), the ownership check fails. For single-instance
       // OSS deploys, this is fine. For multi-instance SaaS, see the
       // class doc on the future Redis migration.
+      //
+      // Platform admins do NOT bypass this check — they can only delete
+      // their own threads, same as everyone else. Admin powers are
+      // limited to agent/user management, not thread management.
       const cached = this.threadCache.get(threadId);
       if (!cached) return false;
-      if (cached.createdById !== uid && cached.createdById !== "") return false;
+      // Owner OR org-mate (same org can manage each other's threads).
+      if (cached.createdById !== uid && cached.createdById !== "" && cached.organizationId !== oid) return false;
     }
 
     let deleted = false;
@@ -616,12 +629,14 @@ export class PostgresAgentRunner extends AgentRunner {
     threadId: string,
     title: string,
     userId?: string,
+    orgId?: string,
   ): Promise<boolean> {
     const uid = userId ?? getRunnerUser()?.id;
+    const oid = orgId ?? getRunnerUser()?.orgId;
     if (uid) {
       const cached = this.threadCache.get(threadId);
       if (!cached) return false;
-      if (cached.createdById !== uid && cached.createdById !== "") return false;
+      if (cached.createdById !== uid && cached.createdById !== "" && cached.organizationId !== oid) return false;
     }
 
     const result = await query(
@@ -740,6 +755,7 @@ export class PostgresAgentRunner extends AgentRunner {
     const agentId = request.agent.agentId ?? "default";
     const messages = (request.agent as unknown as { messages?: Message[] }).messages;
     const userId = getRunnerUser()?.id ?? null;
+    const orgId = getRunnerUser()?.orgId ?? null;
 
     if (messages && messages.length > 0) {
       await query(
@@ -761,13 +777,13 @@ export class PostgresAgentRunner extends AgentRunner {
     const effectiveUserId = existing.rows[0]?.user_id ?? userId;
 
     await query(
-      `INSERT INTO thread_metadata (thread_id, agent_id, title, updated_at, user_id)
-       VALUES ($1, $2, $3, now(), $4)
+      `INSERT INTO thread_metadata (thread_id, agent_id, title, updated_at, user_id, org_id)
+       VALUES ($1, $2, $3, now(), $4, $5)
        ON CONFLICT (thread_id) DO UPDATE SET
          agent_id = EXCLUDED.agent_id,
          title = COALESCE(thread_metadata.title, EXCLUDED.title),
          updated_at = EXCLUDED.updated_at`,
-      [request.threadId, agentId, title, effectiveUserId ?? null],
+      [request.threadId, agentId, title, effectiveUserId ?? null, orgId],
     );
 
     // ─── Write-through cache update ───────────────────────────────────
@@ -780,7 +796,7 @@ export class PostgresAgentRunner extends AgentRunner {
       id: request.threadId,
       name: title,
       agentId,
-      organizationId: "",
+      organizationId: orgId ?? "",
       createdById: effectiveUserId ?? "",
       archived: false,
       createdAt: prev?.createdAt ?? nowIso,

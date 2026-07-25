@@ -7,14 +7,14 @@ import { CopilotChat, useCopilotKit } from "@copilotkit/react-core/v2";
 import { AgentSidebar } from "./agent-sidebar";
 import { HitlHandlers } from "./hitl/approval-card";
 import { ToolRenders } from "./tools/tool-renders";
-import { authClient } from "@/lib/auth/auth-client";
 import { useAuthConfig } from "@/lib/auth/use-auth-config";
+import { useCanManageAgents } from "@/lib/auth/use-can-manage-agents";
 import type { AgentEntry } from "@/lib/agents/agents.config";
 
 export function ChatShell() {
   const router = useRouter();
-  const { data: session } = authClient.useSession();
   const { config } = useAuthConfig();
+  const { canManage } = useCanManageAgents();
   const [agents, setAgents] = useState<AgentEntry[]>([]);
   const [hasLoaded, setHasLoaded] = useState(false);
   const [activeAgent, setActiveAgent] = useState("");
@@ -26,8 +26,8 @@ export function ChatShell() {
     return localStorage.getItem("sidebarCollapsed") === "true";
   });
 
-  // Admin = real session admin role OR solo mode (synthetic admin from server).
-  const isAdmin = session?.user.role === "admin" || (config?.authDisabled ?? false);
+  // Show the empty-state CTA to org owners/admins OR in solo mode.
+  const canManageAgents_ = canManage === true || (config?.authDisabled ?? false);
 
   useEffect(() => {
     let cancelled = false;
@@ -99,7 +99,7 @@ export function ChatShell() {
           </>
         ) : hasLoaded ? (
           <div className="flex flex-1 flex-col items-center justify-center gap-4 text-center">
-            {isAdmin ? (
+            {canManageAgents_ ? (
               <>
                 <p className="text-sm text-zinc-400">
                   No agents configured yet.

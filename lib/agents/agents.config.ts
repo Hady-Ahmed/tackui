@@ -6,6 +6,7 @@ export interface AgentEntry {
   description: string;
   kind: AgentKind;
   endpoint: string;
+  orgId: string;
   graphId?: string;
   langsmithApiKey?: string;
 }

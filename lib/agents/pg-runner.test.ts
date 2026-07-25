@@ -10,12 +10,14 @@ const user1: RequestUser = {
   role: "user",
   name: "Alice",
   email: "a@test.com",
+  orgId: "org-1",
 };
 const user2: RequestUser = {
   id: "user-2",
   role: "user",
   name: "Bob",
   email: "b@test.com",
+  orgId: "org-1",
 };
 
 // Cache access helper — the sync LocalThreadEndpointRunner methods read
@@ -68,13 +70,14 @@ async function seedThread(
 ) {
   await seedThreadCache(runner, threadId, agentId, title, userId);
   await query(
-    `INSERT INTO thread_metadata (thread_id, agent_id, title, user_id)
-     VALUES ($1, $2, $3, $4)
+    `INSERT INTO thread_metadata (thread_id, agent_id, title, user_id, org_id)
+     VALUES ($1, $2, $3, $4, $5)
      ON CONFLICT (thread_id) DO UPDATE SET
        agent_id = EXCLUDED.agent_id,
        title = EXCLUDED.title,
-       user_id = EXCLUDED.user_id`,
-    [threadId, agentId, title, userId],
+       user_id = EXCLUDED.user_id,
+       org_id = EXCLUDED.org_id`,
+    [threadId, agentId, title, userId, "org-1"],
   );
   await query(
     `INSERT INTO agent_runs (thread_id, run_id, parent_run_id, events, input, version)
@@ -217,9 +220,9 @@ describe("PostgresAgentRunner — thread scoping (cache-based listThreads)", () 
       // on another instance. deleteThread's ownership check reads cache
       // first, returns false. Documented in pg-runner.ts class doc.
       await query(
-        `INSERT INTO thread_metadata (thread_id, agent_id, title, user_id)
-         VALUES ($1, $2, $3, $4)`,
-        ["t-ghost", "agent-a", "Ghost", user1.id],
+        `INSERT INTO thread_metadata (thread_id, agent_id, title, user_id, org_id)
+         VALUES ($1, $2, $3, $4, $5)`,
+        ["t-ghost", "agent-a", "Ghost", user1.id, "org-1"],
       );
 
       const ok = await runner.deleteThread("t-ghost", user1.id);

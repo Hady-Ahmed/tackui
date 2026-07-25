@@ -2,10 +2,13 @@ import { describe, it, expect, beforeEach } from "vitest";
 import { GET, PATCH, DELETE } from "./route";
 import { listAgents, createAgent, deleteAgent } from "@/lib/agents/agent-store";
 import type { CreateAgentInput } from "@/lib/agents/agent-store";
+import { getSyntheticAdmin } from "@/lib/auth/context";
 import { runMigrations } from "@/lib/db/migrate";
 
+let testOrg: string;
+
 async function cleanup() {
-  for (const a of await listAgents()) await deleteAgent(a.id);
+  for (const a of await listAgents(testOrg, { bypassOrgScope: true })) await deleteAgent(a.id, testOrg, { bypassOrgScope: true });
 }
 
 const validInput: CreateAgentInput = {
@@ -22,8 +25,9 @@ function makeParams(id: string) {
 
 beforeEach(async () => {
   await runMigrations();
+  testOrg = (await getSyntheticAdmin()).orgId;
   await cleanup();
-  await createAgent(validInput);
+  await createAgent(validInput, testOrg);
 });
 
 describe("GET /api/agents/[id]", () => {

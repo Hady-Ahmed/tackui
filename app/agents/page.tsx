@@ -7,6 +7,7 @@ import type { AgentEntry, AgentKind } from "@/lib/agents/agents.config";
 import { UsersAdmin } from "@/components/users-admin";
 import { authClient } from "@/lib/auth/auth-client";
 import { useAuthConfig } from "@/lib/auth/use-auth-config";
+import { useCanManageAgents } from "@/lib/auth/use-can-manage-agents";
 
 const KINDS: AgentKind[] = ["langgraph", "agno", "agui"];
 
@@ -72,6 +73,7 @@ export default function AgentsPage() {
   const router = useRouter();
   const { data: session, isPending } = authClient.useSession();
   const { config } = useAuthConfig();
+  const { canManage, loading: canManageLoading } = useCanManageAgents();
   const [agents, setAgents] = useState<AgentEntry[]>([]);
   const [loading, setLoading] = useState(true);
   const [form, setForm] = useState<FormState>(emptyForm);
@@ -88,10 +90,16 @@ export default function AgentsPage() {
     if (config.authDisabled) return;
     if (!session) {
       router.push("/login");
-    } else if (session.user.role !== "admin") {
+      return;
+    }
+    // Gate on org-level agent management permission, not platform admin.
+    // Org owners can manage their own workspace's agents; platform admins
+    // can manage any org's agents. The server enforces this via
+    // canManageAgents() — the hook just mirrors it for the redirect.
+    if (canManage === false) {
       router.push("/");
     }
-  }, [session, isPending, router, config]);
+  }, [session, isPending, router, config, canManage]);
 
   const fetchAgents = useCallback(async () => {
     setLoading(true);
@@ -198,7 +206,7 @@ export default function AgentsPage() {
     await fetchAgents();
   };
 
-  if (isPending || !config || (!session && !config.authDisabled) || (!config.authDisabled && (!session || session.user.role !== "admin"))) {
+  if (isPending || !config || canManageLoading || (!session && !config.authDisabled) || (!config.authDisabled && canManage !== true)) {
     return (
       <div className="flex min-h-screen items-center justify-center bg-zinc-50 dark:bg-black">
         <p className="text-sm text-zinc-400">Loading...</p>

@@ -10,6 +10,9 @@ import {
 import type { CreateAgentInput } from "./agent-store";
 import { runMigrations } from "@/lib/db/migrate";
 
+const TEST_ORG = "test-org-id";
+const OTHER_ORG = "other-org-id";
+
 const validInput: CreateAgentInput = {
   id: "test-agent",
   name: "Test Agent",
@@ -19,7 +22,7 @@ const validInput: CreateAgentInput = {
 };
 
 async function cleanup() {
-  for (const a of await listAgents()) await deleteAgent(a.id);
+  for (const a of await listAgents(TEST_ORG, { bypassOrgScope: true })) await deleteAgent(a.id, TEST_ORG, { bypassOrgScope: true });
 }
 
 beforeEach(async () => {
@@ -88,11 +91,12 @@ describe("agentEntrySchema", () => {
 
 describe("createAgent", () => {
   it("creates an agent and returns it", async () => {
-    const created = await createAgent(validInput);
+    const created = await createAgent(validInput, TEST_ORG);
     expect(created.id).toBe("test-agent");
     expect(created.name).toBe("Test Agent");
     expect(created.kind).toBe("agui");
     expect(created.endpoint).toBe("http://localhost:8000/agent");
+    expect(created.orgId).toBe(TEST_ORG);
   });
 
   it("stores optional fields", async () => {
@@ -100,16 +104,16 @@ describe("createAgent", () => {
       ...validInput,
       graphId: "my-graph",
       langsmithApiKey: "ls-key",
-    });
+    }, TEST_ORG);
     expect(created.graphId).toBe("my-graph");
     expect(created.langsmithApiKey).toBe("ls-key");
   });
 
   it("throws on duplicate ID (PG unique-violation 23505)", async () => {
-    await createAgent(validInput);
+    await createAgent(validInput, TEST_ORG);
     let errCode: string | undefined;
     try {
-      await createAgent(validInput);
+      await createAgent(validInput, TEST_ORG);
     } catch (e) {
       errCode = (e as { code?: string }).code;
     }
@@ -119,79 +123,116 @@ describe("createAgent", () => {
 
 describe("listAgents", () => {
   it("returns empty array when no agents", async () => {
-    expect(await listAgents()).toEqual([]);
+    expect(await listAgents(TEST_ORG)).toEqual([]);
   });
 
   it("returns all agents ordered by created_at", async () => {
-    await createAgent(validInput);
+    await createAgent(validInput, TEST_ORG);
     await createAgent({
       ...validInput,
       id: "second-agent",
       name: "Second",
-    });
-    const list = await listAgents();
+    }, TEST_ORG);
+    const list = await listAgents(TEST_ORG);
     expect(list).toHaveLength(2);
     expect(list[0].id).toBe("test-agent");
     expect(list[1].id).toBe("second-agent");
+  });
+
+  it("scopes by org_id — other orgs' agents are hidden", async () => {
+    await createAgent(validInput, TEST_ORG);
+    await createAgent({
+      ...validInput,
+      id: "other-org-agent",
+      name: "Other Org Agent",
+    }, OTHER_ORG);
+    const list = await listAgents(TEST_ORG);
+    expect(list).toHaveLength(1);
+    expect(list[0].id).toBe("test-agent");
+  });
+
+  it("bypassOrgScope returns all orgs' agents", async () => {
+    await createAgent(validInput, TEST_ORG);
+    await createAgent({
+      ...validInput,
+      id: "other-org-agent",
+      name: "Other Org Agent",
+    }, OTHER_ORG);
+    const list = await listAgents(TEST_ORG, { bypassOrgScope: true });
+    expect(list).toHaveLength(2);
   });
 });
 
 describe("getAgent", () => {
   it("returns agent by ID", async () => {
-    await createAgent(validInput);
-    const agent = await getAgent("test-agent");
+    await createAgent(validInput, TEST_ORG);
+    const agent = await getAgent("test-agent", TEST_ORG);
     expect(agent).not.toBeNull();
     expect(agent!.name).toBe("Test Agent");
   });
 
   it("returns null for missing ID", async () => {
-    expect(await getAgent("nonexistent")).toBeNull();
+    expect(await getAgent("nonexistent", TEST_ORG)).toBeNull();
+  });
+
+  it("returns null when agent belongs to another org", async () => {
+    await createAgent(validInput, OTHER_ORG);
+    expect(await getAgent("test-agent", TEST_ORG)).toBeNull();
   });
 });
 
 describe("updateAgent", () => {
   it("updates fields and returns the updated agent", async () => {
-    await createAgent(validInput);
-    const updated = await updateAgent("test-agent", { name: "Renamed" });
+    await createAgent(validInput, TEST_ORG);
+    const updated = await updateAgent("test-agent", { name: "Renamed" }, TEST_ORG);
     expect(updated).not.toBeNull();
     expect(updated!.name).toBe("Renamed");
     expect(updated!.endpoint).toBe("http://localhost:8000/agent");
   });
 
   it("updates endpoint", async () => {
-    await createAgent(validInput);
+    await createAgent(validInput, TEST_ORG);
     const updated = await updateAgent("test-agent", {
       endpoint: "http://localhost:9000/new",
-    });
+    }, TEST_ORG);
     expect(updated!.endpoint).toBe("http://localhost:9000/new");
   });
 
   it("returns null for missing agent", async () => {
-    expect(await updateAgent("nonexistent", { name: "X" })).toBeNull();
+    expect(await updateAgent("nonexistent", { name: "X" }, TEST_ORG)).toBeNull();
+  });
+
+  it("returns null when agent belongs to another org", async () => {
+    await createAgent(validInput, OTHER_ORG);
+    expect(await updateAgent("test-agent", { name: "X" }, TEST_ORG)).toBeNull();
   });
 
   it("validates merged result", async () => {
-    await createAgent(validInput);
+    await createAgent(validInput, TEST_ORG);
     await expect(
-      updateAgent("test-agent", { endpoint: "not-a-url" }),
+      updateAgent("test-agent", { endpoint: "not-a-url" }, TEST_ORG),
     ).rejects.toThrow();
   });
 
   it("does not throw on missing id — returns null cleanly", async () => {
-    // Confirms RETURNING * with no matching row resolves to null, not throw.
-    const result = await updateAgent("totally-missing", { name: "X" });
+    const result = await updateAgent("totally-missing", { name: "X" }, TEST_ORG);
     expect(result).toBeNull();
   });
 });
 
 describe("deleteAgent", () => {
   it("deletes an agent and returns true", async () => {
-    await createAgent(validInput);
-    expect(await deleteAgent("test-agent")).toBe(true);
-    expect(await getAgent("test-agent")).toBeNull();
+    await createAgent(validInput, TEST_ORG);
+    expect(await deleteAgent("test-agent", TEST_ORG)).toBe(true);
+    expect(await getAgent("test-agent", TEST_ORG)).toBeNull();
   });
 
   it("returns false for missing agent", async () => {
-    expect(await deleteAgent("nonexistent")).toBe(false);
+    expect(await deleteAgent("nonexistent", TEST_ORG)).toBe(false);
+  });
+
+  it("returns false when agent belongs to another org", async () => {
+    await createAgent(validInput, OTHER_ORG);
+    expect(await deleteAgent("test-agent", TEST_ORG)).toBe(false);
   });
 });

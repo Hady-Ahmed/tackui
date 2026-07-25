@@ -1,14 +1,18 @@
 import { describe, it, expect, beforeEach } from "vitest";
 import { GET, POST } from "./route";
 import { listAgents, deleteAgent } from "@/lib/agents/agent-store";
+import { getSyntheticAdmin } from "@/lib/auth/context";
 import { runMigrations } from "@/lib/db/migrate";
 
+let testOrg: string;
+
 async function cleanup() {
-  for (const a of await listAgents()) await deleteAgent(a.id);
+  for (const a of await listAgents(testOrg, { bypassOrgScope: true })) await deleteAgent(a.id, testOrg, { bypassOrgScope: true });
 }
 
 beforeEach(async () => {
   await runMigrations();
+  testOrg = (await getSyntheticAdmin()).orgId;
   await cleanup();
 });
 

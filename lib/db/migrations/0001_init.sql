@@ -19,7 +19,7 @@ CREATE TABLE IF NOT EXISTS agents (
   endpoint            TEXT        NOT NULL,
   graph_id            TEXT,
   langsmith_api_key   TEXT,
-  org_id              TEXT,
+  org_id              TEXT        NOT NULL,
   created_at          TIMESTAMPTZ NOT NULL DEFAULT now(),
   updated_at          TIMESTAMPTZ NOT NULL DEFAULT now()
 );
@@ -57,7 +57,7 @@ CREATE TABLE IF NOT EXISTS thread_metadata (
   agent_id    TEXT         NOT NULL,
   title       TEXT,
   user_id     TEXT,
-  org_id      TEXT,
+  org_id      TEXT         NOT NULL,
   updated_at  TIMESTAMPTZ  NOT NULL DEFAULT now()
 );
 CREATE INDEX IF NOT EXISTS idx_thread_metadata_user_id ON thread_metadata (user_id);

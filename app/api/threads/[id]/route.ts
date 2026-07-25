@@ -32,7 +32,7 @@ export async function PATCH(
     );
   }
 
-  const ok = await runner.renameThread(id, parsed.data.title, user.id);
+  const ok = await runner.renameThread(id, parsed.data.title, user.id, user.orgId);
   if (!ok) {
     return NextResponse.json(
       { error: "Thread not found" },
@@ -52,7 +52,7 @@ export async function DELETE(
   }
 
   const { id } = await params;
-  const ok = await runner.deleteThread(id, user.id);
+  const ok = await runner.deleteThread(id, user.id, user.orgId);
   if (!ok) {
     return NextResponse.json(
       { error: "Thread not found" },

@@ -4,7 +4,7 @@ import {
 } from "@copilotkit/runtime/v2";
 import { getAgents } from "@/lib/agents/registry";
 import { runner } from "@/lib/agents/runner-instance";
-import { getRequestUser, SYNTHETIC_ADMIN } from "@/lib/auth/context";
+import { getRequestUser, getSyntheticAdmin } from "@/lib/auth/context";
 import { isAuthDisabled } from "@/lib/auth/auth";
 import { runWithUserAsync } from "@/lib/auth/request-context";
 
@@ -27,7 +27,7 @@ async function handler(request: Request): Promise<Response> {
       }
       return runWithUserAsync(user, () => innerHandler(request));
     }
-    return runWithUserAsync(SYNTHETIC_ADMIN, () => innerHandler(request));
+    return runWithUserAsync(await getSyntheticAdmin(), () => innerHandler(request));
   } catch (err) {
     console.error("[copilotkit] handler error", {
       method: request.method,

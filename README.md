@@ -13,8 +13,9 @@ A unified frontend for custom agents speaking the [AG-UI protocol](https://docs.
 - **Test connection** — server-side reachability probe with sidebar status indicators
 - **Collapsible sidebar** — icon-only mode with smooth transition, persists across reloads
 - **Authentication** — email/password, Google, GitHub, and OIDC SSO (Keycloak, Authentik, Okta, Entra, etc.)
+- **Organizations** — every user gets a personal workspace on signup; agents and conversations are scoped to the workspace
 - **Roles & user management** — admin/member roles, first user is admin, ban/unban, set roles
-- **Per-user scoping** — each user only sees their own conversations
+- **Per-user scoping** — each user only sees their own conversations within their active workspace
 - **Solo mode** — `AUTH_DISABLED=true` skips login entirely for single-user deployments
 - **Light/dark mode** — toggle in the sidebar footer; defaults to system preference, then remembers your choice
 
@@ -230,7 +231,7 @@ See [`.env.example`](.env.example) for the full list with comments.
 - [Next.js 16](https://nextjs.org) (App Router, TypeScript, Tailwind CSS v4)
 - [CopilotKit v2](https://copilotkit.ai) (AG-UI client + runtime)
 - [AG-UI Protocol](https://docs.ag-ui.com) (event-based agent communication)
-- [Better Auth](https://better-auth.com) (email/password, OAuth, OIDC SSO, admin roles)
+- [Better Auth](https://better-auth.com) (email/password, OAuth, OIDC SSO, admin roles, organizations)
 - Postgres (conversation persistence + agent registry + auth via `pg`)
 - [Zod](https://zod.dev) (runtime validation)
 

@@ -3,12 +3,14 @@ import { HttpAgent } from "@ag-ui/client";
 import type { AbstractAgent } from "@ag-ui/client";
 import type { AgentEntry } from "./agents.config";
 import { listAgents } from "./agent-store";
+import { getRequestUser } from "@/lib/auth/context";
 
 export type AgentsMap = Record<string, AbstractAgent>;
 
 export async function getAgents(request?: Request): Promise<AgentsMap> {
-  void request;
-  const entries = await listAgents();
+  const user = await getRequestUser(request ?? new Request("http://localhost"));
+  if (!user) throw new Error("No agents available — not authenticated.");
+  const entries = await listAgents(user.orgId);
   if (entries.length === 0) {
     throw new Error(
       "No agents configured. Add agents via the /agents admin page.",

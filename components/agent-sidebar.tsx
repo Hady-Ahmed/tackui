@@ -6,8 +6,8 @@ import { useThreads, useAgent } from "@copilotkit/react-core/v2";
 import type { AgentEntry, AgentKind } from "@/lib/agents/agents.config";
 import { AccountMenu } from "./account-menu";
 import { ThemeToggle } from "./theme-toggle";
-import { authClient } from "@/lib/auth/auth-client";
 import { useAuthConfig } from "@/lib/auth/use-auth-config";
+import { useCanManageAgents } from "@/lib/auth/use-can-manage-agents";
 
 type TestStatus = "idle" | "loading" | "ok" | "fail";
 type TestResult = { status: TestStatus; message?: string };
@@ -92,10 +92,11 @@ export function AgentSidebar({
   onToggleCollapse,
 }: AgentSidebarProps) {
   const [statuses, setStatuses] = useState<Record<string, TestResult>>({});
-  const { data: session } = authClient.useSession();
   const { config } = useAuthConfig();
-  // Admin = real session admin role OR solo mode (synthetic admin from server).
-  const isAdmin = session?.user.role === "admin" || (config?.authDisabled ?? false);
+  const { canManage } = useCanManageAgents();
+  // Show the "Manage agents" link to org owners/admins (canManage from
+  // /api/auth/can-manage-agents) OR in solo mode (synthetic admin).
+  const showManageLink = canManage === true || (config?.authDisabled ?? false);
 
   useEffect(() => {
     let cancelled = false;
@@ -150,7 +151,7 @@ export function AgentSidebar({
           onSelectAgent={onSelectAgent}
           onNewChat={onNewChat}
           onToggleCollapse={onToggleCollapse}
-          isAdmin={isAdmin}
+          showManageLink={showManageLink}
         />
       ) : (
         <ExpandedContent
@@ -162,7 +163,7 @@ export function AgentSidebar({
           onNewChat={onNewChat}
           onSelectThread={onSelectThread}
           onToggleCollapse={onToggleCollapse}
-          isAdmin={isAdmin}
+          showManageLink={showManageLink}
         />
       )}
     </aside>
@@ -178,7 +179,7 @@ function ExpandedContent({
   onNewChat,
   onSelectThread,
   onToggleCollapse,
-  isAdmin,
+  showManageLink,
 }: {
   agents: AgentEntry[];
   activeAgent: string;
@@ -188,7 +189,7 @@ function ExpandedContent({
   onNewChat: () => void;
   onSelectThread: (threadId: string) => void;
   onToggleCollapse: () => void;
-  isAdmin: boolean;
+  showManageLink: boolean;
 }) {
   return (
     <>
@@ -307,7 +308,7 @@ function ExpandedContent({
       <div className="border-t border-zinc-200 p-3 dark:border-zinc-800">
         <AccountMenu />
         <ThemeToggle />
-        {isAdmin && (
+        {showManageLink && (
           <Link
             href="/agents"
             className="mt-2 flex w-full items-center justify-center rounded-lg px-3 py-2 text-sm font-medium text-zinc-600 transition-colors hover:bg-zinc-100 dark:text-zinc-400 dark:hover:bg-zinc-800"
@@ -327,7 +328,7 @@ function CollapsedContent({
   onSelectAgent,
   onNewChat,
   onToggleCollapse,
-  isAdmin,
+  showManageLink,
 }: {
   agents: AgentEntry[];
   activeAgent: string;
@@ -335,7 +336,7 @@ function CollapsedContent({
   onSelectAgent: (id: string) => void;
   onNewChat: () => void;
   onToggleCollapse: () => void;
-  isAdmin: boolean;
+  showManageLink: boolean;
 }) {
   return (
     <>
@@ -395,7 +396,7 @@ function CollapsedContent({
         })}
       </nav>
 
-      {isAdmin && (
+      {showManageLink && (
         <Link
           href="/agents"
           title="Manage agents"

@@ -4,14 +4,14 @@ import {
   createAgent,
   agentEntrySchema,
 } from "@/lib/agents/agent-store";
-import { getCurrentUser } from "@/lib/auth/context";
+import { getCurrentUser, canManageAgents } from "@/lib/auth/context";
 
 export async function GET() {
   const user = await getCurrentUser();
   if (!user) {
     return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
   }
-  return NextResponse.json(await listAgents());
+  return NextResponse.json(await listAgents(user.orgId));
 }
 
 export async function POST(request: Request) {
@@ -19,7 +19,7 @@ export async function POST(request: Request) {
   if (!user) {
     return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
   }
-  if (user.role !== "admin") {
+  if (!(await canManageAgents(user))) {
     return NextResponse.json({ error: "Forbidden" }, { status: 403 });
   }
 
@@ -39,7 +39,9 @@ export async function POST(request: Request) {
   }
 
   try {
-    const created = await createAgent(parsed.data);
+    // Platform admin creates in their own org (or can override later).
+    // For now, agents are created in the admin's active org.
+    const created = await createAgent(parsed.data, user.orgId);
     return NextResponse.json(created, { status: 201 });
   } catch (err) {
     // PG unique-violation SQLSTATE = 23505
