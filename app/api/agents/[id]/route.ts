@@ -8,6 +8,7 @@ import {
 } from "@/lib/agents/agent-store";
 import { getCurrentUser, canManageAgents } from "@/lib/auth/context";
 import { assertSafeUrl, UnsafeUrlError } from "@/lib/net/safe-fetch";
+import { checkUserLimit } from "@/lib/ratelimit/middleware";
 
 const partialSchema = agentEntrySchema.partial();
 
@@ -29,6 +30,8 @@ export async function GET(
   if (!agent) {
     return NextResponse.json({ error: "Agent not found" }, { status: 404 });
   }
+  const limited = checkUserLimit(user.id, "agentRead");
+  if (limited) return limited;
   return NextResponse.json(toPublicAgent(agent));
 }
 
@@ -43,6 +46,9 @@ export async function PATCH(
   if (!(await canManageAgents(user))) {
     return NextResponse.json({ error: "Forbidden" }, { status: 403 });
   }
+
+  const limited = checkUserLimit(user.id, "agentMutate");
+  if (limited) return limited;
 
   const { id } = await params;
   let body: unknown;
@@ -93,6 +99,9 @@ export async function DELETE(
   if (!(await canManageAgents(user))) {
     return NextResponse.json({ error: "Forbidden" }, { status: 403 });
   }
+
+  const limited = checkUserLimit(user.id, "agentMutate");
+  if (limited) return limited;
 
   const { id } = await params;
   const ok = await deleteAgent(id, user.orgId);

@@ -8,6 +8,11 @@ vi.mock("@/lib/agents/runner-instance", () => ({
   },
 }));
 
+// Mock the rate limiter — defaults to "always allow".
+vi.mock("@/lib/ratelimit/middleware", () => ({
+  checkUserLimit: vi.fn().mockReturnValue(null),
+}));
+
 import { PATCH, DELETE } from "./route";
 import { runner } from "@/lib/agents/runner-instance";
 

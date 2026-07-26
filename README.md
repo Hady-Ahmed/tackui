@@ -17,6 +17,8 @@ A unified frontend for custom agents speaking the [AG-UI protocol](https://docs.
 - **Roles & user management** — admin/member roles, first user is admin, ban/unban, set roles
 - **Per-user scoping** — each user only sees their own conversations within their active workspace
 - **Solo mode** — `AUTH_DISABLED=true` skips login entirely for single-user deployments
+- **Rate limiting** — two-layer (per-IP flood protection + per-user route limits) with concurrent SSE stream caps
+- **Error tracking** — optional Sentry integration (no-op when DSN is not set)
 - **Light/dark mode** — toggle in the sidebar footer; defaults to system preference, then remembers your choice
 
 ## Quick Start
@@ -222,7 +224,11 @@ See [`.env.example`](.env.example) for the full list with comments.
 | `BETTER_AUTH_SECRET` | Yes (unless `AUTH_DISABLED=true`) | Secret for signing session cookies. Generate with `openssl rand -hex 32`. The app refuses to boot without it when auth is enabled. |
 | `BETTER_AUTH_URL` | Yes (unless `AUTH_DISABLED=true`) | Public base URL of the app (e.g. `http://localhost:3000`) |
 | `AUTH_DISABLED` | No | Set to `true` to skip login (solo mode). **Never use this in any deployment exposed to the internet or shared users.** |
-| `ALLOW_PRIVATE_ENDPOINTS` | No | Set to `true` to let the reachability probe fetch internal/localhost URLs (e.g. when agent backends run on the same host). Defaults to `false` (blocks private IPs to prevent SSRF). |
+| `ALLOW_PRIVATE_ENDPOINTS` | No | Set to `true` to allow creating/editing agents with endpoints that resolve to private/internal IPs (e.g. when agent backends run on the same host). Defaults to `false` (blocks private IPs to prevent SSRF). |
+| `SENTRY_DSN` | No | Sentry DSN for server-side error tracking. No-op if unset. |
+| `NEXT_PUBLIC_SENTRY_DSN` | No | Sentry DSN for client-side error tracking (public, exposed to browser). No-op if unset. |
+| `SENTRY_TRACES_SAMPLE_RATE` | No | Transaction trace sampling rate, 0.0–1.0 (default: 0.1). Set to 0 to disable. |
+| `NEXT_PUBLIC_SENTRY_TRACES_SAMPLE_RATE` | No | Client-side trace sampling rate (default: 0.1). |
 | `GOOGLE_CLIENT_ID` / `GOOGLE_CLIENT_SECRET` | No | Google OAuth provider |
 | `GITHUB_CLIENT_ID` / `GITHUB_CLIENT_SECRET` | No | GitHub OAuth provider |
 | `OIDC_CLIENT_ID` / `OIDC_CLIENT_SECRET` / `OIDC_ISSUER` | No | External OIDC SSO (Keycloak, Authentik, Okta, Entra, etc.) |
@@ -267,14 +273,45 @@ The app sets the following headers on all responses:
 - `Permissions-Policy` — denies access to geolocation, microphone, camera, payment, USB
 - `Strict-Transport-Security` (production only) — forces HTTPS for 1 year
 
+### Rate limiting
+
+The app has two-layer rate limiting to protect against abuse and server overload:
+
+**Per-IP flood protection** (in `proxy.ts`, pre-auth): 120 requests/min per IP on all `/api/*` routes (except `/api/health` which is unlimited, and `/api/auth/*` which has its own limiter). Uses `X-Forwarded-For` for IP extraction behind a reverse proxy.
+
+**Per-user route limits** (in route handlers, post-auth):
+
+| Route | Limit | Concurrent |
+| --- | --- | --- |
+| `/api/copilotkit/*` (agent runs) | 20/min per user | 3 concurrent SSE streams per user |
+| `/api/agents/reachability-probe` | 10/min per user | — |
+| `/api/agents` POST + PATCH/DELETE | 10/min per user | — |
+| `/api/agents` GET | 60/min per user | — |
+| `/api/threads/[id]` PATCH/DELETE | 30/min per user | — |
+
+**Better Auth rate limiting**: sign-in is limited to 10/min per IP, sign-up to 5/min per IP.
+
+429 responses include standard `X-RateLimit-Limit`, `X-RateLimit-Remaining`, `X-RateLimit-Reset`, and `Retry-After` headers. In solo mode (`AUTH_DISABLED=true`), per-user limits are not enforced — per-IP flood protection still applies.
+
+**Multi-instance note:** The in-memory rate-limit store is per-process. For multi-instance deployments, replace it with a Redis-backed store (the interface stays the same).
+
+### Error tracking
+
+The app integrates [Sentry](https://sentry.io) via `@sentry/nextjs` for automatic error capture on both server and client. It's **completely optional** — if `SENTRY_DSN` (server) and `NEXT_PUBLIC_SENTRY_DSN` (client) are not set, Sentry is a no-op and no data is sent anywhere. Self-hosters can opt out by simply not setting these env vars.
+
+- `SENTRY_DSN` — server-side DSN (kept secret)
+- `NEXT_PUBLIC_SENTRY_DSN` — client-side DSN (exposed to the browser; use Sentry's public DSN)
+- `SENTRY_TRACES_SAMPLE_RATE` / `NEXT_PUBLIC_SENTRY_TRACES_SAMPLE_RATE` — transaction trace sampling (default: 0.1 = 10%). Set to 0 to disable performance traces.
+
+Error boundaries (`app/error.tsx` + `app/global-error.tsx`) call `Sentry.captureException` before rendering the fallback UI, so render crashes are captured even if the user doesn't report them.
+
 ### Known limitations (not yet implemented)
 
 These are documented for transparency and will be addressed in future releases:
 
 - **No email verification / password reset** — email/password accounts are created without verification. If you need these, configure SMTP and enable Better Auth's email verification. Social/OIDC login delegates verification to the provider.
-- **No rate limiting** — there is no rate limiting on login, signup, or agent-run endpoints. For any multi-user deployment, place the app behind a reverse proxy with rate limiting (e.g. Caddy's `rate_limit`, Cloudflare, or an API gateway) to prevent brute-force and cost-abuse attacks.
 - **No CSRF token on mutation routes** — the app relies on `sameSite=lax` session cookies (Better Auth default) and Better Auth's built-in CSRF protection on `/api/auth/*`. Mutation routes (`/api/agents`, `/api/threads`) are not behind an explicit CSRF token. This is acceptable for `sameSite=lax` but is not defense-in-depth.
-- **Single-instance cache** — the in-memory thread cache is per-process. Multi-instance deployments (horizontal scaling) will see stale threads until a cache invalidation mechanism (PG `LISTEN/NOTIFY`) is added. Single-instance self-hosted deployments are unaffected.
+- **Single-instance cache** — the in-memory thread cache and rate-limit store are per-process. Multi-instance deployments (horizontal scaling) will see stale threads until a cache invalidation mechanism (PG `LISTEN/NOTIFY`) is added, and rate limits will be per-instance until a Redis-backed store is plugged in. Single-instance self-hosted deployments are unaffected.
 
 ## Tech Stack
 

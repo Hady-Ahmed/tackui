@@ -8,6 +8,7 @@ import {
 } from "@/lib/agents/agent-store";
 import { getCurrentUser, canManageAgents } from "@/lib/auth/context";
 import { assertSafeUrl, UnsafeUrlError } from "@/lib/net/safe-fetch";
+import { checkUserLimit } from "@/lib/ratelimit/middleware";
 
 const SSRF_MESSAGE =
   "Endpoint resolves to a private or internal address. " +
@@ -19,6 +20,8 @@ export async function GET() {
   if (!user) {
     return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
   }
+  const limited = checkUserLimit(user.id, "agentRead");
+  if (limited) return limited;
   return NextResponse.json(toPublicAgents(await listAgents(user.orgId)));
 }
 
@@ -30,6 +33,9 @@ export async function POST(request: Request) {
   if (!(await canManageAgents(user))) {
     return NextResponse.json({ error: "Forbidden" }, { status: 403 });
   }
+
+  const limited = checkUserLimit(user.id, "agentMutate");
+  if (limited) return limited;
 
   let body: unknown;
   try {

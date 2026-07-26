@@ -12,6 +12,11 @@ vi.mock("@/lib/net/safe-fetch", () => ({
   },
 }));
 
+// Mock the rate limiter — defaults to "always allow".
+vi.mock("@/lib/ratelimit/middleware", () => ({
+  checkUserLimit: vi.fn().mockReturnValue(null),
+}));
+
 import { GET, PATCH, DELETE } from "./route";
 import { listAgents, createAgent, deleteAgent } from "@/lib/agents/agent-store";
 import type { CreateAgentInput } from "@/lib/agents/agent-store";

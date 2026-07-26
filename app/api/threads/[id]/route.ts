@@ -2,6 +2,7 @@ import { NextResponse } from "next/server";
 import { z } from "zod";
 import { runner } from "@/lib/agents/runner-instance";
 import { getCurrentUser } from "@/lib/auth/context";
+import { checkUserLimit } from "@/lib/ratelimit/middleware";
 
 const renameSchema = z.object({
   title: z.string().min(1).max(200),
@@ -15,6 +16,9 @@ export async function PATCH(
   if (!user) {
     return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
   }
+
+  const limited = checkUserLimit(user.id, "threadMutate");
+  if (limited) return limited;
 
   const { id } = await params;
   let body: unknown;
@@ -50,6 +54,9 @@ export async function DELETE(
   if (!user) {
     return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
   }
+
+  const limited = checkUserLimit(user.id, "threadMutate");
+  if (limited) return limited;
 
   const { id } = await params;
   const ok = await runner.deleteThread(id, user.id, user.orgId);

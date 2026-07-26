@@ -1,4 +1,10 @@
 import { describe, it, expect, vi, afterEach } from "vitest";
+
+// Mock the rate limiter — defaults to "always allow".
+vi.mock("@/lib/ratelimit/middleware", () => ({
+  checkUserLimit: vi.fn().mockReturnValue(null),
+}));
+
 import { POST } from "./route";
 
 const originalFetch = globalThis.fetch;

@@ -1,4 +1,10 @@
-import { describe, it, expect } from "vitest";
+import { describe, it, expect, vi } from "vitest";
+
+// Mock the rate limiter — defaults to "always allow".
+vi.mock("@/lib/ratelimit/middleware", () => ({
+  checkUserLimit: vi.fn().mockReturnValue(null),
+}));
+
 import { GET } from "./route";
 
 describe("GET /api/auth/can-manage-agents", () => {

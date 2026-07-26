@@ -103,6 +103,12 @@ lib/
   net/
     safe-fetch.ts               # SSRF guard — assertSafeUrl (blocks private IPs, ALLOW_PRIVATE_ENDPOINTS opt-in) + isPrivateIp (IPv4/IPv6 range checks)
     safe-fetch.test.ts          # 40 tests — private IP ranges, IPv6, IPv4-mapped, DNS resolution, bypass opt-in
+  ratelimit/
+    store.ts                    # In-memory sliding-window + concurrent counter (single-instance; pluggable for Redis)
+    limits.ts                   # Named limit presets (copilotkit: 20/min, concurrent: 3, probe: 10/min, etc.)
+    middleware.ts               # checkUserLimit / acquireConcurrent helpers + 429 response builders with X-RateLimit headers
+    store.test.ts               # 13 tests — sliding window, concurrent, GC, boundary conditions
+    middleware.test.ts          # 10 tests — 429 responses, checkUserLimit, acquireConcurrent + release
   theme.ts                     # useTheme() hook — class-based light/dark, persists to localStorage (useSyncExternalStore)
 
 components/
@@ -116,8 +122,11 @@ components/
   tools/
     tool-renders.tsx           # Tool-call visualization (useRenderTool)
 
-proxy.ts                       # Next.js proxy (cookie gate + AUTH_DISABLED bypass + /api/health bypass + open-redirect-safe redirect)
-next.config.ts                 # Security headers (CSP, HSTS, X-Frame-Options, etc.) + standalone build + poweredByHeader disabled
+proxy.ts                       # Next.js proxy (cookie gate + AUTH_DISABLED bypass + /api/health bypass + per-IP rate limiting + open-redirect-safe redirect)
+next.config.ts                 # Security headers (CSP, HSTS, X-Frame-Options, etc.) + standalone build + poweredByHeader disabled + Sentry wrapper
+sentry.client.config.ts        # Sentry client-side init (no-op if NEXT_PUBLIC_SENTRY_DSN unset)
+sentry.server.config.ts        # Sentry server-side init (no-op if SENTRY_DSN unset)
+sentry.edge.config.ts          # Sentry edge-runtime init (no-op if SENTRY_DSN unset)
 scripts/
   create-admin.ts              # CLI: create/promote an admin user
 ```
@@ -207,6 +216,71 @@ the full error is logged server-side via `console.error("[reachability-probe] ..
 - **`/api/health`** (`app/api/health/route.ts`) — liveness check returning
   `200 { ok: true }`. Bypassed by `proxy.ts` cookie gate so orchestrators can
   probe without a session. Wired into `docker-compose.yml` healthcheck.
+
+### Rate limiting
+
+Two-layer rate limiting protects the server from abuse and floods:
+
+**Layer 1 — Per-IP global flood protection (`proxy.ts`):**
+- 120 requests/min per IP on all `/api/*` routes (except `/api/health` which
+  is unlimited, and `/api/auth/*` which has its own Better Auth limiter).
+- Enforced in the proxy (pre-auth) using `X-Forwarded-For` for IP extraction.
+- Proxy runtime pinned to `nodejs` — the in-memory `Map` requires it.
+
+**Layer 2 — Per-user route-level limits (`lib/ratelimit/`):**
+- Enforced in route handlers, post-auth, keyed by `user.id`.
+- Limits (see `lib/ratelimit/limits.ts`):
+
+| Route | Limit | Concurrent |
+| --- | --- | --- |
+| `/api/copilotkit/*` (agent runs) | 20/min per user | 3 concurrent SSE streams per user |
+| `/api/agents/reachability-probe` | 10/min per user | — |
+| `/api/agents` POST + `/api/agents/[id]` PATCH/DELETE | 10/min per user | — |
+| `/api/agents` GET + `/api/agents/[id]` GET | 60/min per user | — |
+| `/api/threads/[id]` PATCH/DELETE | 30/min per user | — |
+| `/api/auth/can-manage-agents` GET | 30/min per user (shares `agentRead` bucket) | — |
+
+**Better Auth rate limiting** (`lib/auth/auth.ts`):
+- Sign-in: 10/min per IP. Sign-up: 5/min per IP. Configured via
+  `rateLimit.customRules` in the `betterAuth()` call. Disabled in solo mode.
+
+**Concurrent SSE stream cap:**
+The `/api/copilotkit` route tracks in-flight streams per user. The
+`wrapStreamWithRelease()` helper wraps the `Response` body `ReadableStream`
+so the decrement fires automatically on stream completion, error, or client
+disconnect — no manual cleanup needed in route code. When a user exceeds
+the concurrent cap (3), they get `429 { error: "Too many concurrent agent
+runs (3 max)..." }` which surfaces in the CopilotKit chat UI.
+
+**Solo mode (`AUTH_DISABLED=true`):** Per-user limits are not enforced
+(everyone is `id: "local"`). Per-IP flood protection from `proxy.ts` still
+applies.
+
+**429 responses** include standard `X-RateLimit-Limit`,
+`X-RateLimit-Remaining`, `X-RateLimit-Reset`, and `Retry-After` headers.
+
+**Multi-instance note:** The in-memory store (`lib/ratelimit/store.ts`)
+is per-process. For multi-instance deployments, replace it with a
+Redis-backed store — the interface (`checkLimit` / `incrementConcurrent` /
+`decrementConcurrent`) stays the same.
+
+### Error tracking
+
+Sentry integration via `@sentry/nextjs` — automatically captures uncaught
+exceptions on both server and client. No-op when `SENTRY_DSN` (server) /
+`NEXT_PUBLIC_SENTRY_DSN` (client) is not set, so self-hosters can opt out
+entirely by simply not setting the env vars.
+
+- `sentry.client.config.ts` / `sentry.server.config.ts` /
+  `sentry.edge.config.ts` — SDK init (reads DSN from env, only enabled in
+  production).
+- `next.config.ts` — wrapped in `withSentryConfig()` (source map upload,
+  tree-shaking).
+- `app/error.tsx` + `app/global-error.tsx` — call `Sentry.captureException`
+  before rendering the fallback UI.
+- `SENTRY_TRACES_SAMPLE_RATE` / `NEXT_PUBLIC_SENTRY_TRACES_SAMPLE_RATE` —
+  transaction trace sampling (default: 0.1 = 10%). Set to 0 to disable
+  performance traces.
 
 ### Supported agent kinds
 
@@ -523,26 +597,25 @@ strategy it uses so users know whether server-side session storage is required.
   when auth enabled; open-redirect fix (`safeRedirect()` in login page);
   `/api/health` liveness endpoint (bypassed by proxy cookie gate); error
   message masking on reachability probe (no internal hostname leakage)
+- Rate limiting (SaaS hardening) — two-layer: per-IP global flood protection
+  in `proxy.ts` (120/min) + per-user route-level limits in `lib/ratelimit/`
+  (20 runs/min, 3 concurrent SSE streams, 10/min probe/mutations, 60/min
+  reads). Better Auth `rateLimit` config (sign-in: 10/min, sign-up: 5/min
+  per IP). 429 responses with standard `X-RateLimit-*` headers.
+- Error tracking — `@sentry/nextjs` integration (server + client + edge
+  configs). No-op when `SENTRY_DSN` is not set. Error boundaries call
+  `Sentry.captureException`. Trace sampling via `SENTRY_TRACES_SAMPLE_RATE`.
 
 ## Future (structured for easy upgrade)
 
 **SaaS launch track (the next concrete phase):**
 
-- **Rate limiting + usage controls** — no rate limiting on login, signup,
-  `/api/copilotkit`, or `/api/agents*` today. Any signed-up user can drive
-  unbounded LLM cost via `/api/copilotkit`. Needs per-user/per-org run caps
-  + a rate-limiting layer (in-memory for single-instance, Redis for multi-
-  instance). Place behind a reverse proxy with rate limiting for any
-  multi-user deploy in the meantime (documented in README Security section).
 - **Email verification + password reset** — email/password accounts are
-  created without verification today. When SMTP is configured, enable email
-  verification on signup and set `requireLocalEmailVerified: true` (secure
-  auto-linking). Requires SMTP env vars (`SMTP_URL`, etc.) +
-  `sendVerificationEmail` callback + verification callback page + forgot-
-  password flow.
-- **Error tracking + metrics** — no Sentry, OTEL, or request metrics today.
-  Only two `console.error` calls with JSON context (`[copilotkit]` +
-  `[runner]`). Production bugs are invisible.
+  created without verification today. When SMTP is configured (Resend),
+  enable email verification on signup and set `requireLocalEmailVerified:
+  true` (secure auto-linking). Requires SMTP env vars (`RESEND_API_KEY`,
+  etc.) + `sendVerificationEmail` callback + verification callback page +
+  forgot-password flow.
 - **PG LISTEN/NOTIFY cache invalidation for multi-instance:** the in-memory
   `Map`s in `PostgresAgentRunner` (`threadCache`, `messageCache`, `eventsCache`)
   are per-process. For horizontal scaling (multiple Next.js instances),

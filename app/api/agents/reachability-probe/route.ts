@@ -1,6 +1,7 @@
 import { NextResponse } from "next/server";
 import { z } from "zod";
 import { getCurrentUser } from "@/lib/auth/context";
+import { checkUserLimit } from "@/lib/ratelimit/middleware";
 
 const testSchema = z.object({
   endpoint: z.string().url(),
@@ -12,6 +13,9 @@ export async function POST(request: Request) {
   if (!user) {
     return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
   }
+
+  const limited = checkUserLimit(user.id, "reachabilityProbe");
+  if (limited) return limited;
 
   let body: unknown;
   try {

@@ -16,6 +16,7 @@
     "@copilotkit/react-core": "^1.62.3",
     "@copilotkit/react-ui": "^1.62.3",
     "@copilotkit/runtime": "^1.62.3",
+    "@sentry/nextjs": "^10.68.0",
     "better-auth": "^1.6.23",
     "hono": "^4.12.29",
     "next": "16.2.10",

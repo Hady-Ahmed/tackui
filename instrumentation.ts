@@ -49,6 +49,12 @@ async function retryPg<T>(
  *      so the synthetic admin has a valid org_id for scoping (NOT NULL)
  */
 export async function register() {
+  // Sentry server-side init — no-op if SENTRY_DSN is not set.
+  // The config files (sentry.server.config.ts / sentry.edge.config.ts)
+  // are auto-imported by @sentry/nextjs via the withSentryConfig wrapper
+  // in next.config.ts. We don't need to call Sentry.init() here — the
+  // wrapper handles it. This comment is here so future readers know.
+
   // Skip in Edge runtime — migrations need node:fs, node:path, and pg.
   if (process.env.NEXT_RUNTIME === "edge") return;
 

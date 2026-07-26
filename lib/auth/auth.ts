@@ -73,6 +73,18 @@ export const auth = betterAuth({
   // init time. In auth mode the throw above guarantees a real secret.
   secret: BETTER_AUTH_SECRET ?? "solo-mode-no-sessions",
   emailAndPassword: { enabled: true },
+  // Explicit rate limiting — replaces the silent default. Per-IP (no user
+  // exists pre-login). In-memory storage (single-instance; for multi-
+  // instance, switch to a Redis-backed custom storage).
+  rateLimit: {
+    enabled: !AUTH_DISABLED,
+    window: 60,
+    max: 100,
+    customRules: {
+      "/sign-in/email": { window: 60, max: 10 },
+      "/sign-up/email": { window: 60, max: 5 },
+    },
+  },
   socialProviders: buildSocialProviders(),
   account: {
     accountLinking: {
