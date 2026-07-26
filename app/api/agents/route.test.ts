@@ -1,8 +1,22 @@
-import { describe, it, expect, beforeEach } from "vitest";
+import { describe, it, expect, beforeEach, vi } from "vitest";
+
+// Mock the SSRF guard so route tests focus on route logic.
+// The guard itself is tested in lib/net/safe-fetch.test.ts.
+vi.mock("@/lib/net/safe-fetch", () => ({
+  assertSafeUrl: vi.fn().mockResolvedValue(undefined),
+  UnsafeUrlError: class UnsafeUrlError extends Error {
+    constructor(public readonly reason: string) {
+      super(reason);
+      this.name = "UnsafeUrlError";
+    }
+  },
+}));
+
 import { GET, POST } from "./route";
 import { listAgents, deleteAgent } from "@/lib/agents/agent-store";
 import { getSyntheticAdmin } from "@/lib/auth/context";
 import { runMigrations } from "@/lib/db/migrate";
+import { assertSafeUrl, UnsafeUrlError } from "@/lib/net/safe-fetch";
 
 let testOrg: string;
 
@@ -14,6 +28,7 @@ beforeEach(async () => {
   await runMigrations();
   testOrg = (await getSyntheticAdmin()).orgId;
   await cleanup();
+  vi.mocked(assertSafeUrl).mockResolvedValue(undefined);
 });
 
 const validBody = {
@@ -115,5 +130,28 @@ describe("POST /api/agents", () => {
     expect(res.status).toBe(409);
     const data = await res.json();
     expect(data.error).toContain("already exists");
+  });
+
+  it("returns 400 when SSRF guard rejects the endpoint", async () => {
+    vi.mocked(assertSafeUrl).mockRejectedValueOnce(
+      new UnsafeUrlError("hostname resolves to a private address"),
+    );
+    const res = await POST(
+      new Request("http://localhost/api/agents", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          ...validBody,
+          endpoint: "http://169.254.169.254/",
+        }),
+      }),
+    );
+    expect(res.status).toBe(400);
+    const data = await res.json();
+    expect(data.error).toContain("private or internal address");
+    // Agent was not created
+    const list = await GET();
+    const agents = await list.json();
+    expect(agents).toHaveLength(0);
   });
 });

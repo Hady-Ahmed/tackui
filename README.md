@@ -219,12 +219,62 @@ See [`.env.example`](.env.example) for the full list with comments.
 | Variable | Required? | Description |
 | --- | --- | --- |
 | `DATABASE_URL` | Yes | Postgres connection string (e.g. `postgres://user:pass@localhost:5432/dbname`) |
-| `BETTER_AUTH_SECRET` | Yes (unless `AUTH_DISABLED=true`) | Secret for signing session cookies. Generate with `openssl rand -hex 32` |
+| `BETTER_AUTH_SECRET` | Yes (unless `AUTH_DISABLED=true`) | Secret for signing session cookies. Generate with `openssl rand -hex 32`. The app refuses to boot without it when auth is enabled. |
 | `BETTER_AUTH_URL` | Yes (unless `AUTH_DISABLED=true`) | Public base URL of the app (e.g. `http://localhost:3000`) |
-| `AUTH_DISABLED` | No | Set to `true` to skip login (solo mode) |
+| `AUTH_DISABLED` | No | Set to `true` to skip login (solo mode). **Never use this in any deployment exposed to the internet or shared users.** |
+| `ALLOW_PRIVATE_ENDPOINTS` | No | Set to `true` to let the reachability probe fetch internal/localhost URLs (e.g. when agent backends run on the same host). Defaults to `false` (blocks private IPs to prevent SSRF). |
 | `GOOGLE_CLIENT_ID` / `GOOGLE_CLIENT_SECRET` | No | Google OAuth provider |
 | `GITHUB_CLIENT_ID` / `GITHUB_CLIENT_SECRET` | No | GitHub OAuth provider |
 | `OIDC_CLIENT_ID` / `OIDC_CLIENT_SECRET` / `OIDC_ISSUER` | No | External OIDC SSO (Keycloak, Authentik, Okta, Entra, etc.) |
+| `PG_POOL_MAX` | No | Max connections in the Postgres pool (default: `10`) |
+| `PG_CONNECT_TIMEOUT` | No | Postgres connection timeout in ms (default: `5000`) |
+| `POSTGRES_PASSWORD` | No (docker-compose only) | Postgres password (default: `postgres`) |
+| `POSTGRES_DB` | No (docker-compose only) | Postgres database name (default: `agent_frontend`) |
+| `APP_PORT` | No (docker-compose only) | Host port to expose the app on (default: `3000`) |
+
+## Security
+
+### `AUTH_DISABLED=true` is for single-user setups only
+
+When `AUTH_DISABLED=true`, **everyone who can reach the app is the admin** — no login, no session, full access to all agents, conversations, and settings. This is convenient for local dev or a personal deployment on a trusted network, but it must **never** be exposed to the internet or shared with untrusted users. If you need multi-user access, enable auth (`AUTH_DISABLED=false` with `BETTER_AUTH_SECRET` set).
+
+### Use a TLS-terminating reverse proxy in production
+
+The app does not terminate TLS itself. In production, put it behind a reverse proxy that handles TLS (Caddy, Nginx, Traefik, Cloudflare Tunnel, etc.). Session cookies sent over plain HTTP can be sniffed. The app sends `Strict-Transport-Security` (HSTS) in production mode to instruct browsers to always use HTTPS.
+
+### SSRF protection on agent creation
+
+The "Test connection" button and agent creation/editing send the agent endpoint URL to the server. To prevent [Server-Side Request Forgery](https://owasp.org/www-community/attacks/Server_Side_Request_Forgery) (an attacker using the server to scan internal services or steal cloud metadata credentials), **agent creation and editing block URLs that resolve to private/internal IP addresses** by default (`127.0.0.1`, `10.x`, `192.168.x`, `172.16-31.x`, `169.254.x`, IPv6 equivalents).
+
+The "Test connection" reachability probe is **not** gated — it's a pure diagnostic that always tells you whether the endpoint is up. The SSRF guard is at the persistence choke point (create/update), so bad URLs can never be stored. Once an agent is stored, the CopilotKit runtime fetches it during runs without re-checking — this is intentional, so existing agents keep working even if you later change the env var.
+
+If your agent backends run on the same host as the frontend (common for self-hosters), set `ALLOW_PRIVATE_ENDPOINTS=true` to allow internal URLs when creating or editing agents. This is safe when only trusted users can reach the admin page.
+
+### Secret handling
+
+- **`BETTER_AUTH_SECRET`** — the app refuses to boot in auth mode without it. A missing secret would silently sign session cookies with a publicly-known value, allowing account forgery.
+- **`langsmithApiKey`** — stored encrypted at rest in Postgres (via your database's disk encryption) and never returned in API responses. The admin edit form shows whether a key is set (via `hasLangsmithApiKey: boolean`) but never displays the value. To replace it, type a new value; to keep the existing one, leave the field blank.
+- **Social/OIDC client secrets** — only read from environment variables, never stored in the database or exposed via API responses.
+
+### Security headers
+
+The app sets the following headers on all responses:
+
+- `Content-Security-Policy` — restricts script/style/connect/frame sources (defense against XSS and clickjacking)
+- `X-Frame-Options: DENY` — prevents the app from being embedded in an iframe (legacy clickjacking defense)
+- `X-Content-Type-Options: nosniff` — prevents MIME-type sniffing
+- `Referrer-Policy: strict-origin-when-cross-origin` — limits referrer information sent to cross-origin destinations
+- `Permissions-Policy` — denies access to geolocation, microphone, camera, payment, USB
+- `Strict-Transport-Security` (production only) — forces HTTPS for 1 year
+
+### Known limitations (not yet implemented)
+
+These are documented for transparency and will be addressed in future releases:
+
+- **No email verification / password reset** — email/password accounts are created without verification. If you need these, configure SMTP and enable Better Auth's email verification. Social/OIDC login delegates verification to the provider.
+- **No rate limiting** — there is no rate limiting on login, signup, or agent-run endpoints. For any multi-user deployment, place the app behind a reverse proxy with rate limiting (e.g. Caddy's `rate_limit`, Cloudflare, or an API gateway) to prevent brute-force and cost-abuse attacks.
+- **No CSRF token on mutation routes** — the app relies on `sameSite=lax` session cookies (Better Auth default) and Better Auth's built-in CSRF protection on `/api/auth/*`. Mutation routes (`/api/agents`, `/api/threads`) are not behind an explicit CSRF token. This is acceptable for `sameSite=lax` but is not defense-in-depth.
+- **Single-instance cache** — the in-memory thread cache is per-process. Multi-instance deployments (horizontal scaling) will see stale threads until a cache invalidation mechanism (PG `LISTEN/NOTIFY`) is added. Single-instance self-hosted deployments are unaffected.
 
 ## Tech Stack
 

@@ -4,10 +4,17 @@ import {
   updateAgent,
   deleteAgent,
   agentEntrySchema,
+  toPublicAgent,
 } from "@/lib/agents/agent-store";
 import { getCurrentUser, canManageAgents } from "@/lib/auth/context";
+import { assertSafeUrl, UnsafeUrlError } from "@/lib/net/safe-fetch";
 
 const partialSchema = agentEntrySchema.partial();
+
+const SSRF_MESSAGE =
+  "Endpoint resolves to a private or internal address. " +
+  "Set ALLOW_PRIVATE_ENDPOINTS=true if this is intentional (e.g. " +
+  "agent backend running on the same host).";
 
 export async function GET(
   _request: Request,
@@ -22,7 +29,7 @@ export async function GET(
   if (!agent) {
     return NextResponse.json({ error: "Agent not found" }, { status: 404 });
   }
-  return NextResponse.json(agent);
+  return NextResponse.json(toPublicAgent(agent));
 }
 
 export async function PATCH(
@@ -53,11 +60,26 @@ export async function PATCH(
     );
   }
 
+  // SSRF guard: when the endpoint is being changed, validate the new URL
+  // before persisting it. Only fires when `endpoint` is in the PATCH body
+  // — editing other fields (name, description) on an existing
+  // private-endpoint agent does NOT re-trigger the guard.
+  if (parsed.data.endpoint !== undefined) {
+    try {
+      await assertSafeUrl(parsed.data.endpoint);
+    } catch (err) {
+      if (err instanceof UnsafeUrlError) {
+        return NextResponse.json({ error: SSRF_MESSAGE }, { status: 400 });
+      }
+      throw err;
+    }
+  }
+
   const updated = await updateAgent(id, parsed.data, user.orgId);
   if (!updated) {
     return NextResponse.json({ error: "Agent not found" }, { status: 404 });
   }
-  return NextResponse.json(updated);
+  return NextResponse.json(toPublicAgent(updated));
 }
 
 export async function DELETE(

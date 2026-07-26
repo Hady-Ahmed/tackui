@@ -96,4 +96,15 @@ describe("POST /api/agents/reachability-probe", () => {
     );
     expect(res.status).toBe(400);
   });
+
+  it("masks raw error messages in the response", async () => {
+    mockFetchError(new TypeError("getaddrinfo ENOTFOUND internal-db.local"));
+    const res = await POST(makeRequest(validBody));
+    const data = await res.json();
+    expect(data.ok).toBe(false);
+    // The raw error message (with internal hostname) must not leak
+    expect(data.message).not.toContain("internal-db.local");
+    expect(data.message).not.toContain("getaddrinfo");
+    expect(data.message).toContain("Cannot reach server");
+  });
 });

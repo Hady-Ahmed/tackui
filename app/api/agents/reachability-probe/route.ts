@@ -43,15 +43,19 @@ export async function POST(request: Request) {
       message: `Server reachable (HTTP ${res.status})`,
     });
   } catch (err) {
-    const reason =
-      err instanceof Error
-        ? err.name === "TimeoutError" || err.name === "AbortError"
-          ? "request timed out (5s)"
-          : err.message
-        : "unknown error";
+    // Mask raw error messages — they can leak internal hostnames/IPs
+    // (e.g. DNS resolution failures). Log the detail server-side only.
+    const isTimeout =
+      err instanceof Error &&
+      (err.name === "TimeoutError" || err.name === "AbortError");
+    const reason = isTimeout ? "request timed out (5s)" : "unreachable";
+    console.error("[reachability-probe] fetch failed", {
+      endpoint,
+      error: err instanceof Error ? err.message : String(err),
+    });
     return NextResponse.json({
       ok: false,
-      message: `Cannot reach server at ${endpoint}: ${reason}`,
+      message: `Cannot reach server: ${reason}`,
     });
   }
 }

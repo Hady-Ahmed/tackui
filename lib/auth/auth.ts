@@ -4,6 +4,18 @@ import { getPoolOrTestClient, query } from "@/lib/db/pg";
 
 const AUTH_DISABLED = process.env.AUTH_DISABLED === "true";
 
+// Enforce a real secret when auth is enabled. A missing secret in auth
+// mode would silently fall back to a publicly-known value (in the source),
+// allowing session-cookie forgery. Solo mode (AUTH_DISABLED=true) doesn't
+// sign sessions, so it's exempt.
+const BETTER_AUTH_SECRET = process.env.BETTER_AUTH_SECRET;
+if (!AUTH_DISABLED && !BETTER_AUTH_SECRET) {
+  throw new Error(
+    "BETTER_AUTH_SECRET is required when AUTH_DISABLED is not 'true'. " +
+      "Generate one with: openssl rand -hex 32",
+  );
+}
+
 function buildSocialProviders() {
   const providers: Record<
     string,
@@ -56,7 +68,10 @@ function buildPlugins(): BetterAuthPlugin[] {
 export const auth = betterAuth({
   database: getPoolOrTestClient(),
   baseURL: process.env.BETTER_AUTH_URL || "http://localhost:3000",
-  secret: process.env.BETTER_AUTH_SECRET || "dev-secret-change-me-in-production",
+  // In solo mode (AUTH_DISABLED=true) no sessions are signed, so the
+  // secret value is irrelevant — Better Auth still needs a string at
+  // init time. In auth mode the throw above guarantees a real secret.
+  secret: BETTER_AUTH_SECRET ?? "solo-mode-no-sessions",
   emailAndPassword: { enabled: true },
   socialProviders: buildSocialProviders(),
   account: {

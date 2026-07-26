@@ -3,7 +3,7 @@
 import { useEffect, useRef, useState } from "react";
 import Link from "next/link";
 import { useThreads, useAgent } from "@copilotkit/react-core/v2";
-import type { AgentEntry, AgentKind } from "@/lib/agents/agents.config";
+import type { PublicAgent, AgentKind } from "@/lib/agents/agents.config";
 import { AccountMenu } from "./account-menu";
 import { ThemeToggle } from "./theme-toggle";
 import { useAuthConfig } from "@/lib/auth/use-auth-config";
@@ -71,7 +71,7 @@ function dotTitle(status: TestStatus, message?: string): string {
 }
 
 interface AgentSidebarProps {
-  agents: AgentEntry[];
+  agents: PublicAgent[];
   activeAgent: string;
   activeThreadId: string;
   onSelectAgent: (id: string) => void;
@@ -181,7 +181,7 @@ function ExpandedContent({
   onToggleCollapse,
   showManageLink,
 }: {
-  agents: AgentEntry[];
+  agents: PublicAgent[];
   activeAgent: string;
   activeThreadId: string;
   statuses: Record<string, TestResult>;
@@ -330,7 +330,7 @@ function CollapsedContent({
   onToggleCollapse,
   showManageLink,
 }: {
-  agents: AgentEntry[];
+  agents: PublicAgent[];
   activeAgent: string;
   statuses: Record<string, TestResult>;
   onSelectAgent: (id: string) => void;

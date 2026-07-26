@@ -3,7 +3,7 @@
 import { useState, useEffect, useCallback, useRef } from "react";
 import { useRouter } from "next/navigation";
 import Link from "next/link";
-import type { AgentEntry, AgentKind } from "@/lib/agents/agents.config";
+import type { PublicAgent, AgentKind } from "@/lib/agents/agents.config";
 import { UsersAdmin } from "@/components/users-admin";
 import { authClient } from "@/lib/auth/auth-client";
 import { useAuthConfig } from "@/lib/auth/use-auth-config";
@@ -74,10 +74,11 @@ export default function AgentsPage() {
   const { data: session, isPending } = authClient.useSession();
   const { config } = useAuthConfig();
   const { canManage, loading: canManageLoading } = useCanManageAgents();
-  const [agents, setAgents] = useState<AgentEntry[]>([]);
+  const [agents, setAgents] = useState<PublicAgent[]>([]);
   const [loading, setLoading] = useState(true);
   const [form, setForm] = useState<FormState>(emptyForm);
   const [editingId, setEditingId] = useState<string | null>(null);
+  const [editingHasKey, setEditingHasKey] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [submitting, setSubmitting] = useState(false);
   const [formTest, setFormTest] = useState<TestResult>({ status: "idle" });
@@ -122,8 +123,9 @@ export default function AgentsPage() {
     setFormTest({ status: "idle" });
   };
 
-  const startEdit = (agent: AgentEntry) => {
+  const startEdit = (agent: PublicAgent) => {
     setEditingId(agent.id);
+    setEditingHasKey(agent.hasLangsmithApiKey);
     setForm({
       id: agent.id,
       name: agent.name,
@@ -131,7 +133,10 @@ export default function AgentsPage() {
       kind: agent.kind,
       endpoint: agent.endpoint,
       graphId: agent.graphId ?? "",
-      langsmithApiKey: agent.langsmithApiKey ?? "",
+      // Never pre-fill the secret. The field starts empty; submitting
+      // blank omits it from the PATCH (preserving the stored value).
+      // hasLangsmithApiKey drives helper text below.
+      langsmithApiKey: "",
     });
     setError(null);
     setFormTest({ status: "idle" });
@@ -140,6 +145,7 @@ export default function AgentsPage() {
   const resetForm = () => {
     setForm(emptyForm);
     setEditingId(null);
+    setEditingHasKey(false);
     setError(null);
     setFormTest({ status: "idle" });
   };
@@ -151,7 +157,7 @@ export default function AgentsPage() {
     setFormTest(result);
   };
 
-  const handleTestRow = async (agent: AgentEntry) => {
+  const handleTestRow = async (agent: PublicAgent) => {
     setRowTests((prev) => ({ ...prev, [agent.id]: { status: "loading" } }));
     const result = await testEndpoint(agent.endpoint, agent.kind);
     setRowTests((prev) => ({ ...prev, [agent.id]: result }));
@@ -318,7 +324,14 @@ export default function AgentsPage() {
                   placeholder="agent"
                 />
               </Field>
-              <Field label="LangSmith API Key" hint="langgraph only, optional">
+              <Field
+                label="LangSmith API Key"
+                hint={
+                  editingId && editingHasKey
+                    ? "Key set ✓ — leave blank to keep existing, type a new value to replace"
+                    : "langgraph only, optional"
+                }
+              >
                 <input
                   value={form.langsmithApiKey}
                   onChange={(e) =>
@@ -326,7 +339,7 @@ export default function AgentsPage() {
                   }
                   type="password"
                   className={inputClass()}
-                  placeholder="ls-..."
+                  placeholder={editingId && editingHasKey ? "(unchanged)" : "ls-..."}
                 />
               </Field>
             </div>

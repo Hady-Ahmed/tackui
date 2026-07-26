@@ -9,13 +9,13 @@ import { HitlHandlers } from "./hitl/approval-card";
 import { ToolRenders } from "./tools/tool-renders";
 import { useAuthConfig } from "@/lib/auth/use-auth-config";
 import { useCanManageAgents } from "@/lib/auth/use-can-manage-agents";
-import type { AgentEntry } from "@/lib/agents/agents.config";
+import type { PublicAgent } from "@/lib/agents/agents.config";
 
 export function ChatShell() {
   const router = useRouter();
   const { config } = useAuthConfig();
   const { canManage } = useCanManageAgents();
-  const [agents, setAgents] = useState<AgentEntry[]>([]);
+  const [agents, setAgents] = useState<PublicAgent[]>([]);
   const [hasLoaded, setHasLoaded] = useState(false);
   const [activeAgent, setActiveAgent] = useState("");
   const [activeThreadId, setActiveThreadId] = useState(() =>
@@ -40,7 +40,7 @@ export function ChatShell() {
         return;
       }
       if (!res.ok) return;
-      const list: AgentEntry[] = await res.json();
+      const list: PublicAgent[] = await res.json();
       setAgents(list);
       setHasLoaded(true);
       setActiveAgent((prev) => {

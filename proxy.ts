@@ -5,13 +5,18 @@ const AUTH_DISABLED = process.env.AUTH_DISABLED === "true";
 
 const PUBLIC_ROUTES = ["/login", "/signup"];
 const AUTH_API_PREFIX = "/api/auth";
+const HEALTH_PREFIX = "/api/health";
 
 export async function proxy(request: NextRequest) {
   if (AUTH_DISABLED) return NextResponse.next();
 
   const { pathname } = request.nextUrl;
 
-  if (pathname.startsWith(AUTH_API_PREFIX) || PUBLIC_ROUTES.includes(pathname)) {
+  if (
+    pathname.startsWith(AUTH_API_PREFIX) ||
+    pathname.startsWith(HEALTH_PREFIX) ||
+    PUBLIC_ROUTES.includes(pathname)
+  ) {
     return NextResponse.next();
   }
 

@@ -6,6 +6,22 @@ import Link from "next/link";
 import { authClient } from "@/lib/auth/auth-client";
 import { useAuthConfig } from "@/lib/auth/use-auth-config";
 
+/**
+ * Validates a redirect target is a same-origin relative path.
+ * Prevents open-redirect attacks via `//evil.com` or `https://evil.com`
+ * in the `redirect` query param. Returns `/` for anything that isn't a
+ * path starting with a single `/`.
+ */
+function safeRedirect(value: string | null): string {
+  if (!value) return "/";
+  // Must start with a single slash, not `//` (protocol-relative) or `/\`
+  // (some browsers treat `/\` as a protocol separator on Windows).
+  if (!value.startsWith("/")) return "/";
+  if (value.startsWith("//")) return "/";
+  if (value.startsWith("/\\")) return "/";
+  return value;
+}
+
 function LoginContent() {
   const router = useRouter();
   const params = useSearchParams();
@@ -15,7 +31,7 @@ function LoginContent() {
   const [loading, setLoading] = useState(false);
   const { config } = useAuthConfig();
 
-  const redirect = params.get("redirect") || "/";
+  const redirect = safeRedirect(params.get("redirect"));
 
   useEffect(() => {
     if (config?.authDisabled) {

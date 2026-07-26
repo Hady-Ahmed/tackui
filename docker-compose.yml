@@ -9,6 +9,10 @@
 #   AUTH_DISABLED=false \
 #   docker-compose up
 #
+# The app refuses to boot with AUTH_DISABLED=false unless BETTER_AUTH_SECRET
+# is set — a missing secret would silently sign sessions with a known value,
+# allowing account forgery. Solo mode (AUTH_DISABLED=true) doesn't need one.
+#
 # Data persists in the pg_data volume across restarts.
 
 services:
@@ -34,7 +38,10 @@ services:
     environment:
       DATABASE_URL: postgres://postgres:${POSTGRES_PASSWORD:-postgres}@db:5432/${POSTGRES_DB:-agent_frontend}
       AUTH_DISABLED: ${AUTH_DISABLED:-true}
-      BETTER_AUTH_SECRET: ${BETTER_AUTH_SECRET:-dev-secret-change-me-in-production}
+      # BETTER_AUTH_SECRET is required when AUTH_DISABLED=false.
+      # The app throws on boot if it's missing in auth mode.
+      # In solo mode (AUTH_DISABLED=true) it's unused — leave blank.
+      BETTER_AUTH_SECRET: ${BETTER_AUTH_SECRET:-}
       BETTER_AUTH_URL: ${BETTER_AUTH_URL:-http://localhost:${APP_PORT:-3000}}
       # Social providers (optional — only enabled if set)
       GOOGLE_CLIENT_ID: ${GOOGLE_CLIENT_ID:-}
@@ -48,6 +55,12 @@ services:
     depends_on:
       db:
         condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://localhost:3000/api/health || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+      start_period: 15s
     restart: unless-stopped
 
 volumes:

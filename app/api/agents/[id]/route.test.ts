@@ -1,9 +1,23 @@
-import { describe, it, expect, beforeEach } from "vitest";
+import { describe, it, expect, beforeEach, vi } from "vitest";
+
+// Mock the SSRF guard so route tests focus on route logic.
+// The guard itself is tested in lib/net/safe-fetch.test.ts.
+vi.mock("@/lib/net/safe-fetch", () => ({
+  assertSafeUrl: vi.fn().mockResolvedValue(undefined),
+  UnsafeUrlError: class UnsafeUrlError extends Error {
+    constructor(public readonly reason: string) {
+      super(reason);
+      this.name = "UnsafeUrlError";
+    }
+  },
+}));
+
 import { GET, PATCH, DELETE } from "./route";
 import { listAgents, createAgent, deleteAgent } from "@/lib/agents/agent-store";
 import type { CreateAgentInput } from "@/lib/agents/agent-store";
 import { getSyntheticAdmin } from "@/lib/auth/context";
 import { runMigrations } from "@/lib/db/migrate";
+import { assertSafeUrl, UnsafeUrlError } from "@/lib/net/safe-fetch";
 
 let testOrg: string;
 
@@ -28,6 +42,8 @@ beforeEach(async () => {
   testOrg = (await getSyntheticAdmin()).orgId;
   await cleanup();
   await createAgent(validInput, testOrg);
+  vi.mocked(assertSafeUrl).mockClear();
+  vi.mocked(assertSafeUrl).mockResolvedValue(undefined);
 });
 
 describe("GET /api/agents/[id]", () => {
@@ -113,6 +129,43 @@ describe("PATCH /api/agents/[id]", () => {
       makeParams("test-agent"),
     );
     expect(res.status).toBe(400);
+  });
+
+  it("returns 400 when SSRF guard rejects a new endpoint", async () => {
+    vi.mocked(assertSafeUrl).mockRejectedValueOnce(
+      new UnsafeUrlError("hostname resolves to a private address"),
+    );
+    const res = await PATCH(
+      new Request("http://localhost/api/agents/test-agent", {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ endpoint: "http://169.254.169.254/" }),
+      }),
+      makeParams("test-agent"),
+    );
+    expect(res.status).toBe(400);
+    const data = await res.json();
+    expect(data.error).toContain("private or internal address");
+    // Endpoint was not updated
+    const getRes = await GET(
+      new Request("http://localhost/api/agents/test-agent"),
+      makeParams("test-agent"),
+    );
+    const agent = await getRes.json();
+    expect(agent.endpoint).toBe("http://localhost:8000/agent");
+  });
+
+  it("does not call the SSRF guard when endpoint is not in the patch", async () => {
+    const res = await PATCH(
+      new Request("http://localhost/api/agents/test-agent", {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ name: "Just Renamed" }),
+      }),
+      makeParams("test-agent"),
+    );
+    expect(res.status).toBe(200);
+    expect(assertSafeUrl).not.toHaveBeenCalled();
   });
 });
 

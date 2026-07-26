@@ -1,7 +1,6 @@
 import { query } from "@/lib/db/pg";
 import { z } from "zod";
-import type { AgentEntry, AgentKind } from "./agents.config";
-
+import type { AgentEntry, AgentKind, PublicAgent } from "./agents.config";
 const agentKindSchema = z.enum(["langgraph", "agno", "agui"]);
 
 export const agentEntrySchema = z.object({
@@ -39,6 +38,29 @@ function rowToEntry(row: AgentRow): AgentEntry {
     graphId: row.graph_id ?? undefined,
     langsmithApiKey: row.langsmith_api_key ?? undefined,
   };
+}
+
+/**
+ * Strip the raw `langsmithApiKey` from an AgentEntry and replace it
+ * with a boolean `hasLangsmithApiKey`. Use this for any response that
+ * leaves the server (REST GET endpoints, admin UI fetches). The raw key
+ * is only ever read by `lib/agents/registry.ts` server-side.
+ */
+export function toPublicAgent(entry: AgentEntry): PublicAgent {
+  return {
+    id: entry.id,
+    name: entry.name,
+    description: entry.description,
+    kind: entry.kind,
+    endpoint: entry.endpoint,
+    orgId: entry.orgId,
+    ...(entry.graphId !== undefined ? { graphId: entry.graphId } : {}),
+    hasLangsmithApiKey: Boolean(entry.langsmithApiKey),
+  };
+}
+
+export function toPublicAgents(entries: AgentEntry[]): PublicAgent[] {
+  return entries.map(toPublicAgent);
 }
 
 /**
