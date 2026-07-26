@@ -1,4 +1,5 @@
 import { describe, it, expect, vi, afterEach } from "vitest";
+import { NextResponse } from "next/server";
 
 // Mock the rate limiter — defaults to "always allow".
 vi.mock("@/lib/ratelimit/middleware", () => ({
@@ -6,6 +7,7 @@ vi.mock("@/lib/ratelimit/middleware", () => ({
 }));
 
 import { POST } from "./route";
+import { checkUserLimit } from "@/lib/ratelimit/middleware";
 
 const originalFetch = globalThis.fetch;
 
@@ -112,5 +114,13 @@ describe("POST /api/agents/reachability-probe", () => {
     expect(data.message).not.toContain("internal-db.local");
     expect(data.message).not.toContain("getaddrinfo");
     expect(data.message).toContain("Cannot reach server");
+  });
+
+  it("returns 429 when rate limited", async () => {
+    vi.mocked(checkUserLimit).mockReturnValueOnce(
+      NextResponse.json({ error: "Rate limit exceeded" }, { status: 429 }),
+    );
+    const res = await POST(makeRequest(validBody));
+    expect(res.status).toBe(429);
   });
 });

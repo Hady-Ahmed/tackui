@@ -1,4 +1,5 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
+import { NextResponse } from "next/server";
 
 // Mock the runner singleton so we don't need real PG state.
 vi.mock("@/lib/agents/runner-instance", () => ({
@@ -15,6 +16,7 @@ vi.mock("@/lib/ratelimit/middleware", () => ({
 
 import { PATCH, DELETE } from "./route";
 import { runner } from "@/lib/agents/runner-instance";
+import { checkUserLimit } from "@/lib/ratelimit/middleware";
 
 const mockedRename = vi.mocked(runner.renameThread);
 const mockedDelete = vi.mocked(runner.deleteThread);
@@ -96,6 +98,15 @@ describe("PATCH /api/threads/[id]", () => {
     expect(res.status).toBe(400);
     expect(mockedRename).not.toHaveBeenCalled();
   });
+
+  it("returns 429 when rate limited", async () => {
+    vi.mocked(checkUserLimit).mockReturnValueOnce(
+      NextResponse.json({ error: "Rate limit exceeded" }, { status: 429 }),
+    );
+    const [req, ctx] = makePatchRequest("t1", { title: "New" });
+    const res = await PATCH(req, ctx);
+    expect(res.status).toBe(429);
+  });
 });
 
 describe("DELETE /api/threads/[id]", () => {
@@ -114,5 +125,14 @@ describe("DELETE /api/threads/[id]", () => {
     expect(res.status).toBe(404);
     const data = await res.json();
     expect(data.error).toContain("not found");
+  });
+
+  it("returns 429 when rate limited", async () => {
+    vi.mocked(checkUserLimit).mockReturnValueOnce(
+      NextResponse.json({ error: "Rate limit exceeded" }, { status: 429 }),
+    );
+    const [req, ctx] = makeDeleteRequest("t1");
+    const res = await DELETE(req, ctx);
+    expect(res.status).toBe(429);
   });
 });

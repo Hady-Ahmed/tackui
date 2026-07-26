@@ -23,6 +23,8 @@ import type { CreateAgentInput } from "@/lib/agents/agent-store";
 import { getSyntheticAdmin } from "@/lib/auth/context";
 import { runMigrations } from "@/lib/db/migrate";
 import { assertSafeUrl, UnsafeUrlError } from "@/lib/net/safe-fetch";
+import { checkUserLimit } from "@/lib/ratelimit/middleware";
+import { NextResponse } from "next/server";
 
 let testOrg: string;
 
@@ -49,6 +51,8 @@ beforeEach(async () => {
   await createAgent(validInput, testOrg);
   vi.mocked(assertSafeUrl).mockClear();
   vi.mocked(assertSafeUrl).mockResolvedValue(undefined);
+  vi.mocked(checkUserLimit).mockClear();
+  vi.mocked(checkUserLimit).mockReturnValue(null);
 });
 
 describe("GET /api/agents/[id]", () => {
@@ -68,6 +72,17 @@ describe("GET /api/agents/[id]", () => {
       makeParams("nonexistent"),
     );
     expect(res.status).toBe(404);
+  });
+
+  it("returns 429 when rate limited", async () => {
+    vi.mocked(checkUserLimit).mockReturnValueOnce(
+      NextResponse.json({ error: "Rate limit exceeded" }, { status: 429 }),
+    );
+    const res = await GET(
+      new Request("http://localhost/api/agents/test-agent"),
+      makeParams("test-agent"),
+    );
+    expect(res.status).toBe(429);
   });
 });
 
@@ -172,6 +187,21 @@ describe("PATCH /api/agents/[id]", () => {
     expect(res.status).toBe(200);
     expect(assertSafeUrl).not.toHaveBeenCalled();
   });
+
+  it("returns 429 when rate limited", async () => {
+    vi.mocked(checkUserLimit).mockReturnValueOnce(
+      NextResponse.json({ error: "Rate limit exceeded" }, { status: 429 }),
+    );
+    const res = await PATCH(
+      new Request("http://localhost/api/agents/test-agent", {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ name: "X" }),
+      }),
+      makeParams("test-agent"),
+    );
+    expect(res.status).toBe(429);
+  });
 });
 
 describe("DELETE /api/agents/[id]", () => {
@@ -193,5 +223,21 @@ describe("DELETE /api/agents/[id]", () => {
       makeParams("nonexistent"),
     );
     expect(res.status).toBe(404);
+  });
+
+  it("returns 429 when rate limited", async () => {
+    // Need to recreate the agent since DELETE removes it in beforeEach's
+    // cleanup is not the issue — it's created in beforeEach. But the 429
+    // fires before the delete, so the agent still exists.
+    vi.mocked(checkUserLimit).mockReturnValueOnce(
+      NextResponse.json({ error: "Rate limit exceeded" }, { status: 429 }),
+    );
+    const res = await DELETE(
+      new Request("http://localhost/api/agents/test-agent", {
+        method: "DELETE",
+      }),
+      makeParams("test-agent"),
+    );
+    expect(res.status).toBe(429);
   });
 });

@@ -23,6 +23,8 @@ import { listAgents, deleteAgent } from "@/lib/agents/agent-store";
 import { getSyntheticAdmin } from "@/lib/auth/context";
 import { runMigrations } from "@/lib/db/migrate";
 import { assertSafeUrl, UnsafeUrlError } from "@/lib/net/safe-fetch";
+import { checkUserLimit } from "@/lib/ratelimit/middleware";
+import { NextResponse } from "next/server";
 
 let testOrg: string;
 
@@ -65,6 +67,14 @@ describe("GET /api/agents", () => {
     const data = await res.json();
     expect(data).toHaveLength(1);
     expect(data[0].id).toBe("test-agent");
+  });
+
+  it("returns 429 when rate limited", async () => {
+    vi.mocked(checkUserLimit).mockReturnValueOnce(
+      NextResponse.json({ error: "Rate limit exceeded" }, { status: 429 }),
+    );
+    const res = await GET();
+    expect(res.status).toBe(429);
   });
 });
 
@@ -159,5 +169,19 @@ describe("POST /api/agents", () => {
     const list = await GET();
     const agents = await list.json();
     expect(agents).toHaveLength(0);
+  });
+
+  it("returns 429 when rate limited", async () => {
+    vi.mocked(checkUserLimit).mockReturnValueOnce(
+      NextResponse.json({ error: "Rate limit exceeded" }, { status: 429 }),
+    );
+    const res = await POST(
+      new Request("http://localhost/api/agents", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(validBody),
+      }),
+    );
+    expect(res.status).toBe(429);
   });
 });
