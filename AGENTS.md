@@ -61,17 +61,19 @@ When adding new functionality, add tests alongside it:
 ```
 app/
   api/copilotkit/[[...path]]/route.ts  # CopilotKit runtime (catch-all — matches /api/copilotkit and all sub-paths)
-  api/agents/route.ts          # REST: GET/POST /api/agents (list, create)
-  api/agents/[id]/route.ts     # REST: GET/PATCH/DELETE /api/agents/[id]
-  api/agents/reachability-probe/route.ts  # REST: POST /api/agents/reachability-probe (reachability probe)
+  api/agents/route.ts          # REST: GET/POST /api/agents (list, create) — SSRF guard on POST
+  api/agents/[id]/route.ts     # REST: GET/PATCH/DELETE /api/agents/[id] — SSRF guard on PATCH (when endpoint changes)
+  api/agents/reachability-probe/route.ts  # REST: POST /api/agents/reachability-probe (pure diagnostic — no SSRF guard, error messages masked)
   api/auth/[...all]/route.ts   # Better Auth handler (signup, signin, callback)
   api/auth/config/route.ts     # GET enabled providers (for self-configuring login UI)
   api/auth/can-manage-agents/route.ts  # GET — returns whether user can manage agents (org owner/admin or platform admin)
   api/threads/[id]/route.ts    # REST: PATCH/DELETE /api/threads/[id] (rename, delete conversations)
+  api/threads/[id]/route.test.ts  # Tests for PATCH/DELETE (mocked runner)
+  api/health/route.ts          # GET — liveness health check (bypassed by proxy.ts cookie gate)
   agents/page.tsx              # Admin UI — add/edit/delete agents + test connection + user management
   error.tsx                    # Route error boundary — render-crash recovery (centered card + Reload)
   global-error.tsx             # Root error boundary — catches layout-level failures (renders own <html>)
-  login/page.tsx               # Login (email/password + social + SSO)
+  login/page.tsx               # Login (email/password + social + SSO) — validates redirect param (open-redirect fix)
   signup/page.tsx              # Sign up (email/password + social + SSO)
   layout.tsx                   # Root layout — wraps app in CopilotKitProvider + FOUC-free theme init script
   page.tsx                     # Main chat page (client component)
@@ -79,13 +81,13 @@ app/
 
 lib/
   agents/
-    agents.config.ts           # AgentEntry / AgentKind types (no runtime config)
-    agent-store.ts             # Async CRUD for agents table (zod-validated, pg.Pool-backed)
+    agents.config.ts           # AgentEntry / AgentKind / PublicAgent types (no runtime config)
+    agent-store.ts             # Async CRUD for agents table (zod-validated, pg.Pool-backed) + toPublicAgent/toPublicAgents (strips langsmithApiKey)
     registry.ts                # getAgents() factory — reads DB, builds agents map (async)
     pg-runner.ts               # PostgresAgentRunner — AgentRunner impl with thread endpoints + smart-replay connect() (RUN_ERROR filtering) + in-memory cache bridging sync interface to async PG
     runner-instance.ts         # Shared runner singleton (used by runtime + thread API)
   auth/
-    auth.ts                    # Better Auth instance (Postgres Pool adapter, plugins, first-user-is-admin)
+    auth.ts                    # Better Auth instance (Postgres Pool adapter, plugins, first-user-is-admin, BETTER_AUTH_SECRET enforcement on boot)
     auth-client.ts             # Better Auth React client (signIn, signUp, useSession)
     context.ts                 # getCurrentUser / getRequestUser / getSyntheticAdmin (session → RequestUser)
     request-context.ts         # AsyncLocalStorage for per-request user (read by runner)
@@ -98,6 +100,9 @@ lib/
     migrations/                 # Versioned .sql files tracked in schema_migrations
       0001_init.sql             # Initial schema: agents, agent_runs, run_state, thread_messages, thread_metadata
       0002_org_id_not_null.sql  # Makes org_id NOT NULL (wipe-and-restart for existing deploys)
+  net/
+    safe-fetch.ts               # SSRF guard — assertSafeUrl (blocks private IPs, ALLOW_PRIVATE_ENDPOINTS opt-in) + isPrivateIp (IPv4/IPv6 range checks)
+    safe-fetch.test.ts          # 40 tests — private IP ranges, IPv6, IPv4-mapped, DNS resolution, bypass opt-in
   theme.ts                     # useTheme() hook — class-based light/dark, persists to localStorage (useSyncExternalStore)
 
 components/
@@ -111,7 +116,8 @@ components/
   tools/
     tool-renders.tsx           # Tool-call visualization (useRenderTool)
 
-proxy.ts                       # Next.js proxy (cookie gate + AUTH_DISABLED bypass)
+proxy.ts                       # Next.js proxy (cookie gate + AUTH_DISABLED bypass + /api/health bypass + open-redirect-safe redirect)
+next.config.ts                 # Security headers (CSP, HSTS, X-Frame-Options, etc.) + standalone build + poweredByHeader disabled
 scripts/
   create-admin.ts              # CLI: create/promote an admin user
 ```
@@ -144,6 +150,18 @@ Via the admin UI (`/agents` page → "Add agent" form) or `POST /api/agents` wit
 
 Optional fields: `graphId` (langgraph only), `langsmithApiKey` (langgraph only).
 
+> **Secret handling:** `langsmithApiKey` is **write-only** — accepted on
+> POST/PATCH but never returned in GET responses. The API exposes a
+> `hasLangsmithApiKey: boolean` instead (see `PublicAgent` in
+> `lib/agents/agents.config.ts`). The admin edit form shows "Key set ✓"
+> when true; submitting a blank field preserves the existing value.
+
+> **SSRF guard:** Creating or editing an agent with an endpoint that
+> resolves to a private/internal IP (`127.x`, `10.x`, `192.168.x`,
+> `172.16-31.x`, `169.254.x`, IPv6 equivalents) returns 400. Set
+> `ALLOW_PRIVATE_ENDPOINTS=true` to opt in (for self-hosters running
+> backends on the same host). See [Security](#security) below.
+
 ### Test connection
 
 Both the admin form and the agents table have a "Test connection" button that
@@ -152,6 +170,43 @@ with a 5s timeout and reports reachability. It catches URL typos and down
 servers — it does **not** validate auth, AG-UI protocol compliance, or that the
 agent will actually run. The sidebar also shows a status dot per agent (gray =
 untested, green = reachable, red = unreachable), re-tested on window focus.
+
+The probe is a **pure diagnostic** — it always reports reachability truthfully,
+including for `localhost`/private IPs. SSRF protection lives on agent
+create/edit (the persistence choke point), not on the probe. Raw error messages
+are masked in the response (they can leak internal hostnames via DNS errors);
+the full error is logged server-side via `console.error("[reachability-probe] ...")`.
+
+### Security
+
+- **SSRF guard on agent create/edit** — `POST /api/agents` and `PATCH /api/agents/[id]`
+  call `assertSafeUrl()` (`lib/net/safe-fetch.ts`) before persisting the endpoint.
+  Blocks loopback/private/link-local/multicast IPs (IPv4 + IPv6, including
+  IPv4-mapped). Opt in with `ALLOW_PRIVATE_ENDPOINTS=true` for self-hosters
+  running backends on the same host. The guard only fires on PATCH when the
+  `endpoint` field is in the body — editing other fields on an existing
+  private-endpoint agent works without the flag. Once stored, the CopilotKit
+  runtime fetches the endpoint during runs without re-checking (intentional —
+  existing agents keep working even if the env var changes).
+- **`langsmithApiKey` is write-only** — accepted on POST/PATCH, never returned
+  in GET responses. `PublicAgent.hasLangsmithApiKey: boolean` replaces it.
+  `toPublicAgent()` / `toPublicAgents()` in `lib/agents/agent-store.ts` do the
+  stripping. The admin edit form shows "Key set ✓" when true; blank submit
+  preserves the existing value.
+- **Security headers** (`next.config.ts`) — CSP (`'unsafe-inline'` scripts/styles,
+  `'unsafe-eval'` dev-only, `frame-ancestors 'none'`), `X-Frame-Options: DENY`,
+  `X-Content-Type-Options: nosniff`, `Referrer-Policy: strict-origin-when-cross-origin`,
+  `Permissions-Policy` (no geo/mic/cam/payment/usb), HSTS (prod only),
+  `poweredByHeader: false`.
+- **`BETTER_AUTH_SECRET` enforcement** (`lib/auth/auth.ts`) — throws on boot
+  if unset when `AUTH_DISABLED !== "true"`. Prevents silent session forgery
+  via the publicly-known fallback that was previously in the source.
+- **Open-redirect fix** (`app/login/page.tsx`) — `safeRedirect()` validates the
+  `redirect` query param is a same-origin relative path (starts with single `/`,
+  not `//` or `/\`).
+- **`/api/health`** (`app/api/health/route.ts`) — liveness check returning
+  `200 { ok: true }`. Bypassed by `proxy.ts` cookie gate so orchestrators can
+  probe without a session. Wired into `docker-compose.yml` healthcheck.
 
 ### Supported agent kinds
 
@@ -174,6 +229,9 @@ After running migrations, add an agent via the admin UI (`/agents`) or REST:
 ```bash
 # AUTH_DISABLED=true (solo mode) — no session cookie needed.
 # Otherwise sign in first and pass `-b cookies.txt` (see Option B in README).
+#
+# If the endpoint is on localhost or a private IP, set ALLOW_PRIVATE_ENDPOINTS=true
+# first — the SSRF guard on POST/PATCH will 400 otherwise.
 curl -X POST http://localhost:3000/api/agents \
   -H 'Content-Type: application/json' \
   -d '{"id":"test","name":"Test","description":"smoke test","kind":"agui","endpoint":"http://localhost:8000/agent"}'
@@ -201,16 +259,29 @@ scripts only; the frontend reads endpoints from the DB).
 Required unless `AUTH_DISABLED=true`:
 
 - `BETTER_AUTH_SECRET` — secret for signing session cookies (generate with
-  `openssl rand -hex 32`)
+  `openssl rand -hex 32`). The app **throws on boot** if unset when auth is
+  enabled — prevents silent session forgery via a publicly-known fallback.
 - `BETTER_AUTH_URL` — public base URL of the app (e.g.
   `http://localhost:3000`)
+
+Optional security flags:
+
+- `ALLOW_PRIVATE_ENDPOINTS` — set to `true` to allow creating/editing agents
+  with endpoints that resolve to private/internal IPs (for self-hosters running
+  backends on the same host). Defaults to `false` (blocks private IPs to
+  prevent SSRF). See [Security](#security) above.
+
+Optional Postgres pool tuning:
+
+- `PG_POOL_MAX` — max connections in the pool (default: `10`)
+- `PG_CONNECT_TIMEOUT` — connection timeout in ms (default: `5000`)
 
 Optional social providers (omit any you don't want):
 
 - `GOOGLE_CLIENT_ID` / `GOOGLE_CLIENT_SECRET` — Google OAuth
 - `GITHUB_CLIENT_ID` / `GITHUB_CLIENT_SECRET` — GitHub OAuth
-- `OIDC_CLIENT_ID` / `OIDC_CLIENT_SECRET` / `OIDC_ISSUER` — external OIDC
-  SSO (Keycloak, Authentik, Okta, Entra, etc.)
+- `OIDC_CLIENT_ID` / `OIDC_CLIENT_SECRET` / `OIDC_ISSUER` — external OIDC SSO
+  (Keycloak, Authentik, Okta, Entra, etc.)
 
 Solo / no-auth mode:
 
@@ -443,8 +514,51 @@ strategy it uses so users know whether server-side session storage is required.
   swallowed). No logging library — `console.error` with JSON context
 - Login/signup auth-disabled redirect fix — moved `router.push(redirect)`
   from render into `useEffect` to avoid React warnings + brief form flash
+- Security hardening (OSS release) — `langsmithApiKey` stripped from all
+  GET responses (`PublicAgent.hasLangsmithApiKey` boolean replaces it);
+  SSRF guard on agent create/edit (`lib/net/safe-fetch.ts` +
+  `ALLOW_PRIVATE_ENDPOINTS` opt-in); security headers in `next.config.ts`
+  (CSP, HSTS, X-Frame-Options, Referrer-Policy, Permissions-Policy,
+  `poweredByHeader: false`); `BETTER_AUTH_SECRET` throws on boot if unset
+  when auth enabled; open-redirect fix (`safeRedirect()` in login page);
+  `/api/health` liveness endpoint (bypassed by proxy cookie gate); error
+  message masking on reachability probe (no internal hostname leakage)
 
 ## Future (structured for easy upgrade)
+
+**SaaS launch track (the next concrete phase):**
+
+- **Rate limiting + usage controls** — no rate limiting on login, signup,
+  `/api/copilotkit`, or `/api/agents*` today. Any signed-up user can drive
+  unbounded LLM cost via `/api/copilotkit`. Needs per-user/per-org run caps
+  + a rate-limiting layer (in-memory for single-instance, Redis for multi-
+  instance). Place behind a reverse proxy with rate limiting for any
+  multi-user deploy in the meantime (documented in README Security section).
+- **Email verification + password reset** — email/password accounts are
+  created without verification today. When SMTP is configured, enable email
+  verification on signup and set `requireLocalEmailVerified: true` (secure
+  auto-linking). Requires SMTP env vars (`SMTP_URL`, etc.) +
+  `sendVerificationEmail` callback + verification callback page + forgot-
+  password flow.
+- **Error tracking + metrics** — no Sentry, OTEL, or request metrics today.
+  Only two `console.error` calls with JSON context (`[copilotkit]` +
+  `[runner]`). Production bugs are invisible.
+- **PG LISTEN/NOTIFY cache invalidation for multi-instance:** the in-memory
+  `Map`s in `PostgresAgentRunner` (`threadCache`, `messageCache`, `eventsCache`)
+  are per-process. For horizontal scaling (multiple Next.js instances),
+  add a dedicated LISTEN connection that evicts cache entries on NOTIFY from
+  other instances. Keeps self-host at one dependency (PG). Redis only needed
+  if you go multi-region or add it for another reason (rate limiting, jobs).
+  Not needed for single-instance OSS deploys.
+- **Org switcher + team invitations UI** — the `organization` plugin supports
+  invites server-side; needs client-side invite flow + org-switcher dropdown
+  in the account menu. Personal-org users (the majority at launch) have one
+  org and never need to switch.
+- **ToS / privacy pages** — required for SaaS that processes user
+  conversations (PII) and offers social login. Need `/terms` + `/privacy`
+  routes + cookie notice (esp. EU).
+
+**Feature track (whenever, no SaaS dependency):**
 
 - Generative UI / shared state (`useCoAgent`) — requires backend to emit
   `STATE_SNAPSHOT`/`STATE_DELTA` events; neither backend currently does
@@ -454,24 +568,6 @@ strategy it uses so users know whether server-side session storage is required.
   resolution should delegate to the IdP (OIDC token claims) when SSO is
   configured, falling back to an app-managed group table for email/password
   only. Separate from org_id (which is isolation, not sharing).
-- Team invitations + org switcher UI — the `organization` plugin supports
-  invites server-side; needs client-side invite flow + org-switcher dropdown
-  in the account menu. Personal-org users (the majority at launch) have one
-  org and never need to switch.
-- **PG LISTEN/NOTIFY cache invalidation for multi-instance:** the in-memory
-  `Map`s in `PostgresAgentRunner` (`threadCache`, `messageCache`, `eventsCache`)
-  are per-process. For horizontal scaling (multiple Next.js instances),
-  add a dedicated LISTEN connection that evicts cache entries on NOTIFY from
-  other instances. Keeps self-host at one dependency (PG). Redis only needed
-  if you go multi-region or add it for another reason (rate limiting, jobs).
-  Not needed for single-instance OSS deploys.
-- Email verification + conditional account linking security: when SMTP is
-  configured, enable email verification on signup and set
-  `requireLocalEmailVerified: true` (secure auto-linking). When SMTP is not
-  configured (common for self-hosters), keep `requireLocalEmailVerified: false`
-  (graceful fallback — `trustedProviders` mitigates the risk). Requires SMTP
-  env vars (`SMTP_URL`, etc.) + `sendVerificationEmail` callback + verification
-  callback page.
 - Account settings page (link/unlink providers): let signed-in users add
   password access to a social-only account, or link additional social providers
   to a password account. Better Auth supports this server-side via
@@ -481,14 +577,18 @@ strategy it uses so users know whether server-side session storage is required.
   or cross-statement `ROLLBACK`. The 5 skipped tests in `lib/agents/pg-runner.test.ts`
   cover these paths. A testcontainers-based integration suite would run them
   against a real PG container in CI.
+- Nonce-based CSP — current CSP uses `'unsafe-inline'` for scripts (pragmatic
+  v1). A nonce-based policy requires threading a per-request nonce through
+  Next's middleware + script tags — stronger XSS defense.
 
 ## Notes
 
 - Env changes require dev server restart — Next.js reads `.env.local` at boot
   and does not hot-reload env vars. After editing `.env.local`, stop the dev
   server (`Ctrl+C`) and run `npm run dev` again. Module-level `const X =
-  process.env.X === "true"` patterns in `proxy.ts` and `lib/auth/auth.ts` are
-  evaluated once at boot. Documented in `.env.example` + README Quick Start.
+  process.env.X === "true"` patterns in `proxy.ts`, `lib/auth/auth.ts`, and
+  `lib/net/safe-fetch.ts` are evaluated once at boot. Documented in
+  `.env.example` + README Quick Start.
 - Next.js 16 has breaking changes vs prior versions. Read docs in
   `node_modules/next/dist/docs/` before modifying framework-level code.
 - CopilotKit v2 API: import runtime from `@copilotkit/runtime/v2`, React components
