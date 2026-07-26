@@ -123,6 +123,16 @@ function LoginContent() {
               placeholder="Password"
               className="w-full rounded-lg border border-zinc-200 px-3 py-2 text-sm outline-none focus:border-blue-500 focus:ring-1 focus:ring-blue-500 dark:border-zinc-700 dark:bg-zinc-900 dark:text-zinc-50"
             />
+            {config?.emailVerification && (
+              <div className="text-right">
+                <Link
+                  href="/forgot-password"
+                  className="text-xs font-medium text-blue-600 hover:underline dark:text-blue-400"
+                >
+                  Forgot password?
+                </Link>
+              </div>
+            )}
             <button
               type="submit"
               disabled={loading}

@@ -16,6 +16,7 @@ A unified frontend for custom agents speaking the [AG-UI protocol](https://docs.
 - **Organizations** — every user gets a personal workspace on signup; agents and conversations are scoped to the workspace
 - **Roles & user management** — admin/member roles, first user is admin, ban/unban, set roles
 - **Per-user scoping** — each user only sees their own conversations within their active workspace
+- **Email verification + password reset** — optional, via Resend. When enabled, accounts require email verification before sign-in.
 - **Solo mode** — `AUTH_DISABLED=true` skips login entirely for single-user deployments
 - **Rate limiting** — two-layer (per-IP flood protection + per-user route limits) with concurrent SSE stream caps
 - **Error tracking** — optional Sentry integration (no-op when DSN is not set)
@@ -173,6 +174,30 @@ If a user signs up with email/password and later logs in via a social provider (
 
 Set `AUTH_DISABLED=true` to skip login entirely. Everyone is treated as the single admin. Useful for local dev or single-user self-hosted deployments where auth is unnecessary.
 
+### Email verification + password reset (optional)
+
+Email verification and password reset are **optional** and env-gated via [Resend](https://resend.com). When `RESEND_API_KEY` is set:
+
+- New email/password signups receive a verification link via email. Users must verify before they can sign in.
+- "Forgot password?" link appears on the login page — users can request a password reset email.
+- Social/OIDC login delegates verification to the provider (Google/GitHub/OIDC verify emails themselves).
+- `requireLocalEmailVerified: true` — prevents account-linking takeover (a social account can't auto-link to an unverified email/password account).
+
+When `RESEND_API_KEY` is **not** set (self-hosters without SMTP):
+- Accounts work immediately without verification.
+- Password reset is unavailable (the "Forgot password?" link is hidden).
+- `requireLocalEmailVerified: false` — trustedProviders mitigates the risk.
+
+**Setup:**
+1. Sign up at [resend.com](https://resend.com) (free tier: 3,000 emails/month)
+2. Verify your sending domain in Resend's dashboard
+3. Set the env vars:
+   ```bash
+   RESEND_API_KEY=re_xxxxx
+   EMAIL_FROM=noreply@yourdomain.com
+   ```
+4. Restart the server
+
 ## Architecture
 
 ```
@@ -232,6 +257,8 @@ See [`.env.example`](.env.example) for the full list with comments.
 | `GOOGLE_CLIENT_ID` / `GOOGLE_CLIENT_SECRET` | No | Google OAuth provider |
 | `GITHUB_CLIENT_ID` / `GITHUB_CLIENT_SECRET` | No | GitHub OAuth provider |
 | `OIDC_CLIENT_ID` / `OIDC_CLIENT_SECRET` / `OIDC_ISSUER` | No | External OIDC SSO (Keycloak, Authentik, Okta, Entra, etc.) |
+| `RESEND_API_KEY` | No | Resend API key. When set, enables email verification + password reset. |
+| `EMAIL_FROM` | No | Sender address for emails (e.g. `noreply@yourdomain.com`). Must be a verified domain in Resend. Defaults to `noreply@localhost`. |
 | `PG_POOL_MAX` | No | Max connections in the Postgres pool (default: `10`) |
 | `PG_CONNECT_TIMEOUT` | No | Postgres connection timeout in ms (default: `5000`) |
 | `POSTGRES_PASSWORD` | No (docker-compose only) | Postgres password (default: `postgres`) |
@@ -309,7 +336,6 @@ Error boundaries (`app/error.tsx` + `app/global-error.tsx`) call `Sentry.capture
 
 These are documented for transparency and will be addressed in future releases:
 
-- **No email verification / password reset** — email/password accounts are created without verification. If you need these, configure SMTP and enable Better Auth's email verification. Social/OIDC login delegates verification to the provider.
 - **No CSRF token on mutation routes** — the app relies on `sameSite=lax` session cookies (Better Auth default) and Better Auth's built-in CSRF protection on `/api/auth/*`. Mutation routes (`/api/agents`, `/api/threads`) are not behind an explicit CSRF token. This is acceptable for `sameSite=lax` but is not defense-in-depth.
 - **Single-instance cache** — the in-memory thread cache and rate-limit store are per-process. Multi-instance deployments (horizontal scaling) will see stale threads until a cache invalidation mechanism (PG `LISTEN/NOTIFY`) is added, and rate limits will be per-instance until a Redis-backed store is plugged in. Single-instance self-hosted deployments are unaffected.
 

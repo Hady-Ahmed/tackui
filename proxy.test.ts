@@ -172,9 +172,11 @@ describe("proxy — cookie gate (AUTH_DISABLED=false)", () => {
     expect(res.status).toBe(200);
   });
 
-  it("passes through public routes (login, signup)", async () => {
+  it("passes through public routes (login, signup, verify-email, forgot-password, reset-password)", async () => {
     mockGetSessionCookie.mockReturnValue(null);
-    const res = await proxy(makeRequest("/login", { ip: "1.2.3.4" }));
-    expect(res.status).toBe(200);
+    for (const route of ["/login", "/signup", "/verify-email", "/forgot-password", "/reset-password"]) {
+      const res = await proxy(makeRequest(route, { ip: "1.2.3.4" }));
+      expect(res.status).toBe(200);
+    }
   });
 });

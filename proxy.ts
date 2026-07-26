@@ -5,7 +5,7 @@ import { LIMITS } from "@/lib/ratelimit/limits";
 
 const AUTH_DISABLED = process.env.AUTH_DISABLED === "true";
 
-const PUBLIC_ROUTES = ["/login", "/signup"];
+const PUBLIC_ROUTES = ["/login", "/signup", "/verify-email", "/forgot-password", "/reset-password"];
 const AUTH_API_PREFIX = "/api/auth";
 const HEALTH_PREFIX = "/api/health";
 

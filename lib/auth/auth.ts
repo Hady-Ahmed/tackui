@@ -1,6 +1,8 @@
 import { betterAuth, type BetterAuthPlugin } from "better-auth";
 import { admin, genericOAuth, organization } from "better-auth/plugins";
 import { getPoolOrTestClient, query } from "@/lib/db/pg";
+import { EMAIL_ENABLED, sendEmail } from "@/lib/email/client";
+import { verificationEmail, passwordResetEmail } from "@/lib/email/templates";
 
 const AUTH_DISABLED = process.env.AUTH_DISABLED === "true";
 
@@ -72,7 +74,30 @@ export const auth = betterAuth({
   // secret value is irrelevant — Better Auth still needs a string at
   // init time. In auth mode the throw above guarantees a real secret.
   secret: BETTER_AUTH_SECRET ?? "solo-mode-no-sessions",
-  emailAndPassword: { enabled: true },
+  emailAndPassword: {
+    enabled: true,
+    // Require email verification before sign-in when SMTP is configured.
+    // When SMTP is not configured (self-hosters without Resend), this is
+    // false — accounts work immediately without verification.
+    requireEmailVerification: EMAIL_ENABLED,
+    // Send password reset email when SMTP is configured.
+    sendResetPassword: EMAIL_ENABLED
+      ? async ({ user, url }) => {
+          void sendEmail(user.email, passwordResetEmail(user, url));
+        }
+      : undefined,
+  },
+  // Email verification — only enabled when SMTP is configured.
+  // sendOnSignIn re-sends the verification email on each sign-in attempt
+  // if the user's email is unverified.
+  emailVerification: EMAIL_ENABLED
+    ? {
+        sendVerificationEmail: async ({ user, url }) => {
+          void sendEmail(user.email, verificationEmail(user, url));
+        },
+        sendOnSignIn: true,
+      }
+    : undefined,
   // Explicit rate limiting — replaces the silent default. Per-IP (no user
   // exists pre-login). In-memory storage (single-instance; for multi-
   // instance, switch to a Redis-backed custom storage).
@@ -90,7 +115,12 @@ export const auth = betterAuth({
     accountLinking: {
       enabled: true,
       trustedProviders: ["google", "github", "oidc"],
-      requireLocalEmailVerified: false,
+      // Require local email verification before auto-linking a social
+      // account to an existing email/password account. Prevents
+      // account-takeover via email pre-enumeration. When SMTP is not
+      // configured, this is false (graceful fallback — trustedProviders
+      // mitigates the risk).
+      requireLocalEmailVerified: EMAIL_ENABLED,
     },
   },
   plugins: buildPlugins(),
@@ -193,6 +223,10 @@ export function getEnabledProviders() {
       !!process.env.OIDC_CLIENT_SECRET &&
       !!process.env.OIDC_ISSUER,
     authDisabled: AUTH_DISABLED,
+    // Expose whether email verification + password reset are available.
+    // The client uses this to show "verify your email" prompts and
+    // "Forgot password?" links.
+    emailVerification: EMAIL_ENABLED,
     // When AUTH_DISABLED=true, the server treats every request as the
     // synthetic admin (see SYNTHETIC_ADMIN in lib/auth/context.ts). Expose
     // that same identity to the client via /api/auth/config so client

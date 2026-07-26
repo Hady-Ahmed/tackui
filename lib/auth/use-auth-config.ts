@@ -13,6 +13,7 @@ export interface AuthConfig {
   social: string[];
   oidc: boolean;
   authDisabled: boolean;
+  emailVerification: boolean;
   user: AuthConfigUser | null;
 }
 

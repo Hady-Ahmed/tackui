@@ -73,8 +73,11 @@ app/
   agents/page.tsx              # Admin UI — add/edit/delete agents + test connection + user management
   error.tsx                    # Route error boundary — render-crash recovery (centered card + Reload)
   global-error.tsx             # Root error boundary — catches layout-level failures (renders own <html>)
-  login/page.tsx               # Login (email/password + social + SSO) — validates redirect param (open-redirect fix)
-  signup/page.tsx              # Sign up (email/password + social + SSO)
+  login/page.tsx               # Login (email/password + social + SSO) — validates redirect param (open-redirect fix) + forgot password link
+  signup/page.tsx              # Sign up (email/password + social + SSO) — shows "check your email" when verification enabled
+  verify-email/page.tsx        # Email verification callback — reads ?token=, calls authClient.verifyEmail
+  forgot-password/page.tsx     # Password reset request — calls authClient.requestPasswordReset (anti-enumeration)
+  reset-password/page.tsx      # Password reset form — reads ?token=, calls authClient.resetPassword
   layout.tsx                   # Root layout — wraps app in CopilotKitProvider + FOUC-free theme init script
   page.tsx                     # Main chat page (client component)
   globals.css                  # Global styles + Tailwind (class-based dark mode via @custom-variant)
@@ -100,6 +103,10 @@ lib/
     migrations/                 # Versioned .sql files tracked in schema_migrations
       0001_init.sql             # Initial schema: agents, agent_runs, run_state, thread_messages, thread_metadata
       0002_org_id_not_null.sql  # Makes org_id NOT NULL (wipe-and-restart for existing deploys)
+  email/
+    client.ts                   # Resend SDK singleton + EMAIL_ENABLED flag + sendEmail() helper (no-op when RESEND_API_KEY unset)
+    templates.ts                # Email template builders — verificationEmail(), passwordResetEmail() (HTML + text)
+    templates.test.ts           # 9 tests — template rendering, URL inclusion, HTML escaping
   net/
     safe-fetch.ts               # SSRF guard — assertSafeUrl (blocks private IPs, ALLOW_PRIVATE_ENDPOINTS opt-in) + isPrivateIp (IPv4/IPv6 range checks)
     safe-fetch.test.ts          # 40 tests — private IP ranges, IPv6, IPv4-mapped, DNS resolution, bypass opt-in
@@ -363,6 +370,13 @@ Solo / no-auth mode:
   No other auth env vars needed. Useful for local dev or single-user
   self-hosted deployments.
 
+Email (optional — when set, enables email verification + password reset):
+
+- `RESEND_API_KEY` — Resend API key (get one at https://resend.com, free
+  tier: 3,000 emails/mo). When unset, email features are disabled entirely.
+- `EMAIL_FROM` — sender address (e.g. `noreply@yourdomain.com`). Must be a
+  verified domain in Resend. Defaults to `noreply@localhost`.
+
 ## Authentication
 
 Auth is powered by [Better Auth](https://better-auth.com) with:
@@ -605,17 +619,20 @@ strategy it uses so users know whether server-side session storage is required.
 - Error tracking — `@sentry/nextjs` integration (server + client + edge
   configs). No-op when `SENTRY_DSN` is not set. Error boundaries call
   `Sentry.captureException`. Trace sampling via `SENTRY_TRACES_SAMPLE_RATE`.
+- Email verification + password reset — env-gated via `RESEND_API_KEY`.
+  When set: `requireEmailVerification: true`, `requireLocalEmailVerified: true`,
+  `sendVerificationEmail` + `sendResetPassword` callbacks via Resend, `/verify-email`
+  callback page, `/forgot-password` + `/reset-password` flow pages, signup shows
+  "check your email" screen. When unset: graceful fallback (no verification,
+  accounts work immediately, forgot-password link hidden).
 
 ## Future (structured for easy upgrade)
 
 **SaaS launch track (the next concrete phase):**
 
-- **Email verification + password reset** — email/password accounts are
-  created without verification today. When SMTP is configured (Resend),
-  enable email verification on signup and set `requireLocalEmailVerified:
-  true` (secure auto-linking). Requires SMTP env vars (`RESEND_API_KEY`,
-  etc.) + `sendVerificationEmail` callback + verification callback page +
-  forgot-password flow.
+- **ToS / privacy pages** — required for SaaS that processes user
+  conversations (PII) and offers social login. Need `/terms` + `/privacy`
+  routes + cookie notice (esp. EU).
 - **PG LISTEN/NOTIFY cache invalidation for multi-instance:** the in-memory
   `Map`s in `PostgresAgentRunner` (`threadCache`, `messageCache`, `eventsCache`)
   are per-process. For horizontal scaling (multiple Next.js instances),

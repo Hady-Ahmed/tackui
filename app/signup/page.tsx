@@ -10,6 +10,7 @@ interface AuthConfig {
   social: string[];
   oidc: boolean;
   authDisabled: boolean;
+  emailVerification: boolean;
 }
 
 export default function SignupPage() {
@@ -20,6 +21,7 @@ export default function SignupPage() {
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
   const [config, setConfig] = useState<AuthConfig | null>(null);
+  const [showVerifyPrompt, setShowVerifyPrompt] = useState(false);
 
   useEffect(() => {
     fetch("/api/auth/config")
@@ -36,6 +38,11 @@ export default function SignupPage() {
     setLoading(false);
     if (result.error) {
       setError(result.error.message ?? "Sign up failed");
+    } else if (config?.emailVerification) {
+      // Email verification is enabled — show "check your email" screen
+      // instead of auto-logging in. The user must verify before they can
+      // sign in (requireEmailVerification: true).
+      setShowVerifyPrompt(true);
     } else {
       router.push("/");
       router.refresh();
@@ -52,6 +59,36 @@ export default function SignupPage() {
       router.push("/");
     }
   }, [config?.authDisabled, router]);
+
+  if (showVerifyPrompt) {
+    return (
+      <div className="flex min-h-screen items-center justify-center bg-zinc-50 px-4 dark:bg-black">
+        <div className="w-full max-w-sm space-y-4 text-center">
+          <div className="mx-auto flex h-12 w-12 items-center justify-center rounded-full bg-blue-100 text-blue-600 dark:bg-blue-950 dark:text-blue-400">
+            <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 16 16" fill="currentColor" className="h-6 w-6" aria-hidden="true">
+              <path d="M2.5 3.75A.75.75 0 0 1 3.25 3h9.5a.75.75 0 0 1 .75.75v8.5a.75.75 0 0 1-.75.75h-9.5a.75.75 0 0 1-.75-.75v-8.5ZM3.25 2A1.75 1.75 0 0 0 1.5 3.75v8.5c0 .966.784 1.75 1.75 1.75h9.5A1.75 1.75 0 0 0 14.5 12.25v-8.5A1.75 1.75 0 0 0 12.75 2h-9.5Z" />
+              <path d="M4 4.75A.75.75 0 0 1 4.75 4h6.5a.75.75 0 0 1 0 1.5h-6.5A.75.75 0 0 1 4 4.75ZM4 7a.75.75 0 0 1 .75-.75h6.5a.75.75 0 0 1 0 1.5h-6.5A.75.75 0 0 1 4 7Z" />
+            </svg>
+          </div>
+          <h1 className="text-xl font-semibold text-zinc-900 dark:text-zinc-50">
+            Check your email
+          </h1>
+          <p className="text-sm text-zinc-500 dark:text-zinc-400">
+            We sent a verification link to <strong>{email}</strong>.
+            Click the link to verify your email and activate your account.
+          </p>
+          <p className="text-xs text-zinc-400">
+            Didn&apos;t receive an email? Check your spam folder, or
+            {" "}
+            <Link href="/login" className="font-medium text-blue-600 hover:underline dark:text-blue-400">
+              try signing in
+            </Link>
+            {" "}to resend the verification email.
+          </p>
+        </div>
+      </div>
+    );
+  }
 
   return (
     <div className="flex min-h-screen items-center justify-center bg-zinc-50 px-4 dark:bg-black">
