@@ -259,12 +259,17 @@ Two-layer rate limiting protects the server from abuse and floods:
 
 **Concurrent SSE stream cap:**
 The `/api/copilotkit` route tracks in-flight **run** streams per user (not
-connect/info streams). The `isRunRequest` check in the route handler
-distinguishes runs from connects: any POST that is NOT to a `/connect`
-sub-path is a run. Only runs count toward the rate limit (20/min) and
-the concurrent cap (3). Connect streams (POST `/agent/*/connect`), info
-fetches (GET `/info`), and thread listing (GET `/threads`) are exempt —
-they're lightweight and needed for every page load.
+connect/info/stop streams). The `isRunRequest` check in the route handler
+distinguishes runs from control requests: a POST is a run only if it is
+NOT to a `/connect` or `/stop/` sub-path. Only runs count toward the rate
+limit (20/min) and the concurrent cap (3). Connect streams (POST
+`/agent/*/connect`), stop requests (POST `/agent/*/stop/<threadId>`), info
+fetches (GET `/info`), and thread listing (GET `/threads`) are exempt.
+Stop requests must be exempt — otherwise stopping a run at the
+3-concurrent cap tries to acquire a 4th slot and 429s, making the run
+unstoppable. The aborted run's own SSE stream close still fires
+`release()` via `wrapStreamWithRelease`, which is what actually
+decrements the counter.
 
 The `wrapStreamWithRelease()` helper (in `lib/ratelimit/stream-wrap.ts`)
 wraps the `Response` body `ReadableStream` so the concurrent-cap decrement
