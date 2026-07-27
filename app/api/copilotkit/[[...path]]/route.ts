@@ -28,20 +28,27 @@ async function handler(request: Request): Promise<Response> {
     let userId: string;
 
     // Determine if this is an actual agent RUN request vs. a
-    // connect/info/threads request. Only runs count toward the rate
+    // connect/info/threads/stop request. Only runs count toward the rate
     // limit and concurrent cap.
     //
     // CopilotKit POSTs to various sub-paths (e.g. /agent/agno/run),
-    // not just the base /api/copilotkit. The only long-lived POST
-    // that ISN'T a run is the connect stream (POST /agent/*/connect)
-    // — it listens for events on an existing connection, no new
-    // backend call. Everything else POST is a run.
+    // not just the base /api/copilotkit. The long-lived POSTs that
+    // AREN'T runs are:
+    //   - connect streams (POST /agent/*/connect) — listen for events
+    //     on an existing connection, no new backend call.
+    //   - stop requests (POST /agent/*/stop/<threadId>) — teardown
+    //     signal that aborts an existing run. Exempting these is
+    //     critical: otherwise stopping a run at the 3-concurrent cap
+    //     tries to acquire a 4th slot and 429s, making the run
+    //     unstoppable.
+    // Everything else POST is a run.
     //
     // Non-run requests are still protected by the per-IP global
     // flood limit (300/min) in proxy.ts.
     const url = new URL(request.url);
-    const isConnectRequest = url.pathname.includes("/connect");
-    const isRunRequest = request.method === "POST" && !isConnectRequest;
+    const isControlRequest =
+      url.pathname.includes("/connect") || url.pathname.includes("/stop/");
+    const isRunRequest = request.method === "POST" && !isControlRequest;
 
     if (!isAuthDisabled()) {
       const user = await getRequestUser(request);
