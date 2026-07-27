@@ -7,6 +7,7 @@ import {
   type RateLimitResult,
 } from "./store";
 import { LIMITS, type LimitName } from "./limits";
+import { isAuthDisabled } from "@/lib/auth/auth";
 
 /**
  * Build a 429 Too Many Requests response with standard rate-limit headers.
@@ -64,6 +65,9 @@ export function checkUserLimit(
   identifier: string,
   limitName: LimitName,
 ): NextResponse | null {
+  // Solo mode (AUTH_DISABLED=true): per-user limits are not enforced.
+  // Per-IP flood protection from proxy.ts still applies.
+  if (isAuthDisabled()) return null;
   const limit = LIMITS[limitName];
   if (!("windowMs" in limit)) return null; // concurrent limits use checkConcurrent below
   const key = `${limitName}:${identifier}`;
@@ -96,6 +100,8 @@ export function acquireConcurrent(
   identifier: string,
   limitName: LimitName,
 ): NextResponse | (() => void) {
+  // Solo mode (AUTH_DISABLED=true): concurrent cap is not enforced.
+  if (isAuthDisabled()) return () => {};
   const limit = LIMITS[limitName];
   if (!("max" in limit) || "windowMs" in limit) return () => {}; // not a concurrent limit
   const key = `${limitName}:${identifier}`;

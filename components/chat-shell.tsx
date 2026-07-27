@@ -25,6 +25,7 @@ export function ChatShell() {
     if (typeof window === "undefined") return false;
     return localStorage.getItem("sidebarCollapsed") === "true";
   });
+  const [runError, setRunError] = useState<string | null>(null);
 
   // Show the empty-state CTA to org owners/admins OR in solo mode.
   const canManageAgents_ = canManage === true || (config?.authDisabled ?? false);
@@ -60,14 +61,17 @@ export function ChatShell() {
   const handleSelectAgent = useCallback((id: string) => {
     setActiveAgent(id);
     setActiveThreadId(crypto.randomUUID());
+    setRunError(null);
   }, []);
 
   const handleNewChat = useCallback(() => {
     setActiveThreadId(crypto.randomUUID());
+    setRunError(null);
   }, []);
 
   const handleSelectThread = useCallback((threadId: string) => {
     setActiveThreadId(threadId);
+    setRunError(null);
   }, []);
 
   const toggleSidebar = useCallback(() => {
@@ -93,9 +97,26 @@ export function ChatShell() {
       <main className="flex flex-1 flex-col overflow-hidden">
         {activeAgent ? (
           <>
+            {runError && (
+              <div className="mx-4 mt-4 flex items-start justify-between gap-3 rounded-lg border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-700 dark:border-red-900 dark:bg-red-950 dark:text-red-300">
+                <span>{runError}</span>
+                <button
+                  type="button"
+                  onClick={() => setRunError(null)}
+                  aria-label="Dismiss"
+                  className="shrink-0 text-red-500 hover:text-red-700 dark:text-red-400 dark:hover:text-red-200"
+                >
+                  x
+                </button>
+              </div>
+            )}
             <HitlHandlers agentId={activeAgent} />
             <ToolRenders agentId={activeAgent} />
-            <AgentChat agentId={activeAgent} threadId={activeThreadId} />
+            <AgentChat
+              agentId={activeAgent}
+              threadId={activeThreadId}
+              onRunError={setRunError}
+            />
           </>
         ) : hasLoaded ? (
           <div className="flex flex-1 flex-col items-center justify-center gap-4 text-center">
@@ -127,7 +148,15 @@ export function ChatShell() {
   );
 }
 
-function AgentChat({ agentId, threadId }: { agentId: string; threadId: string }) {
+function AgentChat({
+  agentId,
+  threadId,
+  onRunError,
+}: {
+  agentId: string;
+  threadId: string;
+  onRunError: (msg: string | null) => void;
+}) {
   const { copilotkit } = useCopilotKit();
 
   useEffect(() => {
@@ -143,6 +172,33 @@ function AgentChat({ agentId, threadId }: { agentId: string; threadId: string })
       agentId={agentId}
       threadId={threadId}
       className="flex-1"
+      onError={(event) => {
+        // CopilotChat's onError is a union: either the AG-UI error event
+        // ({ error, code, context }) or a passthrough React SyntheticEvent.
+        // Discriminate: the AG-UI event carries an `error` field (an Error).
+        if (!("error" in event)) return;
+        const error = event.error;
+        // Ignore user-initiated cancels and empty aborts.
+        const msg = error?.message ?? "";
+        if (
+          error?.name === "AbortError" ||
+          msg === "Fetch is aborted" ||
+          msg === "signal is aborted without reason" ||
+          msg === "component unmounted" ||
+          msg === ""
+        ) {
+          return;
+        }
+        // Only surface HTTP 429s in the UI (concurrent cap + 20/min run limit).
+        const status = (error as Error & { status?: number }).status;
+        if (status !== 429) return;
+        const payload = (error as Error & { payload?: unknown }).payload;
+        const serverMsg =
+          payload && typeof payload === "object" && "error" in payload
+            ? String((payload as { error: unknown }).error)
+            : msg;
+        onRunError(serverMsg || "Too many requests. Try again shortly.");
+      }}
     />
   );
 }

@@ -10,8 +10,8 @@ export const LIMITS = {
   copilotkit: { max: 20, windowMs: 60_000 },
   /** Per-user: concurrent in-flight SSE streams. 3 at a time. */
   copilotkitConcurrent: { max: 3 },
-  /** Per-user: reachability probe (outbound fetch). 10/min. */
-  reachabilityProbe: { max: 10, windowMs: 60_000 },
+  /** Per-user: reachability probe (outbound fetch). 30/min. */
+  reachabilityProbe: { max: 30, windowMs: 60_000 },
   /** Per-user: agent mutations (POST/PATCH/DELETE /api/agents). 10/min. */
   agentMutate: { max: 10, windowMs: 60_000 },
   /** Per-user: agent reads (GET /api/agents). 60/min. */

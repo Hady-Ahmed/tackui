@@ -1,4 +1,13 @@
-import { describe, it, expect, beforeEach } from "vitest";
+import { describe, it, expect, beforeEach, vi } from "vitest";
+
+// The middleware reads isAuthDisabled() at call time. The test env sets
+// AUTH_DISABLED=true (vitest.setup.ts), which would short-circuit all
+// limits to "allow". Mock it to false so the tests exercise the real
+// rate-limit / concurrent-cap logic.
+vi.mock("@/lib/auth/auth", () => ({
+  isAuthDisabled: () => false,
+}));
+
 import {
   rateLimitResponse,
   concurrentLimitResponse,

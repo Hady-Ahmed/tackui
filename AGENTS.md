@@ -247,7 +247,7 @@ Two-layer rate limiting protects the server from abuse and floods:
 | Route | Limit | Concurrent |
 | --- | --- | --- |
 | `/api/copilotkit/*` (POST runs only) | 20/min per user | 3 concurrent run streams per user |
-| `/api/agents/reachability-probe` | 10/min per user | — |
+| `/api/agents/reachability-probe` | 30/min per user | — |
 | `/api/agents` POST + `/api/agents/[id]` PATCH/DELETE | 10/min per user | — |
 | `/api/agents` GET + `/api/agents/[id]` GET | 60/min per user | — |
 | `/api/threads/[id]` PATCH/DELETE | 30/min per user | — |
@@ -274,8 +274,12 @@ manual cleanup needed in route code. When a user exceeds the concurrent cap
 which surfaces in the CopilotKit chat UI.
 
 **Solo mode (`AUTH_DISABLED=true`):** Per-user limits are not enforced
-(everyone is `id: "local"`). Per-IP flood protection from `proxy.ts` still
-applies.
+(everyone is `id: "local"`). This applies to **all** per-user limits —
+the copilotkit run/concurrent caps, agent mutations, agent reads, thread
+mutations, reachability probe, and the can-manage-agents check. The guard
+is centralized in `checkUserLimit()` / `acquireConcurrent()` in
+`lib/ratelimit/middleware.ts` (not in each route handler). Per-IP flood
+protection from `proxy.ts` still applies.
 
 **429 responses** include standard `X-RateLimit-Limit`,
 `X-RateLimit-Remaining`, `X-RateLimit-Reset`, and `Retry-After` headers.
