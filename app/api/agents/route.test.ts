@@ -19,7 +19,8 @@ vi.mock("@/lib/ratelimit/middleware", () => ({
 }));
 
 import { GET, POST } from "./route";
-import { listAgents, deleteAgent } from "@/lib/agents/agent-store";
+import { listAgents, deleteAgent, createAgent } from "@/lib/agents/agent-store";
+import type { CreateAgentInput } from "@/lib/agents/agent-store";
 import { getSyntheticAdmin } from "@/lib/auth/context";
 import { runMigrations } from "@/lib/db/migrate";
 import { assertSafeUrl, UnsafeUrlError } from "@/lib/net/safe-fetch";
@@ -40,7 +41,13 @@ beforeEach(async () => {
 });
 
 const validBody = {
-  id: "test-agent",
+  name: "Test Agent",
+  description: "A test agent",
+  kind: "agui",
+  endpoint: "http://localhost:8000/agent",
+};
+
+const validInput: CreateAgentInput = {
   name: "Test Agent",
   description: "A test agent",
   kind: "agui",
@@ -66,7 +73,8 @@ describe("GET /api/agents", () => {
     const res = await GET();
     const data = await res.json();
     expect(data).toHaveLength(1);
-    expect(data[0].id).toBe("test-agent");
+    expect(data[0].name).toBe("Test Agent");
+    expect(data[0].id).toMatch(/^[0-9a-f]{12}$/);
   });
 
   it("returns 429 when rate limited", async () => {
@@ -79,7 +87,7 @@ describe("GET /api/agents", () => {
 });
 
 describe("POST /api/agents", () => {
-  it("creates an agent and returns 201", async () => {
+  it("creates an agent and returns 201 with a server-generated id", async () => {
     const res = await POST(
       new Request("http://localhost/api/agents", {
         method: "POST",
@@ -89,8 +97,25 @@ describe("POST /api/agents", () => {
     );
     expect(res.status).toBe(201);
     const data = await res.json();
-    expect(data.id).toBe("test-agent");
+    expect(data.id).toMatch(/^[0-9a-f]{12}$/);
     expect(data.name).toBe("Test Agent");
+    // `id` is not accepted from the client — it's server-generated.
+    expect(validBody).not.toHaveProperty("id");
+  });
+
+  it("ignores `id` if the client sends it (defense-in-depth)", async () => {
+    const res = await POST(
+      new Request("http://localhost/api/agents", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ ...validBody, id: "attacker-supplied" }),
+      }),
+    );
+    expect(res.status).toBe(201);
+    const data = await res.json();
+    // Server generated a fresh id; the client-supplied one was ignored.
+    expect(data.id).toMatch(/^[0-9a-f]{12}$/);
+    expect(data.id).not.toBe("attacker-supplied");
   });
 
   it("returns 400 for invalid body (bad endpoint)", async () => {
@@ -128,14 +153,14 @@ describe("POST /api/agents", () => {
     expect(res.status).toBe(400);
   });
 
-  it("returns 409 for duplicate ID", async () => {
-    await POST(
-      new Request("http://localhost/api/agents", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(validBody),
-      }),
-    );
+  it("creates two agents with the same name in different orgs without collision", async () => {
+    // Regression test for the auth-on → auth-off phantom-collision bug.
+    // Pre-create an agent directly in another org (simulating the agent
+    // left behind from a prior auth-on session). POSTing from the test
+    // user's org must still succeed — the composite PK allows same-id
+    // across orgs, and ids are random anyway.
+    await createAgent(validInput, "other-org-id");
+
     const res = await POST(
       new Request("http://localhost/api/agents", {
         method: "POST",
@@ -143,9 +168,9 @@ describe("POST /api/agents", () => {
         body: JSON.stringify(validBody),
       }),
     );
-    expect(res.status).toBe(409);
+    expect(res.status).toBe(201);
     const data = await res.json();
-    expect(data.error).toContain("already exists");
+    expect(data.id).toMatch(/^[0-9a-f]{12}$/);
   });
 
   it("returns 400 when SSRF guard rejects the endpoint", async () => {

@@ -2,7 +2,7 @@ import { NextResponse } from "next/server";
 import {
   listAgents,
   createAgent,
-  agentEntrySchema,
+  createAgentBodySchema,
   toPublicAgents,
   toPublicAgent,
 } from "@/lib/agents/agent-store";
@@ -44,7 +44,7 @@ export async function POST(request: Request) {
     return NextResponse.json({ error: "Invalid JSON body" }, { status: 400 });
   }
 
-  const parsed = agentEntrySchema.safeParse(body);
+  const parsed = createAgentBodySchema.safeParse(body);
   if (!parsed.success) {
     return NextResponse.json(
       { error: "Validation failed", details: parsed.error.flatten() },
@@ -65,16 +65,23 @@ export async function POST(request: Request) {
   }
 
   try {
-    // Platform admin creates in their own org (or can override later).
-    // For now, agents are created in the admin's active org.
+    // The agent `id` is server-generated (never client-supplied) — see
+    // generateAgentId in lib/agents/agent-store.ts. With the composite
+    // PK `(id, org_id)` and 48-bit random ids, a 23505 here is a real
+    // bug (not a retryable race) — log it loudly.
     const created = await createAgent(parsed.data, user.orgId);
     return NextResponse.json(toPublicAgent(created), { status: 201 });
   } catch (err) {
-    // PG unique-violation SQLSTATE = 23505
+    // PG unique-violation SQLSTATE = 23505. Should be effectively
+    // impossible with random ids; if it fires, surface the error rather
+    // than masking it as a user-facing "already exists".
     if ((err as { code?: string }).code === "23505") {
+      console.error("[agents] unexpected 23505 on create (random id collision?)", {
+        orgId: user.orgId,
+      });
       return NextResponse.json(
-        { error: `Agent with id "${parsed.data.id}" already exists` },
-        { status: 409 },
+        { error: "Failed to generate a unique agent id. Please retry." },
+        { status: 500 },
       );
     }
     const message = err instanceof Error ? err.message : "Unknown error";

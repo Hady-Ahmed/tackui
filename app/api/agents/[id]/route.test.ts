@@ -27,13 +27,15 @@ import { checkUserLimit } from "@/lib/ratelimit/middleware";
 import { NextResponse } from "next/server";
 
 let testOrg: string;
+// The id of the agent created in beforeEach — used as the URL path param
+// throughout. Server-generated, so we must capture it at runtime.
+let agentId: string;
 
 async function cleanup() {
   for (const a of await listAgents(testOrg, { bypassOrgScope: true })) await deleteAgent(a.id, testOrg, { bypassOrgScope: true });
 }
 
 const validInput: CreateAgentInput = {
-  id: "test-agent",
   name: "Test Agent",
   description: "A test agent",
   kind: "agui",
@@ -48,7 +50,8 @@ beforeEach(async () => {
   await runMigrations();
   testOrg = (await getSyntheticAdmin()).orgId;
   await cleanup();
-  await createAgent(validInput, testOrg);
+  const created = await createAgent(validInput, testOrg);
+  agentId = created.id;
   vi.mocked(assertSafeUrl).mockClear();
   vi.mocked(assertSafeUrl).mockResolvedValue(undefined);
   vi.mocked(checkUserLimit).mockClear();
@@ -58,12 +61,13 @@ beforeEach(async () => {
 describe("GET /api/agents/[id]", () => {
   it("returns 200 for existing agent", async () => {
     const res = await GET(
-      new Request("http://localhost/api/agents/test-agent"),
-      makeParams("test-agent"),
+      new Request(`http://localhost/api/agents/${agentId}`),
+      makeParams(agentId),
     );
     expect(res.status).toBe(200);
     const data = await res.json();
-    expect(data.id).toBe("test-agent");
+    expect(data.id).toBe(agentId);
+    expect(data.name).toBe("Test Agent");
   });
 
   it("returns 404 for missing agent", async () => {
@@ -79,8 +83,8 @@ describe("GET /api/agents/[id]", () => {
       NextResponse.json({ error: "Rate limit exceeded" }, { status: 429 }),
     );
     const res = await GET(
-      new Request("http://localhost/api/agents/test-agent"),
-      makeParams("test-agent"),
+      new Request(`http://localhost/api/agents/${agentId}`),
+      makeParams(agentId),
     );
     expect(res.status).toBe(429);
   });
@@ -89,30 +93,47 @@ describe("GET /api/agents/[id]", () => {
 describe("PATCH /api/agents/[id]", () => {
   it("updates name and returns 200", async () => {
     const res = await PATCH(
-      new Request("http://localhost/api/agents/test-agent", {
+      new Request(`http://localhost/api/agents/${agentId}`, {
         method: "PATCH",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ name: "Renamed" }),
       }),
-      makeParams("test-agent"),
+      makeParams(agentId),
     );
     expect(res.status).toBe(200);
     const data = await res.json();
     expect(data.name).toBe("Renamed");
+    expect(data.id).toBe(agentId);
   });
 
   it("updates endpoint", async () => {
     const res = await PATCH(
-      new Request("http://localhost/api/agents/test-agent", {
+      new Request(`http://localhost/api/agents/${agentId}`, {
         method: "PATCH",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ endpoint: "http://localhost:9000/new" }),
       }),
-      makeParams("test-agent"),
+      makeParams(agentId),
     );
     expect(res.status).toBe(200);
     const data = await res.json();
     expect(data.endpoint).toBe("http://localhost:9000/new");
+  });
+
+  it("ignores `id` in the PATCH body (id comes from the URL only)", async () => {
+    const res = await PATCH(
+      new Request(`http://localhost/api/agents/${agentId}`, {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ id: "attacker-supplied", name: "Hacked" }),
+      }),
+      makeParams(agentId),
+    );
+    expect(res.status).toBe(200);
+    const data = await res.json();
+    expect(data.id).toBe(agentId);
+    expect(data.id).not.toBe("attacker-supplied");
+    expect(data.name).toBe("Hacked");
   });
 
   it("returns 404 for missing agent", async () => {
@@ -129,24 +150,24 @@ describe("PATCH /api/agents/[id]", () => {
 
   it("returns 400 for invalid patch (bad kind)", async () => {
     const res = await PATCH(
-      new Request("http://localhost/api/agents/test-agent", {
+      new Request(`http://localhost/api/agents/${agentId}`, {
         method: "PATCH",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ kind: "openai" }),
       }),
-      makeParams("test-agent"),
+      makeParams(agentId),
     );
     expect(res.status).toBe(400);
   });
 
   it("returns 400 for invalid JSON", async () => {
     const res = await PATCH(
-      new Request("http://localhost/api/agents/test-agent", {
+      new Request(`http://localhost/api/agents/${agentId}`, {
         method: "PATCH",
         headers: { "Content-Type": "application/json" },
         body: "not json",
       }),
-      makeParams("test-agent"),
+      makeParams(agentId),
     );
     expect(res.status).toBe(400);
   });
@@ -156,20 +177,20 @@ describe("PATCH /api/agents/[id]", () => {
       new UnsafeUrlError("hostname resolves to a private address"),
     );
     const res = await PATCH(
-      new Request("http://localhost/api/agents/test-agent", {
+      new Request(`http://localhost/api/agents/${agentId}`, {
         method: "PATCH",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ endpoint: "http://169.254.169.254/" }),
       }),
-      makeParams("test-agent"),
+      makeParams(agentId),
     );
     expect(res.status).toBe(400);
     const data = await res.json();
     expect(data.error).toContain("private or internal address");
     // Endpoint was not updated
     const getRes = await GET(
-      new Request("http://localhost/api/agents/test-agent"),
-      makeParams("test-agent"),
+      new Request(`http://localhost/api/agents/${agentId}`),
+      makeParams(agentId),
     );
     const agent = await getRes.json();
     expect(agent.endpoint).toBe("http://localhost:8000/agent");
@@ -177,12 +198,12 @@ describe("PATCH /api/agents/[id]", () => {
 
   it("does not call the SSRF guard when endpoint is not in the patch", async () => {
     const res = await PATCH(
-      new Request("http://localhost/api/agents/test-agent", {
+      new Request(`http://localhost/api/agents/${agentId}`, {
         method: "PATCH",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ name: "Just Renamed" }),
       }),
-      makeParams("test-agent"),
+      makeParams(agentId),
     );
     expect(res.status).toBe(200);
     expect(assertSafeUrl).not.toHaveBeenCalled();
@@ -193,12 +214,12 @@ describe("PATCH /api/agents/[id]", () => {
       NextResponse.json({ error: "Rate limit exceeded" }, { status: 429 }),
     );
     const res = await PATCH(
-      new Request("http://localhost/api/agents/test-agent", {
+      new Request(`http://localhost/api/agents/${agentId}`, {
         method: "PATCH",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ name: "X" }),
       }),
-      makeParams("test-agent"),
+      makeParams(agentId),
     );
     expect(res.status).toBe(429);
   });
@@ -207,10 +228,10 @@ describe("PATCH /api/agents/[id]", () => {
 describe("DELETE /api/agents/[id]", () => {
   it("deletes an agent and returns 204", async () => {
     const res = await DELETE(
-      new Request("http://localhost/api/agents/test-agent", {
+      new Request(`http://localhost/api/agents/${agentId}`, {
         method: "DELETE",
       }),
-      makeParams("test-agent"),
+      makeParams(agentId),
     );
     expect(res.status).toBe(204);
   });
@@ -226,17 +247,14 @@ describe("DELETE /api/agents/[id]", () => {
   });
 
   it("returns 429 when rate limited", async () => {
-    // Need to recreate the agent since DELETE removes it in beforeEach's
-    // cleanup is not the issue — it's created in beforeEach. But the 429
-    // fires before the delete, so the agent still exists.
     vi.mocked(checkUserLimit).mockReturnValueOnce(
       NextResponse.json({ error: "Rate limit exceeded" }, { status: 429 }),
     );
     const res = await DELETE(
-      new Request("http://localhost/api/agents/test-agent", {
+      new Request(`http://localhost/api/agents/${agentId}`, {
         method: "DELETE",
       }),
-      makeParams("test-agent"),
+      makeParams(agentId),
     );
     expect(res.status).toBe(429);
   });

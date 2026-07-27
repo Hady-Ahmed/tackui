@@ -3,14 +3,12 @@ import {
   getAgent,
   updateAgent,
   deleteAgent,
-  agentEntrySchema,
+  updateAgentBodySchema,
   toPublicAgent,
 } from "@/lib/agents/agent-store";
 import { getCurrentUser, canManageAgents } from "@/lib/auth/context";
 import { assertSafeUrl, UnsafeUrlError } from "@/lib/net/safe-fetch";
 import { checkUserLimit } from "@/lib/ratelimit/middleware";
-
-const partialSchema = agentEntrySchema.partial();
 
 const SSRF_MESSAGE =
   "Endpoint resolves to a private or internal address. " +
@@ -58,7 +56,7 @@ export async function PATCH(
     return NextResponse.json({ error: "Invalid JSON body" }, { status: 400 });
   }
 
-  const parsed = partialSchema.safeParse(body);
+  const parsed = updateAgentBodySchema.safeParse(body);
   if (!parsed.success) {
     return NextResponse.json(
       { error: "Validation failed", details: parsed.error.flatten() },

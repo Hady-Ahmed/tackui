@@ -1,20 +1,46 @@
+import { randomUUID } from "node:crypto";
 import { query } from "@/lib/db/pg";
 import { z } from "zod";
 import type { AgentEntry, AgentKind, PublicAgent } from "./agents.config";
 const agentKindSchema = z.enum(["langgraph", "agno", "agui"]);
 
-export const agentEntrySchema = z.object({
-  id: z.string().min(1).max(64).regex(/^[a-z0-9-]+$/, "id must be lowercase kebab-case"),
+// Shared field definitions — used by the create + update input schemas
+// below. `id` is intentionally absent: it is server-generated on create
+// (see generateAgentId) and comes from the URL path param on update.
+const fieldShapes = {
   name: z.string().min(1).max(100),
   description: z.string().max(300),
   kind: agentKindSchema,
   endpoint: z.string().url(),
   graphId: z.string().optional(),
   langsmithApiKey: z.string().optional(),
-});
+};
 
-export type CreateAgentInput = z.infer<typeof agentEntrySchema>;
-export type UpdateAgentInput = Partial<CreateAgentInput>;
+/**
+ * Body schema for POST /api/agents. `id` is never accepted from the
+ * client — the server generates it. If a client sends `id`, zod's
+ * default `.strip()` behavior drops unknown keys, so it's ignored.
+ */
+export const createAgentBodySchema = z.object(fieldShapes);
+export type CreateAgentInput = z.infer<typeof createAgentBodySchema>;
+
+/**
+ * Body schema for PATCH /api/agents/[id]. All fields optional; `id`
+ * is never accepted (comes from the URL path param).
+ */
+export const updateAgentBodySchema = z.object(fieldShapes).partial();
+export type UpdateAgentInput = z.infer<typeof updateAgentBodySchema>;
+
+/**
+ * Internal schema used to validate a fully-merged agent row before
+ * persisting (in updateAgent). Includes `id` because it's part of the
+ * row, but `id` here comes from the URL param / existing row — never
+ * from client input.
+ */
+const agentRowSchema = z.object({
+  id: z.string().min(1).max(64),
+  ...fieldShapes,
+});
 
 interface AgentRow {
   id: string;
@@ -64,8 +90,30 @@ export function toPublicAgents(entries: AgentEntry[]): PublicAgent[] {
 }
 
 /**
+ * Generate a random 12-char lowercase hex agent id.
+ *
+ * 48 bits of entropy — birthday-collision threshold is ~16M rows per
+ * org, far beyond any realistic deploy. Combined with the composite
+ * PK `(id, org_id)` (migration 0003), collisions on INSERT are
+ * effectively impossible; the 23505 catch in the route handler is a
+ * loud-error safety net, not a retry path.
+ *
+ * Uses crypto.randomUUID() (zero new deps). Hex chars are URL-safe.
+ */
+export function generateAgentId(): string {
+  return randomUUID().replace(/-/g, "").slice(0, 12);
+}
+
+/**
  * List agents scoped to an org. Platform admins (role === "admin") bypass
  * the org filter to see/manage all agents across orgs.
+ *
+ * NOTE: `bypassOrgScope` is currently test-only (cleanup loops). It is
+ * scaffolding for a future platform-admin "manage agents across orgs"
+ * feature in the org-switcher track. No production caller passes it.
+ * Kept here so the composite PK `(id, org_id)` migration doesn't churn
+ * test plumbing — `DELETE WHERE id = $1` still works (deletes across
+ * orgs, which is what cleanup wants).
  */
 export async function listAgents(
   orgId: string,
@@ -114,18 +162,19 @@ export async function getAgent(
 /**
  * Create an agent. The orgId is server-stamped from the session, never
  * from the client body (the client cannot control which org an agent
- * belongs to).
+ * belongs to). The `id` is server-generated (never client-supplied).
  */
 export async function createAgent(
   input: CreateAgentInput,
   orgId: string,
 ): Promise<AgentEntry> {
+  const id = generateAgentId();
   const result = await query<AgentRow>(
     `INSERT INTO agents (id, name, description, kind, endpoint, org_id, graph_id, langsmith_api_key)
      VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
      RETURNING id, name, description, kind, endpoint, org_id, graph_id, langsmith_api_key`,
     [
-      input.id,
+      id,
       input.name,
       input.description,
       input.kind,
@@ -140,7 +189,8 @@ export async function createAgent(
 
 /**
  * Update an agent scoped to an org. Platform admins can bypass the org
- * filter to update agents in any org.
+ * filter to update agents in any org. The `id` comes from the URL path
+ * param (never from the patch body).
  */
 export async function updateAgent(
   id: string,
@@ -150,8 +200,17 @@ export async function updateAgent(
 ): Promise<AgentEntry | null> {
   const existing = await getAgent(id, orgId, opts);
   if (!existing) return null;
-  const merged = { ...existing, ...patch, id, orgId: existing.orgId };
-  const parsed = agentEntrySchema.parse(merged);
+  const merged = {
+    id,
+    name: existing.name,
+    description: existing.description,
+    kind: existing.kind,
+    endpoint: existing.endpoint,
+    graphId: existing.graphId,
+    langsmithApiKey: existing.langsmithApiKey,
+    ...patch,
+  };
+  const parsed = agentRowSchema.parse(merged);
   if (opts?.bypassOrgScope) {
     const result = await query<AgentRow>(
       `UPDATE agents

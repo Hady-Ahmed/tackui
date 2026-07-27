@@ -85,7 +85,7 @@ app/
 lib/
   agents/
     agents.config.ts           # AgentEntry / AgentKind / PublicAgent types (no runtime config)
-    agent-store.ts             # Async CRUD for agents table (zod-validated, pg.Pool-backed) + toPublicAgent/toPublicAgents (strips langsmithApiKey)
+    agent-store.ts             # Async CRUD for agents table (zod-validated, pg.Pool-backed) + generateAgentId (random 12-char hex) + toPublicAgent/toPublicAgents (strips langsmithApiKey)
     registry.ts                # getAgents() factory — reads DB, builds agents map (async)
     pg-runner.ts               # PostgresAgentRunner — AgentRunner impl with thread endpoints + smart-replay connect() (RUN_ERROR filtering) + in-memory cache bridging sync interface to async PG
     runner-instance.ts         # Shared runner singleton (used by runtime + thread API)
@@ -103,6 +103,7 @@ lib/
     migrations/                 # Versioned .sql files tracked in schema_migrations
       0001_init.sql             # Initial schema: agents, agent_runs, run_state, thread_messages, thread_metadata
       0002_org_id_not_null.sql  # Makes org_id NOT NULL (wipe-and-restart for existing deploys)
+      0003_agent_id_org_scoped.sql # Composite PK (id, org_id) — same id can exist in different orgs
   email/
     client.ts                   # Resend SDK singleton + EMAIL_ENABLED flag + sendEmail() helper (no-op when RESEND_API_KEY unset)
     templates.ts                # Email template builders — verificationEmail(), passwordResetEmail() (HTML + text)
@@ -158,7 +159,6 @@ Via the admin UI (`/agents` page → "Add agent" form) or `POST /api/agents` wit
 
 ```json
 {
-  "id": "research",
   "name": "Research Agent",
   "description": "LangGraph-powered web research assistant",
   "kind": "agui",
@@ -167,6 +167,10 @@ Via the admin UI (`/agents` page → "Add agent" form) or `POST /api/agents` wit
 ```
 
 Optional fields: `graphId` (langgraph only), `langsmithApiKey` (langgraph only).
+
+`id` is **server-generated** (12-char random hex) — never send it in the
+POST body. The response includes the generated `id`, which you use in
+PATCH/DELETE URLs. The id is immutable after creation.
 
 > **Secret handling:** `langsmithApiKey` is **write-only** — accepted on
 > POST/PATCH but never returned in GET responses. The API exposes a
@@ -323,19 +327,29 @@ After running migrations, add an agent via the admin UI (`/agents`) or REST:
 #
 # If the endpoint is on localhost or a private IP, set ALLOW_PRIVATE_ENDPOINTS=true
 # first — the SSRF guard on POST/PATCH will 400 otherwise.
+#
+# `id` is server-generated (12-char random hex) — do NOT send it in the body.
+# The response includes the generated `id`, which you use in PATCH/DELETE URLs.
 curl -X POST http://localhost:3000/api/agents \
   -H 'Content-Type: application/json' \
-  -d '{"id":"test","name":"Test","description":"smoke test","kind":"agui","endpoint":"http://localhost:8000/agent"}'
+  -d '{"name":"Test","description":"smoke test","kind":"agui","endpoint":"http://localhost:8000/agent"}'
+# → 201 { "id": "a1b2c3d4e5f6", "name": "Test", ... }
 
 curl http://localhost:3000/api/agents                 # list
-curl -X PATCH http://localhost:3000/api/agents/test \
+curl -X PATCH http://localhost:3000/api/agents/a1b2c3d4e5f6 \
   -H 'Content-Type: application/json' \
-  -d '{"name":"Renamed"}'                              # update
-curl -X DELETE http://localhost:3000/api/agents/test   # delete
+  -d '{"name":"Renamed"}'                              # update (id from URL)
+curl -X DELETE http://localhost:3000/api/agents/a1b2c3d4e5f6   # delete
 ```
 
-`description` is required (zod-validated). `id` must be lowercase kebab-case
-and is immutable after creation.
+`description` is required (zod-validated). `id` is server-generated
+(12-char random hex via `crypto.randomUUID()`, see `generateAgentId` in
+`lib/agents/agent-store.ts`), never client-supplied, and immutable after
+creation. The PK is composite `(id, org_id)` (migration 0003) — the same
+id can exist in different orgs (matches the app-level org scoping on
+every query). 48 bits of entropy makes intra-org collisions effectively
+impossible; the 23505 catch in the POST handler is a loud-error safety
+net, not a retry path.
 
 ## Environment Variables
 

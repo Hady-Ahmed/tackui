@@ -22,9 +22,9 @@ afterEach(async () => {
 });
 
 describe("runMigrations", () => {
-  it("applies 0001_init.sql and 0002_org_id_not_null.sql, creates all expected tables", async () => {
+  it("applies 0001_init.sql, 0002_org_id_not_null.sql, 0003_agent_id_org_scoped.sql, creates all expected tables", async () => {
     const result = await runMigrations();
-    expect(result.applied).toEqual(["0001", "0002"]);
+    expect(result.applied).toEqual(["0001", "0002", "0003"]);
     expect(result.skipped).toEqual([]);
 
     const tables = await query<{ table_name: string }>(`
@@ -45,11 +45,13 @@ describe("runMigrations", () => {
   it("records each applied migration in schema_migrations", async () => {
     await runMigrations();
     const applied = await listAppliedMigrations();
-    expect(applied).toHaveLength(2);
+    expect(applied).toHaveLength(3);
     expect(applied[0].id).toBe("0001");
     expect(applied[0].filename).toBe("0001_init.sql");
     expect(applied[1].id).toBe("0002");
     expect(applied[1].filename).toBe("0002_org_id_not_null.sql");
+    expect(applied[2].id).toBe("0003");
+    expect(applied[2].filename).toBe("0003_agent_id_org_scoped.sql");
     // applied_at is returned as a Date by pg-mem and as an ISO string by real
     // pg (depending on driver parsing). Accept both.
     const appliedAt = applied[0].applied_at;
@@ -60,12 +62,12 @@ describe("runMigrations", () => {
   it("is idempotent — second run reports skipped, no new inserts", async () => {
     const first = await runMigrations();
     const second = await runMigrations();
-    expect(first.applied).toEqual(["0001", "0002"]);
+    expect(first.applied).toEqual(["0001", "0002", "0003"]);
     expect(second.applied).toEqual([]);
-    expect(second.skipped).toEqual(["0001", "0002"]);
+    expect(second.skipped).toEqual(["0001", "0002", "0003"]);
 
     const applied = await listAppliedMigrations();
-    expect(applied).toHaveLength(2);
+    expect(applied).toHaveLength(3);
   });
 
   it("creates the agents table with the documented columns", async () => {

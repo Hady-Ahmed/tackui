@@ -12,7 +12,6 @@ import { useCanManageAgents } from "@/lib/auth/use-can-manage-agents";
 const KINDS: AgentKind[] = ["langgraph", "agno", "agui"];
 
 type FormState = {
-  id: string;
   name: string;
   description: string;
   kind: AgentKind;
@@ -22,7 +21,6 @@ type FormState = {
 };
 
 const emptyForm: FormState = {
-  id: "",
   name: "",
   description: "",
   kind: "agui",
@@ -127,7 +125,6 @@ export default function AgentsPage() {
     setEditingId(agent.id);
     setEditingHasKey(agent.hasLangsmithApiKey);
     setForm({
-      id: agent.id,
       name: agent.name,
       description: agent.description,
       kind: agent.kind,
@@ -169,7 +166,6 @@ export default function AgentsPage() {
     setError(null);
 
     const payload = {
-      id: form.id,
       name: form.name,
       description: form.description,
       kind: form.kind,
@@ -256,17 +252,6 @@ export default function AgentsPage() {
             className="space-y-4 rounded-xl border border-zinc-200 bg-white p-6 dark:border-zinc-800 dark:bg-zinc-950"
           >
             <div className="grid grid-cols-2 gap-4">
-              <Field label="ID" hint="lowercase kebab-case, immutable after creation">
-                <input
-                  value={form.id}
-                  onChange={(e) => updateForm({ id: e.target.value })}
-                  disabled={!!editingId}
-                  required
-                  pattern="[a-z0-9-]+"
-                  className={inputClass(editingId ? true : false)}
-                  placeholder="research"
-                />
-              </Field>
               <Field label="Name">
                 <input
                   value={form.name}
@@ -276,16 +261,15 @@ export default function AgentsPage() {
                   placeholder="Research Agent"
                 />
               </Field>
+              <Field label="Description">
+                <input
+                  value={form.description}
+                  onChange={(e) => updateForm({ description: e.target.value })}
+                  className={inputClass()}
+                  placeholder="LangGraph-powered web research assistant"
+                />
+              </Field>
             </div>
-
-            <Field label="Description">
-              <input
-                value={form.description}
-                onChange={(e) => updateForm({ description: e.target.value })}
-                className={inputClass()}
-                placeholder="LangGraph-powered web research assistant"
-              />
-            </Field>
 
             <div className="grid grid-cols-2 gap-4">
               <Field label="Kind">
