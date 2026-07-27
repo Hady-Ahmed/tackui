@@ -39,13 +39,16 @@ export default function SignupPage() {
     if (result.error) {
       setError(result.error.message ?? "Sign up failed");
     } else if (config?.emailVerification) {
-      // Email verification is enabled — show "check your email" screen
-      // instead of auto-logging in. The user must verify before they can
-      // sign in (requireEmailVerification: true).
+      // Better Auth automatically sends a verification email during signup
+      // (when requireEmailVerification + sendVerificationEmail are configured).
+      // We don't call sendVerificationEmail explicitly — that would send a
+      // duplicate. For account-linking edge cases (Google account already
+      // exists), the user discovers verification is needed when they try to
+      // log in → 403 → "Resend verification email" button on the login page.
       setShowVerifyPrompt(true);
     } else {
-      router.push("/");
-      router.refresh();
+      // Hard navigation — avoids client-side hydration race.
+      window.location.href = "/";
     }
   };
 

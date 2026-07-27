@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useEffect, Suspense } from "react";
+import { useState, Suspense } from "react";
 import { useRouter, useSearchParams } from "next/navigation";
 import Link from "next/link";
 import { authClient } from "@/lib/auth/auth-client";
@@ -8,54 +8,38 @@ import { authClient } from "@/lib/auth/auth-client";
 function VerifyEmailContent() {
   const router = useRouter();
   const params = useSearchParams();
-  const token = params.get("token");
   const error = params.get("error");
-  // Derive initial status from URL params — avoids setState-in-effect
-  // for the synchronous cases (error/missing token).
-  const [status, setStatus] = useState<"loading" | "success" | "error" | "resending">(
-    error || !token ? "error" : "loading",
-  );
-  const [resendEmail, setResendEmail] = useState("");
-  const [resendMessage, setResendMessage] = useState<string | null>(null);
 
-  useEffect(() => {
-    if (error || !token) return;
-    let cancelled = false;
-    (async () => {
-      const result = await authClient.verifyEmail({ query: { token } });
-      if (cancelled) return;
-      setStatus(result.error ? "error" : "success");
-    })();
-    return () => {
-      cancelled = true;
-    };
-  }, [token, error]);
+  // Better Auth's verification flow: the email link goes to
+  // /api/auth/verify-email?token=xxx&callbackURL=/verify-email. Better Auth
+  // verifies the token server-side, then redirects to /verify-email.
+  //
+  // - If the redirect has no `error` param → verification succeeded.
+  // - If the redirect has `?error=invalid_token` → verification failed.
+  //
+  // We do NOT call authClient.verifyEmail() here — Better Auth already
+  // verified (or failed) before redirecting. Calling it again would try to
+  // consume an already-used token and fail.
+  const status: "success" | "error" = error ? "error" : "success";
+  const [resendEmail, setResendEmail] = useState("");
+  const [resending, setResending] = useState(false);
+  const [resendMessage, setResendMessage] = useState<string | null>(null);
 
   const handleResend = async (e: React.FormEvent) => {
     e.preventDefault();
-    setStatus("resending");
+    setResending(true);
     setResendMessage(null);
     const result = await authClient.sendVerificationEmail({
       email: resendEmail,
       callbackURL: "/verify-email",
     });
+    setResending(false);
     if (result.error) {
       setResendMessage(result.error.message ?? "Failed to resend verification email.");
     } else {
       setResendMessage("If an account exists, a new verification link has been sent.");
     }
-    setStatus("error");
   };
-
-  if (status === "loading") {
-    return (
-      <div className="flex min-h-screen items-center justify-center bg-zinc-50 px-4 dark:bg-black">
-        <div className="w-full max-w-sm space-y-4 text-center">
-          <p className="text-sm text-zinc-400">Verifying your email...</p>
-        </div>
-      </div>
-    );
-  }
 
   if (status === "success") {
     return (
@@ -110,10 +94,10 @@ function VerifyEmailContent() {
           />
           <button
             type="submit"
-            disabled={status === "resending"}
+            disabled={resending}
             className="w-full rounded-lg bg-blue-600 px-4 py-2 text-sm font-medium text-white transition-colors hover:bg-blue-700 disabled:opacity-50"
           >
-            {status === "resending" ? "Sending..." : "Resend verification email"}
+            {resending ? "Sending..." : "Resend verification email"}
           </button>
         </form>
 

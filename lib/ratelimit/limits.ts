@@ -20,8 +20,10 @@ export const LIMITS = {
   threadMutate: { max: 30, windowMs: 60_000 },
   /** Per-IP: sign-in/sign-up attempts. 10/min. */
   authIp: { max: 10, windowMs: 60_000 },
-  /** Per-IP: global flood protection on all /api/* routes. 120/min. */
-  globalIp: { max: 120, windowMs: 60_000 },
+  /** Per-IP: global flood protection on all /api/* routes. 300/min.
+   *  Generous enough for active use (page refreshes, CopilotKit connect/info
+   *  streams, conversation switching) while still blocking flood attacks. */
+  globalIp: { max: 300, windowMs: 60_000 },
 } as const;
 
 export type LimitName = keyof typeof LIMITS;

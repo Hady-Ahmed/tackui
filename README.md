@@ -304,13 +304,13 @@ The app sets the following headers on all responses:
 
 The app has two-layer rate limiting to protect against abuse and server overload:
 
-**Per-IP flood protection** (in `proxy.ts`, pre-auth): 120 requests/min per IP on all `/api/*` routes (except `/api/health` which is unlimited, and `/api/auth/*` which has its own limiter). Uses `X-Forwarded-For` for IP extraction behind a reverse proxy.
+**Per-IP flood protection** (in `proxy.ts`, pre-auth): 300 requests/min per IP on all `/api/*` routes (except `/api/health` which is unlimited, and `/api/auth/*` which has its own limiter). Uses `X-Forwarded-For` for IP extraction behind a reverse proxy.
 
 **Per-user route limits** (in route handlers, post-auth):
 
 | Route | Limit | Concurrent |
 | --- | --- | --- |
-| `/api/copilotkit/*` (agent runs) | 20/min per user | 3 concurrent SSE streams per user |
+| `/api/copilotkit/*` (POST runs only — connect/info exempt) | 20/min per user | 3 concurrent run streams per user |
 | `/api/agents/reachability-probe` | 10/min per user | — |
 | `/api/agents` POST + PATCH/DELETE | 10/min per user | — |
 | `/api/agents` GET | 60/min per user | — |

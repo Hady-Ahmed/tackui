@@ -88,14 +88,25 @@ export const auth = betterAuth({
       : undefined,
   },
   // Email verification — only enabled when SMTP is configured.
-  // sendOnSignIn re-sends the verification email on each sign-in attempt
-  // if the user's email is unverified.
+  // sendOnSignIn is false: we don't auto-send on every login attempt
+  // (that would be spammy). Instead, the login page catches the 403
+  // "email not verified" error and shows a "Resend verification email"
+  // button the user can click explicitly.
   emailVerification: EMAIL_ENABLED
     ? {
         sendVerificationEmail: async ({ user, url }) => {
-          void sendEmail(user.email, verificationEmail(user, url));
+          // Rewrite the callbackURL so all verification emails (both
+          // the automatic signup one and manual resends) redirect to
+          // /verify-email instead of the default /. This gives a
+          // consistent UX — the user always sees the "Email verified"
+          // success page, not a bare redirect to the login page.
+          // Using URL parse + setSearchParam (not string replace) to
+          // be idempotent — setting the same value twice is a no-op.
+          const parsed = new URL(url);
+          parsed.searchParams.set("callbackURL", "/verify-email");
+          void sendEmail(user.email, verificationEmail(user, parsed.toString()));
         },
-        sendOnSignIn: true,
+        sendOnSignIn: false,
       }
     : undefined,
   // Explicit rate limiting — replaces the silent default. Per-IP (no user

@@ -75,7 +75,7 @@ app/
   global-error.tsx             # Root error boundary — catches layout-level failures (renders own <html>)
   login/page.tsx               # Login (email/password + social + SSO) — validates redirect param (open-redirect fix) + forgot password link
   signup/page.tsx              # Sign up (email/password + social + SSO) — shows "check your email" when verification enabled
-  verify-email/page.tsx        # Email verification callback — reads ?token=, calls authClient.verifyEmail
+  verify-email/page.tsx        # Email verification callback — Better Auth verifies token server-side, redirects here. Shows success/failure + resend form (does NOT call verifyEmail — uses ?error= param from redirect)
   forgot-password/page.tsx     # Password reset request — calls authClient.requestPasswordReset (anti-enumeration)
   reset-password/page.tsx      # Password reset form — reads ?token=, calls authClient.resetPassword
   layout.tsx                   # Root layout — wraps app in CopilotKitProvider + FOUC-free theme init script
@@ -114,8 +114,10 @@ lib/
     store.ts                    # In-memory sliding-window + concurrent counter (single-instance; pluggable for Redis)
     limits.ts                   # Named limit presets (copilotkit: 20/min, concurrent: 3, probe: 10/min, etc.)
     middleware.ts               # checkUserLimit / acquireConcurrent helpers + 429 response builders with X-RateLimit headers
+    stream-wrap.ts              # wrapStreamWithRelease — wraps SSE Response body so concurrent-cap decrement fires on stream close/error/cancel
     store.test.ts               # 13 tests — sliding window, concurrent, GC, boundary conditions
     middleware.test.ts          # 10 tests — 429 responses, checkUserLimit, acquireConcurrent + release
+    stream-wrap.test.ts         # 7 tests — stream lifecycle: release on completion, error, cancel, no-body, header preservation
   theme.ts                     # useTheme() hook — class-based light/dark, persists to localStorage (useSyncExternalStore)
 
 components/
@@ -229,7 +231,7 @@ the full error is logged server-side via `console.error("[reachability-probe] ..
 Two-layer rate limiting protects the server from abuse and floods:
 
 **Layer 1 — Per-IP global flood protection (`proxy.ts`):**
-- 120 requests/min per IP on all `/api/*` routes (except `/api/health` which
+- 300 requests/min per IP on all `/api/*` routes (except `/api/health` which
   is unlimited, and `/api/auth/*` which has its own Better Auth limiter).
 - Enforced in the proxy (pre-auth) using `X-Forwarded-For` for IP extraction.
 - Proxy runtime pinned to `nodejs` — the in-memory `Map` requires it.
@@ -240,7 +242,7 @@ Two-layer rate limiting protects the server from abuse and floods:
 
 | Route | Limit | Concurrent |
 | --- | --- | --- |
-| `/api/copilotkit/*` (agent runs) | 20/min per user | 3 concurrent SSE streams per user |
+| `/api/copilotkit/*` (POST runs only) | 20/min per user | 3 concurrent run streams per user |
 | `/api/agents/reachability-probe` | 10/min per user | — |
 | `/api/agents` POST + `/api/agents/[id]` PATCH/DELETE | 10/min per user | — |
 | `/api/agents` GET + `/api/agents/[id]` GET | 60/min per user | — |
@@ -252,12 +254,20 @@ Two-layer rate limiting protects the server from abuse and floods:
   `rateLimit.customRules` in the `betterAuth()` call. Disabled in solo mode.
 
 **Concurrent SSE stream cap:**
-The `/api/copilotkit` route tracks in-flight streams per user. The
-`wrapStreamWithRelease()` helper wraps the `Response` body `ReadableStream`
-so the decrement fires automatically on stream completion, error, or client
-disconnect — no manual cleanup needed in route code. When a user exceeds
-the concurrent cap (3), they get `429 { error: "Too many concurrent agent
-runs (3 max)..." }` which surfaces in the CopilotKit chat UI.
+The `/api/copilotkit` route tracks in-flight **run** streams per user (not
+connect/info streams). The `isRunRequest` check in the route handler
+distinguishes runs from connects: any POST that is NOT to a `/connect`
+sub-path is a run. Only runs count toward the rate limit (20/min) and
+the concurrent cap (3). Connect streams (POST `/agent/*/connect`), info
+fetches (GET `/info`), and thread listing (GET `/threads`) are exempt —
+they're lightweight and needed for every page load.
+
+The `wrapStreamWithRelease()` helper (in `lib/ratelimit/stream-wrap.ts`)
+wraps the `Response` body `ReadableStream` so the concurrent-cap decrement
+fires automatically on stream completion, error, or client disconnect — no
+manual cleanup needed in route code. When a user exceeds the concurrent cap
+(3), they get `429 { error: "Too many concurrent agent runs (3 max)..." }`
+which surfaces in the CopilotKit chat UI.
 
 **Solo mode (`AUTH_DISABLED=true`):** Per-user limits are not enforced
 (everyone is `id: "local"`). Per-IP flood protection from `proxy.ts` still
@@ -612,7 +622,7 @@ strategy it uses so users know whether server-side session storage is required.
   `/api/health` liveness endpoint (bypassed by proxy cookie gate); error
   message masking on reachability probe (no internal hostname leakage)
 - Rate limiting (SaaS hardening) — two-layer: per-IP global flood protection
-  in `proxy.ts` (120/min) + per-user route-level limits in `lib/ratelimit/`
+  in `proxy.ts` (300/min) + per-user route-level limits in `lib/ratelimit/`
   (20 runs/min, 3 concurrent SSE streams, 10/min probe/mutations, 60/min
   reads). Better Auth `rateLimit` config (sign-in: 10/min, sign-up: 5/min
   per IP). 429 responses with standard `X-RateLimit-*` headers.
@@ -625,6 +635,18 @@ strategy it uses so users know whether server-side session storage is required.
   callback page, `/forgot-password` + `/reset-password` flow pages, signup shows
   "check your email" screen. When unset: graceful fallback (no verification,
   accounts work immediately, forgot-password link hidden).
+  - `sendOnSignIn: false` — verification email is NOT auto-sent on every login
+    attempt (avoids spam). Instead, the login page catches the 403 "email not
+    verified" error and shows a "Resend verification email" button.
+  - The `sendVerificationEmail` callback rewrites the callbackURL to
+    `/verify-email` (Better Auth's default is `/`) so all verification emails
+    land on the success page — consistent UX for both automatic signup emails
+    and manual resends.
+  - The `/verify-email` page does NOT call `authClient.verifyEmail()` — Better
+    Auth verifies the token server-side before redirecting. The page just
+    checks for `?error=` param (failure) vs no error (success).
+  - Login + signup use `window.location.href` (hard navigation) after
+    successful auth to avoid client-side session hydration races.
 
 ## Future (structured for easy upgrade)
 

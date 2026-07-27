@@ -9,10 +9,11 @@ const PUBLIC_ROUTES = ["/login", "/signup", "/verify-email", "/forgot-password",
 const AUTH_API_PREFIX = "/api/auth";
 const HEALTH_PREFIX = "/api/health";
 
-// Pin to Node.js runtime — the in-memory rate-limit store requires it.
-// Switching to edge would break the shared Map (each request gets a fresh
-// isolate). For edge deployment, replace the store with a Redis backend.
-export const runtime = "nodejs";
+// The proxy always runs on Node.js in Next.js 16 (it was the default for
+// middleware too, but now it's the only option). The in-memory rate-limit
+// store relies on this — a shared Map persists across requests in the same
+// process. For edge deployment (not supported by the proxy), replace the
+// store with a Redis backend.
 
 /**
  * Extract the client IP from the request. Behind a reverse proxy, reads

@@ -27,6 +27,22 @@ async function handler(request: Request): Promise<Response> {
   try {
     let userId: string;
 
+    // Determine if this is an actual agent RUN request vs. a
+    // connect/info/threads request. Only runs count toward the rate
+    // limit and concurrent cap.
+    //
+    // CopilotKit POSTs to various sub-paths (e.g. /agent/agno/run),
+    // not just the base /api/copilotkit. The only long-lived POST
+    // that ISN'T a run is the connect stream (POST /agent/*/connect)
+    // — it listens for events on an existing connection, no new
+    // backend call. Everything else POST is a run.
+    //
+    // Non-run requests are still protected by the per-IP global
+    // flood limit (300/min) in proxy.ts.
+    const url = new URL(request.url);
+    const isConnectRequest = url.pathname.includes("/connect");
+    const isRunRequest = request.method === "POST" && !isConnectRequest;
+
     if (!isAuthDisabled()) {
       const user = await getRequestUser(request);
       if (!user) {
@@ -34,22 +50,32 @@ async function handler(request: Request): Promise<Response> {
       }
       userId = user.id;
 
-      // Per-user rate limit: 20 runs/min.
-      const limited = checkUserLimit(userId, "copilotkit");
-      if (limited) return limited;
+      // Per-user rate limit: 20 runs/min. Only counts actual agent
+      // runs (POST to base path), not connect/info/threads requests.
+      if (isRunRequest) {
+        const limited = checkUserLimit(userId, "copilotkit");
+        if (limited) return limited;
+      }
 
-      // Concurrent SSE cap: 3 in-flight streams per user.
-      // Wrap the response stream so the decrement fires on stream close
-      // (completion, error, or client disconnect).
-      const concurrentResult = acquireConcurrent(userId, "copilotkitConcurrent");
-      if (concurrentResult instanceof Response) return concurrentResult;
-      const releaseConcurrent = concurrentResult;
+      // Concurrent SSE cap: 3 in-flight run streams per user.
+      // Only applies to actual agent runs. Connect streams (POST to
+      // /agent/*/connect) are long-lived but lightweight — they
+      // listen for events on existing connections, they don't start
+      // new agent runs or hold expensive resources.
+      let releaseConcurrent: (() => void) | null = null;
+      if (isRunRequest) {
+        const concurrentResult = acquireConcurrent(userId, "copilotkitConcurrent");
+        if (concurrentResult instanceof Response) return concurrentResult;
+        releaseConcurrent = concurrentResult;
+      }
 
       try {
         const response = await runWithUserAsync(user, () => innerHandler(request));
-        return wrapStreamWithRelease(response, releaseConcurrent);
+        return releaseConcurrent
+          ? wrapStreamWithRelease(response, releaseConcurrent)
+          : response;
       } catch (err) {
-        releaseConcurrent();
+        if (releaseConcurrent) releaseConcurrent();
         throw err;
       }
     }

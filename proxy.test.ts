@@ -68,21 +68,21 @@ describe("proxy — per-IP rate limiting (AUTH_DISABLED=false)", () => {
   });
 
   it("blocks requests over the limit with 429", async () => {
-    // Exhaust the limit (120/min)
-    for (let i = 0; i < 120; i++) {
+    // Exhaust the limit (300/min)
+    for (let i = 0; i < 300; i++) {
       await proxy(makeRequest("/api/agents", { ip: "1.2.3.4" }));
     }
     const res = await proxy(makeRequest("/api/agents", { ip: "1.2.3.4" }));
     expect(res.status).toBe(429);
     const data = await res.json();
     expect(data.error).toContain("Too many requests");
-    expect(res.headers.get("X-RateLimit-Limit")).toBe("120");
+    expect(res.headers.get("X-RateLimit-Limit")).toBe("300");
     expect(res.headers.get("Retry-After")).toBeTruthy();
   });
 
   it("tracks IPs independently", async () => {
     // Exhaust IP 1.2.3.4
-    for (let i = 0; i < 120; i++) {
+    for (let i = 0; i < 300; i++) {
       await proxy(makeRequest("/api/agents", { ip: "1.2.3.4" }));
     }
     // Different IP should still be allowed
@@ -92,7 +92,7 @@ describe("proxy — per-IP rate limiting (AUTH_DISABLED=false)", () => {
 
   it("/api/health is exempt from rate limiting", async () => {
     // Exhaust the limit
-    for (let i = 0; i < 120; i++) {
+    for (let i = 0; i < 300; i++) {
       await proxy(makeRequest("/api/agents", { ip: "1.2.3.4" }));
     }
     // /api/health should still pass
@@ -102,7 +102,7 @@ describe("proxy — per-IP rate limiting (AUTH_DISABLED=false)", () => {
 
   it("/api/auth/* is exempt from the global IP limiter", async () => {
     // Exhaust the limit
-    for (let i = 0; i < 120; i++) {
+    for (let i = 0; i < 300; i++) {
       await proxy(makeRequest("/api/agents", { ip: "1.2.3.4" }));
     }
     // /api/auth/* should not be limited by the global IP limiter
@@ -111,8 +111,8 @@ describe("proxy — per-IP rate limiting (AUTH_DISABLED=false)", () => {
   });
 
   it("extracts IP from X-Forwarded-For (first hop)", async () => {
-    // Send 120 requests with a multi-hop X-Forwarded-For
-    for (let i = 0; i < 120; i++) {
+    // Send 300 requests with a multi-hop X-Forwarded-For
+    for (let i = 0; i < 300; i++) {
       await proxy(
         makeRequest("/api/agents", {
           ip: "1.2.3.4, 10.0.0.1, 10.0.0.2",
@@ -130,7 +130,7 @@ describe("proxy — per-IP rate limiting (AUTH_DISABLED=false)", () => {
 
   it("non-API routes are not rate limited by the IP layer", async () => {
     // Exhaust the limit on API routes
-    for (let i = 0; i < 120; i++) {
+    for (let i = 0; i < 300; i++) {
       await proxy(makeRequest("/api/agents", { ip: "1.2.3.4" }));
     }
     // A page route should not be 429'd by the IP limiter (it might

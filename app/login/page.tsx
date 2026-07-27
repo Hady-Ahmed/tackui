@@ -29,6 +29,9 @@ function LoginContent() {
   const [password, setPassword] = useState("");
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
+  const [needsVerification, setNeedsVerification] = useState(false);
+  const [resending, setResending] = useState(false);
+  const [resendMessage, setResendMessage] = useState<string | null>(null);
   const { config } = useAuthConfig();
 
   const redirect = safeRedirect(params.get("redirect"));
@@ -43,13 +46,38 @@ function LoginContent() {
     e.preventDefault();
     setLoading(true);
     setError(null);
+    setNeedsVerification(false);
     const result = await authClient.signIn.email({ email, password });
     setLoading(false);
     if (result.error) {
-      setError(result.error.message ?? "Sign in failed");
+      // Better Auth returns 403 when email verification is required
+      // but the user's email is not verified. Show a targeted message
+      // with a resend button instead of the generic error.
+      if (result.error.status === 403) {
+        setNeedsVerification(true);
+      } else {
+        setError(result.error.message ?? "Sign in failed");
+      }
     } else {
-      router.push(redirect);
-      router.refresh();
+      // Hard navigation — avoids client-side hydration race where the
+      // target page doesn't see the new session yet and redirects back
+      // to /login. A full page load sends the new session cookie.
+      window.location.href = redirect;
+    }
+  };
+
+  const handleResendVerification = async () => {
+    setResending(true);
+    setResendMessage(null);
+    const result = await authClient.sendVerificationEmail({
+      email,
+      callbackURL: "/verify-email",
+    });
+    setResending(false);
+    if (result.error) {
+      setResendMessage("Failed to resend. Please try signing up again.");
+    } else {
+      setResendMessage("Verification email sent. Check your inbox.");
     }
   };
 
@@ -76,6 +104,25 @@ function LoginContent() {
         {error && (
           <div className="rounded-lg border border-red-200 bg-red-50 px-4 py-2 text-sm text-red-700 dark:border-red-900 dark:bg-red-950 dark:text-red-300">
             {error}
+          </div>
+        )}
+
+        {needsVerification && (
+          <div className="rounded-lg border border-amber-200 bg-amber-50 px-4 py-3 text-sm text-amber-800 dark:border-amber-900 dark:bg-amber-950 dark:text-amber-300">
+            <p className="mb-2">
+              Please verify your email address before signing in.
+            </p>
+            <button
+              type="button"
+              onClick={handleResendVerification}
+              disabled={resending}
+              className="font-medium text-amber-900 underline hover:no-underline disabled:opacity-50 dark:text-amber-200"
+            >
+              {resending ? "Sending..." : "Resend verification email"}
+            </button>
+            {resendMessage && (
+              <p className="mt-2 text-xs">{resendMessage}</p>
+            )}
           </div>
         )}
 
