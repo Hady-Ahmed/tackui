@@ -133,9 +133,10 @@ components/
     tool-renders.tsx           # Tool-call visualization (useRenderTool)
 
 proxy.ts                       # Next.js proxy (cookie gate + AUTH_DISABLED bypass + /api/health bypass + per-IP rate limiting + open-redirect-safe redirect)
-next.config.ts                 # Security headers (CSP, HSTS, X-Frame-Options, etc.) + standalone build + poweredByHeader disabled + Sentry wrapper
-sentry.client.config.ts        # Sentry client-side init (no-op if NEXT_PUBLIC_SENTRY_DSN unset)
-sentry.server.config.ts        # Sentry server-side init (no-op if SENTRY_DSN unset)
+next.config.ts                 # Security headers (CSP, HSTS, X-Frame-Options, etc.) + standalone build + poweredByHeader disabled + Sentry wrapper (+ tunnelRoute for ad-blocker bypass)
+instrumentation.ts             # Server boot hook — Sentry server/edge init (runtime-guarded imports) + onRequestError export + PG migrations + auth tables + solo org
+instrumentation-client.ts      # Client boot hook — Sentry client init (Turbopack-compatible replacement for sentry.client.config.ts) + onRouterTransitionStart export
+sentry.server.config.ts        # Sentry Node.js runtime init (no-op if SENTRY_DSN unset)
 sentry.edge.config.ts          # Sentry edge-runtime init (no-op if SENTRY_DSN unset)
 scripts/
   create-admin.ts              # CLI: create/promote an admin user
@@ -301,11 +302,22 @@ exceptions on both server and client. No-op when `SENTRY_DSN` (server) /
 `NEXT_PUBLIC_SENTRY_DSN` (client) is not set, so self-hosters can opt out
 entirely by simply not setting the env vars.
 
-- `sentry.client.config.ts` / `sentry.server.config.ts` /
-  `sentry.edge.config.ts` — SDK init (reads DSN from env, only enabled in
-  production).
+- `instrumentation-client.ts` / `sentry.server.config.ts` /
+  `sentry.edge.config.ts` — SDK init (reads DSN from env). The client init
+  lives in `instrumentation-client.ts` (Next.js 16 file convention) because
+  Turbopack no longer auto-injects `sentry.client.config.ts` into the client
+  bundle. The server/edge configs are imported from `instrumentation.ts`
+  (runtime-guarded: nodejs imports `sentry.server.config`, edge imports
+  `sentry.edge.config`). `instrumentation.ts` also exports
+  `onRequestError = Sentry.captureRequestError` so route-handler / Server
+  Component / middleware errors reach Sentry — without it, Next.js logs them
+  but they never arrive. `instrumentation-client.ts` exports
+  `onRouterTransitionStart = Sentry.captureRouterTransitionStart` (required
+  by the SDK for client-side route instrumentation).
 - `next.config.ts` — wrapped in `withSentryConfig()` (source map upload,
-  tree-shaking).
+  tree-shaking) + `tunnelRoute: "/sentry-tunnel"` (proxies client envelopes
+  through a same-origin endpoint so ad blockers — which filter-list
+  Sentry's ingest domain — don't block them).
 - `app/error.tsx` + `app/global-error.tsx` — call `Sentry.captureException`
   before rendering the fallback UI.
 - `SENTRY_TRACES_SAMPLE_RATE` / `NEXT_PUBLIC_SENTRY_TRACES_SAMPLE_RATE` —

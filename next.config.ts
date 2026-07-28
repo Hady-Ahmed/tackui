@@ -69,4 +69,9 @@ export default withSentryConfig(nextConfig, {
   silent: true,
   // Disable Sentry's own telemetry collection.
   telemetry: false,
+  // Route client-side envelopes through a same-origin proxy endpoint to
+  // bypass ad blockers (uBlock/AdBlock filter-list Sentry's ingest domain).
+  // @sentry/nextjs auto-creates the /sentry-tunnel handler and rewrites the
+  // client transport to use it — no other code changes needed.
+  tunnelRoute: "/sentry-tunnel",
 });
