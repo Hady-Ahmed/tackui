@@ -151,20 +151,22 @@ export function AccountMenu() {
                   Upgrade plan
                 </button>
               )}
-              <button
-                onClick={async () => {
-                  const res = await fetch("/api/billing/portal", {
-                    method: "POST",
-                  });
-                  if (res.ok) {
-                    const { url } = await res.json();
-                    if (url) window.location.assign(url);
-                  }
-                }}
-                className="block w-full px-3 py-2 text-left text-sm text-zinc-700 transition-colors hover:bg-zinc-100 dark:text-zinc-300 dark:hover:bg-zinc-800"
-              >
-                Manage subscription
-              </button>
+              {billing.plan !== "free" && (
+                <button
+                  onClick={async () => {
+                    const res = await fetch("/api/billing/portal", {
+                      method: "POST",
+                    });
+                    if (res.ok) {
+                      const { url } = await res.json();
+                      if (url) window.location.assign(url);
+                    }
+                  }}
+                  className="block w-full px-3 py-2 text-left text-sm text-zinc-700 transition-colors hover:bg-zinc-100 dark:text-zinc-300 dark:hover:bg-zinc-800"
+                >
+                  Manage subscription
+                </button>
+              )}
             </>
           )}
           <button

@@ -12,10 +12,18 @@ import { z } from "zod";
  * Returns 404 when billing isn't configured (self-host, or SaaS without
  * Stripe). The body picks the plan + optional seat count (team only).
  */
-const bodySchema = z.object({
-  plan: z.enum(["pro", "team"]),
-  seats: z.number().int().min(1).max(1000).optional(),
-});
+const bodySchema = z
+  .object({
+    plan: z.enum(["pro", "team"]),
+    seats: z.number().int().min(1).max(1000).optional(),
+  })
+  // Team is the collaboration tier — it starts at 2 seats (the owner + 1
+  // invitee). Pro is the solo tier; seats is irrelevant for it (ignored
+  // by createCheckoutSession, which always sends quantity: 1 for pro).
+  .refine((data) => data.plan !== "team" || (data.seats ?? 1) >= 2, {
+    message: "Team plan requires at least 2 seats.",
+    path: ["seats"],
+  });
 
 export async function POST(request: Request) {
   if (!BILLING_ENABLED) {

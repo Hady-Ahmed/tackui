@@ -148,4 +148,52 @@ describe("POST /api/billing/checkout", () => {
       expect.objectContaining({ seats: 5, customerEmail: "test@example.com" }),
     );
   });
+
+  it("returns 400 when Team seats is 1 (min 2 — collaboration tier)", async () => {
+    const { POST } = await loadSaaS();
+    mockGetCurrentUser.mockResolvedValue(user());
+    mockCanManageAgents.mockResolvedValue(true);
+    const res = await POST(
+      new Request("http://localhost/api/billing/checkout", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ plan: "team", seats: 1 }),
+      }),
+    );
+    expect(res.status).toBe(400);
+    const data = await res.json();
+    expect(data.error).toBe("Validation failed");
+    // Should NOT have called Stripe — rejected before that.
+    expect(mockCreateCheckoutSession).not.toHaveBeenCalled();
+  });
+
+  it("accepts Team with 2 seats (the minimum for collaboration)", async () => {
+    const { POST } = await loadSaaS();
+    mockGetCurrentUser.mockResolvedValue(user());
+    mockCanManageAgents.mockResolvedValue(true);
+    mockCreateCheckoutSession.mockResolvedValue({ url: "https://checkout.stripe.com/abc" });
+    const res = await POST(
+      new Request("http://localhost/api/billing/checkout", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ plan: "team", seats: 2 }),
+      }),
+    );
+    expect(res.status).toBe(200);
+  });
+
+  it("accepts Pro without a seats field (seats is irrelevant for Pro)", async () => {
+    const { POST } = await loadSaaS();
+    mockGetCurrentUser.mockResolvedValue(user());
+    mockCanManageAgents.mockResolvedValue(true);
+    mockCreateCheckoutSession.mockResolvedValue({ url: "https://checkout.stripe.com/abc" });
+    const res = await POST(
+      new Request("http://localhost/api/billing/checkout", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ plan: "pro" }),
+      }),
+    );
+    expect(res.status).toBe(200);
+  });
 });

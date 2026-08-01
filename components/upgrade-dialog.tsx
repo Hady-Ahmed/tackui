@@ -9,8 +9,9 @@ import { useBilling } from "@/lib/billing/use-billing";
  *
  * Shows the Pro + Team options. The user's current plan is marked as
  * "current" (greyed). Pro→ checkout with quantity 1; Team → checkout with
- * a seats input (defaults to 1, min 1). On success the browser is sent to
- * the Stripe-hosted Checkout URL; the webhook then upserts the
+ * a seats input (defaults to 2, min 2 — Team is the collaboration tier,
+ * so it starts at the owner + 1 invitee). On success the browser is sent
+ * to the Stripe-hosted Checkout URL; the webhook then upserts the
  * subscription row and the account-menu badge updates on next load.
  *
  * Only renders under SaaS mode with billing configured — the parent
@@ -24,7 +25,7 @@ export function UpgradeDialog({
   onClose: () => void;
 }) {
   const { billing } = useBilling();
-  const [seats, setSeats] = useState(1);
+  const [seats, setSeats] = useState(2);
   const [submitting, setSubmitting] = useState<null | "pro" | "team">(null);
   const [error, setError] = useState<string | null>(null);
 
@@ -40,7 +41,7 @@ export function UpgradeDialog({
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify(
-          plan === "team" ? { plan, seats: Math.max(1, seats) } : { plan },
+          plan === "team" ? { plan, seats: Math.max(2, seats) } : { plan },
         ),
       });
       const data = await res.json();
@@ -131,14 +132,14 @@ export function UpgradeDialog({
                     <input
                       id="seats"
                       type="number"
-                      min={1}
+                      min={2}
                       max={1000}
                       value={seats}
-                      onChange={(e) => setSeats(Math.max(1, Number(e.target.value) || 1))}
+                      onChange={(e) => setSeats(Math.max(2, Number(e.target.value) || 2))}
                       className="w-20 rounded border border-zinc-300 px-2 py-1 dark:border-zinc-700 dark:bg-zinc-900 dark:text-zinc-100"
                     />
                     <span className="text-xs text-zinc-500">
-                      You can add more later in the customer portal.
+                      Starts at 2 (you + 1 collaborator). Add more later in the customer portal.
                     </span>
                   </div>
                 )}
