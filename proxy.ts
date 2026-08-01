@@ -4,10 +4,24 @@ import { checkLimit } from "@/lib/ratelimit/store";
 import { LIMITS } from "@/lib/ratelimit/limits";
 
 const AUTH_DISABLED = process.env.AUTH_DISABLED === "true";
+const SAAS_MODE = process.env.SAAS_MODE === "true";
 
-const PUBLIC_ROUTES = ["/login", "/signup", "/verify-email", "/forgot-password", "/reset-password"];
+// Auth pages are always public. Under SaaS mode the marketing landing page
+// (`/`) plus legal pages (`/terms`, `/privacy`) are also public so anonymous
+// visitors can read the marketing site. Self-host mode keeps `/` gated (it
+// IS the chat app, auth-required).
+const AUTH_ROUTES = ["/login", "/signup", "/verify-email", "/forgot-password", "/reset-password"];
+const SAAS_PUBLIC_ROUTES = ["/", "/terms", "/privacy"];
+const PUBLIC_ROUTES = SAAS_MODE
+  ? [...AUTH_ROUTES, ...SAAS_PUBLIC_ROUTES]
+  : AUTH_ROUTES;
 const AUTH_API_PREFIX = "/api/auth";
 const HEALTH_PREFIX = "/api/health";
+// Stripe webhooks are server-to-server with no session cookie and carry
+// their own signature verification (app/api/billing/webhook/route.ts).
+// Bypass the cookie gate + per-IP rate limit so Stripe's retries aren't
+// throttled. Auth-disabled mode already returns next() before this runs.
+const WEBHOOK_PREFIX = "/api/billing/webhook";
 
 // The proxy always runs on Node.js in Next.js 16 (it was the default for
 // middleware too, but now it's the only option). The in-memory rate-limit
@@ -37,13 +51,14 @@ export async function proxy(request: NextRequest) {
   const { pathname } = request.nextUrl;
 
   // /api/health is always unlimited (orchestrator probes have no session).
-  if (pathname.startsWith(HEALTH_PREFIX)) {
+  // /api/billing/webhook is verified by Stripe signature, not a session.
+  if (pathname.startsWith(HEALTH_PREFIX) || pathname.startsWith(WEBHOOK_PREFIX)) {
     return NextResponse.next();
   }
 
-  // Per-IP global flood protection on all /api/* routes (except /api/health
-  // which is already bypassed above, and /api/auth which has its own
-  // Better Auth rate limiter configured in lib/auth/auth.ts).
+  // Per-IP global flood protection on all /api/* routes (except the
+  // bypassed health + billing webhook routes, and /api/auth which has its
+  // own Better Auth rate limiter configured in lib/auth/auth.ts).
   if (pathname.startsWith("/api/") && !pathname.startsWith(AUTH_API_PREFIX)) {
     const ip = getClientIp(request);
     const result = checkLimit(

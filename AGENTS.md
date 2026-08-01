@@ -60,17 +60,27 @@ When adding new functionality, add tests alongside it:
 
 ```
 app/
-  api/copilotkit/[[...path]]/route.ts  # CopilotKit runtime (catch-all — matches /api/copilotkit and all sub-paths)
-  api/agents/route.ts          # REST: GET/POST /api/agents (list, create) — SSRF guard on POST
+  api/copilotkit/[[...path]]/route.ts  # CopilotKit runtime (catch-all — matches /api/copilotkit and all sub-paths) — plan-derived rate/concurrent caps when SAAS_MODE
+  api/agents/route.ts          # REST: GET/POST /api/agents (list, create) — SSRF guard on POST + plan agent-count check (SaaS)
   api/agents/[id]/route.ts     # REST: GET/PATCH/DELETE /api/agents/[id] — SSRF guard on PATCH (when endpoint changes)
   api/agents/reachability-probe/route.ts  # REST: POST /api/agents/reachability-probe (pure diagnostic — no SSRF guard, error messages masked)
   api/auth/[...all]/route.ts   # Better Auth handler (signup, signin, callback)
   api/auth/config/route.ts     # GET enabled providers (for self-configuring login UI)
   api/auth/can-manage-agents/route.ts  # GET — returns whether user can manage agents (org owner/admin or platform admin)
+  api/billing/checkout/route.ts   # POST — Stripe Checkout session (auth + canManageAgents) — SaaS only
+  api/billing/portal/route.ts     # POST — Stripe Customer Portal session (auth + canManageAgents) — SaaS only
+  api/billing/webhook/route.ts    # POST — Stripe webhook receiver (no auth, signature-verified; bypassed by proxy cookie gate + per-IP rate limit) — SaaS only
+  api/billing/subscription/route.ts # GET — current org plan + limits (for account-menu badge) — SaaS only
+  api/org/route.ts             # GET — user's orgs + roles + active org + seat info + canCreateOrg (read-only aggregate)
   api/threads/[id]/route.ts    # REST: PATCH/DELETE /api/threads/[id] (rename, delete conversations)
   api/threads/[id]/route.test.ts  # Tests for PATCH/DELETE (mocked runner)
   api/health/route.ts          # GET — liveness health check (bypassed by proxy.ts cookie gate)
   agents/page.tsx              # Admin UI — add/edit/delete agents + test connection + user management
+  app/page.tsx                 # Chat page (client component, lives at /app in both SaaS + self-host modes)
+  app/invitations/page.tsx     # Accept/reject pending org invitations (SaaS team + self-host multi-user)
+  pricing/page.tsx            # Free/Pro/Team tier cards (SaaS only — redirects to /app when !BILLING_ENABLED)
+  terms/page.tsx              # Terms of Service (SaaS only — redirects to /app when !SAAS_MODE)
+  privacy/page.tsx            # Privacy Policy (SaaS only — redirects to /app when !SAAS_MODE)
   error.tsx                    # Route error boundary — render-crash recovery (centered card + Reload)
   global-error.tsx             # Root error boundary — catches layout-level failures (renders own <html>)
   login/page.tsx               # Login (email/password + social + SSO) — validates redirect param (open-redirect fix) + forgot password link
@@ -78,8 +88,8 @@ app/
   verify-email/page.tsx        # Email verification callback — Better Auth verifies token server-side, redirects here. Shows success/failure + resend form (does NOT call verifyEmail — uses ?error= param from redirect)
   forgot-password/page.tsx     # Password reset request — calls authClient.requestPasswordReset (anti-enumeration)
   reset-password/page.tsx      # Password reset form — reads ?token=, calls authClient.resetPassword
-  layout.tsx                   # Root layout — wraps app in CopilotKitProvider + FOUC-free theme init script
-  page.tsx                     # Main chat page (client component)
+  layout.tsx                   # Root layout — wraps app in CopilotKitProvider + FOUC-free theme init script + CookieNotice (SaaS only)
+  page.tsx                     # SaaS-aware root router — SAAS_MODE renders <Landing/>, else redirects to /app
   globals.css                  # Global styles + Tailwind (class-based dark mode via @custom-variant)
 
 lib/
@@ -104,13 +114,29 @@ lib/
       0001_init.sql             # Initial schema: agents, agent_runs, run_state, thread_messages, thread_metadata
       0002_org_id_not_null.sql  # Makes org_id NOT NULL (wipe-and-restart for existing deploys)
       0003_agent_id_org_scoped.sql # Composite PK (id, org_id) — same id can exist in different orgs
+      0004_subscriptions.sql    # SaaS subscriptions table (org_id PK, plan/status/seats, Stripe IDs) — SaaS-only, inert on self-host
+  config/
+    saas.ts                     # SAAS_MODE / BILLING_ENABLED / SSRF_GUARD_FORCE_ON / SSRF_REJECTION_MESSAGE flags (module-load consts)
+    saas.test.ts                # 5 tests — flag combinations across modes
   email/
     client.ts                   # Resend SDK singleton + EMAIL_ENABLED flag + sendEmail() helper (no-op when RESEND_API_KEY unset)
     templates.ts                # Email template builders — verificationEmail(), passwordResetEmail() (HTML + text)
     templates.test.ts           # 9 tests — template rendering, URL inclusion, HTML escaping
+  billing/                      # SaaS-only — inert when !BILLING_ENABLED
+    plans.ts                    # Plan definitions (Free/Pro/Team) + getPlanLimits + planIdFromPriceId + priceIdForPlan + defaultPlan
+    plans.test.ts               # 11 tests — limits per plan, default plan, price-id mapping
+    stripe.ts                   # Stripe SDK singleton (null when !BILLING_ENABLED) + getWebhookSecret
+    subscription-store.ts       # Async CRUD on subscriptions table (zod-validated, pg.Pool-backed) + getOrgPlan + userHasTeamPlan + getMembershipLimit
+    subscription-store.test.ts  # 16 tests — CRUD, cross-org isolation, plan resolution
+    checkout.ts                 # createCheckoutSession (orgId in metadata) + createPortalSession
+    use-billing.ts              # useBilling() hook — fetches /api/billing/subscription once per page load (cached)
+    use-orgs.ts                 # useOrgs() hook — fetches /api/org for seat info + canCreateOrg + resetOrgsCache
+  plans/
+    enforcement.ts              # SaaS plan enforcement: getEnforcementLimits + checkAgentCountLimit + checkMemberCountLimit + checkCanCreateOrg (all short-circuit to unlimited/allowed when !SAAS_MODE)
+    enforcement.test.ts         # 13 tests — per-plan limits, self-host short-circuit, seat + agent caps
   net/
-    safe-fetch.ts               # SSRF guard — assertSafeUrl (blocks private IPs, ALLOW_PRIVATE_ENDPOINTS opt-in) + isPrivateIp (IPv4/IPv6 range checks)
-    safe-fetch.test.ts          # 40 tests — private IP ranges, IPv6, IPv4-mapped, DNS resolution, bypass opt-in
+    safe-fetch.ts               # SSRF guard — assertSafeUrl (blocks private IPs, ALLOW_PRIVATE_ENDPOINTS opt-in, hard-locked ON under SaaS mode) + isPrivateIp (IPv4/IPv6 range checks)
+    safe-fetch.test.ts          # 43 tests — private IP ranges, IPv6, IPv4-mapped, DNS resolution, bypass opt-in, SaaS forced guard
   ratelimit/
     store.ts                    # In-memory sliding-window + concurrent counter (single-instance; pluggable for Redis)
     limits.ts                   # Named limit presets (copilotkit: 20/min, concurrent: 3, probe: 10/min, etc.)
@@ -123,7 +149,11 @@ lib/
 
 components/
   agent-sidebar.tsx            # Agent picker + conversation list + status dots + rename/delete + collapsible (useThreads)
-  account-menu.tsx             # User avatar, name, email, sign out (useSession)
+  account-menu.tsx             # User avatar, name, email, sign out (useSession) + plan badge + manage subscription + invite button + OrgSwitcher
+  org-switcher.tsx             # Org switcher dropdown (self-renders when >1 org) + create-workspace (SaaS Team / self-host multi-user)
+  invite-dialog.tsx            # Invite-by-email modal (org owner/admin) + live seats counter
+  landing.tsx                  # Marketing landing page (SaaS mode only — root / renders this)
+  cookie-notice.tsx            # Minimal EU cookie notice (SaaS mode only, dismissible via localStorage)
   theme-toggle.tsx             # Light/dark toggle button (sidebar footer, icon + label)
   chat-shell.tsx               # Chat layout with agent switching + empty-state CTA + collapsible sidebar state + AgentChat wrapper
   users-admin.tsx              # Admin user management (list, set role, ban/unban)
@@ -294,6 +324,132 @@ protection from `proxy.ts` still applies.
 is per-process. For multi-instance deployments, replace it with a
 Redis-backed store — the interface (`checkLimit` / `incrementConcurrent` /
 `decrementConcurrent`) stays the same.
+
+### SaaS mode (`SAAS_MODE`)
+
+The hosted SaaS instance is the *same codebase* as the OSS self-host
+product, gated by a single env var. There is no separate repo — all
+SaaS-only code paths are inert when `SAAS_MODE` is unset.
+
+- `lib/config/saas.ts` — `SAAS_MODE`, `BILLING_ENABLED`
+  (= `SAAS_MODE && STRIPE_SECRET_KEY`), `SSRF_GUARD_FORCE_ON` (= `SAAS_MODE`,
+  hard-locks the SSRF guard on so a misconfigured `ALLOW_PRIVATE_ENDPOINTS`
+  can't expose the host's private network to a tenant), and
+  `SSRF_REJECTION_MESSAGE` (mode-aware: SaaS users get "not permitted on
+  the hosted service", self-hosters get the opt-in hint).
+- **Route layout:** root `app/page.tsx` is a SaaS-aware router —
+  `SAAS_MODE` renders `<Landing/>` (marketing), else redirects to `/app`.
+  Chat lives at `/app` in both modes. Auth pages (`/login`, `/signup`, …)
+  stay at their paths. `proxy.ts` makes `/`, `/terms`, `/privacy` public
+  under SaaS mode (auth-gated under self-host, where `/` IS the chat).
+  `/api/billing/webhook` is bypassed by the cookie gate + per-IP rate
+  limit (Stripe calls server-to-server, signature-verified).
+
+### Billing (Stripe flat subscriptions, SaaS-only)
+
+- `lib/billing/plans.ts` — plan definitions (Free/Pro/Team) +
+  `getPlanLimits(plan)` (returns the unlimited sentinel for self-host) +
+  `planIdFromPriceId` (maps a Stripe Price ID → plan; the dollar amounts
+  live in Stripe, only the price IDs are env-configured) +
+  `priceIdForPlan` + `defaultPlan` (free under SaaS, self-host when
+  `!SAAS_MODE`). `SAAS_PLANS` exported for the pricing page.
+- `lib/billing/stripe.ts` — Stripe SDK singleton (null when
+  `!BILLING_ENABLED`). `getStripe()` + `getWebhookSecret()`.
+- `lib/billing/subscription-store.ts` — async CRUD on the `subscriptions`
+  table (zod-validated, `pg.Pool`-backed, mirrors `agent-store.ts`):
+  `getSubscription`, `getOrgPlan` (stored plan or default), `upsertSubscription`
+  (the webhook is the sole writer), `deleteSubscription` (downgrade to free),
+  `getOrgIdByCustomerId` (resolve org from a Stripe customer id),
+  `userHasTeamPlan` (org-creation gate), `getMembershipLimit` (seat cap for
+  better-auth's `membershipLimit`).
+- `lib/billing/checkout.ts` — `createCheckoutSession` (carries `orgId` in
+  metadata so the webhook can route events to the right org) +
+  `createPortalSession` (Customer Portal).
+- `app/api/billing/checkout/route.ts` — POST (auth + `canManageAgents`)
+  → Checkout URL.
+- `app/api/billing/portal/route.ts` — POST (auth + `canManageAgents`)
+  → Customer Portal URL.
+- `app/api/billing/webhook/route.ts` — POST (no auth — signature-verified).
+  Handles `checkout.session.completed` (upsert from metadata),
+  `customer.subscription.updated`/`created` (upsert from the Subscription
+  object — reads period-end from the subscription *item* in the current
+  Stripe API version), `customer.subscription.deleted` (delete row →
+  free). Returns 500 on handler errors so Stripe retries transient
+  failures (DB down).
+- `app/api/billing/subscription/route.ts` — GET (auth) → current plan +
+  limits for the account-menu badge.
+- Migration `0004_subscriptions.sql` — `subscriptions` table
+  (`org_id` PK, `plan`/`status`/`seats`/`current_period_end`,
+  indexes on Stripe IDs).
+- `lib/billing/use-billing.ts` — `useBilling()` hook (one fetch per page
+  load, cached in module state — same pattern as `useCanManageAgents`).
+- `lib/billing/use-orgs.ts` — `useOrgs()` hook (fetches `/api/org` for
+  seat info + canCreateOrg) + `resetOrgsCache()`.
+
+### Plan enforcement (SaaS-only)
+
+`lib/plans/enforcement.ts` — every function short-circuits to
+"unlimited/allowed" when `!SAAS_MODE`:
+
+- `getEnforcementLimits(orgId)` — returns `{ plan, limits }`. Self-host
+  returns the unlimited sentinel without a DB call.
+- `checkAgentCountLimit(orgId)` — POST `/api/agents` rejects (402) when
+  the org is at its plan's agent cap (free ≤ 3). Pro/team unlimited.
+- `checkMemberCountLimit(orgId, currentCount)` — invite path rejects
+  (402) when at the seat cap. Free/pro = 1 (personal, no invites),
+  team = `subscription.seats`.
+- `checkCanCreateOrg(orgId)` — org creation gate (403). SaaS: only Team
+  plan; self-host: always allowed.
+
+The rate-limit middleware (`lib/ratelimit/middleware.ts`) accepts an
+optional `opts.max` override so the copilotkit route can feed plan-derived
+`runsPerMinute` + `concurrentRuns` caps (free=10/min+1, pro=20/min+3,
+team=20/min+5). The copilotkit route fetches `getEnforcementLimits` under
+SaaS mode and passes the overrides; under self-host the static `LIMITS`
+presets apply unchanged.
+
+**Server-side org gates (better-auth `organization` plugin, wired in
+`lib/auth/auth.ts`):** `allowUserToCreateOrganization` (only team-plan
+users can create workspaces on SaaS — the personal org auto-created on
+signup goes through the session hook, NOT this gate, so signup always
+works) + `membershipLimit` (per-org seat cap: free/pro = 1, team =
+`subscription.seats`). These enforce at the API layer so direct calls
+can't bypass the plan.
+
+### Org switcher + invitations (SaaS team plan + self-host multi-user)
+
+- `components/org-switcher.tsx` — tier-agnostic dropdown. Self-renders
+  only when the user belongs to >1 org (Free/Pro users have one personal
+  org → never see it). "Create workspace" gated by `canCreateOrg` (SaaS
+  Team only, self-host multi-user always). Uses better-auth's
+  `useListOrganizations` + `useActiveOrganization` + our `/api/org` for
+  seat info. Switching calls `authClient.organization.setActive` then
+  hard-navigates to `/app` so server components re-scope.
+- `components/invite-dialog.tsx` — invite-by-email modal for org
+  owners/admins. Calls `authClient.organization.inviteMember`. Shows a
+  live seats-remaining counter from `/api/org`; the server-side
+  `membershipLimit` is the backstop (returns
+  `ORGANIZATION_MEMBERSHIP_LIMIT_REACHED` past the cap).
+- `app/app/invitations/page.tsx` — accept/reject pending invitations
+  (`authClient.organization.listUserInvitations` +
+  `acceptInvitation`/`rejectInvitation`).
+- `app/api/org/route.ts` — GET (the user's orgs + roles + active org +
+  seat info + canCreateOrg). Read-only aggregate. Creation + invites go
+  through the better-auth client directly (the server-side gates enforce
+  the plan).
+
+### Marketing + legal pages (SaaS-only)
+
+- `components/landing.tsx` + `app/page.tsx` (SaaS → `<Landing/>`) — hero,
+  feature grid, pricing teaser, footer.
+- `app/pricing/page.tsx` — Free/Pro/Team tier cards. The dollar amounts
+  live in Stripe; the page shows feature gates only. Redirects to `/app`
+  when `!BILLING_ENABLED`.
+- `app/terms/page.tsx` + `app/privacy/page.tsx` — ToS + Privacy (SaaS
+  data practices: Stripe, Resend, Better Auth, Sentry). Redirect to
+  `/app` when `!SAAS_MODE` (self-hosters write their own).
+- `components/cookie-notice.tsx` — minimal EU cookie notice, rendered in
+  the root layout only under SaaS mode, dismissible (localStorage).
 
 ### Error tracking
 

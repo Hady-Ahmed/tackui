@@ -9,11 +9,7 @@ import {
 import { getCurrentUser, canManageAgents } from "@/lib/auth/context";
 import { assertSafeUrl, UnsafeUrlError } from "@/lib/net/safe-fetch";
 import { checkUserLimit } from "@/lib/ratelimit/middleware";
-
-const SSRF_MESSAGE =
-  "Endpoint resolves to a private or internal address. " +
-  "Set ALLOW_PRIVATE_ENDPOINTS=true if this is intentional (e.g. " +
-  "agent backend running on the same host).";
+import { SSRF_REJECTION_MESSAGE } from "@/lib/config/saas";
 
 export async function GET(
   _request: Request,
@@ -73,7 +69,7 @@ export async function PATCH(
       await assertSafeUrl(parsed.data.endpoint);
     } catch (err) {
       if (err instanceof UnsafeUrlError) {
-        return NextResponse.json({ error: SSRF_MESSAGE }, { status: 400 });
+        return NextResponse.json({ error: SSRF_REJECTION_MESSAGE }, { status: 400 });
       }
       throw err;
     }

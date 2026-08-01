@@ -18,6 +18,12 @@ vi.mock("@/lib/ratelimit/middleware", () => ({
   checkUserLimit: vi.fn().mockReturnValue(null),
 }));
 
+// Mock the plan-enforcement check — defaults to "allow". The enforcement
+// logic itself is tested in lib/plans/enforcement.test.ts.
+vi.mock("@/lib/plans/enforcement", () => ({
+  checkAgentCountLimit: vi.fn().mockResolvedValue(null),
+}));
+
 import { GET, POST } from "./route";
 import { listAgents, deleteAgent, createAgent } from "@/lib/agents/agent-store";
 import type { CreateAgentInput } from "@/lib/agents/agent-store";
@@ -25,6 +31,7 @@ import { getSyntheticAdmin } from "@/lib/auth/context";
 import { runMigrations } from "@/lib/db/migrate";
 import { assertSafeUrl, UnsafeUrlError } from "@/lib/net/safe-fetch";
 import { checkUserLimit } from "@/lib/ratelimit/middleware";
+import { checkAgentCountLimit } from "@/lib/plans/enforcement";
 import { NextResponse } from "next/server";
 
 let testOrg: string;
@@ -38,6 +45,7 @@ beforeEach(async () => {
   testOrg = (await getSyntheticAdmin()).orgId;
   await cleanup();
   vi.mocked(assertSafeUrl).mockResolvedValue(undefined);
+  vi.mocked(checkAgentCountLimit).mockResolvedValue(null);
 });
 
 const validBody = {
@@ -208,5 +216,28 @@ describe("POST /api/agents", () => {
       }),
     );
     expect(res.status).toBe(429);
+  });
+
+  it("returns 402 when the plan agent-count limit is reached", async () => {
+    vi.mocked(checkAgentCountLimit).mockResolvedValueOnce(
+      NextResponse.json(
+        { error: "Plan limit reached", code: "PLAN_AGENT_LIMIT" },
+        { status: 402 },
+      ),
+    );
+    const res = await POST(
+      new Request("http://localhost/api/agents", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(validBody),
+      }),
+    );
+    expect(res.status).toBe(402);
+    const data = await res.json();
+    expect(data.code).toBe("PLAN_AGENT_LIMIT");
+    // Agent was not created
+    const list = await GET();
+    const agents = await list.json();
+    expect(agents).toHaveLength(0);
   });
 });

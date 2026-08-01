@@ -181,4 +181,55 @@ describe("assertSafeUrl", () => {
       );
     });
   });
+
+  // The SaaS-mode forced SSRF guard lives in lib/config/saas.ts and is read
+  // at module load time by safe-fetch.ts. We exercise it by stubbing
+  // process.env.SAAS_MODE and re-importing the module fresh, so the
+  // SSRF_GUARD_FORCE_ON constant picks up the new value.
+  describe("SaaS mode forced guard", () => {
+    const origSaas = process.env.SAAS_MODE;
+    const origAllowPrivate = process.env.ALLOW_PRIVATE_ENDPOINTS;
+
+    afterEach(() => {
+      if (origSaas === undefined) delete process.env.SAAS_MODE;
+      else process.env.SAAS_MODE = origSaas;
+      if (origAllowPrivate === undefined) delete process.env.ALLOW_PRIVATE_ENDPOINTS;
+      else process.env.ALLOW_PRIVATE_ENDPOINTS = origAllowPrivate;
+      vi.resetModules();
+    });
+
+    it("ignores ALLOW_PRIVATE_ENDPOINTS=true under SaaS mode", async () => {
+      process.env.SAAS_MODE = "true";
+      process.env.ALLOW_PRIVATE_ENDPOINTS = "true";
+      vi.resetModules();
+      const { assertSafeUrl: fresh } = await import("./safe-fetch");
+      await expect(
+        fresh("http://127.0.0.1:8000/agent"),
+      ).rejects.toMatchObject({
+        name: "UnsafeUrlError",
+        message: "hostname resolves to a private address",
+      });
+      // Cloud metadata endpoint must always be blocked on SaaS.
+      await expect(
+        fresh("http://169.254.169.254/latest/meta-data/"),
+      ).rejects.toMatchObject({ name: "UnsafeUrlError" });
+    });
+
+    it("ignores the allowPrivate call option under SaaS mode", async () => {
+      process.env.SAAS_MODE = "true";
+      vi.resetModules();
+      const { assertSafeUrl: fresh } = await import("./safe-fetch");
+      await expect(
+        fresh("http://10.0.0.1:8000/", { allowPrivate: true }),
+      ).rejects.toMatchObject({ name: "UnsafeUrlError" });
+    });
+
+    it("still allows public endpoints under SaaS mode", async () => {
+      process.env.SAAS_MODE = "true";
+      vi.resetModules();
+      const { assertSafeUrl: fresh } = await import("./safe-fetch");
+      await expect(fresh("http://1.1.1.1:8000/")).resolves.toBeUndefined();
+      await expect(fresh("http://8.8.8.8/")).resolves.toBeUndefined();
+    });
+  });
 });

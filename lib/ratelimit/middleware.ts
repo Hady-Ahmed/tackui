@@ -60,18 +60,24 @@ export function concurrentLimitResponse(max: number): NextResponse {
  * const limited = checkUserLimit(user.id, "copilotkit");
  * if (limited) return limited;
  * ```
+ *
+ * `opts.max` overrides the preset's max — used by the SaaS plan-enforcement
+ * layer to feed per-plan limits (e.g. free=10/min, pro=20/min). When
+ * omitted, the preset's max from LIMITS is used (the self-host default).
  */
 export function checkUserLimit(
   identifier: string,
   limitName: LimitName,
+  opts?: { max?: number },
 ): NextResponse | null {
   // Solo mode (AUTH_DISABLED=true): per-user limits are not enforced.
   // Per-IP flood protection from proxy.ts still applies.
   if (isAuthDisabled()) return null;
   const limit = LIMITS[limitName];
   if (!("windowMs" in limit)) return null; // concurrent limits use checkConcurrent below
+  const max = opts?.max ?? limit.max;
   const key = `${limitName}:${identifier}`;
-  const result = checkLimit(key, limit.max, limit.windowMs);
+  const result = checkLimit(key, max, limit.windowMs);
   if (!result.allowed) {
     return rateLimitResponse(
       result,
@@ -99,15 +105,17 @@ export function checkUserLimit(
 export function acquireConcurrent(
   identifier: string,
   limitName: LimitName,
+  opts?: { max?: number },
 ): NextResponse | (() => void) {
   // Solo mode (AUTH_DISABLED=true): concurrent cap is not enforced.
   if (isAuthDisabled()) return () => {};
   const limit = LIMITS[limitName];
   if (!("max" in limit) || "windowMs" in limit) return () => {}; // not a concurrent limit
+  const max = opts?.max ?? limit.max;
   const key = `${limitName}:${identifier}`;
-  const result = checkConcurrent(key, limit.max);
+  const result = checkConcurrent(key, max);
   if (!result.allowed) {
-    return concurrentLimitResponse(limit.max);
+    return concurrentLimitResponse(max);
   }
   incrementConcurrent(key);
   let released = false;

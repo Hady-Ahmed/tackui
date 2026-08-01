@@ -6,12 +6,14 @@ import { getAgents } from "@/lib/agents/registry";
 import { runner } from "@/lib/agents/runner-instance";
 import { getRequestUser, getSyntheticAdmin } from "@/lib/auth/context";
 import { isAuthDisabled } from "@/lib/auth/auth";
+import { SAAS_MODE } from "@/lib/config/saas";
 import { runWithUserAsync } from "@/lib/auth/request-context";
 import {
   checkUserLimit,
   acquireConcurrent,
 } from "@/lib/ratelimit/middleware";
 import { wrapStreamWithRelease } from "@/lib/ratelimit/stream-wrap";
+import { getEnforcementLimits } from "@/lib/plans/enforcement";
 
 const runtime = new CopilotRuntime({
   agents: ({ request }) => getAgents(request),
@@ -57,21 +59,34 @@ async function handler(request: Request): Promise<Response> {
       }
       userId = user.id;
 
-      // Per-user rate limit: 20 runs/min. Only counts actual agent
-      // runs (POST to base path), not connect/info/threads requests.
+      // Per-user rate limit + concurrent cap. Under SaaS mode the limits
+      // come from the org's plan (free=10/min + 1 concurrent, pro=20/min
+      // + 3, team=20/min + 5); under self-host the static presets in
+      // LIMITS apply (getEnforcementLimits short-circuits to those).
+      let planRunsPerMin: number | undefined;
+      let planConcurrent: number | undefined;
+      if (SAAS_MODE) {
+        const { limits } = await getEnforcementLimits(user.orgId);
+        planRunsPerMin = limits.runsPerMinute;
+        planConcurrent = limits.concurrentRuns;
+      }
       if (isRunRequest) {
-        const limited = checkUserLimit(userId, "copilotkit");
+        const limited = checkUserLimit(userId, "copilotkit", {
+          max: planRunsPerMin,
+        });
         if (limited) return limited;
       }
 
-      // Concurrent SSE cap: 3 in-flight run streams per user.
+      // Concurrent SSE cap: in-flight run streams per user.
       // Only applies to actual agent runs. Connect streams (POST to
       // /agent/*/connect) are long-lived but lightweight — they
       // listen for events on existing connections, they don't start
       // new agent runs or hold expensive resources.
       let releaseConcurrent: (() => void) | null = null;
       if (isRunRequest) {
-        const concurrentResult = acquireConcurrent(userId, "copilotkitConcurrent");
+        const concurrentResult = acquireConcurrent(userId, "copilotkitConcurrent", {
+          max: planConcurrent,
+        });
         if (concurrentResult instanceof Response) return concurrentResult;
         releaseConcurrent = concurrentResult;
       }

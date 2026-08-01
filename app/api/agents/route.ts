@@ -9,11 +9,8 @@ import {
 import { getCurrentUser, canManageAgents } from "@/lib/auth/context";
 import { assertSafeUrl, UnsafeUrlError } from "@/lib/net/safe-fetch";
 import { checkUserLimit } from "@/lib/ratelimit/middleware";
-
-const SSRF_MESSAGE =
-  "Endpoint resolves to a private or internal address. " +
-  "Set ALLOW_PRIVATE_ENDPOINTS=true if this is intentional (e.g. " +
-  "agent backend running on the same host).";
+import { SSRF_REJECTION_MESSAGE } from "@/lib/config/saas";
+import { checkAgentCountLimit } from "@/lib/plans/enforcement";
 
 export async function GET() {
   const user = await getCurrentUser();
@@ -37,6 +34,11 @@ export async function POST(request: Request) {
   const limited = checkUserLimit(user.id, "agentMutate");
   if (limited) return limited;
 
+  // Plan enforcement (SaaS only): reject if the org is at its agent cap.
+  // Self-host short-circuits to allowed inside checkAgentCountLimit.
+  const planLimited = await checkAgentCountLimit(user.orgId);
+  if (planLimited) return planLimited;
+
   let body: unknown;
   try {
     body = await request.json();
@@ -59,7 +61,7 @@ export async function POST(request: Request) {
     await assertSafeUrl(parsed.data.endpoint);
   } catch (err) {
     if (err instanceof UnsafeUrlError) {
-      return NextResponse.json({ error: SSRF_MESSAGE }, { status: 400 });
+      return NextResponse.json({ error: SSRF_REJECTION_MESSAGE }, { status: 400 });
     }
     throw err;
   }

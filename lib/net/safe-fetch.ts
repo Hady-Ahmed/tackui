@@ -1,5 +1,6 @@
 import { lookup as dnsLookup } from "node:dns/promises";
 import { isIP } from "node:net";
+import { SSRF_GUARD_FORCE_ON } from "@/lib/config/saas";
 
 /**
  * SSRF guard for outbound fetches to user-supplied URLs.
@@ -13,6 +14,12 @@ import { isIP } from "node:net";
  *
  * Block-by-default. Self-hosters running agent backends on the same
  * machine as the frontend can opt in with ALLOW_PRIVATE_ENDPOINTS=true.
+ *
+ * SaaS mode (`SAAS_MODE=true`) hard-locks the guard ON — the
+ * `ALLOW_PRIVATE_ENDPOINTS` opt-in and the `allowPrivate` call option are
+ * both ignored. A shared host must never let a tenant reach the host's
+ * private network (cloud metadata, internal services). See
+ * lib/config/saas.ts (`SSRF_GUARD_FORCE_ON`).
  *
  * Limitation: this is a pre-fetch DNS check. DNS rebinding (a domain
  * that resolves to a public IP at check time, then to an internal IP at
@@ -42,7 +49,11 @@ export async function assertSafeUrl(
   url: string,
   opts?: { allowPrivate?: boolean },
 ): Promise<void> {
-  const allow = opts?.allowPrivate ?? ALLOW_PRIVATE;
+  // The SaaS host always runs the guard, ignoring ALLOW_PRIVATE_ENDPOINTS.
+  // A single shared instance must never let a tenant reach the host's
+  // private network (cloud metadata, internal services). Self-hosters keep
+  // the opt-in (single-tenant — they own the network they'd reach).
+  const allow = SSRF_GUARD_FORCE_ON ? false : opts?.allowPrivate ?? ALLOW_PRIVATE;
   if (allow) return;
 
   let parsed: URL;

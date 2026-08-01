@@ -9,16 +9,17 @@ import { useAuthConfig } from "@/lib/auth/use-auth-config";
 /**
  * Validates a redirect target is a same-origin relative path.
  * Prevents open-redirect attacks via `//evil.com` or `https://evil.com`
- * in the `redirect` query param. Returns `/` for anything that isn't a
- * path starting with a single `/`.
+ * in the `redirect` query param. Returns `/app` for anything that isn't a
+ * path starting with a single `/`. (`/app` is the chat in both SaaS and
+ * self-host modes — `/` is the landing page under SaaS mode.)
  */
 function safeRedirect(value: string | null): string {
-  if (!value) return "/";
+  if (!value) return "/app";
   // Must start with a single slash, not `//` (protocol-relative) or `/\`
   // (some browsers treat `/\` as a protocol separator on Windows).
-  if (!value.startsWith("/")) return "/";
-  if (value.startsWith("//")) return "/";
-  if (value.startsWith("/\\")) return "/";
+  if (!value.startsWith("/")) return "/app";
+  if (value.startsWith("//")) return "/app";
+  if (value.startsWith("/\\")) return "/app";
   return value;
 }
 

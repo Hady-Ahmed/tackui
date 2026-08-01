@@ -96,7 +96,7 @@ export default function AgentsPage() {
     // can manage any org's agents. The server enforces this via
     // canManageAgents() — the hook just mirrors it for the redirect.
     if (canManage === false) {
-      router.push("/");
+      router.push("/app");
     }
   }, [session, isPending, router, config, canManage]);
 
@@ -230,7 +230,7 @@ export default function AgentsPage() {
             </p>
           </div>
           <Link
-            href="/"
+            href="/app"
             className="rounded-lg border border-zinc-200 px-3 py-1.5 text-sm font-medium text-zinc-700 transition-colors hover:bg-zinc-100 dark:border-zinc-700 dark:text-zinc-300 dark:hover:bg-zinc-800"
           >
             ← Back to chat

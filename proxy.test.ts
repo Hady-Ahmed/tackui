@@ -110,6 +110,18 @@ describe("proxy — per-IP rate limiting (AUTH_DISABLED=false)", () => {
     expect(res.status).not.toBe(429);
   });
 
+  it("/api/billing/webhook is exempt from rate limiting + cookie gate", async () => {
+    // Exhaust the limit
+    for (let i = 0; i < 300; i++) {
+      await proxy(makeRequest("/api/agents", { ip: "1.2.3.4" }));
+    }
+    // No session cookie — must still pass (Stripe calls server-to-server)
+    const res = await proxy(
+      makeRequest("/api/billing/webhook", { ip: "1.2.3.4" }),
+    );
+    expect(res.status).toBe(200);
+  });
+
   it("extracts IP from X-Forwarded-For (first hop)", async () => {
     // Send 300 requests with a multi-hop X-Forwarded-For
     for (let i = 0; i < 300; i++) {

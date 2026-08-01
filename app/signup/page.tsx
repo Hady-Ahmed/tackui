@@ -48,18 +48,18 @@ export default function SignupPage() {
       setShowVerifyPrompt(true);
     } else {
       // Hard navigation — avoids client-side hydration race.
-      window.location.href = "/";
+      window.location.href = "/app";
     }
   };
 
   const handleSocial = async (provider: string) => {
     setError(null);
-    await authClient.signIn.social({ provider, callbackURL: "/" });
+    await authClient.signIn.social({ provider, callbackURL: "/app" });
   };
 
   useEffect(() => {
     if (config?.authDisabled) {
-      router.push("/");
+      router.push("/app");
     }
   }, [config?.authDisabled, router]);
 

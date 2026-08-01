@@ -265,6 +265,57 @@ See [`.env.example`](.env.example) for the full list with comments.
 | `POSTGRES_DB` | No (docker-compose only) | Postgres database name (default: `agent_frontend`) |
 | `APP_PORT` | No (docker-compose only) | Host port to expose the app on (default: `3000`) |
 
+### SaaS mode (hosted only — self-hosters ignore)
+
+These variables configure the hosted SaaS offering. They have **no effect**
+on a self-hosted deployment and can be left unset. The SaaS code paths
+(landing page at `/`, billing, plan enforcement, legal pages, forced SSRF
+guard) are gated behind `SAAS_MODE` and never run when it is unset.
+
+| Variable | Description |
+| --- | --- |
+| `SAAS_MODE` | Set to `true` on the hosted instance. Enables the landing page at `/` (chat moves to `/app`), `/terms` + `/privacy` + `/pricing` routes, plan enforcement (Free/Pro/Team), and a hard-locked SSRF guard (private endpoints are NEVER allowed on the shared host, regardless of `ALLOW_PRIVATE_ENDPOINTS`). |
+| `STRIPE_SECRET_KEY` | Stripe SDK key. Required for paid plans; without it, SaaS mode runs but all users sit on the Free plan — no checkout/portal UI renders. |
+| `STRIPE_WEBHOOK_SECRET` | Stripe webhook signing secret (from the dashboard or `stripe listen`). |
+| `STRIPE_PRICE_PRO` | Stripe Price ID for the Pro plan. The dollar amount lives in Stripe — edit it there. |
+| `STRIPE_PRICE_TEAM` | Stripe Price ID for the Team plan (per-seat). |
+
+> **Self-hosters:** do not set any of these. Self-host is the unlimited,
+> no-billing, private-endpoints-allowed experience. See
+> [Self-hosting vs SaaS](#self-hosting-vs-saas) below.
+
+## Self-hosting vs SaaS
+
+AG-UI Chat ships from one codebase in two modes, gated by a single env var
+(`SAAS_MODE`):
+
+- **Self-host (the OSS product, default — `SAAS_MODE` unset):** chat lives
+  at `/`, no billing, no plan enforcement, no landing/legal pages. Private
+  agent endpoints allowed via `ALLOW_PRIVATE_ENDPOINTS=true`. Multi-user +
+  multi-org fully supported when auth is enabled (not crippleware).
+- **SaaS (the hosted instance, `SAAS_MODE=true`):** landing page at `/`,
+  chat at `/app`, Stripe billing with Free/Pro/Team plans, plan
+  enforcement (agent count, concurrent runs, rate limits, seats), legal
+  pages, cookie notice. Private endpoints are **never** allowed on the
+  shared host (SSRF guard hard-locked on) — regardless of
+  `ALLOW_PRIVATE_ENDPOINTS`.
+
+Self-hosters never see SaaS code paths: the landing page, billing UI,
+plan checks, and legal pages are all gated behind `SAAS_MODE` and are
+inert when it's unset. There is no separate codebase to maintain or
+version-sync.
+
+| | Self-host (solo) | Self-host (multi-user) | SaaS Free | SaaS Pro | SaaS Team |
+| --- | --- | --- | --- | --- | --- |
+| Agents | unlimited | unlimited | 3 | unlimited | unlimited |
+| Concurrent runs | 3 | 3 | 1 | 3 | 5 |
+| Org switcher | n/a (1 org) | ✅ | n/a (1 org) | n/a (1 org) | ✅ |
+| Create org | n/a | ✅ unlimited | ❌ | ❌ | ✅ (paid) |
+| Team seats | 1 (solo) | unlimited | 1 (personal) | 1 (personal) | per-seat (paid) |
+| Private endpoints | ✅ | ✅ | ❌ | ❌ | ❌ |
+| Support | community | community | community | priority | priority |
+
+
 ## Security
 
 ### `AUTH_DISABLED=true` is for single-user setups only
