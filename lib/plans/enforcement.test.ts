@@ -142,16 +142,13 @@ describe("lib/plans/enforcement", () => {
       expect(await checkCanCreateOrg("org-1")).toBeNull();
     });
 
-    it("rejects (403) free/pro — org creation needs Team", async () => {
-      mockGetOrgPlan.mockResolvedValue("pro");
+    it("always allows under SaaS (workspace creation is free — Team gates invites, not creation)", async () => {
       const { checkCanCreateOrg } = await loadSaaS();
-      const res = await checkCanCreateOrg("org-1");
-      expect(res!.status).toBe(403);
-      expect((await res!.json()).code).toBe("PLAN_ORG_CREATE_FORBIDDEN");
+      expect(await checkCanCreateOrg("org-1")).toBeNull();
     });
 
-    it("allows under team", async () => {
-      mockGetOrgPlan.mockResolvedValue("team");
+    it("always allows under SaaS even on free plan", async () => {
+      mockGetOrgPlan.mockResolvedValue("free");
       const { checkCanCreateOrg } = await loadSaaS();
       expect(await checkCanCreateOrg("org-1")).toBeNull();
     });

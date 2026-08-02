@@ -3,8 +3,7 @@ import { admin, genericOAuth, organization } from "better-auth/plugins";
 import { getPoolOrTestClient, query } from "@/lib/db/pg";
 import { EMAIL_ENABLED, sendEmail } from "@/lib/email/client";
 import { verificationEmail, passwordResetEmail } from "@/lib/email/templates";
-import { SAAS_MODE } from "@/lib/config/saas";
-import { userHasTeamPlan, getMembershipLimit } from "@/lib/billing/subscription-store";
+import { getMembershipLimit } from "@/lib/billing/subscription-store";
 
 const AUTH_DISABLED = process.env.AUTH_DISABLED === "true";
 
@@ -47,14 +46,13 @@ function buildPlugins(): BetterAuthPlugin[] {
       // SaaS plan enforcement, wired server-side so it can't be bypassed
       // by a direct API call. Self-host: both return unlimited/true.
       //
-      // allowUserToCreateOrganization — only team-plan users can create
-      // additional workspaces on SaaS (free/pro are personal-org-only).
-      // The personal org auto-created on signup goes through the session
-      // hook, NOT this gate, so signup always works.
-      allowUserToCreateOrganization: async (user) => {
-        if (!SAAS_MODE) return true;
-        return userHasTeamPlan(user.id);
-      },
+      // allowUserToCreateOrganization — always true. Creating workspaces
+      // is free and unrestricted (Vercel/GitHub model): a Free workspace
+      // has 3 agents max, 1 member, no invites — harmless. The Team plan
+      // gates *invites* (via membershipLimit below), not workspace
+      // creation. The personal org auto-created on signup goes through
+      // the session hook, NOT this gate.
+      allowUserToCreateOrganization: async () => true,
       // membershipLimit — per-org seat cap. free/pro = 1 (personal, no
       // invites), team = subscription.seats. better-auth rejects invites
       // past this with ORGANIZATION_MEMBERSHIP_LIMIT_REACHED.

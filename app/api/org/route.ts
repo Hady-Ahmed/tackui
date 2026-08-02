@@ -1,22 +1,22 @@
 import { NextResponse } from "next/server";
 import { getCurrentUser } from "@/lib/auth/context";
 import { checkCanCreateOrg } from "@/lib/plans/enforcement";
-import { getMembershipLimit } from "@/lib/billing/subscription-store";
 import { query } from "@/lib/db/pg";
 
 /**
- * GET /api/org — the current user's orgs + active org + seat info.
+ * GET /api/org — the current user's orgs + active org + per-org plan info.
  *
  * Read-only aggregate used by the org switcher + invite dialog to render
- * seat availability and the "create workspace" affordance. Creation +
- * invites themselves go through the better-auth client
+ * plan badges, seat counts, and the "create workspace" affordance. Creation
+ * + invites themselves go through the better-auth client
  * (authClient.organization.create / inviteMember) — the plan gates
- * (allowUserToCreateOrganization, membershipLimit) are enforced
- * server-side in lib/auth/auth.ts, so direct API calls can't bypass them.
+ * (membershipLimit) are enforced server-side in lib/auth/auth.ts, so
+ * direct API calls can't bypass them.
  *
- * Returns the user's memberships across all orgs with their role, the
- * active org id, whether org creation is allowed (plan), the active org's
- * seat cap, and its current member count.
+ * Returns the user's memberships across all orgs with their role + each
+ * org's plan (free/pro/team) + seat cap + current member count, the active
+ * org id, and whether org creation is allowed (always true — Free
+ * workspaces are harmless).
  */
 
 interface OrgRow {
@@ -24,14 +24,25 @@ interface OrgRow {
   name: string;
   slug: string;
   role: string;
+  plan: string;
+  seats: number | null;
 }
 
-async function countMembers(orgId: string): Promise<number> {
-  const r = await query<{ count: number }>(
-    `SELECT count(*)::int as count FROM member WHERE "organizationId" = $1`,
-    [orgId],
+interface MemberCountRow {
+  organizationId: string;
+  count: number;
+}
+
+async function countMembersByOrg(orgIds: string[]): Promise<Map<string, number>> {
+  if (orgIds.length === 0) return new Map();
+  const r = await query<MemberCountRow>(
+    `SELECT "organizationId", count(*)::int as count
+     FROM member
+     WHERE "organizationId" = ANY($1::text[])
+     GROUP BY "organizationId"`,
+    [orgIds],
   );
-  return r.rows[0]?.count ?? 0;
+  return new Map(r.rows.map((row) => [row.organizationId, row.count]));
 }
 
 export async function GET() {
@@ -40,26 +51,46 @@ export async function GET() {
     return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
   }
 
+  // Join member → organization → subscriptions (LEFT JOIN so Free orgs
+  // with no subscription row still appear with plan='free').
   const result = await query<OrgRow>(
-    `SELECT o.id, o.name, o.slug, m.role
+    `SELECT o.id, o.name, o.slug, m.role,
+            COALESCE(s.plan, 'free') AS plan,
+            s.seats
      FROM member m
      JOIN organization o ON o.id = m."organizationId"
+     LEFT JOIN subscriptions s ON s.org_id = o.id
      WHERE m."userId" = $1
      ORDER BY o."createdAt" ASC`,
     [user.id],
   );
 
-  // null = unlimited (self-host). A finite number = seat cap.
-  const limit = await getMembershipLimit(user.orgId);
-  const seats = Number.isFinite(limit) ? limit : null;
-  const memberCount = await countMembers(user.orgId);
+  const orgIds = result.rows.map((r) => r.id);
+  const memberCounts = await countMembersByOrg(orgIds);
+
+  const orgs = result.rows.map((r) => ({
+    id: r.id,
+    name: r.name,
+    slug: r.slug,
+    role: r.role,
+    plan: r.plan,
+    seats: r.seats,
+    memberCount: memberCounts.get(r.id) ?? 0,
+  }));
+
+  // canCreateOrg is always true — workspace creation is free and
+  // unrestricted (Free workspaces: 3 agents, 1 member, no invites).
   const canCreateOrg = (await checkCanCreateOrg(user.orgId)) === null;
 
+  // Top-level seats/memberCount for the active org (the invite dialog +
+  // switcher header read these without scanning the orgs array).
+  const activeOrgInfo = orgs.find((o) => o.id === user.orgId);
+
   return NextResponse.json({
-    orgs: result.rows,
+    orgs,
     activeOrgId: user.orgId,
     canCreateOrg,
-    seats,
-    memberCount,
+    seats: activeOrgInfo?.seats ?? null,
+    memberCount: activeOrgInfo?.memberCount ?? 0,
   });
 }

@@ -2,6 +2,7 @@
 
 import { useState } from "react";
 import { useBilling } from "@/lib/billing/use-billing";
+import { useOrgs } from "@/lib/billing/use-orgs";
 
 /**
  * Upgrade dialog — lets a user start a Stripe Checkout session for a paid
@@ -25,6 +26,8 @@ export function UpgradeDialog({
   onClose: () => void;
 }) {
   const { billing } = useBilling();
+  const { orgs, activeOrgId } = useOrgs();
+  const activeOrgName = orgs.find((o) => o.id === activeOrgId)?.name ?? "this workspace";
   const [seats, setSeats] = useState(2);
   const [submitting, setSubmitting] = useState<null | "pro" | "team">(null);
   const [error, setError] = useState<string | null>(null);
@@ -86,7 +89,7 @@ export function UpgradeDialog({
           Upgrade plan
         </h2>
         <p className="mt-1 text-sm text-zinc-500">
-          You&apos;re currently on the {billing?.limits?.label ?? currentPlan} plan.
+          {"You're upgrading "}<span className="font-medium text-zinc-700 dark:text-zinc-300">{activeOrgName}</span> (currently on the {billing?.limits?.label ?? currentPlan} plan).
         </p>
 
         {error && (
@@ -125,22 +128,27 @@ export function UpgradeDialog({
                   )}
                 </div>
                 {tier.id === "team" && !isCurrent && (
-                  <div className="mt-3 flex items-center gap-2 text-sm">
-                    <label className="text-zinc-600 dark:text-zinc-400" htmlFor="seats">
-                      Seats
-                    </label>
-                    <input
-                      id="seats"
-                      type="number"
-                      min={2}
-                      max={1000}
-                      value={seats}
-                      onChange={(e) => setSeats(Math.max(2, Number(e.target.value) || 2))}
-                      className="w-20 rounded border border-zinc-300 px-2 py-1 dark:border-zinc-700 dark:bg-zinc-900 dark:text-zinc-100"
-                    />
-                    <span className="text-xs text-zinc-500">
-                      Starts at 2 (you + 1 collaborator). Add more later in the customer portal.
-                    </span>
+                  <div>
+                    <div className="mt-3 flex items-center gap-2 text-sm">
+                      <label className="text-zinc-600 dark:text-zinc-400" htmlFor="seats">
+                        Seats
+                      </label>
+                      <input
+                        id="seats"
+                        type="number"
+                        min={2}
+                        max={1000}
+                        value={seats}
+                        onChange={(e) => setSeats(Math.max(2, Number(e.target.value) || 2))}
+                        className="w-20 rounded border border-zinc-300 px-2 py-1 dark:border-zinc-700 dark:bg-zinc-900 dark:text-zinc-100"
+                      />
+                      <span className="text-xs text-zinc-500">
+                        Starts at 2 (you + 1 collaborator). Add more later in the customer portal.
+                      </span>
+                    </div>
+                    <p className="mt-2 rounded bg-blue-50 px-2 py-1.5 text-xs text-blue-700 dark:bg-blue-950 dark:text-blue-300">
+                      Tip: Team workspaces are for collaboration. If this is your personal workspace, consider creating a new team workspace first (via the workspace switcher) so your personal and team spaces stay separate.
+                    </p>
                   </div>
                 )}
                 <ul className="mt-3 space-y-1 text-xs text-zinc-600 dark:text-zinc-400">

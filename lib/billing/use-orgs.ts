@@ -7,6 +7,12 @@ export interface OrgMembership {
   name: string;
   slug: string;
   role: string;
+  /** The org's plan: "free" | "pro" | "team" (or "self-host" under self-host). */
+  plan: string;
+  /** Seat cap for Team orgs. null = unlimited (self-host) or free/pro. */
+  seats: number | null;
+  /** Current member count in this org. */
+  memberCount: number;
 }
 
 export interface OrgsState {

@@ -6,25 +6,25 @@ import { authClient } from "@/lib/auth/auth-client";
 import { useOrgs } from "@/lib/billing/use-orgs";
 
 /**
- * Org switcher dropdown — lets a user switch between their workspaces and
+ * Org switcher dropdown — lets a user switch between workspaces and
  * create a new one.
  *
- * Tier-agnostic by design: it self-renders only when the user belongs to
- * more than one org (so Free/Pro users on a single personal org never see
- * it). The "Create workspace" affordance inside it is gated by the team
- * plan via useOrgs().canCreateOrg (which reads checkCanCreateOrg — SaaS
- * Team only, self-host multi-user always).
+ * Self-renders only when the user belongs to >1 org (so users with a
+ * single personal workspace never see it). This happens when they've
+ * created additional workspaces or been invited to someone else's team.
  *
- * Solo mode (AUTH_DISABLED) never reaches this component — the account
- * menu renders the synthetic admin branch before mounting the switcher.
+ * Creating workspaces is always available (Free workspaces: 3 agents,
+ * 1 member, no invites — harmless). The Team plan gates *invites*, not
+ * workspace creation. New workspaces start on Free; upgrade them to Team
+ * from the account menu's "Upgrade plan" button after switching to them.
  *
- * Switching calls better-auth's setActiveOrganization then hard-refreshes
- * so the new org's agents/threads/scoping takes effect across the app.
+ * Switching calls better-auth's setActiveOrganization then hard-navigates
+ * to /app so server components + the runner re-scope to the new org.
  */
 export function OrgSwitcher() {
   const { data: orgs, isPending: orgsLoading } = authClient.useListOrganizations();
   const { data: activeOrg } = authClient.useActiveOrganization();
-  const { orgs: orgsWithRoles, canCreateOrg, seats, memberCount } = useOrgs();
+  const { orgs: orgsWithRoles } = useOrgs();
   const router = useRouter();
   const [open, setOpen] = useState(false);
   const [creating, setCreating] = useState(false);
@@ -43,8 +43,13 @@ export function OrgSwitcher() {
   }, []);
 
   const list = orgs ?? orgsWithRoles ?? [];
-  // Self-hide when there's only one org (or zero — loading).
-  if (!orgsLoading && list.length <= 1 && !canCreateOrg) return null;
+  // Wait for both data sources before rendering. better-auth's
+  // useListOrganizations and our useOrgs load at different speeds —
+  // rendering during that gap causes a brief flash. After both resolve,
+  // self-hide when there's only one org (single-personal-workspace users).
+  const ready = !orgsLoading && orgsWithRoles.length > 0;
+  if (!ready) return null;
+  if (list.length <= 1) return null;
 
   async function switchTo(orgId: string) {
     setOpen(false);
@@ -55,7 +60,6 @@ export function OrgSwitcher() {
       setError(error.message ?? "Failed to switch workspace");
       return;
     }
-    // Hard refresh so server components + the runner re-scope to the new org.
     router.refresh();
     window.location.assign("/app");
   }
@@ -70,11 +74,7 @@ export function OrgSwitcher() {
     });
     setCreating(false);
     if (error) {
-      setError(
-        error.code === "YOU_ARE_NOT_ALLOWED_TO_CREATE_A_NEW_ORGANIZATION"
-          ? "Upgrade to the Team plan to create workspaces."
-          : error.message ?? "Failed to create workspace",
-      );
+      setError(error.message ?? "Failed to create workspace");
       return;
     }
     setNewName("");
@@ -84,6 +84,7 @@ export function OrgSwitcher() {
   }
 
   const activeName = activeOrg?.name ?? orgsWithRoles.find((o) => o.id === (activeOrg?.id ?? ""))?.name ?? "Workspace";
+  const activeOrgInfo = orgsWithRoles.find((o) => o.id === (activeOrg?.id ?? ""));
 
   return (
     <div ref={ref} className="relative">
@@ -99,7 +100,11 @@ export function OrgSwitcher() {
             {activeName}
           </p>
           <p className="truncate text-xs text-zinc-400">
-            {canCreateOrg && seats ? `Team · ${memberCount}/${seats} seats` : "Workspace"}
+            {activeOrgInfo?.plan === "team"
+              ? `Team · ${activeOrgInfo.memberCount}/${activeOrgInfo.seats ?? "?"} seats`
+              : activeOrgInfo?.plan === "pro"
+                ? "Pro"
+                : "Free"}
           </p>
         </div>
         <svg className="h-4 w-4 shrink-0 text-zinc-400" viewBox="0 0 20 20" fill="currentColor">
@@ -110,34 +115,50 @@ export function OrgSwitcher() {
       {open && (
         <div className="absolute bottom-full left-0 right-0 mb-1 rounded-lg border border-zinc-200 bg-white py-1 shadow-lg dark:border-zinc-800 dark:bg-zinc-950">
           <div className="max-h-60 overflow-y-auto">
-            {list.map((org) => (
-              <button
-                key={org.id}
-                onClick={() => switchTo(org.id)}
-                className="flex w-full items-center justify-between px-3 py-2 text-left text-sm text-zinc-700 transition-colors hover:bg-zinc-100 dark:text-zinc-300 dark:hover:bg-zinc-800"
-              >
-                <span className="truncate">{org.name}</span>
-                {org.id === (activeOrg?.id ?? "") && (
-                  <span className="ml-2 text-xs text-blue-600 dark:text-blue-400">active</span>
-                )}
-              </button>
-            ))}
+            {list.map((org) => {
+              const info = orgsWithRoles.find((o) => o.id === org.id);
+              const plan = info?.plan ?? "free";
+              return (
+                <button
+                  key={org.id}
+                  onClick={() => switchTo(org.id)}
+                  className="flex w-full items-center justify-between px-3 py-2 text-left text-sm text-zinc-700 transition-colors hover:bg-zinc-100 dark:text-zinc-300 dark:hover:bg-zinc-800"
+                >
+                  <div className="min-w-0 flex-1">
+                    <span className="truncate">{org.name}</span>
+                    <span className="ml-2 text-xs text-zinc-400">
+                      {plan === "team"
+                        ? `Team · ${info?.memberCount ?? 0}/${info?.seats ?? "?"} seats`
+                        : plan === "pro"
+                          ? "Pro"
+                          : "Free"}
+                    </span>
+                  </div>
+                  {org.id === (activeOrg?.id ?? "") && (
+                    <span className="ml-2 shrink-0 text-xs text-blue-600 dark:text-blue-400">active</span>
+                  )}
+                </button>
+              );
+            })}
           </div>
 
-          {canCreateOrg && (
-            <div className="border-t border-zinc-200 p-2 dark:border-zinc-800">
-              {newName === "" ? (
-                <button
-                  onClick={() => setNewName(" ")}
-                  className="w-full rounded px-2 py-1.5 text-left text-sm text-zinc-700 transition-colors hover:bg-zinc-100 dark:text-zinc-300 dark:hover:bg-zinc-800"
-                >
-                  + New workspace
-                </button>
-              ) : (
+          {/* New workspace — always available. Free workspaces start with
+              3 agents, 1 member, no invites. Upgrade to Team from the
+              account menu after switching to it. */}
+          <div className="border-t border-zinc-200 p-2 dark:border-zinc-800">
+            {newName.trim() === "" ? (
+              <button
+                onClick={() => setNewName(" ")}
+                className="w-full rounded px-2 py-1.5 text-left text-sm text-zinc-700 transition-colors hover:bg-zinc-100 dark:text-zinc-300 dark:hover:bg-zinc-800"
+              >
+                + New workspace
+              </button>
+            ) : (
+              <div>
                 <div className="flex gap-2">
                   <input
                     autoFocus
-                    value={newName.trim()}
+                    value={newName}
                     onChange={(e) => setNewName(e.target.value)}
                     onKeyDown={(e) => {
                       if (e.key === "Enter") createOrg();
@@ -154,9 +175,12 @@ export function OrgSwitcher() {
                     {creating ? "…" : "Create"}
                   </button>
                 </div>
-              )}
-            </div>
-          )}
+                <p className="mt-1 text-xs text-zinc-400">
+                  New workspaces start on the Free plan. Switch to it and upgrade to Team for collaboration.
+                </p>
+              </div>
+            )}
+          </div>
 
           {error && (
             <div className="border-t border-zinc-200 px-3 py-2 text-xs text-red-600 dark:border-zinc-800 dark:text-red-400">

@@ -112,24 +112,18 @@ export async function checkMemberCountLimit(
 }
 
 /**
- * Check whether a user can create a new org (team workspace). On SaaS,
- * only the Team plan can create additional orgs. Self-host multi-user can
- * always create orgs. Returns null when allowed, or a 403 NextResponse.
- * Called by POST /api/org.
+ * Check whether a user can create a new org (team workspace).
+ *
+ * Creating workspaces is always allowed (Vercel/GitHub model): a Free
+ * workspace has 3 agents max, 1 member, no invites — harmless. The Team
+ * plan gates *invites* (via membershipLimit), not workspace creation.
+ * Returns null (allowed) unconditionally. Kept as a function for future
+ * use + self-host multi-user where a company might want to restrict org
+ * creation to admins.
  */
 export async function checkCanCreateOrg(
-  orgId: string,
+  _orgId: string,
 ): Promise<NextResponse | null> {
-  if (!SAAS_MODE) return null;
-  const { limits } = await getEnforcementLimits(orgId);
-  if (!limits.canCreateOrg) {
-    return NextResponse.json(
-      {
-        error: "Creating additional workspaces requires the Team plan.",
-        code: "PLAN_ORG_CREATE_FORBIDDEN",
-      },
-      { status: 403 },
-    );
-  }
+  void _orgId;
   return null;
 }
