@@ -305,13 +305,21 @@ plan checks, and legal pages are all gated behind `SAAS_MODE` and are
 inert when it's unset. There is no separate codebase to maintain or
 version-sync.
 
+**Workspace model (Vercel/GitHub pattern):** every user gets a personal
+workspace on signup (Free). Creating additional workspaces is always
+available — new workspaces start on Free (3 agents, 1 member, no invites).
+Upgrade a workspace to Pro for solo capacity, or to Team for collaboration
+(invites + per-seat billing). The org switcher appears when a user belongs
+to >1 org (created a second workspace or been invited to someone else's
+team).
+
 | | Self-host (solo) | Self-host (multi-user) | SaaS Free | SaaS Pro | SaaS Team |
 | --- | --- | --- | --- | --- | --- |
 | Agents | unlimited | unlimited | 3 | unlimited | unlimited |
 | Concurrent runs | 3 | 3 | 1 | 3 | 5 |
+| Create workspace | n/a | ✅ unlimited | ✅ (starts Free) | ✅ (starts Free) | ✅ (starts Free) |
 | Org switcher | n/a (1 org) | ✅ | n/a (1 org) | n/a (1 org) | ✅ |
-| Create org | n/a | ✅ unlimited | ❌ | ❌ | ✅ (paid) |
-| Team seats | 1 (solo) | unlimited | 1 (personal) | 1 (personal) | per-seat (paid) |
+| Team seats | 1 (solo) | unlimited | 1 (personal) | 1 (personal) | per-seat (min 2, paid) |
 | Private endpoints | ✅ | ✅ | ❌ | ❌ | ❌ |
 | Support | community | community | community | priority | priority |
 

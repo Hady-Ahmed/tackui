@@ -71,7 +71,7 @@ app/
   api/billing/portal/route.ts     # POST — Stripe Customer Portal session (auth + canManageAgents) — SaaS only
   api/billing/webhook/route.ts    # POST — Stripe webhook receiver (no auth, signature-verified; bypassed by proxy cookie gate + per-IP rate limit) — SaaS only
   api/billing/subscription/route.ts # GET — current org plan + limits (for account-menu badge) — SaaS only
-  api/org/route.ts             # GET — user's orgs + roles + active org + seat info + canCreateOrg (read-only aggregate)
+  api/org/route.ts             # GET — user's orgs + roles + per-org plan/seats/memberCount + active org + canCreateOrg (read-only aggregate)
   api/threads/[id]/route.ts    # REST: PATCH/DELETE /api/threads/[id] (rename, delete conversations)
   api/threads/[id]/route.test.ts  # Tests for PATCH/DELETE (mocked runner)
   api/health/route.ts          # GET — liveness health check (bypassed by proxy.ts cookie gate)
@@ -120,7 +120,7 @@ lib/
     saas.test.ts                # 5 tests — flag combinations across modes
   email/
     client.ts                   # Resend SDK singleton + EMAIL_ENABLED flag + sendEmail() helper (no-op when RESEND_API_KEY unset)
-    templates.ts                # Email template builders — verificationEmail(), passwordResetEmail() (HTML + text)
+    templates.ts                # Email template builders — verificationEmail(), passwordResetEmail(), invitationEmail() (HTML + text)
     templates.test.ts           # 9 tests — template rendering, URL inclusion, HTML escaping
   billing/                      # SaaS-only — inert when !BILLING_ENABLED
     plans.ts                    # Plan definitions (Free/Pro/Team) + getPlanLimits + planIdFromPriceId + priceIdForPlan + defaultPlan
@@ -128,12 +128,13 @@ lib/
     stripe.ts                   # Stripe SDK singleton (null when !BILLING_ENABLED) + getWebhookSecret
     subscription-store.ts       # Async CRUD on subscriptions table (zod-validated, pg.Pool-backed) + getOrgPlan + userHasTeamPlan + getMembershipLimit
     subscription-store.test.ts  # 16 tests — CRUD, cross-org isolation, plan resolution
-    checkout.ts                 # createCheckoutSession (orgId in metadata) + createPortalSession
+    checkout.ts                 # createCheckoutSession (orgId in metadata, Team min 2 seats enforced by route) + createPortalSession
     use-billing.ts              # useBilling() hook — fetches /api/billing/subscription once per page load (cached)
-    use-orgs.ts                 # useOrgs() hook — fetches /api/org for seat info + canCreateOrg + resetOrgsCache
+    use-orgs.ts                 # useOrgs() hook — fetches /api/org for per-org plan + seats + canCreateOrg + resetOrgsCache
+    use-invitations.ts          # useInvitations() hook — fetches pending org invitations count via better-auth client (cached) + resetInvitationsCache
   plans/
-    enforcement.ts              # SaaS plan enforcement: getEnforcementLimits + checkAgentCountLimit + checkMemberCountLimit + checkCanCreateOrg (all short-circuit to unlimited/allowed when !SAAS_MODE)
-    enforcement.test.ts         # 13 tests — per-plan limits, self-host short-circuit, seat + agent caps
+    enforcement.ts              # SaaS plan enforcement: getEnforcementLimits + checkAgentCountLimit + checkMemberCountLimit + checkCanCreateOrg (all short-circuit to unlimited/allowed when !SAAS_MODE; checkCanCreateOrg always returns null — workspace creation is free)
+    enforcement.test.ts         # 13 tests — per-plan limits, self-host short-circuit, seat + agent caps, org creation always allowed
   net/
     safe-fetch.ts               # SSRF guard — assertSafeUrl (blocks private IPs, ALLOW_PRIVATE_ENDPOINTS opt-in, hard-locked ON under SaaS mode) + isPrivateIp (IPv4/IPv6 range checks)
     safe-fetch.test.ts          # 43 tests — private IP ranges, IPv6, IPv4-mapped, DNS resolution, bypass opt-in, SaaS forced guard
@@ -149,9 +150,11 @@ lib/
 
 components/
   agent-sidebar.tsx            # Agent picker + conversation list + status dots + rename/delete + collapsible (useThreads)
-  account-menu.tsx             # User avatar, name, email, sign out (useSession) + plan badge + manage subscription + invite button + OrgSwitcher
-  org-switcher.tsx             # Org switcher dropdown (self-renders when >1 org) + create-workspace (SaaS Team / self-host multi-user)
+  account-menu.tsx             # User avatar, name, email, sign out (useSession) + plan badge + manage subscription + upgrade button + invite button + new-workspace button + pending-invitations badge + OrgSwitcher
+  org-switcher.tsx             # Org switcher dropdown (pure switcher — self-renders when >1 org; workspace creation lives in NewWorkspaceDialog)
   invite-dialog.tsx            # Invite-by-email modal (org owner/admin) + live seats counter
+  upgrade-dialog.tsx           # Plan upgrade modal (Pro/Team options, Team seats input min 2) → POST /api/billing/checkout → Stripe Checkout
+  new-workspace-dialog.tsx     # Create-new-workspace modal (always available on SaaS — Free workspaces start with 3 agents, 1 member, no invites)
   landing.tsx                  # Marketing landing page (SaaS mode only — root / renders this)
   cookie-notice.tsx            # Minimal EU cookie notice (SaaS mode only, dismissible via localStorage)
   theme-toggle.tsx             # Light/dark toggle button (sidebar footer, icon + label)
@@ -360,10 +363,11 @@ SaaS-only code paths are inert when `SAAS_MODE` is unset.
   `getSubscription`, `getOrgPlan` (stored plan or default), `upsertSubscription`
   (the webhook is the sole writer), `deleteSubscription` (downgrade to free),
   `getOrgIdByCustomerId` (resolve org from a Stripe customer id),
-  `userHasTeamPlan` (org-creation gate), `getMembershipLimit` (seat cap for
-  better-auth's `membershipLimit`).
+  `userHasTeamPlan` (checks if a user belongs to any Team-plan org),
+  `getMembershipLimit` (seat cap for better-auth's `membershipLimit`).
 - `lib/billing/checkout.ts` — `createCheckoutSession` (carries `orgId` in
-  metadata so the webhook can route events to the right org) +
+  metadata so the webhook can route events to the right org; Team enforces
+  min 2 seats at the route layer via zod `.refine`) +
   `createPortalSession` (Customer Portal).
 - `app/api/billing/checkout/route.ts` — POST (auth + `canManageAgents`)
   → Checkout URL.
@@ -384,7 +388,10 @@ SaaS-only code paths are inert when `SAAS_MODE` is unset.
 - `lib/billing/use-billing.ts` — `useBilling()` hook (one fetch per page
   load, cached in module state — same pattern as `useCanManageAgents`).
 - `lib/billing/use-orgs.ts` — `useOrgs()` hook (fetches `/api/org` for
-  seat info + canCreateOrg) + `resetOrgsCache()`.
+  per-org plan + seats + memberCount + canCreateOrg) + `resetOrgsCache()`.
+- `lib/billing/use-invitations.ts` — `useInvitations()` hook (fetches
+  pending org invitations count via better-auth client, cached) +
+  `resetInvitationsCache()`. Used by the account-menu badge.
 
 ### Plan enforcement (SaaS-only)
 
@@ -398,8 +405,10 @@ SaaS-only code paths are inert when `SAAS_MODE` is unset.
 - `checkMemberCountLimit(orgId, currentCount)` — invite path rejects
   (402) when at the seat cap. Free/pro = 1 (personal, no invites),
   team = `subscription.seats`.
-- `checkCanCreateOrg(orgId)` — org creation gate (403). SaaS: only Team
-  plan; self-host: always allowed.
+- `checkCanCreateOrg(orgId)` — always returns null (allowed). Workspace
+  creation is free and unrestricted (Vercel/GitHub model): a Free workspace
+  has 3 agents max, 1 member, no invites — harmless. The Team plan gates
+  *invites* (via `membershipLimit`), not workspace creation.
 
 The rate-limit middleware (`lib/ratelimit/middleware.ts`) accepts an
 optional `opts.max` override so the copilotkit route can feed plan-derived
@@ -409,34 +418,51 @@ SaaS mode and passes the overrides; under self-host the static `LIMITS`
 presets apply unchanged.
 
 **Server-side org gates (better-auth `organization` plugin, wired in
-`lib/auth/auth.ts`):** `allowUserToCreateOrganization` (only team-plan
-users can create workspaces on SaaS — the personal org auto-created on
-signup goes through the session hook, NOT this gate, so signup always
-works) + `membershipLimit` (per-org seat cap: free/pro = 1, team =
-`subscription.seats`). These enforce at the API layer so direct calls
-can't bypass the plan.
+`lib/auth/auth.ts`):** `allowUserToCreateOrganization` (always true —
+workspace creation is free; the personal org auto-created on signup goes
+through the session hook, NOT this gate, so signup always works) +
+`membershipLimit` (per-org seat cap: free/pro = 1, team =
+`subscription.seats`) + `sendInvitationEmail` (env-gated via
+`EMAIL_ENABLED` — sends an invitation email via Resend when configured,
+no-op otherwise; the invitee discovers the invite via the pending-
+invitations badge in the account menu). These enforce at the API layer
+so direct calls can't bypass the plan.
 
 ### Org switcher + invitations (SaaS team plan + self-host multi-user)
 
-- `components/org-switcher.tsx` — tier-agnostic dropdown. Self-renders
-  only when the user belongs to >1 org (Free/Pro users have one personal
-  org → never see it). "Create workspace" gated by `canCreateOrg` (SaaS
-  Team only, self-host multi-user always). Uses better-auth's
-  `useListOrganizations` + `useActiveOrganization` + our `/api/org` for
-  seat info. Switching calls `authClient.organization.setActive` then
-  hard-navigates to `/app` so server components re-scope.
+- `components/org-switcher.tsx` — pure switcher dropdown. Self-renders
+  only when the user belongs to >1 org (Free/Pro users with one personal
+  org never see it; appears when they create additional workspaces or get
+  invited to someone else's team). Shows per-org plan badges (Free/Pro/Team
+  + seat count) in the dropdown. Switching calls
+  `authClient.organization.setActive` then hard-navigates to `/app`.
+- `components/new-workspace-dialog.tsx` — create-new-workspace modal,
+  always available on SaaS (rendered from the account menu's "New
+  workspace" button, not the switcher, so it's reachable even when the
+  user has only one org and the switcher is hidden). Calls
+  `authClient.organization.create`. New workspaces start on Free (3
+  agents, 1 member, no invites); upgrade to Team from the account menu
+  after switching to the new workspace.
 - `components/invite-dialog.tsx` — invite-by-email modal for org
   owners/admins. Calls `authClient.organization.inviteMember`. Shows a
   live seats-remaining counter from `/api/org`; the server-side
   `membershipLimit` is the backstop (returns
   `ORGANIZATION_MEMBERSHIP_LIMIT_REACHED` past the cap).
+- `components/upgrade-dialog.tsx` — plan upgrade modal (Pro/Team options,
+  Team seats input min 2) → POST `/api/billing/checkout` → Stripe
+  Checkout. Shows which workspace is being upgraded + a tip suggesting
+  creating a separate team workspace first if upgrading a personal one.
 - `app/app/invitations/page.tsx` — accept/reject pending invitations
   (`authClient.organization.listUserInvitations` +
-  `acceptInvitation`/`rejectInvitation`).
-- `app/api/org/route.ts` — GET (the user's orgs + roles + active org +
-  seat info + canCreateOrg). Read-only aggregate. Creation + invites go
-  through the better-auth client directly (the server-side gates enforce
-  the plan).
+  `acceptInvitation`/`rejectInvitation`). Reads `organizationName`
+  (top-level string in better-auth's response, not a nested object).
+  Refreshes the `useInvitations` cache on accept/reject so the
+  account-menu badge updates immediately.
+- `app/api/org/route.ts` — GET (the user's orgs + roles + per-org
+  plan/seats/memberCount + active org + canCreateOrg). Read-only
+  aggregate — LEFT JOINs `subscriptions` so Free orgs appear with
+  `plan: "free"`. Creation + invites go through the better-auth client
+  directly (the server-side gates enforce the plan).
 
 ### Marketing + legal pages (SaaS-only)
 
