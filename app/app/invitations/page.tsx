@@ -4,6 +4,7 @@ import { useEffect, useState, useRef } from "react";
 import Link from "next/link";
 import { authClient } from "@/lib/auth/auth-client";
 import { useOrgs } from "@/lib/billing/use-orgs";
+import { useInvitations } from "@/lib/billing/use-invitations";
 
 /**
  * Pending org invitations — accept/reject workspaces you've been invited
@@ -21,12 +22,15 @@ interface Invitation {
   role: string;
   status: string;
   organizationId: string;
-  organization?: { name: string };
-  inviter?: { name?: string; email: string };
+  // better-auth returns the org name as a top-level string field, not a
+  // nested `organization` object (it's Omit'd from the response shape).
+  organizationName?: string;
+  inviterId?: string;
 }
 
 export default function InvitationsPage() {
-  const { refresh } = useOrgs();
+  const { refresh: refreshOrgs } = useOrgs();
+  const { refresh: refreshInvites } = useInvitations();
   const [invitations, setInvitations] = useState<Invitation[]>([]);
   const [loading, setLoading] = useState(true);
   const [actioning, setActioning] = useState<string | null>(null);
@@ -64,7 +68,8 @@ export default function InvitationsPage() {
       setError(error.message ?? "Failed to accept");
       return;
     }
-    refresh();
+    refreshOrgs();
+    refreshInvites();
     load();
   }
 
@@ -78,6 +83,7 @@ export default function InvitationsPage() {
       setError(error.message ?? "Failed to reject");
       return;
     }
+    refreshInvites();
     load();
   }
 
@@ -105,7 +111,7 @@ export default function InvitationsPage() {
         </p>
       ) : (
         <ul className="mt-6 space-y-3">
-          {invitations.map((inv) => (
+            {invitations.map((inv) => (
             <li
               key={inv.id}
               className="rounded-lg border border-zinc-200 p-4 dark:border-zinc-800"
@@ -113,11 +119,10 @@ export default function InvitationsPage() {
               <div className="flex items-center justify-between gap-3">
                 <div className="min-w-0">
                   <p className="font-medium">
-                    {inv.organization?.name ?? "A workspace"}
+                    {inv.organizationName ?? "A workspace"}
                   </p>
                   <p className="truncate text-sm text-zinc-500">
                     Invited as {inv.role}
-                    {inv.inviter ? ` by ${inv.inviter.name ?? inv.inviter.email}` : ""}
                   </p>
                 </div>
                 <div className="flex shrink-0 gap-2">

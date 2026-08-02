@@ -80,3 +80,39 @@ export function passwordResetEmail(
   `;
   return { subject, html, text };
 }
+
+export function invitationEmail(
+  data: {
+    email: string;
+    organizationName: string;
+    inviterName: string;
+    acceptUrl: string;
+  },
+): EmailContent {
+  const subject = `${data.inviterName} invited you to join "${data.organizationName}"`;
+  const text = `Hi,\n\n${data.inviterName} has invited you to join the "${data.organizationName}" workspace on AG-UI Chat.\n\nClick the link below to accept the invitation:\n${data.acceptUrl}\n\nIf you weren't expecting this invitation, you can ignore this email.\n\n— AG-UI Chat`;
+  const html = `
+    <div style="font-family: -apple-system, BlinkMacSystemFont, sans-serif; max-width: 480px; margin: 0 auto; padding: 24px;">
+      <h2 style="color: #111827; margin-bottom: 16px;">You're invited to join ${escapeHtml(data.organizationName)}</h2>
+      <p style="color: #4B5563; line-height: 1.5;">
+        ${escapeHtml(data.inviterName)} has invited you to collaborate in the
+        <strong>${escapeHtml(data.organizationName)}</strong> workspace on AG-UI Chat.
+      </p>
+      <p style="margin: 24px 0;">
+        <a href="${escapeHtml(data.acceptUrl)}"
+           style="display: inline-block; background: #2563EB; color: #fff; padding: 12px 24px; border-radius: 8px; text-decoration: none; font-weight: 500;">
+          Accept invitation
+        </a>
+      </p>
+      <p style="color: #6B7280; font-size: 13px; line-height: 1.5;">
+        Or copy this link: ${escapeHtml(data.acceptUrl)}
+      </p>
+      <p style="color: #6B7280; font-size: 13px; line-height: 1.5; margin-top: 24px;">
+        If you weren't expecting this invitation, you can safely ignore this email.
+      </p>
+      <hr style="border: none; border-top: 1px solid #E5E7EB; margin: 24px 0;" />
+      <p style="color: #9CA3AF; font-size: 12px;">AG-UI Chat</p>
+    </div>
+  `;
+  return { subject, html, text };
+}

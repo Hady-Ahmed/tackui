@@ -6,6 +6,7 @@ import { authClient } from "@/lib/auth/auth-client";
 import { useAuthConfig } from "@/lib/auth/use-auth-config";
 import { useCanManageAgents } from "@/lib/auth/use-can-manage-agents";
 import { useBilling } from "@/lib/billing/use-billing";
+import { useInvitations } from "@/lib/billing/use-invitations";
 import { OrgSwitcher } from "@/components/org-switcher";
 import { InviteDialog } from "@/components/invite-dialog";
 import { UpgradeDialog } from "@/components/upgrade-dialog";
@@ -16,6 +17,7 @@ export function AccountMenu() {
   const { config } = useAuthConfig();
   const { billing } = useBilling();
   const { canManage } = useCanManageAgents();
+  const { count: pendingInvites } = useInvitations();
   const router = useRouter();
   const [open, setOpen] = useState(false);
   const [inviteOpen, setInviteOpen] = useState(false);
@@ -113,6 +115,20 @@ export function AccountMenu() {
           <div className="px-1 py-1">
             <OrgSwitcher />
           </div>
+          {pendingInvites > 0 && (
+            <button
+              onClick={() => {
+                router.push("/app/invitations");
+                setOpen(false);
+              }}
+              className="flex w-full items-center justify-between px-3 py-2 text-left text-sm text-zinc-700 transition-colors hover:bg-zinc-100 dark:text-zinc-300 dark:hover:bg-zinc-800"
+            >
+              <span>Pending invitations</span>
+              <span className="flex h-5 min-w-5 items-center justify-center rounded-full bg-blue-600 px-1.5 text-xs font-medium text-white">
+                {pendingInvites}
+              </span>
+            </button>
+          )}
           {canManage && (billing === null || billing.limits?.maxMembers === null) && (
             <button
               onClick={() => {

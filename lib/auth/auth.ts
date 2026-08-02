@@ -2,7 +2,7 @@ import { betterAuth, type BetterAuthPlugin } from "better-auth";
 import { admin, genericOAuth, organization } from "better-auth/plugins";
 import { getPoolOrTestClient, query } from "@/lib/db/pg";
 import { EMAIL_ENABLED, sendEmail } from "@/lib/email/client";
-import { verificationEmail, passwordResetEmail } from "@/lib/email/templates";
+import { verificationEmail, passwordResetEmail, invitationEmail } from "@/lib/email/templates";
 import { getMembershipLimit } from "@/lib/billing/subscription-store";
 
 const AUTH_DISABLED = process.env.AUTH_DISABLED === "true";
@@ -60,6 +60,30 @@ function buildPlugins(): BetterAuthPlugin[] {
         if (!org?.id) return 1;
         return getMembershipLimit(org.id);
       },
+      // sendInvitationEmail — fires when a user invites someone by email.
+      // Env-gated: when SMTP is configured (RESEND_API_KEY set), the
+      // invitee gets an email with an accept link. When unset, no email
+      // is sent — the invitee discovers the invitation via the pending-
+      // invitations badge in the account menu (or by visiting /app/
+      // invitations directly).
+      sendInvitationEmail: EMAIL_ENABLED
+        ? async (data) => {
+            const baseUrl = process.env.BETTER_AUTH_URL || "http://localhost:3000";
+            const acceptUrl = `${baseUrl}/app/invitations`;
+            const orgName = data.organization?.name ?? "a workspace";
+            const inviterName =
+              data.inviter?.user?.name ?? data.inviter?.user?.email ?? "Someone";
+            void sendEmail(
+              data.email,
+              invitationEmail({
+                email: data.email,
+                organizationName: orgName,
+                inviterName,
+                acceptUrl,
+              }),
+            );
+          }
+        : undefined,
     }),
   ];
 
