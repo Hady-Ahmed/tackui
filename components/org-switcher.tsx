@@ -6,17 +6,16 @@ import { authClient } from "@/lib/auth/auth-client";
 import { useOrgs } from "@/lib/billing/use-orgs";
 
 /**
- * Org switcher dropdown — lets a user switch between workspaces and
- * create a new one.
+ * Org switcher dropdown — lets a user switch between workspaces.
  *
  * Self-renders only when the user belongs to >1 org (so users with a
  * single personal workspace never see it). This happens when they've
- * created additional workspaces or been invited to someone else's team.
+ * created additional workspaces (via the account menu's "New workspace"
+ * button) or been invited to someone else's team.
  *
- * Creating workspaces is always available (Free workspaces: 3 agents,
- * 1 member, no invites — harmless). The Team plan gates *invites*, not
- * workspace creation. New workspaces start on Free; upgrade them to Team
- * from the account menu's "Upgrade plan" button after switching to them.
+ * Creating workspaces lives OUTSIDE this component (in the account menu's
+ * "New workspace" button + dialog) so it's reachable even when the user
+ * has only one org and the switcher is hidden.
  *
  * Switching calls better-auth's setActiveOrganization then hard-navigates
  * to /app so server components + the runner re-scope to the new org.
@@ -27,8 +26,6 @@ export function OrgSwitcher() {
   const { orgs: orgsWithRoles } = useOrgs();
   const router = useRouter();
   const [open, setOpen] = useState(false);
-  const [creating, setCreating] = useState(false);
-  const [newName, setNewName] = useState("");
   const [error, setError] = useState<string | null>(null);
   const ref = useRef<HTMLDivElement>(null);
 
@@ -60,25 +57,6 @@ export function OrgSwitcher() {
       setError(error.message ?? "Failed to switch workspace");
       return;
     }
-    router.refresh();
-    window.location.assign("/app");
-  }
-
-  async function createOrg() {
-    if (!newName.trim()) return;
-    setCreating(true);
-    setError(null);
-    const { error } = await authClient.organization.create({
-      name: newName.trim(),
-      slug: newName.trim().toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, ""),
-    });
-    setCreating(false);
-    if (error) {
-      setError(error.message ?? "Failed to create workspace");
-      return;
-    }
-    setNewName("");
-    setOpen(false);
     router.refresh();
     window.location.assign("/app");
   }
@@ -140,46 +118,6 @@ export function OrgSwitcher() {
                 </button>
               );
             })}
-          </div>
-
-          {/* New workspace — always available. Free workspaces start with
-              3 agents, 1 member, no invites. Upgrade to Team from the
-              account menu after switching to it. */}
-          <div className="border-t border-zinc-200 p-2 dark:border-zinc-800">
-            {newName.trim() === "" ? (
-              <button
-                onClick={() => setNewName(" ")}
-                className="w-full rounded px-2 py-1.5 text-left text-sm text-zinc-700 transition-colors hover:bg-zinc-100 dark:text-zinc-300 dark:hover:bg-zinc-800"
-              >
-                + New workspace
-              </button>
-            ) : (
-              <div>
-                <div className="flex gap-2">
-                  <input
-                    autoFocus
-                    value={newName}
-                    onChange={(e) => setNewName(e.target.value)}
-                    onKeyDown={(e) => {
-                      if (e.key === "Enter") createOrg();
-                      if (e.key === "Escape") setNewName("");
-                    }}
-                    placeholder="Workspace name"
-                    className="min-w-0 flex-1 rounded border border-zinc-300 px-2 py-1 text-sm dark:border-zinc-700 dark:bg-zinc-900 dark:text-zinc-100"
-                  />
-                  <button
-                    onClick={createOrg}
-                    disabled={creating || !newName.trim()}
-                    className="rounded bg-blue-600 px-3 py-1 text-sm font-medium text-white disabled:opacity-50"
-                  >
-                    {creating ? "…" : "Create"}
-                  </button>
-                </div>
-                <p className="mt-1 text-xs text-zinc-400">
-                  New workspaces start on the Free plan. Switch to it and upgrade to Team for collaboration.
-                </p>
-              </div>
-            )}
           </div>
 
           {error && (

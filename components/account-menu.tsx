@@ -9,6 +9,7 @@ import { useBilling } from "@/lib/billing/use-billing";
 import { OrgSwitcher } from "@/components/org-switcher";
 import { InviteDialog } from "@/components/invite-dialog";
 import { UpgradeDialog } from "@/components/upgrade-dialog";
+import { NewWorkspaceDialog } from "@/components/new-workspace-dialog";
 
 export function AccountMenu() {
   const { data: session, isPending } = authClient.useSession();
@@ -19,6 +20,7 @@ export function AccountMenu() {
   const [open, setOpen] = useState(false);
   const [inviteOpen, setInviteOpen] = useState(false);
   const [upgradeOpen, setUpgradeOpen] = useState(false);
+  const [newWorkspaceOpen, setNewWorkspaceOpen] = useState(false);
   const ref = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
@@ -104,6 +106,7 @@ export function AccountMenu() {
 
       <InviteDialog open={inviteOpen} onClose={() => setInviteOpen(false)} />
       <UpgradeDialog open={upgradeOpen} onClose={() => setUpgradeOpen(false)} />
+      <NewWorkspaceDialog open={newWorkspaceOpen} onClose={() => setNewWorkspaceOpen(false)} />
 
       {open && (
         <div className="absolute bottom-full left-0 right-0 mb-1 rounded-lg border border-zinc-200 bg-white py-1 shadow-lg dark:border-zinc-800 dark:bg-zinc-950">
@@ -119,6 +122,21 @@ export function AccountMenu() {
               className="block w-full px-3 py-2 text-left text-sm text-zinc-700 transition-colors hover:bg-zinc-100 dark:text-zinc-300 dark:hover:bg-zinc-800"
             >
               Invite member
+            </button>
+          )}
+          {/* New workspace — always available on SaaS. Lives here (not in
+              the org switcher) so it's reachable even when the user has
+              only one org and the switcher is hidden. Free workspaces
+              start with 3 agents, 1 member, no invites. */}
+          {billing && (
+            <button
+              onClick={() => {
+                setNewWorkspaceOpen(true);
+                setOpen(false);
+              }}
+              className="block w-full px-3 py-2 text-left text-sm text-zinc-700 transition-colors hover:bg-zinc-100 dark:text-zinc-300 dark:hover:bg-zinc-800"
+            >
+              New workspace
             </button>
           )}
           {session.user.role === "admin" && (
