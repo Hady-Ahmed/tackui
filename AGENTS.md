@@ -78,6 +78,7 @@ app/
   agents/page.tsx              # Admin UI — add/edit/delete agents + test connection + user management
   app/page.tsx                 # Chat page (client component, lives at /app in both SaaS + self-host modes)
   app/invitations/page.tsx     # Accept/reject pending org invitations (SaaS team + self-host multi-user)
+  app/members/page.tsx         # Workspace member management — roster + remove + role change + cancel invites (org owner/admin) + self-leave (SaaS team + self-host multi-user)
   pricing/page.tsx            # Free/Pro/Team tier cards (SaaS only — redirects to /app when !BILLING_ENABLED)
   terms/page.tsx              # Terms of Service (SaaS only — redirects to /app when !SAAS_MODE)
   privacy/page.tsx            # Privacy Policy (SaaS only — redirects to /app when !SAAS_MODE)
@@ -147,6 +148,8 @@ lib/
     middleware.test.ts          # 10 tests — 429 responses, checkUserLimit, acquireConcurrent + release
     stream-wrap.test.ts         # 7 tests — stream lifecycle: release on completion, error, cancel, no-body, header preservation
   theme.ts                     # useTheme() hook — class-based light/dark, persists to localStorage (useSyncExternalStore)
+  org-members.ts                # Typed wrappers around better-auth organization client for member management (listMembers + removeMember + updateMemberRole + listInvitations + cancelInvitation) — pure API mapping, returns {data, error}, UI side-effects live in the page
+  org-members.test.ts           # 13 tests — roster typing, remove by id/email, only-owner + not-allowed error propagation, role change, cancel invite
 
 components/
   agent-sidebar.tsx            # Agent picker + conversation list + status dots + rename/delete + collapsible (useThreads)
@@ -458,11 +461,40 @@ so direct calls can't bypass the plan.
   (top-level string in better-auth's response, not a nested object).
   Refreshes the `useInvitations` cache on accept/reject so the
   account-menu badge updates immediately.
+- `app/app/members/page.tsx` — workspace member management (org
+  owners/admins). Roster via `listMembers` with role badges; remove a
+  member (inline confirm) via `removeMember`; change a member's role
+  (member↔admin) via `updateMemberRole` (owner is read-only, not
+  shown as a toggle); cancel a pending invitation via `cancelInvitation`
+  + `resetInvitationsCache`. Non-admins see only the roster + a **Leave**
+  button on their own row (self-removal via `removeMember` — better-auth
+  guards the sole-owner case with
+  `YOU_CANNOT_LEAVE_THE_ORGANIZATION_AS_THE_ONLY_OWNER`, surfaced as a
+  "transfer ownership or delete the workspace" message). After every
+  mutation the page calls `useOrgs().refresh()` so the invite dialog's
+  live seats counter + the account-menu member count update everywhere.
+  Redirects to `/app` under solo mode (no multi-user meaning). The
+  account menu's "Manage members" link is gated identically to "Invite
+  member" (`canManage && maxMembers === null` — self-host or Team plan).
 - `app/api/org/route.ts` — GET (the user's orgs + roles + per-org
   plan/seats/memberCount + active org + canCreateOrg). Read-only
   aggregate — LEFT JOINs `subscriptions` so Free orgs appear with
   `plan: "free"`. Creation + invites go through the better-auth client
   directly (the server-side gates enforce the plan).
+- `lib/org-members.ts` — typed wrappers around the better-auth
+  organization client (`listMembers`, `removeMember`,
+  `updateMemberRole`, `listInvitations`, `cancelInvitation`). Pure API
+  mapping — returns `{data, error}` with the error `code` preserved so
+  the UI can map `YOU_CANNOT_LEAVE_THE_ORGANIZATION_AS_THE_ONLY_OWNER`
+  and `YOU_ARE_NOT_ALLOWED_TO_DELETE_THIS_MEMBER` to friendly messages.
+  No new API routes — these call `/api/auth/organization/*` via the
+  mounted better-auth handler. Permission checks (owner/admin can
+  remove; sole owner can't leave; non-admins blocked) are enforced
+  server-side by better-auth; the page only hides controls for
+  non-admins, the backstop is server-side. Removing a member needs no
+  plan-enforcement check — it only ever increases `seatsRemaining`;
+  better-auth's `membershipLimit` (wired in `lib/auth/auth.ts`) is the
+  live invite gate and decrements automatically on removal.
 
 ### Marketing + legal pages (SaaS-only)
 

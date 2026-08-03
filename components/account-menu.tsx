@@ -140,6 +140,23 @@ export function AccountMenu() {
               Invite member
             </button>
           )}
+          {/* Manage members — roster + remove + role change + cancel
+              invites. Gated identically to "Invite member" (self-host
+              or team plan, where multi-member workspaces exist). Free/pro
+              personal orgs have maxMembers === 1, so there's no one to
+              manage but yourself — hidden there, same as the invite
+              button. */}
+          {canManage && (billing === null || billing.limits?.maxMembers === null) && (
+            <button
+              onClick={() => {
+                router.push("/app/members");
+                setOpen(false);
+              }}
+              className="block w-full px-3 py-2 text-left text-sm text-zinc-700 transition-colors hover:bg-zinc-100 dark:text-zinc-300 dark:hover:bg-zinc-800"
+            >
+              Manage members
+            </button>
+          )}
           {/* New workspace — always available on SaaS. Lives here (not in
               the org switcher) so it's reachable even when the user has
               only one org and the switcher is hidden. Free workspaces
