@@ -191,7 +191,7 @@ export function AccountMenu() {
                   the portal instead). One-way upgrades only; the portal
                   toggle "change plans" stays off to block unsafe
                   downgrades (Team→Pro leaves orphaned members). */}
-              {(billing.plan === "free" || billing.plan === "pro") && (
+              {(billing.plan === "free" || billing.plan === "pro") && canManage && (
                 <button
                   onClick={() => {
                     setUpgradeOpen(true);
@@ -202,7 +202,7 @@ export function AccountMenu() {
                   Upgrade plan
                 </button>
               )}
-              {billing.plan !== "free" && (
+              {billing.plan !== "free" && canManage && (
                 <button
                   onClick={async () => {
                     const res = await fetch("/api/billing/portal", {
