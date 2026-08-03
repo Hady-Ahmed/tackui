@@ -155,7 +155,7 @@ export default function MembersPage() {
     router.refresh();
   }
 
-  async function onRoleChange(member: OrgMember, role: "member" | "admin") {
+  async function onRoleChange(member: OrgMember, role: "member" | "admin" | "owner") {
     setActioning(member.id);
     const res = await updateMemberRole(member.id, role);
     setActioning(null);
@@ -273,16 +273,26 @@ export default function MembersPage() {
                         {m.role}
                       </span>
 
-                      {/* Role change (admin/owner only, not for owners, not self) */}
-                      {canManage && !isOwner && !isMe && (
+                      {/* Role change — hidden on self; on owner rows
+                          only shown to other owners (server blocks
+                          admins from touching owners). Includes the
+                          "Owner" option only when the viewer is an
+                          owner, enabling ownership transfer: promote
+                          someone to owner, then Leave (appears once
+                          ownerCount > 1). */}
+                      {canManage && !isMe && (!isOwner || amOwner) && (
                         <select
                           value={
-                            m.role.split(",").includes("admin") ? "admin" : "member"
+                            m.role.split(",").includes("owner")
+                              ? "owner"
+                              : m.role.split(",").includes("admin")
+                                ? "admin"
+                                : "member"
                           }
                           onChange={(e) =>
                             onRoleChange(
                               m,
-                              e.target.value as "member" | "admin",
+                              e.target.value as "member" | "admin" | "owner",
                             )
                           }
                           disabled={actioning === m.id}
@@ -290,6 +300,7 @@ export default function MembersPage() {
                         >
                           <option value="member">Member</option>
                           <option value="admin">Admin</option>
+                          {amOwner && <option value="owner">Owner</option>}
                         </select>
                       )}
 

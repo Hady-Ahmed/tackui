@@ -104,10 +104,10 @@ export async function removeMember(
   return { data: { memberId }, error: null };
 }
 
-/** Change a member's role within the active org (member <-> admin). */
+/** Change a member's role within the active org (member <-> admin <-> owner). */
 export async function updateMemberRole(
   memberId: string,
-  role: "member" | "admin",
+  role: "member" | "admin" | "owner",
 ): Promise<OrgMemberResult<{ memberId: string }>> {
   const { data, error } = await authClient.organization.updateMemberRole({
     memberId,

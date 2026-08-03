@@ -165,6 +165,19 @@ describe("updateMemberRole", () => {
     expect(res.error).toBeNull();
   });
 
+  it("accepts 'owner' as a role (ownership transfer)", async () => {
+    mockOrg.updateMemberRole.mockResolvedValue({
+      data: { id: "m2", userId: "u2", role: "owner" },
+      error: null,
+    });
+    const res = await updateMemberRole("m2", "owner");
+    expect(mockOrg.updateMemberRole).toHaveBeenCalledWith({
+      memberId: "m2",
+      role: "owner",
+    });
+    expect(res.data).toEqual({ memberId: "m2" });
+  });
+
   it("surfaces errors", async () => {
     mockOrg.updateMemberRole.mockResolvedValue({
       data: null,
