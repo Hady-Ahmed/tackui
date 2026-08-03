@@ -75,10 +75,10 @@ app/
   api/threads/[id]/route.ts    # REST: PATCH/DELETE /api/threads/[id] (rename, delete conversations)
   api/threads/[id]/route.test.ts  # Tests for PATCH/DELETE (mocked runner)
   api/health/route.ts          # GET — liveness health check (bypassed by proxy.ts cookie gate)
-  agents/page.tsx              # Admin UI — add/edit/delete agents + test connection + user management
+  agents/page.tsx              # Admin UI — add/edit/delete agents + test connection + user management + over-limit banner (amber when agent count exceeds plan cap post-cancellation)
   app/page.tsx                 # Chat page (client component, lives at /app in both SaaS + self-host modes)
   app/invitations/page.tsx     # Accept/reject pending org invitations (SaaS team + self-host multi-user)
-  app/members/page.tsx         # Workspace member management — roster + remove + role change + cancel invites (org owner/admin) + self-leave (SaaS team + self-host multi-user)
+  app/members/page.tsx         # Workspace member management — roster + remove + role change (member↔admin↔owner) + cancel invites (org owner/admin) + self-leave + ownership transfer (owner role in dropdown) + over-limit banner (SaaS team + self-host multi-user)
   pricing/page.tsx            # Free/Pro/Team tier cards (SaaS only — redirects to /app when !BILLING_ENABLED)
   terms/page.tsx              # Terms of Service (SaaS only — redirects to /app when !SAAS_MODE)
   privacy/page.tsx            # Privacy Policy (SaaS only — redirects to /app when !SAAS_MODE)
@@ -148,12 +148,12 @@ lib/
     middleware.test.ts          # 10 tests — 429 responses, checkUserLimit, acquireConcurrent + release
     stream-wrap.test.ts         # 7 tests — stream lifecycle: release on completion, error, cancel, no-body, header preservation
   theme.ts                     # useTheme() hook — class-based light/dark, persists to localStorage (useSyncExternalStore)
-  org-members.ts                # Typed wrappers around better-auth organization client for member management (listMembers + removeMember + updateMemberRole + listInvitations + cancelInvitation) — pure API mapping, returns {data, error}, UI side-effects live in the page
-  org-members.test.ts           # 13 tests — roster typing, remove by id/email, only-owner + not-allowed error propagation, role change, cancel invite
+  org-members.ts                # Typed wrappers around better-auth organization client for member management (listMembers + removeMember + updateMemberRole incl. owner role for transfer + listInvitations pending-only + cancelInvitation) — pure API mapping, returns {data, error}, UI side-effects live in the page
+  org-members.test.ts           # 16 tests — roster typing + empty-members, remove by id/email, only-owner + not-allowed error propagation, role change incl. owner, pending-only filter, cancel invite
 
 components/
   agent-sidebar.tsx            # Agent picker + conversation list + status dots + rename/delete + collapsible (useThreads)
-  account-menu.tsx             # User avatar, name, email, sign out (useSession) + plan badge + manage subscription + upgrade button + invite button + new-workspace button + pending-invitations badge + OrgSwitcher
+  account-menu.tsx             # User avatar, name, email, sign out (useSession) + plan badge + manage subscription + upgrade button + invite button + manage-members button + new-workspace button + pending-invitations badge + OrgSwitcher (billing buttons gated to canManage — owner/admin only)
   org-switcher.tsx             # Org switcher dropdown (pure switcher — self-renders when >1 org; workspace creation lives in NewWorkspaceDialog)
   invite-dialog.tsx            # Invite-by-email modal (org owner/admin) + live seats counter
   upgrade-dialog.tsx           # Plan upgrade modal (Pro/Team options, Team seats input min 2) → POST /api/billing/checkout → Stripe Checkout
@@ -464,18 +464,27 @@ so direct calls can't bypass the plan.
 - `app/app/members/page.tsx` — workspace member management (org
   owners/admins). Roster via `listMembers` with role badges; remove a
   member (inline confirm) via `removeMember`; change a member's role
-  (member↔admin) via `updateMemberRole` (owner is read-only, not
-  shown as a toggle); cancel a pending invitation via `cancelInvitation`
-  + `resetInvitationsCache`. Non-admins see only the roster + a **Leave**
-  button on their own row (self-removal via `removeMember` — better-auth
-  guards the sole-owner case with
-  `YOU_CANNOT_LEAVE_THE_ORGANIZATION_AS_THE_ONLY_OWNER`, surfaced as a
-  "transfer ownership or delete the workspace" message). After every
-  mutation the page calls `useOrgs().refresh()` so the invite dialog's
-  live seats counter + the account-menu member count update everywhere.
-  Redirects to `/app` under solo mode (no multi-user meaning). The
-  account menu's "Manage members" link is gated identically to "Invite
-  member" (`canManage && maxMembers === null` — self-host or Team plan).
+  (member↔admin↔owner) via `updateMemberRole` — the Owner option
+  appears in the dropdown only when the viewer is an owner, enabling
+  ownership transfer: promote someone to owner, then Leave (the Leave
+  button appears once `ownerCount > 1`). Cancel a pending invitation
+  via `cancelInvitation` + `resetInvitationsCache`. Non-admins see
+  only the roster + a **Leave** button on their own row (self-removal
+  via `removeMember` — better-auth guards the sole-owner case with
+  `YOU_CANNOT_LEAVE_THE_ORGANIZATION_AS_THE_ONLY_OWNER`; the UI hides
+  the Leave button entirely when the viewer is the sole owner rather
+  than offering a dead button). The Remove button hides when the
+  target is an owner and the viewer isn't (server blocks admins from
+  removing owners). After every mutation the page calls
+  `useOrgs().refresh()` so the invite dialog's live seats counter +
+  the account-menu member count update everywhere. An **over-limit
+  banner** (amber) surfaces the post-cancellation state where a
+  downgraded Team org has more members than the Free 1-member cap —
+  informational only; the server blocks new invites via
+  `membershipLimit`, nothing breaks. Redirects to `/app` under solo
+  mode (no multi-user meaning). The account menu's "Manage members"
+  link is gated identically to "Invite member" (`canManage &&
+  maxMembers === null` — self-host or Team plan).
 - `app/api/org/route.ts` — GET (the user's orgs + roles + per-org
   plan/seats/memberCount + active org + canCreateOrg). Read-only
   aggregate — LEFT JOINs `subscriptions` so Free orgs appear with
@@ -483,10 +492,13 @@ so direct calls can't bypass the plan.
   directly (the server-side gates enforce the plan).
 - `lib/org-members.ts` — typed wrappers around the better-auth
   organization client (`listMembers`, `removeMember`,
-  `updateMemberRole`, `listInvitations`, `cancelInvitation`). Pure API
-  mapping — returns `{data, error}` with the error `code` preserved so
-  the UI can map `YOU_CANNOT_LEAVE_THE_ORGANIZATION_AS_THE_ONLY_OWNER`
-  and `YOU_ARE_NOT_ALLOWED_TO_DELETE_THIS_MEMBER` to friendly messages.
+  `updateMemberRole` (accepts `"owner"` for ownership transfer),
+  `listInvitations` (filters to `status === "pending"` — better-auth
+  returns all invitations incl. accepted/rejected/cancelled, never
+  deleting rows), `cancelInvitation`). Pure API mapping — returns
+  `{data, error}` with the error `code` preserved so the UI can map
+  `YOU_CANNOT_LEAVE_THE_ORGANIZATION_AS_THE_ONLY_OWNER` and
+  `YOU_ARE_NOT_ALLOWED_TO_DELETE_THIS_MEMBER` to friendly messages.
   No new API routes — these call `/api/auth/organization/*` via the
   mounted better-auth handler. Permission checks (owner/admin can
   remove; sole owner can't leave; non-admins blocked) are enforced
@@ -849,6 +861,31 @@ strategy it uses so users know whether server-side session storage is required.
   all queries scope by the user's active org, org-level agent management
   (`canManageAgents` — org owners/admins can manage their workspace's agents),
   solo mode creates a real org row on boot
+- Workspace member management — `/app/members` page (org owners/admins):
+  roster via `listMembers` with role badges; remove a member (inline
+  confirm); change a member's role (member↔admin↔owner) via
+  `updateMemberRole` — the Owner option appears only when the viewer is
+  an owner, enabling ownership transfer (promote someone to owner, then
+  Leave, which appears once `ownerCount > 1`); cancel a pending
+  invitation via `cancelInvitation`; self-leave via `removeMember`
+  (sole owner can't leave — Leave button hidden, not a dead button).
+  Non-admins see only the roster + their own Leave button. The Remove
+  button hides when the target is an owner and the viewer isn't (server
+  blocks admins from removing owners). `listInvitations` filters to
+  pending only (better-auth returns all statuses, never deleting rows).
+  After every mutation the page refreshes `useOrgs()` so the invite
+  dialog's live seats counter + the account-menu member count update
+  everywhere. An amber **over-limit banner** surfaces the
+  post-cancellation state where a downgraded Team org has more members
+  than the Free 1-member cap (and the agents page has the analogous
+  banner for the 3-agent cap) — informational only; the server blocks
+  new invites/agents via `membershipLimit` / `checkAgentCountLimit`,
+  nothing breaks. Billing buttons (Upgrade plan + Manage subscription)
+  in the account menu are `canManage`-gated (owner/admin only) to match
+  the server's `canManageAgents` check — members no longer see dead
+  buttons that 403. Backed by `lib/org-members.ts` (typed wrappers
+  around the better-auth organization client — no new API routes; the
+  server-side permission checks are the backstop).
 - Error boundaries (`app/error.tsx` + `app/global-error.tsx`) — render-crash
   recovery UI; `error.tsx` handles child-segment errors inside the layout,
   `global-error.tsx` catches root layout failures (replaces `<html>`/`<body>`)
@@ -901,9 +938,6 @@ strategy it uses so users know whether server-side session storage is required.
 
 **SaaS launch track (the next concrete phase):**
 
-- **ToS / privacy pages** — required for SaaS that processes user
-  conversations (PII) and offers social login. Need `/terms` + `/privacy`
-  routes + cookie notice (esp. EU).
 - **PG LISTEN/NOTIFY cache invalidation for multi-instance:** the in-memory
   `Map`s in `PostgresAgentRunner` (`threadCache`, `messageCache`, `eventsCache`)
   are per-process. For horizontal scaling (multiple Next.js instances),
@@ -911,13 +945,6 @@ strategy it uses so users know whether server-side session storage is required.
   other instances. Keeps self-host at one dependency (PG). Redis only needed
   if you go multi-region or add it for another reason (rate limiting, jobs).
   Not needed for single-instance OSS deploys.
-- **Org switcher + team invitations UI** — the `organization` plugin supports
-  invites server-side; needs client-side invite flow + org-switcher dropdown
-  in the account menu. Personal-org users (the majority at launch) have one
-  org and never need to switch.
-- **ToS / privacy pages** — required for SaaS that processes user
-  conversations (PII) and offers social login. Need `/terms` + `/privacy`
-  routes + cookie notice (esp. EU).
 
 **Feature track (whenever, no SaaS dependency):**
 
