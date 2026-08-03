@@ -33,12 +33,12 @@
     "@types/pg": "^8.20.0",
     "@types/react": "^19",
     "@types/react-dom": "^19",
-    "@vitest/coverage-v8": "^3.2.7",
+    "@vitest/coverage-v8": "^4.0.0",
     "eslint": "^9",
     "eslint-config-next": "16.2.10",
     "pg-mem": "^3.0.14",
     "tailwindcss": "^4",
     "typescript": "^5",
-    "vitest": "^3.2.7"
+    "vitest": "^4.0.0"
   }
 }

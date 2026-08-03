@@ -32,11 +32,25 @@ services:
     restart: unless-stopped
 
   app:
-    build: .
+    build:
+      context: .
+      # NEXT_PUBLIC_* vars are build-time only — Next.js inlines them into
+      # the client JS bundle during `npm run build`. They CANNOT be supplied
+      # at runtime (unlike SENTRY_DSN below, which is server-side). Set these
+      # in your shell env or a top-level .env file before `docker-compose up`.
+      # When unset, client-side Sentry stays a no-op (server Sentry still works).
+      args:
+        NEXT_PUBLIC_SENTRY_DSN: ${NEXT_PUBLIC_SENTRY_DSN:-}
+        NEXT_PUBLIC_SENTRY_TRACES_SAMPLE_RATE: ${NEXT_PUBLIC_SENTRY_TRACES_SAMPLE_RATE:-0.1}
     ports:
       - "${APP_PORT:-3000}:3000"
     environment:
       DATABASE_URL: postgres://postgres:${POSTGRES_PASSWORD:-postgres}@db:5432/${POSTGRES_DB:-agent_frontend}
+      # Bump if your DB has cold-start latency (e.g. Neon scale-to-zero).
+      PG_CONNECT_TIMEOUT: ${PG_CONNECT_TIMEOUT:-5000}
+      # Max connections in the Postgres pool (default 10). Increase if you
+      # expect high concurrency or see "connection timeout" errors under load.
+      PG_POOL_MAX: ${PG_POOL_MAX:-10}
       AUTH_DISABLED: ${AUTH_DISABLED:-true}
       # BETTER_AUTH_SECRET is required when AUTH_DISABLED=false.
       # The app throws on boot if it's missing in auth mode.
@@ -52,6 +66,15 @@ services:
       OIDC_CLIENT_ID: ${OIDC_CLIENT_ID:-}
       OIDC_CLIENT_SECRET: ${OIDC_CLIENT_SECRET:-}
       OIDC_ISSUER: ${OIDC_ISSUER:-}
+      # Email (optional — enables verification + password reset when set)
+      RESEND_API_KEY: ${RESEND_API_KEY:-}
+      EMAIL_FROM: ${EMAIL_FROM:-}
+      # Security: allow agent endpoints on private IPs (self-hosters with
+      # backends on the same host). Default false = SSRF protection on.
+      ALLOW_PRIVATE_ENDPOINTS: ${ALLOW_PRIVATE_ENDPOINTS:-}
+      # Sentry server-side (runtime — unlike NEXT_PUBLIC_* above).
+      SENTRY_DSN: ${SENTRY_DSN:-}
+      SENTRY_TRACES_SAMPLE_RATE: ${SENTRY_TRACES_SAMPLE_RATE:-0.1}
     depends_on:
       db:
         condition: service_healthy

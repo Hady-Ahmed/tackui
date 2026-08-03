@@ -13,7 +13,24 @@ COPY . .
 # so the build doesn't fail when trying to resolve the pg.Pool at module load
 # (the pool is lazy — no real connection is made during build).
 ENV DATABASE_URL="postgres://build:build@localhost:5432/build"
+# AUTH_DISABLED=true during build prevents the BETTER_AUTH_SECRET boot guard
+# in lib/auth/auth.ts from throwing when Next.js collects page data for
+# /api/auth/[...all]. This ONLY affects the build step — at runtime the real
+# AUTH_DISABLED / BETTER_AUTH_SECRET from docker-compose environment applies.
+ENV AUTH_DISABLED="true"
 ENV NEXT_TELEMETRY_DISABLED=1
+
+# NEXT_PUBLIC_* vars are statically inlined into the client JS bundle at
+# build time by the Next.js compiler. They CANNOT be supplied at runtime —
+# once `next build` runs, the value is frozen in the .next/static chunks.
+# Pass them as build args so they're present when `npm run build` executes.
+# Default to empty (Sentry client stays a no-op when unset, matching
+# instrumentation-client.ts:15's `if (process.env.NEXT_PUBLIC_SENTRY_DSN)` guard).
+ARG NEXT_PUBLIC_SENTRY_DSN=""
+ARG NEXT_PUBLIC_SENTRY_TRACES_SAMPLE_RATE="0.1"
+ENV NEXT_PUBLIC_SENTRY_DSN=$NEXT_PUBLIC_SENTRY_DSN
+ENV NEXT_PUBLIC_SENTRY_TRACES_SAMPLE_RATE=$NEXT_PUBLIC_SENTRY_TRACES_SAMPLE_RATE
+
 RUN npm run build
 
 # ─── Stage 3: Runner ───────────────────────────────────────────────────────
