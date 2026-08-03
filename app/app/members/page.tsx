@@ -6,6 +6,7 @@ import { useRouter } from "next/navigation";
 import { useAuthConfig } from "@/lib/auth/use-auth-config";
 import { useCanManageAgents } from "@/lib/auth/use-can-manage-agents";
 import { useOrgs } from "@/lib/billing/use-orgs";
+import { useBilling } from "@/lib/billing/use-billing";
 import { resetInvitationsCache } from "@/lib/billing/use-invitations";
 import { authClient } from "@/lib/auth/auth-client";
 import {
@@ -39,6 +40,7 @@ export default function MembersPage() {
   const { config, loading: configLoading } = useAuthConfig();
   const { canManage } = useCanManageAgents();
   const { orgs, activeOrgId, refresh: refreshOrgs } = useOrgs();
+  const { billing } = useBilling();
   const { data: session } = authClient.useSession();
   const router = useRouter();
 
@@ -65,6 +67,16 @@ export default function MembersPage() {
   const ownerCount = members.filter((m) =>
     m.role.split(",").map((r) => r.trim()).includes("owner"),
   ).length;
+  // Effective member cap for the active org — null = unlimited
+  // (self-host, or team per-seat uses billing.seats). Used by the
+  // over-limit banner: surfaces the post-cancellation state where a
+  // downgraded Team org has more members than the Free 1-member cap.
+  const memberCap =
+    billing === null
+      ? null
+      : (billing.limits.maxMembers ?? billing.seats);
+  const overMemberCap =
+    canManage && memberCap !== null && members.length > memberCap;
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -212,6 +224,20 @@ export default function MembersPage() {
         <p className="mt-8 text-sm text-zinc-500">Loading…</p>
       ) : (
         <>
+          {/* Over-limit banner — surfaces the post-cancellation state
+              where a downgraded Team org has more members than the
+              Free 1-member cap. Informational only; nothing breaks,
+              the server blocks new invites until the owner removes
+              members or upgrades. */}
+          {overMemberCap && (
+            <div className="mt-4 rounded-lg border border-amber-200 bg-amber-50 p-3 text-sm text-amber-700 dark:border-amber-900 dark:bg-amber-950 dark:text-amber-300">
+              Your workspace is over the {billing!.limits.label} plan&apos;s{" "}
+              {memberCap}-member limit. Remove {members.length - memberCap}{" "}
+              member{members.length - memberCap === 1 ? "" : "s"} or upgrade in
+              the account menu.
+            </div>
+          )}
+
           {/* Members roster */}
           <h2 className="mt-8 text-sm font-semibold uppercase tracking-wide text-zinc-500 dark:text-zinc-400">
             Members

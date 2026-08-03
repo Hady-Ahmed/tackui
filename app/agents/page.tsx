@@ -8,6 +8,7 @@ import { UsersAdmin } from "@/components/users-admin";
 import { authClient } from "@/lib/auth/auth-client";
 import { useAuthConfig } from "@/lib/auth/use-auth-config";
 import { useCanManageAgents } from "@/lib/auth/use-can-manage-agents";
+import { useBilling } from "@/lib/billing/use-billing";
 
 const KINDS: AgentKind[] = ["langgraph", "agno", "agui"];
 
@@ -72,6 +73,7 @@ export default function AgentsPage() {
   const { data: session, isPending } = authClient.useSession();
   const { config } = useAuthConfig();
   const { canManage, loading: canManageLoading } = useCanManageAgents();
+  const { billing } = useBilling();
   const [agents, setAgents] = useState<PublicAgent[]>([]);
   const [loading, setLoading] = useState(true);
   const [form, setForm] = useState<FormState>(emptyForm);
@@ -385,6 +387,25 @@ export default function AgentsPage() {
         </section>
 
         <section>
+          {/* Over-limit banner — surfaces the post-cancellation state
+              where a downgraded Team org has more agents than the Free
+              3-agent cap. Informational only; existing agents keep
+              running, the server blocks new ones until the owner
+              removes agents or upgrades. */}
+          {!loading &&
+            canManage &&
+            billing !== null &&
+            billing.limits.maxAgents !== null &&
+            agents.length > billing.limits.maxAgents && (
+              <div className="mb-4 rounded-lg border border-amber-200 bg-amber-50 p-3 text-sm text-amber-700 dark:border-amber-900 dark:bg-amber-950 dark:text-amber-300">
+                Your workspace is over the {billing.limits.label} plan&apos;s{" "}
+                {billing.limits.maxAgents}-agent limit. Remove{" "}
+                {agents.length - billing.limits.maxAgents} agent
+                {agents.length - billing.limits.maxAgents === 1 ? "" : "s"} or
+                upgrade in the account menu.
+              </div>
+            )}
+
           <h2 className="mb-4 text-sm font-semibold uppercase tracking-wide text-zinc-400">
             Configured agents ({agents.length})
           </h2>
