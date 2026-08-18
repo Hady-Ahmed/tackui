@@ -62,20 +62,14 @@ BETTER_AUTH_URL=http://localhost:3000
 # AUTH_DISABLED=true
 ```
 
-Run the migrations (creates the app's tables + Better Auth's tables):
-
-```bash
-npm run migrate
-npx @better-auth/cli migrate --config lib/auth/auth.ts
-```
-
-Then:
+Migrations run automatically on boot — no manual `npm run migrate` needed.
+For local dev (without Docker), you can trigger them explicitly:
 
 ```bash
 npm run dev
 ```
 
-Open [http://localhost:3000](http://localhost:3000). The first user to sign up becomes the admin.
+The dev server boots, runs migrations against `DATABASE_URL`, and starts the app. The first user to sign up becomes the admin.
 
 > **Env changes require a restart.** Next.js reads `.env.local` at boot and does not hot-reload env vars. After editing `.env.local`, stop the dev server (`Ctrl+C`) and run `npm run dev` again.
 
@@ -139,6 +133,21 @@ The app re-runs migrations on boot — new schema changes apply automatically.
 APP_PORT=8080 docker-compose up
 # → http://localhost:8080
 ```
+
+### Build-time vs runtime environment variables
+
+Next.js inlines any variable prefixed with `NEXT_PUBLIC_` into the client JavaScript bundle **at build time**. These cannot be supplied at runtime — once `next build` (or `docker build`) runs, the value is frozen in the generated `.next/static/chunks/*.js` files.
+
+This matters when deploying via Docker. The `docker-compose.yml` passes `NEXT_PUBLIC_SENTRY_DSN` and `NEXT_PUBLIC_SENTRY_TRACES_SAMPLE_RATE` as **build args** (under `build.args`), not runtime environment variables. Supply them in your shell before building:
+
+```bash
+NEXT_PUBLIC_SENTRY_DSN=https://...@o123.ingest.sentry.io/456 \
+docker-compose up --build
+```
+
+Without them, client-side Sentry silently stays a no-op (`instrumentation-client.ts` guards on presence). Server-side Sentry (`SENTRY_DSN`, no prefix) is a runtime variable and can be changed with a container restart — no rebuild needed.
+
+All other environment variables (`DATABASE_URL`, `BETTER_AUTH_SECRET`, Stripe keys, etc.) are runtime-only and can be rotated without rebuilding the image.
 
 ## Authentication
 
