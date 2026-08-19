@@ -6,6 +6,26 @@ import { LIMITS } from "@/lib/ratelimit/limits";
 const AUTH_DISABLED = process.env.AUTH_DISABLED === "true";
 const SAAS_MODE = process.env.SAAS_MODE === "true";
 
+// Number of trusted reverse-proxy hops in front of this server. The
+// client IP is the Nth-from-RIGHT entry in X-Forwarded-For, where N is
+// this count. Default 1 (Vercel / Railway / Render / a single Nginx in
+// front all set the real client IP as the LAST entry).
+//
+// Why rightmost, not leftmost: X-Forwarded-For is client-appendable. A
+// malicious client can send `X-Forwarded-For: fake-ip` and, if the
+// proxy appends the real IP (the standard behaviour), the header
+// becomes `fake-ip, real-ip`. Taking the leftmost would rate-limit
+// against the spoofed value — attacker rotates it to bypass the
+// 300/min cap. Taking the rightmost-trusted-hop reads the real client
+// IP set by YOUR proxy.
+//
+// Set to 2 if you run Cloudflare -> Nginx -> app (two hops), 3 for
+// three hops, etc. If unset, defaults to 1.
+const TRUSTED_PROXY_HOPS = Math.max(
+  1,
+  Number(process.env.TRUSTED_PROXY_HOPS ?? "1") || 1,
+);
+
 // Auth pages are always public. Under SaaS mode the marketing landing page
 // (`/`) plus legal pages (`/terms`, `/privacy`) are also public so anonymous
 // visitors can read the marketing site. Self-host mode keeps `/` gated (it
@@ -30,17 +50,31 @@ const WEBHOOK_PREFIX = "/api/billing/webhook";
 // store with a Redis backend.
 
 /**
- * Extract the client IP from the request. Behind a reverse proxy, reads
- * the first non-private hop from X-Forwarded-For. In dev (no proxy),
- * falls back to request.ip.
+ * Extract the client IP from the request. Behind a reverse proxy,
+ * reads the Nth-from-right entry of X-Forwarded-For where N is
+ * TRUSTED_PROXY_HOPS (default 1 — the last entry, set by the trusted
+ * proxy). This defeats the leftmost-spoofing attack: a client can
+ * prepend arbitrary IPs to XFF, but the proxy appends the real client
+ * IP LAST, and we read from the trusted side.
+ *
+ * If there are fewer XFF entries than TRUSTED_PROXY_HOPS (the proxy
+ * didn't append, or direct connection in dev), fall back to the
+ * leftmost available — and if no XFF at all, "unknown".
  */
 function getClientIp(request: NextRequest): string {
   const xff = request.headers.get("x-forwarded-for");
   if (xff) {
-    // X-Forwarded-For: client, proxy1, proxy2 — take the first (client).
-    // Trim whitespace; ignore empty entries.
-    const first = xff.split(",")[0]?.trim();
-    if (first) return first;
+    const hops = xff
+      .split(",")
+      .map((s) => s.trim())
+      .filter(Boolean);
+    if (hops.length > 0) {
+      // Take the Nth-from-right. If we have fewer hops than trusted
+      // proxies (direct connection, or proxy didn't forward), fall
+      // back to the leftmost available entry.
+      const idx = Math.max(0, hops.length - TRUSTED_PROXY_HOPS);
+      return hops[idx] ?? hops[0] ?? "unknown";
+    }
   }
   return "unknown";
 }

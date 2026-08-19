@@ -1,0 +1,57 @@
+name: Bug report
+description: Report something that's broken
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for taking the time to file a bug report! Before you start, **search existing issues** to avoid duplicates.
+        If you're reporting a **security vulnerability**, stop — see [SECURITY.md](../SECURITY.md) instead. Do not open a public bug report for security issues.
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: What happened?
+      description: A clear description of the bug. What did you do, what did you expect, what did you see?
+      placeholder: "When I …, I expected …, but instead …"
+    validations:
+      required: true
+  - type: textarea
+    id: reproduce
+    attributes:
+      label: Steps to reproduce
+      description: The smallest set of steps that reliably triggers the bug. A curl script, a click sequence, or a test case is ideal.
+      placeholder: "1. …\n2. …\n3. …"
+    validations:
+      required: true
+  - type: input
+    id: version
+    attributes:
+      label: Version
+      description: Git commit SHA, release tag, or "main branch as of YYYY-MM-DD".
+      placeholder: "commit abc123 / v0.1.0 / main @ 2026-08-18"
+    validations:
+      required: true
+  - type: dropdown
+    id: mode
+    attributes:
+      label: Deployment mode
+      options:
+        - Self-host (solo / AUTH_DISABLED=true)
+        - Self-host (auth enabled, email/password or social)
+        - SaaS mode (SAAS_MODE=true, billing enabled)
+        - Local dev
+        - Other / not sure
+    validations:
+      required: true
+  - type: textarea
+    id: env
+    attributes:
+      label: Relevant environment
+      description: The env vars that matter for the bug (redact secrets). e.g. `ALLOW_PRIVATE_ENDPOINTS=true`, `EMAIL_ENABLED`, hosting platform, Node version, Postgres version. Don't paste `BETTER_AUTH_SECRET`, Stripe keys, or any other secret.
+      placeholder: "ALLOW_PRIVATE_ENDPOINTS=true, hosted on Railway, Node 20, PG 16"
+  - type: textarea
+    id: logs
+    attributes:
+      label: Logs / errors
+      description: Relevant server or browser console output. Paste as-is (between triple backticks) — redact any secret values first.
+      render: shell

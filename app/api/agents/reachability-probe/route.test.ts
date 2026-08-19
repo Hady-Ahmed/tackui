@@ -6,8 +6,40 @@ vi.mock("@/lib/ratelimit/middleware", () => ({
   checkUserLimit: vi.fn().mockReturnValue(null),
 }));
 
+// Mock auth context — getCurrentUser returns an admin by default;
+// canManageAgents returns true by default. Individual tests override.
+vi.mock("@/lib/auth/context", () => ({
+  getCurrentUser: vi.fn().mockResolvedValue({
+    id: "u1",
+    role: "admin",
+    name: "Admin",
+    email: null,
+    orgId: "org-1",
+  }),
+  canManageAgents: vi.fn().mockResolvedValue(true),
+}));
+
+// Mock the SSRF guard — defaults to "safe" (resolves). Tests for the
+// SSRF path override to throw UnsafeUrlError.
+vi.mock("@/lib/net/safe-fetch", () => ({
+  assertSafeUrl: vi.fn().mockResolvedValue(undefined),
+  UnsafeUrlError: class UnsafeUrlError extends Error {
+    constructor(public readonly reason: string) {
+      super(reason);
+      this.name = "UnsafeUrlError";
+    }
+  },
+}));
+
+// Mock the SaaS rejection message so we don't depend on env state.
+vi.mock("@/lib/config/saas", () => ({
+  SSRF_REJECTION_MESSAGE: "not permitted",
+}));
+
 import { POST } from "./route";
 import { checkUserLimit } from "@/lib/ratelimit/middleware";
+import { canManageAgents, getCurrentUser } from "@/lib/auth/context";
+import { assertSafeUrl, UnsafeUrlError } from "@/lib/net/safe-fetch";
 
 const originalFetch = globalThis.fetch;
 
@@ -25,6 +57,11 @@ function mockFetchError(error: Error) {
 afterEach(() => {
   vi.stubGlobal("fetch", originalFetch);
   vi.restoreAllMocks();
+  // Clear call history on factory mocks (assertSafeUrl, canManageAgents,
+  // getCurrentUser, checkUserLimit) — restoreAllMocks only resets
+  // vi.spyOn spies, not vi.mock factory mocks. Without this, call-count
+  // assertions leak across tests.
+  vi.clearAllMocks();
 });
 
 function makeRequest(body: unknown) {
@@ -122,5 +159,41 @@ describe("POST /api/agents/reachability-probe", () => {
     );
     const res = await POST(makeRequest(validBody));
     expect(res.status).toBe(429);
+  });
+
+  it("returns 403 when user cannot manage agents", async () => {
+    vi.mocked(canManageAgents).mockResolvedValueOnce(false);
+    const res = await POST(makeRequest(validBody));
+    expect(res.status).toBe(403);
+    const data = await res.json();
+    expect(data.error).toBe("Forbidden");
+    // The SSRF guard + fetch must not be reached when forbidden.
+    expect(vi.mocked(assertSafeUrl)).not.toHaveBeenCalled();
+  });
+
+  it("returns 401 when no user", async () => {
+    vi.mocked(getCurrentUser).mockResolvedValueOnce(null);
+    const res = await POST(makeRequest(validBody));
+    expect(res.status).toBe(401);
+  });
+
+  it("rejects unsafe (private-IP) endpoints with the SSRF message", async () => {
+    vi.mocked(assertSafeUrl).mockRejectedValueOnce(
+      new UnsafeUrlError("hostname resolves to a private address"),
+    );
+    // Stub fetch so we can assert it was never reached.
+    const fetchSpy = vi.fn().mockResolvedValue({ status: 200 });
+    vi.stubGlobal("fetch", fetchSpy);
+    const res = await POST(makeRequest(validBody));
+    expect(res.status).toBe(400);
+    const data = await res.json();
+    expect(data.error).toBe("not permitted");
+    // fetch must not be reached when the SSRF guard rejects.
+    expect(fetchSpy).not.toHaveBeenCalled();
+  });
+
+  it("lets assertSafeUrl runtime errors propagate (not masked as SSRF)", async () => {
+    vi.mocked(assertSafeUrl).mockRejectedValueOnce(new Error("DNS blew up"));
+    await expect(POST(makeRequest(validBody))).rejects.toThrow("DNS blew up");
   });
 });

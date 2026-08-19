@@ -228,13 +228,14 @@ Via the admin UI (`/agents` page → "Add agent" form) or `POST /api/agents`:
 
 ```json
 {
-  "id": "research",
   "name": "Research Agent",
   "description": "LangGraph-powered web research assistant",
   "kind": "agui",
   "endpoint": "http://localhost:8001/agent"
 }
 ```
+
+`id` is **server-generated** (12-char random hex) — never send it in the POST body. The response includes the generated `id`, which you use in PATCH/DELETE URLs.
 
 Optional fields: `graphId` (langgraph only), `langsmithApiKey` (langgraph only).
 
@@ -258,7 +259,9 @@ See [`.env.example`](.env.example) for the full list with comments.
 | `BETTER_AUTH_SECRET` | Yes (unless `AUTH_DISABLED=true`) | Secret for signing session cookies. Generate with `openssl rand -hex 32`. The app refuses to boot without it when auth is enabled. |
 | `BETTER_AUTH_URL` | Yes (unless `AUTH_DISABLED=true`) | Public base URL of the app (e.g. `http://localhost:3000`) |
 | `AUTH_DISABLED` | No | Set to `true` to skip login (solo mode). **Never use this in any deployment exposed to the internet or shared users.** |
-| `ALLOW_PRIVATE_ENDPOINTS` | No | Set to `true` to allow creating/editing agents with endpoints that resolve to private/internal IPs (e.g. when agent backends run on the same host). Defaults to `false` (blocks private IPs to prevent SSRF). |
+| `ALLOW_PRIVATE_ENDPOINTS` | No | Set to `true` to allow creating/editing agents with endpoints that resolve to private/internal IPs (e.g. when agent backends run on the same host). Defaults to `false` (blocks private IPs to prevent SSRF). Hard-locked off under `SAAS_MODE` regardless of this flag. |
+| `TRUSTED_PROXY_HOPS` | No | Number of trusted reverse-proxy hops in front of the server, used to resolve the real client IP from `X-Forwarded-For` (default `1`). Set to `2` for Cloudflare → Nginx → app, etc. Without this, a malicious client could prepend a fake IP to `X-Forwarded-For` and bypass the per-IP rate limit (300/min cap in `proxy.ts`). |
+| `CONCURRENT_RUN_TIMEOUT_MS` | No | Watchdog timeout (ms) for concurrent-run rate-limit slots. Default `600000` (10 min). Floor `60000`. Safety net only — the actual SSE stream / agent run is NOT cancelled; only the counter is decremented to prevent slot leaks when a client opens a run and drops TCP without triggering `ReadableStream.cancel()`. Override if your agents do legitimately long research runs. |
 | `SENTRY_DSN` | No | Sentry DSN for server-side error tracking. No-op if unset. |
 | `NEXT_PUBLIC_SENTRY_DSN` | No | Sentry DSN for client-side error tracking (public, exposed to browser). No-op if unset. |
 | `SENTRY_TRACES_SAMPLE_RATE` | No | Transaction trace sampling rate, 0.0–1.0 (default: 0.1). Set to 0 to disable. |
@@ -347,7 +350,9 @@ The app does not terminate TLS itself. In production, put it behind a reverse pr
 
 The "Test connection" button and agent creation/editing send the agent endpoint URL to the server. To prevent [Server-Side Request Forgery](https://owasp.org/www-community/attacks/Server_Side_Request_Forgery) (an attacker using the server to scan internal services or steal cloud metadata credentials), **agent creation and editing block URLs that resolve to private/internal IP addresses** by default (`127.0.0.1`, `10.x`, `192.168.x`, `172.16-31.x`, `169.254.x`, IPv6 equivalents).
 
-The "Test connection" reachability probe is **not** gated — it's a pure diagnostic that always tells you whether the endpoint is up. The SSRF guard is at the persistence choke point (create/update), so bad URLs can never be stored. Once an agent is stored, the CopilotKit runtime fetches it during runs without re-checking — this is intentional, so existing agents keep working even if you later change the env var.
+The "Test connection" reachability probe is gated behind `canManageAgents` (org owner/admin only) and applies the same `assertSafeUrl` SSRF guard as agent create/edit. Self-hosters who need to probe `localhost`/private-IP backends set `ALLOW_PRIVATE_ENDPOINTS=true` (the same flag that gates agent create/edit). Raw error messages from the probe are masked (they can leak internal hostnames via DNS errors); the full error is logged server-side.
+
+Once an agent is stored, the CopilotKit runtime fetches it during runs without re-checking — this is intentional, so existing agents keep working even if you later change the env var.
 
 If your agent backends run on the same host as the frontend (common for self-hosters), set `ALLOW_PRIVATE_ENDPOINTS=true` to allow internal URLs when creating or editing agents. This is safe when only trusted users can reach the admin page.
 

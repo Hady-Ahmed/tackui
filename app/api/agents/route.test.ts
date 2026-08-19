@@ -26,6 +26,7 @@ vi.mock("@/lib/plans/enforcement", () => ({
 
 import { GET, POST } from "./route";
 import { listAgents, deleteAgent, createAgent } from "@/lib/agents/agent-store";
+import * as agentStore from "@/lib/agents/agent-store";
 import type { CreateAgentInput } from "@/lib/agents/agent-store";
 import { getSyntheticAdmin } from "@/lib/auth/context";
 import { runMigrations } from "@/lib/db/migrate";
@@ -239,5 +240,33 @@ describe("POST /api/agents", () => {
     const list = await GET();
     const agents = await list.json();
     expect(agents).toHaveLength(0);
+  });
+
+  it("masks internal errors on create (no DB topology leak)", async () => {
+    // Simulate a non-23505 failure from createAgent (e.g. PG connection
+    // drop). The raw message must NOT surface to the client. spyOn on
+    // the namespace so the route's live binding sees the override;
+    // restoreAllMocks in afterEach cleans up.
+    const spy = vi
+      .spyOn(agentStore, "createAgent")
+      .mockRejectedValueOnce(
+        Object.assign(new Error("connect ECONNREFUSED 127.0.0.1:5432"), {
+          code: "ECONNREFUSED",
+        }),
+      );
+    const res = await POST(
+      new Request("http://localhost/api/agents", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(validBody),
+      }),
+    );
+    expect(res.status).toBe(500);
+    const data = await res.json();
+    expect(data.error).toBe("Failed to create agent. Check server logs.");
+    // The raw internal message must not leak
+    expect(JSON.stringify(data)).not.toContain("ECONNREFUSED");
+    expect(JSON.stringify(data)).not.toContain("5432");
+    expect(spy).toHaveBeenCalledTimes(1);
   });
 });

@@ -18,6 +18,15 @@ if (!AUTH_DISABLED && !BETTER_AUTH_SECRET) {
       "Generate one with: openssl rand -hex 32",
   );
 }
+// Defensive: the fallback "solo-mode-no-sessions" is only reachable when
+// AUTH_DISABLED=true (the boot throw above guarantees BETTER_AUTH_SECRET
+// is set in auth mode). Expressing this explicitly here means a future
+// refactor that removes the throw can't silently reintroduce a
+// publicly-known signing secret in auth mode — the fallback branch is
+// unreachable by construction when AUTH_DISABLED is false.
+const AUTH_SECRET: string = AUTH_DISABLED
+  ? "solo-mode-no-sessions"
+  : (BETTER_AUTH_SECRET as string);
 
 function buildSocialProviders() {
   const providers: Record<
@@ -115,8 +124,23 @@ export const auth = betterAuth({
   baseURL: process.env.BETTER_AUTH_URL || "http://localhost:3000",
   // In solo mode (AUTH_DISABLED=true) no sessions are signed, so the
   // secret value is irrelevant — Better Auth still needs a string at
-  // init time. In auth mode the throw above guarantees a real secret.
-  secret: BETTER_AUTH_SECRET ?? "solo-mode-no-sessions",
+  // init time. In auth mode the boot throw + the AUTH_SECRET const
+  // above guarantee a real, env-supplied secret.
+  secret: AUTH_SECRET,
+  // Pin cookie security flags explicitly. Better Auth's defaults are
+  // httpOnly:true + sameSite:"lax" + secure:"auto" (true only when
+  // NODE_ENV === "production" AND the request looks like HTTPS). Behind
+  // a TLS-terminating proxy that doesn't forward X-Forwarded-Proto,
+  // "auto" can mark cookies non-secure. Pinning `secure` to production
+  // makes the attribute a function of the deployment environment, not
+  // of how the proxy forwards headers.
+  advanced: {
+    defaultCookieAttributes: {
+      httpOnly: true,
+      sameSite: "lax" as const,
+      secure: process.env.NODE_ENV === "production",
+    },
+  },
   emailAndPassword: {
     enabled: true,
     // Require email verification before sign-in when SMTP is configured.

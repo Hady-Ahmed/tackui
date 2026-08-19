@@ -9,6 +9,27 @@ import {
 import { LIMITS, type LimitName } from "./limits";
 import { isAuthDisabled } from "@/lib/auth/auth";
 
+// Max wall-clock time a concurrent-run slot can be held before the
+// watchdog force-releases it. This is a SAFETY NET, not a run-cancellation:
+// the actual SSE stream / agent execution keeps running untouched. The
+// watchdog only releases the rate-limit accounting slot so a malicious
+// user can't stall N slots indefinitely by opening N runs and dropping
+// TCP without triggering ReadableStream.cancel() (the normal release path).
+//
+// Side effect: if a legitimate run takes longer than this, the user's
+// concurrent counter drops early — they could start another run before
+// the slow one finishes. That's a soft tradeoff (occasionally
+// under-counting) vs the alternative (permanently over-counting on
+// abandoned connections, requiring a server restart to clear).
+//
+// Default 10 min — generous for chat-style AG-UI token streaming.
+// Override with CONCURRENT_RUN_TIMEOUT_MS (milliseconds) if your
+// agents do long research runs.
+const CONCURRENT_RUN_TIMEOUT_MS = Math.max(
+  60_000, // floor: 1 min — never lower than this
+  Number(process.env.CONCURRENT_RUN_TIMEOUT_MS ?? "") || 10 * 60 * 1000,
+);
+
 /**
  * Build a 429 Too Many Requests response with standard rate-limit headers.
  */
@@ -119,9 +140,27 @@ export function acquireConcurrent(
   }
   incrementConcurrent(key);
   let released = false;
+  // Watchdog: force-release the slot after CONCURRENT_RUN_TIMEOUT_MS
+  // if release() hasn't been called. Prevents slot leaks when a client
+  // opens a run and drops TCP without triggering the stream's
+  // cancel/done/error path. The actual run is NOT cancelled — only the
+  // rate-limit counter is decremented. See CONCURRENT_RUN_TIMEOUT_MS
+  // doc above for the tradeoff.
+  const watchdog = setTimeout(() => {
+    if (released) return;
+    released = true;
+    decrementConcurrent(key);
+    console.error("[ratelimit] watchdog force-released concurrent slot", {
+      key,
+      timeoutMs: CONCURRENT_RUN_TIMEOUT_MS,
+    });
+  }, CONCURRENT_RUN_TIMEOUT_MS);
+  // unref so the timer can't keep the event loop alive on shutdown.
+  watchdog.unref?.();
   return () => {
     if (released) return;
     released = true;
+    clearTimeout(watchdog);
     decrementConcurrent(key);
   };
 }

@@ -72,6 +72,15 @@ services:
       # Security: allow agent endpoints on private IPs (self-hosters with
       # backends on the same host). Default false = SSRF protection on.
       ALLOW_PRIVATE_ENDPOINTS: ${ALLOW_PRIVATE_ENDPOINTS:-}
+      # Security: trusted reverse-proxy hops for X-Forwarded-For client-IP
+      # resolution. Default 1 (Vercel / Railway / Render / single Nginx).
+      # Set to 2 for Cloudflare -> Nginx -> app, etc. See proxy.ts.
+      TRUSTED_PROXY_HOPS: ${TRUSTED_PROXY_HOPS:-}
+      # Rate-limit safety net: force-release a concurrent-run slot after
+      # this many ms if release() was never called (client dropped TCP
+      # without triggering stream cancel). Default 10 min. The actual
+      # run is NOT cancelled — only the counter.
+      CONCURRENT_RUN_TIMEOUT_MS: ${CONCURRENT_RUN_TIMEOUT_MS:-}
       # Sentry server-side (runtime — unlike NEXT_PUBLIC_* above).
       SENTRY_DSN: ${SENTRY_DSN:-}
       SENTRY_TRACES_SAMPLE_RATE: ${SENTRY_TRACES_SAMPLE_RATE:-0.1}

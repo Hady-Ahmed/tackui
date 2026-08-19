@@ -86,7 +86,18 @@ export async function POST(request: Request) {
         { status: 500 },
       );
     }
-    const message = err instanceof Error ? err.message : "Unknown error";
-    return NextResponse.json({ error: message }, { status: 500 });
+    const message = err instanceof Error ? err.message : String(err);
+    // Mask internal errors — the raw message can leak DB topology
+    // (e.g. ECONNREFUSED :5432), schema details (constraint/column
+    // names), or other internal state. Log server-side only, return a
+    // fixed generic message. Consistent with PATCH/DELETE + the probe.
+    console.error("[agents] create failed", {
+      orgId: user.orgId,
+      error: message,
+    });
+    return NextResponse.json(
+      { error: "Failed to create agent. Check server logs." },
+      { status: 500 },
+    );
   }
 }

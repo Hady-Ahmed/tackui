@@ -2,6 +2,20 @@
   "name": "agent-front-end",
   "version": "0.1.0",
   "private": true,
+  "description": "Unified AG-UI frontend — a ChatGPT/Gemini-style chat app for custom agents speaking the AG-UI protocol. Pluggable agent registry, multi-tenant, SaaS-ready.",
+  "license": "Apache-2.0",
+  "author": "Hady Ahmed",
+  "homepage": "https://github.com/Hady-Ahmed/agent-front-end#readme",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/Hady-Ahmed/agent-front-end.git"
+  },
+  "bugs": {
+    "url": "https://github.com/Hady-Ahmed/agent-front-end/issues"
+  },
+  "engines": {
+    "node": ">=20"
+  },
   "scripts": {
     "dev": "next dev",
     "build": "next build",

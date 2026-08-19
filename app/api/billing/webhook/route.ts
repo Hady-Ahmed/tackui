@@ -117,14 +117,26 @@ async function handleCheckoutCompleted(
 async function handleSubscriptionChange(sub: Stripe.Subscription): Promise<void> {
   // Resolve the org id. Prefer subscription.metadata (set at checkout);
   // fall back to a customer-id lookup (row created on checkout).
+  // Cross-check: if both sources exist and disagree, someone tampered
+  // with the Stripe-side metadata (e.g. a Stripe-account compromise) to
+  // re-attribute the subscription to a different org. Drop the event
+  // rather than writing a paid-plan row for an org that never paid.
   const customerId =
     typeof sub.customer === "string" ? sub.customer : sub.customer?.id ?? "";
-  const orgId =
-    (sub.metadata?.orgId as string | undefined) ??
-    (await getOrgIdByCustomerId(customerId));
+  const metadataOrgId = sub.metadata?.orgId as string | undefined;
+  const customerOrgId = await getOrgIdByCustomerId(customerId);
+  const orgId = metadataOrgId ?? customerOrgId;
   if (!orgId) {
     console.error("[billing-webhook] subscription has no resolvable orgId", {
       subscriptionId: sub.id,
+    });
+    return;
+  }
+  if (metadataOrgId && customerOrgId && metadataOrgId !== customerOrgId) {
+    console.error("[billing-webhook] orgId mismatch — dropping event", {
+      subscriptionId: sub.id,
+      metadataOrgId,
+      customerOrgId,
     });
     return;
   }
@@ -134,9 +146,19 @@ async function handleSubscriptionChange(sub: Stripe.Subscription): Promise<void>
 async function handleSubscriptionDeleted(sub: Stripe.Subscription): Promise<void> {
   const customerId =
     typeof sub.customer === "string" ? sub.customer : sub.customer?.id ?? "";
-  const orgId =
-    (sub.metadata?.orgId as string | undefined) ??
-    (await getOrgIdByCustomerId(customerId));
+  const metadataOrgId = sub.metadata?.orgId as string | undefined;
+  const customerOrgId = await getOrgIdByCustomerId(customerId);
+  // Same cross-check as handleSubscriptionChange — refuse to act on a
+  // tampered metadata value.
+  if (metadataOrgId && customerOrgId && metadataOrgId !== customerOrgId) {
+    console.error("[billing-webhook] orgId mismatch on delete — dropping", {
+      subscriptionId: sub.id,
+      metadataOrgId,
+      customerOrgId,
+    });
+    return;
+  }
+  const orgId = metadataOrgId ?? customerOrgId;
   if (!orgId) return;
   await deleteSubscription(orgId);
 }

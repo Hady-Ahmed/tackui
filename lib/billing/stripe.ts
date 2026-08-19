@@ -34,7 +34,13 @@ export function getStripe(): Stripe | null {
 
 /** Webhook signing secret (from Stripe CLI or the dashboard). */
 export function getWebhookSecret(): string | null {
-  return process.env.STRIPE_WEBHOOK_SECRET ?? null;
+  // Treat empty string as null — `?? null` only converts `undefined`,
+  // not `""`. An empty env value would otherwise reach
+  // `stripe.webhooks.constructEventAsync(rawBody, sig, "")` which
+  // rejects every signature with an opaque error → Stripe retries
+  // forever. Treat misconfiguration as "not configured" instead.
+  const s = process.env.STRIPE_WEBHOOK_SECRET;
+  return s && s.length > 0 ? s : null;
 }
 
 export type { Stripe };

@@ -63,7 +63,7 @@ app/
   api/copilotkit/[[...path]]/route.ts  # CopilotKit runtime (catch-all — matches /api/copilotkit and all sub-paths) — plan-derived rate/concurrent caps when SAAS_MODE
   api/agents/route.ts          # REST: GET/POST /api/agents (list, create) — SSRF guard on POST + plan agent-count check (SaaS)
   api/agents/[id]/route.ts     # REST: GET/PATCH/DELETE /api/agents/[id] — SSRF guard on PATCH (when endpoint changes)
-  api/agents/reachability-probe/route.ts  # REST: POST /api/agents/reachability-probe (pure diagnostic — no SSRF guard, error messages masked)
+  api/agents/reachability-probe/route.ts  # REST: POST /api/agents/reachability-probe (canManageAgents-gated, SSRF-guarded, error messages masked)
   api/auth/[...all]/route.ts   # Better Auth handler (signup, signin, callback)
   api/auth/config/route.ts     # GET enabled providers (for self-configuring login UI)
   api/auth/can-manage-agents/route.ts  # GET — returns whether user can manage agents (org owner/admin or platform admin)
@@ -230,11 +230,14 @@ servers — it does **not** validate auth, AG-UI protocol compliance, or that th
 agent will actually run. The sidebar also shows a status dot per agent (gray =
 untested, green = reachable, red = unreachable), re-tested on window focus.
 
-The probe is a **pure diagnostic** — it always reports reachability truthfully,
-including for `localhost`/private IPs. SSRF protection lives on agent
-create/edit (the persistence choke point), not on the probe. Raw error messages
-are masked in the response (they can leak internal hostnames via DNS errors);
-the full error is logged server-side via `console.error("[reachability-probe] ...")`.
+The probe is gated behind `canManageAgents` (org owner/admin only) and
+applies the same `assertSafeUrl` SSRF guard as agent create/edit — so
+it cannot be used to port-scan internal services or hit cloud-metadata
+endpoints. Self-hosters who need to probe `localhost`/private-IP backends
+set `ALLOW_PRIVATE_ENDPOINTS=true` (the same flag that gates agent
+create/edit). Raw error messages are masked in the response (they can
+leak internal hostnames via DNS errors); the full error is logged
+server-side via `console.error("[reachability-probe] ...")`.
 
 ### Security
 
@@ -314,6 +317,21 @@ fires automatically on stream completion, error, or client disconnect — no
 manual cleanup needed in route code. When a user exceeds the concurrent cap
 (3), they get `429 { error: "Too many concurrent agent runs (3 max)..." }`
 which surfaces in the CopilotKit chat UI.
+
+**Concurrent-slot watchdog:** `acquireConcurrent` (in
+`lib/ratelimit/middleware.ts`) sets a `setTimeout` watchdog that
+force-releases the slot after `CONCURRENT_RUN_TIMEOUT_MS` (default 10 min)
+if `release()` was never called. This is a SAFETY NET against slot leaks
+when a client opens a run and drops TCP without triggering
+`ReadableStream.cancel()` (the normal release path through
+`wrapStreamWithRelease`). The actual SSE stream / agent execution is NOT
+cancelled — only the rate-limit counter is decremented. Side effect: a
+legitimate run longer than the watchdog timeout would have its counter
+decremented early, so the user could start another run before the slow one
+finishes (the cap becomes "soft"). Default 10 min is generous for
+chat-style AG-UI token streaming; override via env for long-research
+agents. The watchdog timer is `unref()`'d so it can't keep the event loop
+alive on shutdown.
 
 **Solo mode (`AUTH_DISABLED=true`):** Per-user limits are not enforced
 (everyone is `id: "local"`). This applies to **all** per-user limits —
@@ -622,6 +640,17 @@ Optional security flags:
   with endpoints that resolve to private/internal IPs (for self-hosters running
   backends on the same host). Defaults to `false` (blocks private IPs to
   prevent SSRF). See [Security](#security) above.
+- `TRUSTED_PROXY_HOPS` — number of trusted reverse-proxy hops in front of
+  the server. The client IP is the Nth-from-RIGHT entry of
+  `X-Forwarded-For` where N is this count. Default `1` (correct for Vercel
+  / Railway / Render / a single Nginx in front — they all set the real
+  client IP as the LAST entry). Set to `2` for Cloudflare → Nginx → app,
+  `3` for three hops, etc. Without this, a malicious client can prepend a
+  fake IP to `X-Forwarded-For` and bypass the per-IP rate limit (300/min
+  cap in `proxy.ts`).
+- `CONCURRENT_RUN_TIMEOUT_MS` — watchdog timeout (ms) for concurrent-run
+  rate-limit slots. Default `600000` (10 min). Floor `60000` (1 min). See
+  the "Concurrent-slot watchdog" section under Rate limiting above.
 
 Optional Postgres pool tuning:
 
@@ -744,12 +773,14 @@ pool — note `"user"` is a reserved word in Postgres and must be
 double-quoted in all raw SQL.
 
 Better Auth's tables (`user`, `session`, `account`, `verification`,
-`organization`, `member`, `invitation`) are created via
-`npx @better-auth/cli migrate --config lib/auth/auth.ts` (or automatically
-on boot via `ensureAuthTables()` in `instrumentation.ts`). The
-app's own tables (`agents`, `agent_runs`, `run_state`, `thread_messages`,
-`thread_metadata`) are created via `npm run migrate` (see
-`lib/db/migrations/`). Each command owns its own tables.
+`organization`, `member`, `invitation`) are created automatically on
+boot via `ensureAuthTables()` in `instrumentation.ts` (or manually via
+`npx @better-auth/cli migrate --config lib/auth/auth.ts`). The app's
+own tables (`agents`, `agent_runs`, `run_state`, `thread_messages`,
+`thread_metadata`) are created automatically on boot via
+`runMigrations()` in `instrumentation.ts` (or manually via
+`npm run migrate`, see `lib/db/migrations/`). Boot runs both — no
+manual step is required for a normal deploy.
 
 ### In-memory cache (sync interface bridge)
 
@@ -907,6 +938,25 @@ strategy it uses so users know whether server-side session storage is required.
   when auth enabled; open-redirect fix (`safeRedirect()` in login page);
   `/api/health` liveness endpoint (bypassed by proxy cookie gate); error
   message masking on reachability probe (no internal hostname leakage)
+- Security hardening (SaaS launch) — `assertSafeUrl` SSRF guard + `canManageAgents`
+  gate added to the reachability probe (previously any logged-in user could
+  make the server fetch arbitrary URLs incl. cloud-metadata endpoints);
+  internal error messages masked on `POST /api/agents` (raw `err.message`
+  could leak DB topology/schema); session-cookie `secure` flag pinned to
+  `NODE_ENV === "production"` (was Better Auth's `secure: "auto"` default,
+  which depends on proxy header forwarding); Stripe webhook cross-checks
+  `sub.metadata.orgId` against `getOrgIdByCustomerId` and drops mismatches
+  (defense against Stripe-account compromise re-attributing subscriptions);
+  `X-Forwarded-For` leftmost-spoofing fix in `proxy.ts` (now reads
+  Nth-from-right per `TRUSTED_PROXY_HOPS`, default `1`); concurrent-run
+  watchdog in `acquireConcurrent` force-releases slots after
+  `CONCURRENT_RUN_TIMEOUT_MS` (default 10 min) — the run is NOT cancelled,
+  only the counter is decremented; empty-string `STRIPE_WEBHOOK_SECRET`
+  treated as `null` (was `""`, silently rejecting all webhook signatures
+  → Stripe infinite-retry storm); `AUTH_SECRET` const makes the
+  `"solo-mode-no-sessions"` fallback unreachable by construction when
+  `AUTH_DISABLED !== true` (tripwire against future refactor removing the
+  boot throw)
 - Rate limiting (SaaS hardening) — two-layer: per-IP global flood protection
   in `proxy.ts` (300/min) + per-user route-level limits in `lib/ratelimit/`
   (20 runs/min, 3 concurrent SSE streams, 10/min probe/mutations, 60/min

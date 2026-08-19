@@ -208,4 +208,62 @@ describe("POST /api/billing/webhook", () => {
     const res = await postWebhook();
     expect(res.status).toBe(500);
   });
+
+  it("customer.subscription.updated drops when metadata orgId disagrees with customer-id lookup (tampered metadata)", async () => {
+    // Defense against Stripe-account compromise: if someone edits the
+    // subscription's metadata in Stripe to point at a different org,
+    // the cross-check against our own DB (row created at checkout)
+    // catches the mismatch and refuses to write a paid-plan row.
+    mockConstructEvent.mockResolvedValue(
+      event(
+        "customer.subscription.updated",
+        subscription({ metadata: { orgId: "org-attacker" } }),
+      ),
+    );
+    mockGetOrgIdByCustomerId.mockResolvedValue("org-legit");
+    const res = await postWebhook();
+    expect(res.status).toBe(200);
+    expect(mockUpsert).not.toHaveBeenCalled();
+  });
+
+  it("customer.subscription.updated upserts when metadata orgId matches the customer-id lookup", async () => {
+    mockConstructEvent.mockResolvedValue(
+      event(
+        "customer.subscription.updated",
+        subscription({ metadata: { orgId: "org-same" } }),
+      ),
+    );
+    mockGetOrgIdByCustomerId.mockResolvedValue("org-same");
+    const res = await postWebhook();
+    expect(res.status).toBe(200);
+    expect(mockUpsert).toHaveBeenCalledWith(
+      expect.objectContaining({ orgId: "org-same" }),
+    );
+  });
+
+  it("customer.subscription.deleted drops when metadata orgId disagrees with customer-id lookup", async () => {
+    mockConstructEvent.mockResolvedValue(
+      event(
+        "customer.subscription.deleted",
+        subscription({ metadata: { orgId: "org-attacker" } }),
+      ),
+    );
+    mockGetOrgIdByCustomerId.mockResolvedValue("org-legit");
+    const res = await postWebhook();
+    expect(res.status).toBe(200);
+    expect(mockDelete).not.toHaveBeenCalled();
+  });
+
+  it("customer.subscription.deleted with matching metadata + lookup proceeds", async () => {
+    mockConstructEvent.mockResolvedValue(
+      event(
+        "customer.subscription.deleted",
+        subscription({ metadata: { orgId: "org-same" } }),
+      ),
+    );
+    mockGetOrgIdByCustomerId.mockResolvedValue("org-same");
+    const res = await postWebhook();
+    expect(res.status).toBe(200);
+    expect(mockDelete).toHaveBeenCalledWith("org-same");
+  });
 });

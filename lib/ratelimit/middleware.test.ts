@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeEach, vi } from "vitest";
+import { describe, it, expect, beforeEach, vi, afterEach } from "vitest";
 
 // The middleware reads isAuthDisabled() at call time. The test env sets
 // AUTH_DISABLED=true (vitest.setup.ts), which would short-circuit all
@@ -14,10 +14,14 @@ import {
   checkUserLimit,
   acquireConcurrent,
 } from "./middleware";
-import { _resetForTests } from "./store";
+import { _resetForTests, getConcurrent } from "./store";
 
 beforeEach(() => {
   _resetForTests();
+});
+
+afterEach(() => {
+  vi.useRealTimers();
 });
 
 describe("rateLimitResponse", () => {
@@ -109,5 +113,43 @@ describe("acquireConcurrent", () => {
     expect(typeof acquireConcurrent("user-1", "copilotkitConcurrent")).toBe("function");
     expect(typeof acquireConcurrent("user-1", "copilotkitConcurrent")).toBe("function");
     expect(typeof acquireConcurrent("user-1", "copilotkitConcurrent")).toBe("function");
+  });
+
+  it("watchdog force-releases the slot after the timeout if release() is never called", () => {
+    // Real-world scenario this guards: a client opens a run and drops
+    // TCP without triggering ReadableStream.cancel() (the normal release
+    // path). Without the watchdog, the slot leaks until server restart.
+    vi.useFakeTimers();
+    const key = "user-1";
+    // Acquire but DON'T release — simulate a stalled client.
+    const release = acquireConcurrent(key, "copilotkitConcurrent") as () => void;
+    expect(typeof release).toBe("function");
+    expect(getConcurrent(`copilotkitConcurrent:${key}`)).toBe(1);
+
+    // Advance past the watchdog timeout (default 10 min).
+    vi.advanceTimersByTime(10 * 60 * 1000 + 1);
+
+    // The watchdog must have decremented the counter.
+    expect(getConcurrent(`copilotkitConcurrent:${key}`)).toBe(0);
+
+    // And the slot is now reusable.
+    const release2 = acquireConcurrent(key, "copilotkitConcurrent");
+    expect(typeof release2).toBe("function");
+    (release2 as () => void)();
+  });
+
+  it("watchdog is cancelled when release() is called normally", () => {
+    vi.useFakeTimers();
+    const key = "user-2";
+    const release = acquireConcurrent(key, "copilotkitConcurrent") as () => void;
+    expect(getConcurrent(`copilotkitConcurrent:${key}`)).toBe(1);
+
+    release(); // normal release — should clear the watchdog
+    expect(getConcurrent(`copilotkitConcurrent:${key}`)).toBe(0);
+
+    // Advance past the timeout — watchdog must NOT fire (counter stays 0,
+    // no negative count, no error logged).
+    vi.advanceTimersByTime(10 * 60 * 1000 + 1);
+    expect(getConcurrent(`copilotkitConcurrent:${key}`)).toBe(0);
   });
 });

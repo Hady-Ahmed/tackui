@@ -1,0 +1,46 @@
+name: Feature request
+description: Suggest something new
+labels: ["enhancement"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for the suggestion! Search existing issues (including closed ones) first to avoid duplicates.
+  - type: textarea
+    id: problem
+    attributes:
+      label: The problem
+      description: What are you trying to do that the current project doesn't support? What's the pain point?
+      placeholder: "I'm trying to …, but the project currently …"
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposed solution
+      description: What would you like to see? A sketch, a config example, or a user-flow description is fine.
+      placeholder: "It would be great if …"
+    validations:
+      required: true
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives considered
+      description: Workarounds you've tried or other approaches you've considered. Helps the maintainer understand the design space.
+      placeholder: "I tried …, but …"
+  - type: dropdown
+    id: scope
+    attributes:
+      label: Scope
+      options:
+        - Small — fits v1 scope, no architecture change
+        - Medium — touches one subsystem (agent registry, auth, billing, rate limiting)
+        - Large — new architecture or cross-cutting feature
+        - Not sure
+    validations:
+      required: true
+  - type: textarea
+    id: context
+    attributes:
+      label: Additional context
+      description: Screenshots, links to docs, references to other projects that solved this well, etc.
