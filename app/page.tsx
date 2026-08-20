@@ -14,6 +14,11 @@ import { Landing } from "@/components/landing";
  * hands off to `/app`. Both `/` and `/app` work; the redirect keeps
  * bookmarks and the proxy cookie gate behaving as before (unauth → `/login`).
  */
+// Force request-time rendering — SAAS_MODE is a runtime env var, so the
+// landing-vs-redirect decision must be made at request time, not baked
+// into the static HTML at build time (when SAAS_MODE is unset).
+export const dynamic = "force-dynamic";
+
 export default function RootPage() {
   if (SAAS_MODE) {
     return <Landing />;

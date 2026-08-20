@@ -1,6 +1,6 @@
 import { NextResponse } from "next/server";
 import { z } from "zod";
-import { canManageAgents, getCurrentUser } from "@/lib/auth/context";
+import { getCurrentUser } from "@/lib/auth/context";
 import { SSRF_REJECTION_MESSAGE } from "@/lib/config/saas";
 import { assertSafeUrl, UnsafeUrlError } from "@/lib/net/safe-fetch";
 import { checkUserLimit } from "@/lib/ratelimit/middleware";
@@ -14,14 +14,6 @@ export async function POST(request: Request) {
   const user = await getCurrentUser();
   if (!user) {
     return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
-  }
-
-  // Gate behind org-owner/admin — the probe makes the server issue an
-  // outbound GET to a user-supplied URL, so it must be admin-gated to
-  // prevent any logged-in user from turning the server into a port
-  // scanner / cloud-metadata oracle. Matches the admin-form-only UI.
-  if (!(await canManageAgents(user))) {
-    return NextResponse.json({ error: "Forbidden" }, { status: 403 });
   }
 
   const limited = checkUserLimit(user.id, "reachabilityProbe");
@@ -46,11 +38,13 @@ export async function POST(request: Request) {
 
   // SSRF guard — same choke-point as POST/PATCH /api/agents. Rejects
   // endpoints that resolve to private/internal IPs (cloud metadata,
-  // loopback, RFC 1918). Without this, any admin could still point the
-  // probe at internal services; with the gate above, only admins can
-  // trigger it AND they're bounded to safe addresses. Self-hosters who
-  // need to probe localhost backends set ALLOW_PRIVATE_ENDPOINTS=true
-  // (the same flag that gates agent create/edit).
+  // loopback, RFC 1918). This closes the real vulnerability (any
+  // logged-in user making the server fetch private IPs / cloud-metadata
+  // endpoints) without breaking the sidebar's status-dot probing for
+  // non-admin members. The response body doesn't leak — only status +
+  // a masked reason — so probing public URLs is harmless. Rate-limited
+  // at 30/min per user. Self-hosters who need to probe localhost
+  // backends set ALLOW_PRIVATE_ENDPOINTS=true (same flag as create/edit).
   try {
     await assertSafeUrl(endpoint);
   } catch (err) {

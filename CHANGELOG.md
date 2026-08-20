@@ -4,8 +4,12 @@ All notable changes to this project will be documented in this file. The format 
 
 ## [Unreleased]
 
+### Fixed
+- **SaaS-mode pages baked at build time:** `/`, `/terms`, `/privacy`, `/pricing` read `SAAS_MODE`/`BILLING_ENABLED` at module load but had no dynamic data deps, so Next.js statically generated them at build time (when `SAAS_MODE` isn't set) and baked the `redirect("/app")` into the HTML. Added `export const dynamic = "force-dynamic"` to each — they now render at request time, reading the live env var. Also fixes `<CookieNotice/>` which was being baked out for the same reason.
+- **Reachability probe scope:** reverted the `canManageAgents` gate (it broke the sidebar's status dots for org members — all dots went red because the probe 403'd). The `assertSafeUrl` SSRF guard alone closes the real vulnerability (any logged-in user making the server fetch private IPs / cloud-metadata). Members keep their status dots; admins + members both probe, but only safe (public) URLs.
+
 ### Security
-- **SSRF guard on reachability probe:** `POST /api/agents/reachability-probe` now applies `assertSafeUrl` and is gated behind `canManageAgents` (org owner/admin only). Previously any logged-in user could make the server issue an outbound GET to any URL — including cloud-metadata endpoints.
+- **SSRF guard on reachability probe:** `POST /api/agents/reachability-probe` now applies `assertSafeUrl`. Previously any logged-in user could make the server issue an outbound GET to any URL — including cloud-metadata endpoints. Any logged-in user can still probe (the sidebar's status dots need it for members too), but only public URLs are allowed.
 - **Mask internal errors on agent POST:** `POST /api/agents` no longer returns raw `err.message` on non-23505 failures (could leak DB topology / schema details). Now returns a fixed message and logs the detail server-side.
 - **Pin session-cookie `secure` flag:** `betterAuth()` now sets `advanced.defaultCookieAttributes.secure = NODE_ENV === "production"` explicitly, instead of relying on Better Auth's `secure: "auto"` default (which depends on proxy header forwarding).
 - **Webhook orgId cross-check:** Stripe webhook handler now cross-checks `sub.metadata.orgId` against `getOrgIdByCustomerId(sub.customer)` and drops the event on mismatch — defense against Stripe-account compromise attempting to re-attribute a subscription to a different org.

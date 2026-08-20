@@ -63,7 +63,7 @@ app/
   api/copilotkit/[[...path]]/route.ts  # CopilotKit runtime (catch-all — matches /api/copilotkit and all sub-paths) — plan-derived rate/concurrent caps when SAAS_MODE
   api/agents/route.ts          # REST: GET/POST /api/agents (list, create) — SSRF guard on POST + plan agent-count check (SaaS)
   api/agents/[id]/route.ts     # REST: GET/PATCH/DELETE /api/agents/[id] — SSRF guard on PATCH (when endpoint changes)
-  api/agents/reachability-probe/route.ts  # REST: POST /api/agents/reachability-probe (canManageAgents-gated, SSRF-guarded, error messages masked)
+  api/agents/reachability-probe/route.ts  # REST: POST /api/agents/reachability-probe (SSRF-guarded, error messages masked)
   api/auth/[...all]/route.ts   # Better Auth handler (signup, signin, callback)
   api/auth/config/route.ts     # GET enabled providers (for self-configuring login UI)
   api/auth/can-manage-agents/route.ts  # GET — returns whether user can manage agents (org owner/admin or platform admin)
@@ -230,14 +230,13 @@ servers — it does **not** validate auth, AG-UI protocol compliance, or that th
 agent will actually run. The sidebar also shows a status dot per agent (gray =
 untested, green = reachable, red = unreachable), re-tested on window focus.
 
-The probe is gated behind `canManageAgents` (org owner/admin only) and
-applies the same `assertSafeUrl` SSRF guard as agent create/edit — so
-it cannot be used to port-scan internal services or hit cloud-metadata
-endpoints. Self-hosters who need to probe `localhost`/private-IP backends
-set `ALLOW_PRIVATE_ENDPOINTS=true` (the same flag that gates agent
-create/edit). Raw error messages are masked in the response (they can
-leak internal hostnames via DNS errors); the full error is logged
-server-side via `console.error("[reachability-probe] ...")`.
+The probe applies the same `assertSafeUrl` SSRF guard as agent
+create/edit — so it cannot be used to port-scan internal services or hit
+cloud-metadata endpoints. Any logged-in user can probe (the sidebar's
+status dots need it for members too), but only public URLs are allowed.
+Raw error messages are masked in the response (they can leak internal
+hostnames via DNS errors); the full error is logged server-side via
+`console.error("[reachability-probe] ...")`.
 
 ### Security
 
@@ -938,9 +937,9 @@ strategy it uses so users know whether server-side session storage is required.
   when auth enabled; open-redirect fix (`safeRedirect()` in login page);
   `/api/health` liveness endpoint (bypassed by proxy cookie gate); error
   message masking on reachability probe (no internal hostname leakage)
-- Security hardening (SaaS launch) — `assertSafeUrl` SSRF guard + `canManageAgents`
-  gate added to the reachability probe (previously any logged-in user could
-  make the server fetch arbitrary URLs incl. cloud-metadata endpoints);
+- Security hardening (SaaS launch) — `assertSafeUrl` SSRF guard added to
+  the reachability probe (previously any logged-in user could make the
+  server fetch arbitrary URLs incl. cloud-metadata endpoints);
   internal error messages masked on `POST /api/agents` (raw `err.message`
   could leak DB topology/schema); session-cookie `secure` flag pinned to
   `NODE_ENV === "production"` (was Better Auth's `secure: "auto"` default,

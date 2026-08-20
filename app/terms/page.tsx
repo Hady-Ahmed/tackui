@@ -10,6 +10,9 @@ import { SAAS_MODE } from "@/lib/config/saas";
  * self-hosted instance, which is governed by its operator's own terms +
  * the Apache-2.0 license.
  */
+// Force request-time rendering — SAAS_MODE is a runtime env var.
+export const dynamic = "force-dynamic";
+
 export default function TermsPage() {
   if (!SAAS_MODE) redirect("/app");
 

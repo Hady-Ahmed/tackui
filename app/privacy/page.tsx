@@ -9,6 +9,9 @@ import { SAAS_MODE } from "@/lib/config/saas";
  * service&apos;s data practices (processors, retention). A self-hosted instance
  * is governed by its operator&apos;s own privacy practices.
  */
+// Force request-time rendering — SAAS_MODE is a runtime env var.
+export const dynamic = "force-dynamic";
+
 export default function PrivacyPage() {
   if (!SAAS_MODE) redirect("/app");
 

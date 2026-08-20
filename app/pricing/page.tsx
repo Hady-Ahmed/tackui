@@ -46,6 +46,9 @@ const TIERS: { id: PlanId; tagline: string; features: string[] }[] = [
   },
 ];
 
+// Force request-time rendering — BILLING_ENABLED is a runtime env var.
+export const dynamic = "force-dynamic";
+
 export default function PricingPage() {
   if (!BILLING_ENABLED) redirect("/app");
 

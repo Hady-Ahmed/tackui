@@ -350,7 +350,7 @@ The app does not terminate TLS itself. In production, put it behind a reverse pr
 
 The "Test connection" button and agent creation/editing send the agent endpoint URL to the server. To prevent [Server-Side Request Forgery](https://owasp.org/www-community/attacks/Server_Side_Request_Forgery) (an attacker using the server to scan internal services or steal cloud metadata credentials), **agent creation and editing block URLs that resolve to private/internal IP addresses** by default (`127.0.0.1`, `10.x`, `192.168.x`, `172.16-31.x`, `169.254.x`, IPv6 equivalents).
 
-The "Test connection" reachability probe is gated behind `canManageAgents` (org owner/admin only) and applies the same `assertSafeUrl` SSRF guard as agent create/edit. Self-hosters who need to probe `localhost`/private-IP backends set `ALLOW_PRIVATE_ENDPOINTS=true` (the same flag that gates agent create/edit). Raw error messages from the probe are masked (they can leak internal hostnames via DNS errors); the full error is logged server-side.
+The "Test connection" reachability probe applies the same `assertSafeUrl` SSRF guard as agent create/edit. Any logged-in user can probe (the sidebar's status dots need it for members too), but only public URLs are allowed — internal IPs / cloud-metadata endpoints are blocked. Self-hosters who need to probe `localhost`/private-IP backends set `ALLOW_PRIVATE_ENDPOINTS=true` (the same flag that gates agent create/edit). Raw error messages from the probe are masked (they can leak internal hostnames via DNS errors); the full error is logged server-side.
 
 Once an agent is stored, the CopilotKit runtime fetches it during runs without re-checking — this is intentional, so existing agents keep working even if you later change the env var.
 

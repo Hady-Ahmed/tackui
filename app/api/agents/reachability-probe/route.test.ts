@@ -6,17 +6,15 @@ vi.mock("@/lib/ratelimit/middleware", () => ({
   checkUserLimit: vi.fn().mockReturnValue(null),
 }));
 
-// Mock auth context — getCurrentUser returns an admin by default;
-// canManageAgents returns true by default. Individual tests override.
+// Mock auth context — getCurrentUser returns a user by default.
 vi.mock("@/lib/auth/context", () => ({
   getCurrentUser: vi.fn().mockResolvedValue({
     id: "u1",
-    role: "admin",
-    name: "Admin",
+    role: "user",
+    name: "User",
     email: null,
     orgId: "org-1",
   }),
-  canManageAgents: vi.fn().mockResolvedValue(true),
 }));
 
 // Mock the SSRF guard — defaults to "safe" (resolves). Tests for the
@@ -38,7 +36,7 @@ vi.mock("@/lib/config/saas", () => ({
 
 import { POST } from "./route";
 import { checkUserLimit } from "@/lib/ratelimit/middleware";
-import { canManageAgents, getCurrentUser } from "@/lib/auth/context";
+import { getCurrentUser } from "@/lib/auth/context";
 import { assertSafeUrl, UnsafeUrlError } from "@/lib/net/safe-fetch";
 
 const originalFetch = globalThis.fetch;
@@ -159,16 +157,6 @@ describe("POST /api/agents/reachability-probe", () => {
     );
     const res = await POST(makeRequest(validBody));
     expect(res.status).toBe(429);
-  });
-
-  it("returns 403 when user cannot manage agents", async () => {
-    vi.mocked(canManageAgents).mockResolvedValueOnce(false);
-    const res = await POST(makeRequest(validBody));
-    expect(res.status).toBe(403);
-    const data = await res.json();
-    expect(data.error).toBe("Forbidden");
-    // The SSRF guard + fetch must not be reached when forbidden.
-    expect(vi.mocked(assertSafeUrl)).not.toHaveBeenCalled();
   });
 
   it("returns 401 when no user", async () => {
