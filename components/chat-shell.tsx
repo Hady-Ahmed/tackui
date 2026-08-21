@@ -131,6 +131,14 @@ export function ChatShell() {
                 >
                   Add your first agent →
                 </Link>
+                <a
+                  href="https://docs.ag-ui.com/quickstart/server"
+                  target="_blank"
+                  rel="noreferrer"
+                  className="text-xs text-zinc-500 hover:text-zinc-400"
+                >
+                  Need a backend? AG-UI quickstart →
+                </a>
               </>
             ) : (
               <p className="text-sm text-zinc-400">

@@ -9,6 +9,11 @@ All notable changes to this project will be documented in this file. The format 
 - **Reachability probe scope:** reverted the `canManageAgents` gate (it broke the sidebar's status dots for org members — all dots went red because the probe 403'd). The `assertSafeUrl` SSRF guard alone closes the real vulnerability (any logged-in user making the server fetch private IPs / cloud-metadata). Members keep their status dots; admins + members both probe, but only safe (public) URLs.
 - **Pricing page for logged-in users:** buttons now say "Go to app" for signed-in users instead of the misleading "Sign in to upgrade" (which redirected to `/login` even though the user was already authenticated).
 - **Rate-limit IP resolution behind Cloudflare → Traefik:** `getClientIp` now checks `CF-Connecting-IP` first. Cloudflare sets this to the real client IP, but Traefik (Coolify) overwrites `X-Forwarded-For` with the Cloudflare edge IP — without the `CF-Connecting-IP` check, the rate-limit counter split across multiple edge IPs and never reached the 300 cap.
+- **Removed redundant `agno` agent kind:** was identical to `agui` (both used `HttpAgent`). Dropdown now shows 2 labeled options with descriptions. Graph ID + LangSmith API Key fields only appear when `langgraph` is selected.
+- **Agent admin form clarity:** kind dropdown now shows human-readable labels ("AG-UI / Generic", "LangGraph Platform") with a description explaining when to use each. LangGraph-only fields (Graph ID, LangSmith API Key) are now conditional — hidden when `agui` is selected.
+
+### Added
+- "Need an agent backend?" links on the admin page + chat empty state + README, pointing to the [AG-UI quickstart](https://docs.ag-ui.com/quickstart/server) + [19 integration packages](https://github.com/ag-ui-protocol/ag-ui/tree/main/integrations).
 
 ### Added
 - `components/marketing-layout.tsx` — shared header/footer for SaaS marketing pages. Session-aware nav: "Go to app" for signed-in users, "Sign in" + "Sign up free" for signed-out.

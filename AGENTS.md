@@ -583,17 +583,17 @@ entirely by simply not setting the env vars.
 
 ### Supported agent kinds
 
-| Kind       | Adapter                        | Endpoint format                          |
-| ---------- | ------------------------------ | ---------------------------------------- |
-| `langgraph`| `LangGraphAgent`               | LangGraph Platform API URL (e.g. `:8123`)|
-| `agno`     | `HttpAgent` (from @ag-ui/client) | AG-UI endpoint (e.g. `:8000/agui`)     |
-| `agui`     | `HttpAgent` (from @ag-ui/client) | Any AG-UI-speaking endpoint             |
+| Kind       | Adapter                        | When to use                              | Endpoint format                          |
+| ---------- | ------------------------------ | ---------------------------------------- | ---------------------------------------- |
+| `agui`     | `HttpAgent` (from @ag-ui/client) | Any AG-UI-speaking endpoint — Agno, CrewAI, Pydantic AI, Mastra, LangGraph (via ag-ui-langgraph), or custom | Full URL (e.g. `http://localhost:8000/agent`) |
+| `langgraph`| `LangGraphAgent`               | LangGraph Cloud / Studio (LangGraph Platform API) | LangGraph deployment URL (e.g. `:8123`) |
 
-> **Note:** If your LangGraph backend uses `ag-ui-langgraph` (AG-UI protocol
-> directly, not the LangGraph Platform API), use `kind: "agui"` instead of
-> `"langgraph"`. The `LangGraphAgent` adapter expects the LangGraph Platform API
-> (`/assistants/search`, `/threads`, etc.), while `ag-ui-langgraph` exposes a
-> raw AG-UI endpoint.
+> **Which to pick?** If your backend speaks the AG-UI protocol (most
+> do, including LangGraph via `ag-ui-langgraph`), use `agui`. Use
+> `langgraph` only for LangGraph Cloud / Studio deployments that expose
+> the LangGraph Platform API (`/assistants/search`, `/threads`, etc.).
+> The admin form shows Graph ID + LangSmith API Key fields only when
+> `langgraph` is selected — they're not needed for `agui`.
 
 ### Smoke testing the agent registry
 

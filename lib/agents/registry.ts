@@ -33,7 +33,6 @@ function createAgent(entry: AgentEntry): AbstractAgent {
         langsmithApiKey: entry.langsmithApiKey,
       });
 
-    case "agno":
     case "agui":
       return new HttpAgent({
         url: entry.endpoint,

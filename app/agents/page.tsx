@@ -10,7 +10,20 @@ import { useAuthConfig } from "@/lib/auth/use-auth-config";
 import { useCanManageAgents } from "@/lib/auth/use-can-manage-agents";
 import { useBilling } from "@/lib/billing/use-billing";
 
-const KINDS: AgentKind[] = ["langgraph", "agno", "agui"];
+const KIND_OPTIONS: { value: AgentKind; label: string; description: string }[] = [
+  {
+    value: "agui",
+    label: "AG-UI / Generic",
+    description:
+      "For any AG-UI-speaking endpoint — Agno, CrewAI, Pydantic AI, Mastra, LangGraph (via ag-ui-langgraph), or a custom backend.",
+  },
+  {
+    value: "langgraph",
+    label: "LangGraph Platform",
+    description:
+      "For LangGraph Cloud / Studio backends using the LangGraph Platform API. Needs a Graph ID.",
+  },
+];
 
 type FormState = {
   name: string;
@@ -277,17 +290,25 @@ export default function AgentsPage() {
               <Field label="Kind">
                 <select
                   value={form.kind}
-                  onChange={(e) =>
-                    updateForm({ kind: e.target.value as AgentKind })
-                  }
+                  onChange={(e) => {
+                    const kind = e.target.value as AgentKind;
+                    if (kind !== "langgraph") {
+                      updateForm({ kind, graphId: "", langsmithApiKey: "" });
+                    } else {
+                      updateForm({ kind });
+                    }
+                  }}
                   className={inputClass()}
                 >
-                  {KINDS.map((k) => (
-                    <option key={k} value={k}>
-                      {k}
+                  {KIND_OPTIONS.map((k) => (
+                    <option key={k.value} value={k.value}>
+                      {k.label}
                     </option>
                   ))}
                 </select>
+                <p className="mt-1 text-xs text-zinc-500">
+                  {KIND_OPTIONS.find((k) => k.value === form.kind)?.description}
+                </p>
               </Field>
               <Field label="Endpoint" hint="full URL including port">
                 <input
@@ -301,34 +322,57 @@ export default function AgentsPage() {
               </Field>
             </div>
 
-            <div className="grid grid-cols-2 gap-4">
-              <Field label="Graph ID" hint="langgraph only, optional">
-                <input
-                  value={form.graphId}
-                  onChange={(e) => updateForm({ graphId: e.target.value })}
-                  className={inputClass()}
-                  placeholder="agent"
-                />
-              </Field>
-              <Field
-                label="LangSmith API Key"
-                hint={
-                  editingId && editingHasKey
-                    ? "Key set ✓ — leave blank to keep existing, type a new value to replace"
-                    : "langgraph only, optional"
-                }
-              >
-                <input
-                  value={form.langsmithApiKey}
-                  onChange={(e) =>
-                    updateForm({ langsmithApiKey: e.target.value })
+            {form.kind === "langgraph" && (
+              <div className="grid grid-cols-2 gap-4">
+                <Field label="Graph ID" hint="langgraph only, optional">
+                  <input
+                    value={form.graphId}
+                    onChange={(e) => updateForm({ graphId: e.target.value })}
+                    className={inputClass()}
+                    placeholder="agent"
+                  />
+                </Field>
+                <Field
+                  label="LangSmith API Key"
+                  hint={
+                    editingId && editingHasKey
+                      ? "Key set ✓ — leave blank to keep existing, type a new value to replace"
+                      : "langgraph only, optional"
                   }
-                  type="password"
-                  className={inputClass()}
-                  placeholder={editingId && editingHasKey ? "(unchanged)" : "ls-..."}
-                />
-              </Field>
-            </div>
+                >
+                  <input
+                    value={form.langsmithApiKey}
+                    onChange={(e) =>
+                      updateForm({ langsmithApiKey: e.target.value })
+                    }
+                    type="password"
+                    className={inputClass()}
+                    placeholder={editingId && editingHasKey ? "(unchanged)" : "ls-..."}
+                  />
+                </Field>
+              </div>
+            )}
+
+            <p className="text-xs text-zinc-500">
+              Need an agent backend?{" "}
+              <a
+                href="https://docs.ag-ui.com/quickstart/server"
+                target="_blank"
+                rel="noreferrer"
+                className="text-blue-600 hover:underline dark:text-blue-400"
+              >
+                AG-UI quickstart →
+              </a>
+              {" · "}
+              <a
+                href="https://github.com/ag-ui-protocol/ag-ui/tree/main/integrations"
+                target="_blank"
+                rel="noreferrer"
+                className="text-blue-600 hover:underline dark:text-blue-400"
+              >
+                Browse 19 integrations →
+              </a>
+            </p>
 
             <div className="flex flex-wrap items-center gap-2 pt-2">
               <button

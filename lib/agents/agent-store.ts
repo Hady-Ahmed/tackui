@@ -2,7 +2,7 @@ import { randomUUID } from "node:crypto";
 import { query } from "@/lib/db/pg";
 import { z } from "zod";
 import type { AgentEntry, AgentKind, PublicAgent } from "./agents.config";
-const agentKindSchema = z.enum(["langgraph", "agno", "agui"]);
+const agentKindSchema = z.enum(["langgraph", "agui"]);
 
 // Shared field definitions — used by the create + update input schemas
 // below. `id` is intentionally absent: it is server-generated on create

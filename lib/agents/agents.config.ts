@@ -1,4 +1,4 @@
-export type AgentKind = "langgraph" | "agno" | "agui";
+export type AgentKind = "langgraph" | "agui";
 
 export interface AgentEntry {
   id: string;

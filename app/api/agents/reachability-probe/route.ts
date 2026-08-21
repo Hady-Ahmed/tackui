@@ -7,7 +7,7 @@ import { checkUserLimit } from "@/lib/ratelimit/middleware";
 
 const testSchema = z.object({
   endpoint: z.string().url(),
-  kind: z.enum(["langgraph", "agno", "agui"]),
+  kind: z.enum(["langgraph", "agui"]),
 });
 
 export async function POST(request: Request) {

@@ -241,13 +241,18 @@ Optional fields: `graphId` (langgraph only), `langsmithApiKey` (langgraph only).
 
 ### Supported Backends
 
-| Kind | Adapter | Endpoint format |
-| --- | --- | --- |
-| `langgraph` | `LangGraphAgent` | LangGraph Platform API URL (e.g. `:8123`) |
-| `agno` | `HttpAgent` (from @ag-ui/client) | AG-UI endpoint (e.g. `:8000/agui`) |
-| `agui` | `HttpAgent` (from @ag-ui/client) | Any AG-UI-speaking endpoint |
+| Kind | Adapter | When to use | Endpoint format |
+| --- | --- | --- | --- |
+| `agui` | `HttpAgent` (from @ag-ui/client) | Any AG-UI-speaking endpoint — Agno, CrewAI, Pydantic AI, Mastra, LangGraph (via ag-ui-langgraph), or custom | Full URL (e.g. `http://localhost:8000/agent`) |
+| `langgraph` | `LangGraphAgent` | LangGraph Cloud / Studio backends using the LangGraph Platform API | LangGraph deployment URL (e.g. `:8123`) |
 
-> If your LangGraph backend uses `ag-ui-langgraph` (AG-UI protocol directly, not the LangGraph Platform API), use `kind: "agui"` instead of `"langgraph"`.
+> **Confused about which to pick?** If your backend speaks the AG-UI protocol (most do, including LangGraph via `ag-ui-langgraph`), use `agui`. Use `langgraph` only for LangGraph Cloud / Studio deployments that expose the LangGraph Platform API.
+
+### Finding or building an agent backend
+
+The AG-UI protocol has [19 official integration packages](https://github.com/ag-ui-protocol/ag-ui/tree/main/integrations) — LangGraph, CrewAI, Agno, Pydantic AI, Mastra, LlamaIndex, AWS Strands, Google ADK, and more. Each wraps a framework into an AG-UI-compatible endpoint.
+
+To build your own, follow the [AG-UI server quickstart](https://docs.ag-ui.com/quickstart/server) — a minimal backend is a ~50-line FastAPI server that emits 5 SSE events.
 
 ## Environment Variables
 

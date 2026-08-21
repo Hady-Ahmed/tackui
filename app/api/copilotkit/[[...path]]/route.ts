@@ -33,7 +33,7 @@ async function handler(request: Request): Promise<Response> {
     // connect/info/threads/stop request. Only runs count toward the rate
     // limit and concurrent cap.
     //
-    // CopilotKit POSTs to various sub-paths (e.g. /agent/agno/run),
+    // CopilotKit POSTs to various sub-paths (e.g. /agent/my-agent/run),
     // not just the base /api/copilotkit. The long-lived POSTs that
     // AREN'T runs are:
     //   - connect streams (POST /agent/*/connect) — listen for events
