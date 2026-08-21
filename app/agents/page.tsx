@@ -365,7 +365,7 @@ export default function AgentsPage() {
               </a>
               {" · "}
               <a
-                href="https://github.com/ag-ui-protocol/ag-ui/tree/main/integrations"
+                href="https://github.com/ag-ui-protocol/ag-ui"
                 target="_blank"
                 rel="noreferrer"
                 className="text-blue-600 hover:underline dark:text-blue-400"
