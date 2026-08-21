@@ -3,6 +3,7 @@ import { redirect } from "next/navigation";
 import { BILLING_ENABLED } from "@/lib/config/saas";
 import { getPlanLimits, type PlanId } from "@/lib/billing/plans";
 import { MarketingLayout } from "@/components/marketing-layout";
+import { getCurrentUser } from "@/lib/auth/context";
 
 /**
  * Pricing page — SaaS mode only. Self-host deployments redirect to `/app`.
@@ -53,6 +54,8 @@ export const dynamic = "force-dynamic";
 export default async function PricingPage() {
   if (!BILLING_ENABLED) redirect("/app");
 
+  const user = await getCurrentUser();
+
   return (
     <MarketingLayout>
       <div className="py-16">
@@ -67,6 +70,16 @@ export default async function PricingPage() {
           {TIERS.map((tier) => {
             const limits = getPlanLimits(tier.id);
             const isFree = tier.id === "free";
+            // Logged-in users get "Go to app" on every tier — plan
+            // management lives in the account menu, not here. Logged-out
+            // users get "Sign up free" (free tier) or "Sign in to
+            // upgrade" (paid tiers).
+            const label = user
+              ? "Go to app"
+              : isFree
+                ? "Sign up free"
+                : "Sign in to upgrade";
+            const href = user ? "/app" : isFree ? "/signup" : "/login?redirect=/app";
             return (
               <div
                 key={tier.id}
@@ -92,14 +105,14 @@ export default async function PricingPage() {
                   ))}
                 </ul>
                 <Link
-                  href={isFree ? "/signup" : "/login?redirect=/app"}
+                  href={href}
                   className={`mt-6 block rounded-lg px-4 py-2 text-center text-sm font-medium transition-colors ${
-                    isFree
+                    isFree && !user
                       ? "border border-zinc-300 text-zinc-700 hover:bg-zinc-100 dark:border-zinc-700 dark:text-zinc-300 dark:hover:bg-zinc-800"
                       : "bg-zinc-900 text-white hover:bg-zinc-700 dark:bg-white dark:text-zinc-900 dark:hover:bg-zinc-200"
                   }`}
                 >
-                  {isFree ? "Sign up free" : "Sign in to upgrade"}
+                  {label}
                 </Link>
               </div>
             );

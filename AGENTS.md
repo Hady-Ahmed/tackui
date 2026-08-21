@@ -158,7 +158,8 @@ components/
   invite-dialog.tsx            # Invite-by-email modal (org owner/admin) + live seats counter
   upgrade-dialog.tsx           # Plan upgrade modal (Pro/Team options, Team seats input min 2) → POST /api/billing/checkout → Stripe Checkout
   new-workspace-dialog.tsx     # Create-new-workspace modal (always available on SaaS — Free workspaces start with 3 agents, 1 member, no invites)
-  landing.tsx                  # Marketing landing page (SaaS mode only — root / renders this)
+  landing.tsx                  # Marketing landing page (SaaS mode only — root / renders this, Linear/Vercel style with blue accent + CSS animations)
+  marketing-layout.tsx         # Shared header/footer for SaaS marketing pages (session-aware nav — "Go to app" for signed-in users)
   cookie-notice.tsx            # Minimal EU cookie notice (SaaS mode only, dismissible via localStorage)
   theme-toggle.tsx             # Light/dark toggle button (sidebar footer, icon + label)
   chat-shell.tsx               # Chat layout with agent switching + empty-state CTA + collapsible sidebar state + AgentChat wrapper
@@ -276,7 +277,11 @@ Two-layer rate limiting protects the server from abuse and floods:
 **Layer 1 — Per-IP global flood protection (`proxy.ts`):**
 - 300 requests/min per IP on all `/api/*` routes (except `/api/health` which
   is unlimited, and `/api/auth/*` which has its own Better Auth limiter).
-- Enforced in the proxy (pre-auth) using `X-Forwarded-For` for IP extraction.
+- Enforced in the proxy (pre-auth). IP resolution checks `CF-Connecting-IP`
+  first (set by Cloudflare to the real client IP — Traefik/Coolify overwrites
+  `X-Forwarded-For` with the Cloudflare edge IP, splitting the counter across
+  multiple edge IPs), then falls back to `X-Forwarded-For` with
+  `TRUSTED_PROXY_HOPS` for self-hosters not behind Cloudflare.
 - Proxy runtime pinned to `nodejs` — the in-memory `Map` requires it.
 
 **Layer 2 — Per-user route-level limits (`lib/ratelimit/`):**
@@ -527,14 +532,23 @@ so direct calls can't bypass the plan.
 
 ### Marketing + legal pages (SaaS-only)
 
-- `components/landing.tsx` + `app/page.tsx` (SaaS → `<Landing/>`) — hero,
-  feature grid, pricing teaser, footer.
+- `components/marketing-layout.tsx` — shared header/footer for SaaS marketing
+  pages. Session-aware: calls `getCurrentUser()`, shows "Go to app" for
+  signed-in users, "Sign in" + "Sign up free" for signed-out.
+- `components/landing.tsx` + `app/page.tsx` (SaaS → `<Landing/>`) — hero
+  with radial blue glow, gradient headline, feature cards with inline SVG
+  icons, "Built on" trust section, final CTA. CSS animations in
+  `globals.css` (`fade-in-up`, `pulse-glow`). Linear/Vercel style.
 - `app/pricing/page.tsx` — Free/Pro/Team tier cards. The dollar amounts
-  live in Stripe; the page shows feature gates only. Redirects to `/app`
-  when `!BILLING_ENABLED`.
+  live in Stripe; the page shows feature gates only. Session-aware buttons
+  ("Go to app" for signed-in users). Redirects to `/app` when
+  `!BILLING_ENABLED`.
 - `app/terms/page.tsx` + `app/privacy/page.tsx` — ToS + Privacy (SaaS
-  data practices: Stripe, Resend, Better Auth, Sentry). Redirect to
-  `/app` when `!SAAS_MODE` (self-hosters write their own).
+  data practices: Stripe, Resend, Better Auth, Sentry). Wrapped in
+  `MarketingLayout`. Redirect to `/app` when `!SAAS_MODE`.
+- All 4 SaaS pages (`/`, `/terms`, `/privacy`, `/pricing`) use
+  `export const dynamic = "force-dynamic"` — they read `SAAS_MODE`/
+  `BILLING_ENABLED` at request time (not baked at build time).
 - `components/cookie-notice.tsx` — minimal EU cookie notice, rendered in
   the root layout only under SaaS mode, dismissible (localStorage).
 
@@ -646,7 +660,11 @@ Optional security flags:
   client IP as the LAST entry). Set to `2` for Cloudflare → Nginx → app,
   `3` for three hops, etc. Without this, a malicious client can prepend a
   fake IP to `X-Forwarded-For` and bypass the per-IP rate limit (300/min
-  cap in `proxy.ts`).
+  cap in `proxy.ts`). **Note:** when behind Cloudflare → Traefik (Coolify),
+  `getClientIp` checks `CF-Connecting-IP` first — Traefik overwrites
+  `X-Forwarded-For` with the Cloudflare edge IP, but `CF-Connecting-IP`
+  passes through untouched. `TRUSTED_PROXY_HOPS` is the fallback for
+  non-Cloudflare deploys.
 - `CONCURRENT_RUN_TIMEOUT_MS` — watchdog timeout (ms) for concurrent-run
   rate-limit slots. Default `600000` (10 min). Floor `60000` (1 min). See
   the "Concurrent-slot watchdog" section under Rate limiting above.
@@ -947,7 +965,10 @@ strategy it uses so users know whether server-side session storage is required.
   `sub.metadata.orgId` against `getOrgIdByCustomerId` and drops mismatches
   (defense against Stripe-account compromise re-attributing subscriptions);
   `X-Forwarded-For` leftmost-spoofing fix in `proxy.ts` (now reads
-  Nth-from-right per `TRUSTED_PROXY_HOPS`, default `1`); concurrent-run
+  Nth-from-right per `TRUSTED_PROXY_HOPS`, default `1`);
+  `CF-Connecting-IP` header check in `proxy.ts` (Cloudflare sets the real
+  client IP here — Traefik/Coolify overwrites XFF with the edge IP, splitting
+  the rate-limit counter across multiple edge IPs without this); concurrent-run
   watchdog in `acquireConcurrent` force-releases slots after
   `CONCURRENT_RUN_TIMEOUT_MS` (default 10 min) — the run is NOT cancelled,
   only the counter is decremented; empty-string `STRIPE_WEBHOOK_SECRET`

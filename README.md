@@ -260,7 +260,7 @@ See [`.env.example`](.env.example) for the full list with comments.
 | `BETTER_AUTH_URL` | Yes (unless `AUTH_DISABLED=true`) | Public base URL of the app (e.g. `http://localhost:3000`) |
 | `AUTH_DISABLED` | No | Set to `true` to skip login (solo mode). **Never use this in any deployment exposed to the internet or shared users.** |
 | `ALLOW_PRIVATE_ENDPOINTS` | No | Set to `true` to allow creating/editing agents with endpoints that resolve to private/internal IPs (e.g. when agent backends run on the same host). Defaults to `false` (blocks private IPs to prevent SSRF). Hard-locked off under `SAAS_MODE` regardless of this flag. |
-| `TRUSTED_PROXY_HOPS` | No | Number of trusted reverse-proxy hops in front of the server, used to resolve the real client IP from `X-Forwarded-For` (default `1`). Set to `2` for Cloudflare → Nginx → app, etc. Without this, a malicious client could prepend a fake IP to `X-Forwarded-For` and bypass the per-IP rate limit (300/min cap in `proxy.ts`). |
+| `TRUSTED_PROXY_HOPS` | No | Number of trusted reverse-proxy hops in front of the server, used to resolve the real client IP from `X-Forwarded-For` (default `1`). Set to `2` for Cloudflare → Nginx → app, etc. When behind Cloudflare → Traefik (Coolify), the proxy checks `CF-Connecting-IP` first (Traefik overwrites XFF with the edge IP). This env var is the fallback for non-Cloudflare deploys. |
 | `CONCURRENT_RUN_TIMEOUT_MS` | No | Watchdog timeout (ms) for concurrent-run rate-limit slots. Default `600000` (10 min). Floor `60000`. Safety net only — the actual SSE stream / agent run is NOT cancelled; only the counter is decremented to prevent slot leaks when a client opens a run and drops TCP without triggering `ReadableStream.cancel()`. Override if your agents do legitimately long research runs. |
 | `SENTRY_DSN` | No | Sentry DSN for server-side error tracking. No-op if unset. |
 | `NEXT_PUBLIC_SENTRY_DSN` | No | Sentry DSN for client-side error tracking (public, exposed to browser). No-op if unset. |
@@ -377,7 +377,7 @@ The app sets the following headers on all responses:
 
 The app has two-layer rate limiting to protect against abuse and server overload:
 
-**Per-IP flood protection** (in `proxy.ts`, pre-auth): 300 requests/min per IP on all `/api/*` routes (except `/api/health` which is unlimited, and `/api/auth/*` which has its own limiter). Uses `X-Forwarded-For` for IP extraction behind a reverse proxy.
+**Per-IP flood protection** (in `proxy.ts`, pre-auth): 300 requests/min per IP on all `/api/*` routes (except `/api/health` which is unlimited, and `/api/auth/*` which has its own limiter). Uses `CF-Connecting-IP` (Cloudflare) or `X-Forwarded-For` (with `TRUSTED_PROXY_HOPS`) for IP extraction behind a reverse proxy.
 
 **Per-user route limits** (in route handlers, post-auth):
 

@@ -7,6 +7,12 @@ All notable changes to this project will be documented in this file. The format 
 ### Fixed
 - **SaaS-mode pages baked at build time:** `/`, `/terms`, `/privacy`, `/pricing` read `SAAS_MODE`/`BILLING_ENABLED` at module load but had no dynamic data deps, so Next.js statically generated them at build time (when `SAAS_MODE` isn't set) and baked the `redirect("/app")` into the HTML. Added `export const dynamic = "force-dynamic"` to each — they now render at request time, reading the live env var. Also fixes `<CookieNotice/>` which was being baked out for the same reason.
 - **Reachability probe scope:** reverted the `canManageAgents` gate (it broke the sidebar's status dots for org members — all dots went red because the probe 403'd). The `assertSafeUrl` SSRF guard alone closes the real vulnerability (any logged-in user making the server fetch private IPs / cloud-metadata). Members keep their status dots; admins + members both probe, but only safe (public) URLs.
+- **Pricing page for logged-in users:** buttons now say "Go to app" for signed-in users instead of the misleading "Sign in to upgrade" (which redirected to `/login` even though the user was already authenticated).
+- **Rate-limit IP resolution behind Cloudflare → Traefik:** `getClientIp` now checks `CF-Connecting-IP` first. Cloudflare sets this to the real client IP, but Traefik (Coolify) overwrites `X-Forwarded-For` with the Cloudflare edge IP — without the `CF-Connecting-IP` check, the rate-limit counter split across multiple edge IPs and never reached the 300 cap.
+
+### Added
+- `components/marketing-layout.tsx` — shared header/footer for SaaS marketing pages. Session-aware nav: "Go to app" for signed-in users, "Sign in" + "Sign up free" for signed-out.
+- Landing page redesign — Linear/Vercel style with blue accent: radial glow, gradient headline, SVG feature icons, "Built on" trust section, final CTA. CSS animations (`fade-in-up`, `pulse-glow`) in `globals.css`.
 
 ### Security
 - **SSRF guard on reachability probe:** `POST /api/agents/reachability-probe` now applies `assertSafeUrl`. Previously any logged-in user could make the server issue an outbound GET to any URL — including cloud-metadata endpoints. Any logged-in user can still probe (the sidebar's status dots need it for members too), but only public URLs are allowed.
