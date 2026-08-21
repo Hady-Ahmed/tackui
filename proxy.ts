@@ -50,18 +50,33 @@ const WEBHOOK_PREFIX = "/api/billing/webhook";
 // store with a Redis backend.
 
 /**
- * Extract the client IP from the request. Behind a reverse proxy,
- * reads the Nth-from-right entry of X-Forwarded-For where N is
- * TRUSTED_PROXY_HOPS (default 1 — the last entry, set by the trusted
- * proxy). This defeats the leftmost-spoofing attack: a client can
- * prepend arbitrary IPs to XFF, but the proxy appends the real client
- * IP LAST, and we read from the trusted side.
+ * Extract the client IP from the request.
  *
- * If there are fewer XFF entries than TRUSTED_PROXY_HOPS (the proxy
- * didn't append, or direct connection in dev), fall back to the
- * leftmost available — and if no XFF at all, "unknown".
+ * Resolution order:
+ * 1. `CF-Connecting-IP` — set by Cloudflare to the real client IP. When
+ *    the app is behind Cloudflare → Traefik (Coolify), Traefik overwrites
+ *    `X-Forwarded-For` with the Cloudflare edge IP (not the client), but
+ *    it passes `CF-Connecting-IP` through untouched. This is the reliable
+ *    source for the real client IP behind a Cloudflare-proxied deploy.
+ * 2. `X-Forwarded-For` with `TRUSTED_PROXY_HOPS` — for self-hosters not
+ *    behind Cloudflare. Reads the Nth-from-right entry where N is the
+ *    hop count (default 1). Defeats leftmost-spoofing: a client can
+ *    prepend fake IPs, but the trusted proxy appends the real IP last.
+ * 3. `"unknown"` — no headers present (direct connection in dev, or a
+ *    proxy that strips both headers).
+ *
+ * Security note on CF-Connecting-IP: if someone bypasses Cloudflare and
+ * hits the origin directly, they could send a fake `CF-Connecting-IP`.
+ * This is mitigated by the app container only listening on its internal
+ * port (external traffic must go through Cloudflare → Traefik), and even
+ * if spoofed, per-user rate limits in route handlers still apply.
  */
 function getClientIp(request: NextRequest): string {
+  // Cloudflare sets this to the real client IP — check it first.
+  const cfIp = request.headers.get("cf-connecting-ip");
+  if (cfIp) return cfIp.trim();
+
+  // Fallback: X-Forwarded-For with trusted-proxy-hop counting.
   const xff = request.headers.get("x-forwarded-for");
   if (xff) {
     const hops = xff
@@ -100,13 +115,6 @@ export async function proxy(request: NextRequest) {
       LIMITS.globalIp.max,
       LIMITS.globalIp.windowMs,
     );
-    // TEMP DEBUG — remove after diagnosing the rate-limit issue.
-    console.log("[proxy-debug] rate-limit", {
-      ip,
-      allowed: result.allowed,
-      remaining: result.remaining,
-      xff: request.headers.get("x-forwarded-for"),
-    });
     if (!result.allowed) {
       const retryAfter = Math.ceil((result.resetAt - Date.now()) / 1000);
       return NextResponse.json(
