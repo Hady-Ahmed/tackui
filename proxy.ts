@@ -100,6 +100,13 @@ export async function proxy(request: NextRequest) {
       LIMITS.globalIp.max,
       LIMITS.globalIp.windowMs,
     );
+    // TEMP DEBUG — remove after diagnosing the rate-limit issue.
+    console.log("[proxy-debug] rate-limit", {
+      ip,
+      allowed: result.allowed,
+      remaining: result.remaining,
+      xff: request.headers.get("x-forwarded-for"),
+    });
     if (!result.allowed) {
       const retryAfter = Math.ceil((result.resetAt - Date.now()) / 1000);
       return NextResponse.json(
