@@ -267,7 +267,7 @@ export default function AgentsPage() {
             className="space-y-4 rounded-xl border border-zinc-200 bg-white p-6 dark:border-zinc-800 dark:bg-zinc-950"
           >
             <div className="grid grid-cols-2 gap-4">
-              <Field label="Name">
+              <Field label="Name" required>
                 <input
                   value={form.name}
                   onChange={(e) => updateForm({ name: e.target.value })}
@@ -310,7 +310,7 @@ export default function AgentsPage() {
                   {KIND_OPTIONS.find((k) => k.value === form.kind)?.description}
                 </p>
               </Field>
-              <Field label="Endpoint" hint="full URL including port">
+              <Field label="Endpoint" required hint="full URL including port">
                 <input
                   value={form.endpoint}
                   onChange={(e) => updateForm({ endpoint: e.target.value })}
@@ -324,7 +324,7 @@ export default function AgentsPage() {
 
             {form.kind === "langgraph" && (
               <div className="grid grid-cols-2 gap-4">
-                <Field label="Graph ID" hint="langgraph only, optional">
+                <Field label="Graph ID" hint="optional, defaults to 'agent'">
                   <input
                     value={form.graphId}
                     onChange={(e) => updateForm({ graphId: e.target.value })}
@@ -337,7 +337,7 @@ export default function AgentsPage() {
                   hint={
                     editingId && editingHasKey
                       ? "Key set ✓ — leave blank to keep existing, type a new value to replace"
-                      : "langgraph only, optional"
+                      : "optional — enables LangSmith tracing"
                   }
                 >
                   <input
@@ -568,16 +568,19 @@ function TestBadge({
 function Field({
   label,
   hint,
+  required,
   children,
 }: {
   label: string;
   hint?: string;
+  required?: boolean;
   children: React.ReactNode;
 }) {
   return (
     <label className="block">
       <span className="mb-1 block text-xs font-medium text-zinc-700 dark:text-zinc-300">
         {label}
+        {required && <span className="ml-0.5 text-red-500">*</span>}
       </span>
       {children}
       {hint && (
