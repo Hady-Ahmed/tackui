@@ -26,7 +26,7 @@ export function getStripe(): Stripe | null {
     // design (forces us to review breaking API changes).
     apiVersion: "2026-07-29.dahlia" as Stripe.LatestApiVersion,
     appInfo: {
-      name: "AG-UI Chat",
+      name: "TackUI",
     },
   });
   return singleton;

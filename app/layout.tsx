@@ -16,7 +16,7 @@ const geistMono = Geist_Mono({
 });
 
 export const metadata: Metadata = {
-  title: "AG-UI Chat",
+  title: "TackUI",
   description: "Unified frontend for custom agents speaking the AG-UI protocol",
 };
 

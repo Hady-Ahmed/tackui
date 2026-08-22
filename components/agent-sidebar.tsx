@@ -196,7 +196,7 @@ function ExpandedContent({
       <div className="flex items-center justify-between border-b border-zinc-200 p-4 dark:border-zinc-800">
         <div>
           <h1 className="text-sm font-semibold text-zinc-900 dark:text-zinc-50">
-            AG-UI Chat
+            TackUI
           </h1>
           <p className="mt-0.5 text-xs text-zinc-500 dark:text-zinc-400">
             Unified agent frontend

@@ -26,7 +26,7 @@ export async function MarketingLayout({
       <header className="border-b border-zinc-200 dark:border-zinc-800">
         <div className="mx-auto flex max-w-5xl items-center justify-between px-6 py-4">
           <Link href="/" className="text-lg font-semibold tracking-tight">
-            AG-UI Chat
+            TackUI
           </Link>
           <nav className="flex items-center gap-6 text-sm">
             {BILLING_ENABLED && (
@@ -82,7 +82,7 @@ export async function MarketingLayout({
 
       <footer className="border-t border-zinc-200 dark:border-zinc-800">
         <div className="mx-auto flex max-w-5xl flex-col items-center justify-between gap-3 px-6 py-6 text-sm text-zinc-500 sm:flex-row">
-          <p>© {new Date().getFullYear()} AG-UI Chat</p>
+          <p>© {new Date().getFullYear()} TackUI</p>
           <div className="flex items-center gap-6">
             <Link href="/terms" className="hover:text-zinc-700 dark:hover:text-zinc-300">
               Terms

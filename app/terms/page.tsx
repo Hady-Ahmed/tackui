@@ -26,7 +26,7 @@ export default async function TermsPage() {
           <section>
             <h2 className="text-xl font-semibold">1. Acceptance of terms</h2>
             <p className="mt-3 leading-relaxed text-zinc-600 dark:text-zinc-400">
-              By creating an account or using the hosted AG-UI Chat service (the
+              By creating an account or using the hosted TackUI service (the
               &quot;Service&quot;), you agree to these Terms. If you do not agree, do not
               use the Service.
             </p>

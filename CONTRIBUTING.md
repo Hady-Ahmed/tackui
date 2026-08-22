@@ -1,4 +1,4 @@
-# Contributing to AG-UI Chat
+# Contributing to TackUI
 
 Thanks for your interest in contributing! This guide covers getting set up and the conventions to follow.
 

@@ -101,7 +101,7 @@ export default function SignupPage() {
             Create account
           </h1>
           <p className="mt-1 text-sm text-zinc-500 dark:text-zinc-400">
-            AG-UI Chat — unified agent frontend
+            TackUI — unified agent frontend
           </p>
         </div>
 

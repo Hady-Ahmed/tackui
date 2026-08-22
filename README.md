@@ -1,4 +1,4 @@
-# AG-UI Chat
+# TackUI
 
 A unified frontend for custom agents speaking the [AG-UI protocol](https://docs.ag-ui.com). Built on [CopilotKit](https://copilotkit.ai) with a pluggable agent registry — add any AG-UI-compatible backend with zero UI code changes.
 
@@ -303,7 +303,7 @@ guard) are gated behind `SAAS_MODE` and never run when it is unset.
 
 ## Self-hosting vs SaaS
 
-AG-UI Chat ships from one codebase in two modes, gated by a single env var
+TackUI ships from one codebase in two modes, gated by a single env var
 (`SAAS_MODE`):
 
 - **Self-host (the OSS product, default — `SAAS_MODE` unset):** chat lives

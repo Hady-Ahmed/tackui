@@ -21,7 +21,7 @@ export function verificationEmail(
 ): EmailContent {
   const name = user.name || user.email;
   const subject = "Verify your email address";
-  const text = `Hi ${name},\n\nPlease verify your email address by clicking the link below:\n${url}\n\nThis link will expire in 24 hours. If you didn't create an account, you can ignore this email.\n\n— AG-UI Chat`;
+  const text = `Hi ${name},\n\nPlease verify your email address by clicking the link below:\n${url}\n\nThis link will expire in 24 hours. If you didn't create an account, you can ignore this email.\n\n— TackUI`;
   const html = `
     <div style="font-family: -apple-system, BlinkMacSystemFont, sans-serif; max-width: 480px; margin: 0 auto; padding: 24px;">
       <h2 style="color: #111827; margin-bottom: 16px;">Verify your email address</h2>
@@ -42,7 +42,7 @@ export function verificationEmail(
         This link will expire in 24 hours. If you didn't create an account, you can ignore this email.
       </p>
       <hr style="border: none; border-top: 1px solid #E5E7EB; margin: 24px 0;" />
-      <p style="color: #9CA3AF; font-size: 12px;">AG-UI Chat</p>
+      <p style="color: #9CA3AF; font-size: 12px;">TackUI</p>
     </div>
   `;
   return { subject, html, text };
@@ -54,7 +54,7 @@ export function passwordResetEmail(
 ): EmailContent {
   const name = user.name || user.email;
   const subject = "Reset your password";
-  const text = `Hi ${name},\n\nWe received a request to reset your password. Click the link below to set a new password:\n${url}\n\nThis link will expire in 1 hour. If you didn't request a password reset, you can ignore this email.\n\n— AG-UI Chat`;
+  const text = `Hi ${name},\n\nWe received a request to reset your password. Click the link below to set a new password:\n${url}\n\nThis link will expire in 1 hour. If you didn't request a password reset, you can ignore this email.\n\n— TackUI`;
   const html = `
     <div style="font-family: -apple-system, BlinkMacSystemFont, sans-serif; max-width: 480px; margin: 0 auto; padding: 24px;">
       <h2 style="color: #111827; margin-bottom: 16px;">Reset your password</h2>
@@ -75,7 +75,7 @@ export function passwordResetEmail(
         This link will expire in 1 hour. If you didn't request a password reset, you can safely ignore this email.
       </p>
       <hr style="border: none; border-top: 1px solid #E5E7EB; margin: 24px 0;" />
-      <p style="color: #9CA3AF; font-size: 12px;">AG-UI Chat</p>
+      <p style="color: #9CA3AF; font-size: 12px;">TackUI</p>
     </div>
   `;
   return { subject, html, text };
@@ -90,13 +90,13 @@ export function invitationEmail(
   },
 ): EmailContent {
   const subject = `${data.inviterName} invited you to join "${data.organizationName}"`;
-  const text = `Hi,\n\n${data.inviterName} has invited you to join the "${data.organizationName}" workspace on AG-UI Chat.\n\nClick the link below to accept the invitation:\n${data.acceptUrl}\n\nIf you weren't expecting this invitation, you can ignore this email.\n\n— AG-UI Chat`;
+  const text = `Hi,\n\n${data.inviterName} has invited you to join the "${data.organizationName}" workspace on TackUI.\n\nClick the link below to accept the invitation:\n${data.acceptUrl}\n\nIf you weren't expecting this invitation, you can ignore this email.\n\n— TackUI`;
   const html = `
     <div style="font-family: -apple-system, BlinkMacSystemFont, sans-serif; max-width: 480px; margin: 0 auto; padding: 24px;">
       <h2 style="color: #111827; margin-bottom: 16px;">You're invited to join ${escapeHtml(data.organizationName)}</h2>
       <p style="color: #4B5563; line-height: 1.5;">
         ${escapeHtml(data.inviterName)} has invited you to collaborate in the
-        <strong>${escapeHtml(data.organizationName)}</strong> workspace on AG-UI Chat.
+        <strong>${escapeHtml(data.organizationName)}</strong> workspace on TackUI.
       </p>
       <p style="margin: 24px 0;">
         <a href="${escapeHtml(data.acceptUrl)}"
@@ -111,7 +111,7 @@ export function invitationEmail(
         If you weren't expecting this invitation, you can safely ignore this email.
       </p>
       <hr style="border: none; border-top: 1px solid #E5E7EB; margin: 24px 0;" />
-      <p style="color: #9CA3AF; font-size: 12px;">AG-UI Chat</p>
+      <p style="color: #9CA3AF; font-size: 12px;">TackUI</p>
     </div>
   `;
   return { subject, html, text };
