@@ -48,7 +48,7 @@
     "@types/react": "^19",
     "@types/react-dom": "^19",
     "@vitest/coverage-v8": "^4.0.0",
-    "eslint": "^9",
+    "eslint": "^10",
     "eslint-config-next": "16.2.10",
     "pg-mem": "^3.0.14",
     "tailwindcss": "^4",
