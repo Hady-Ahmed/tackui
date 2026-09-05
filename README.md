@@ -28,7 +28,7 @@ A unified frontend for custom agents speaking the [AG-UI protocol](https://docs.
 
 ```bash
 git clone <repo-url>
-cd agent-front-end
+cd tackui
 docker-compose up
 ```
 
@@ -40,7 +40,7 @@ migrations, and the app all start automatically. Auth is disabled by default
 
 ```bash
 git clone <repo-url>
-cd agent-front-end
+cd tackui
 npm install
 ```
 

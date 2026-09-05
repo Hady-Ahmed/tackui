@@ -5,8 +5,8 @@ Thanks for your interest in contributing! This guide covers getting set up and t
 ## Quick start
 
 ```bash
-git clone https://github.com/Hady-Ahmed/agent-front-end.git
-cd agent-front-end
+git clone https://github.com/Hady-Ahmed/tackui.git
+cd tackui
 npm install
 cp .env.example .env.local   # then edit values
 npm run dev                  # http://localhost:3000

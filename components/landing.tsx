@@ -112,6 +112,11 @@ export async function Landing() {
         />
 
         <div className="animate-fade-in-up relative flex flex-col items-center">
+          {/* Eyebrow — product name */}
+          <p className="mb-4 text-sm font-semibold uppercase tracking-[0.2em] text-blue-600 dark:text-blue-400">
+            TackUI
+          </p>
+
           {/* Badge */}
           <div className="mb-6 inline-flex items-center gap-2 rounded-full border border-zinc-200 bg-white/50 px-3 py-1 text-xs font-medium text-zinc-600 backdrop-blur dark:border-zinc-800 dark:bg-zinc-900/50 dark:text-zinc-400">
             <span className="relative flex h-1.5 w-1.5">

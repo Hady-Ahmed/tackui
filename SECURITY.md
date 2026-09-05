@@ -15,7 +15,7 @@ Only the latest release line receives security fixes. The project is pre-1.0 —
 
 Instead, please report it privately via one of:
 
-- **GitHub Security Advisories** — the "Report a vulnerability" button on the [Security tab](https://github.com/Hady-Ahmed/agent-front-end/security/advisories/new). This is the preferred channel; it lets the maintainers collaborate privately with you on a fix and credit your disclosure.
+- **GitHub Security Advisories** — the "Report a vulnerability" button on the [Security tab](https://github.com/Hady-Ahmed/tackui/security/advisories/new). This is the preferred channel; it lets the maintainers collaborate privately with you on a fix and credit your disclosure.
 - **Email** — send details to the repository owner via the email listed on their GitHub profile. PGP is available on request.
 
 Please include:
