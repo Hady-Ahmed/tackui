@@ -2,7 +2,7 @@
  * SaaS mode feature flags.
  *
  * This file is the single source of truth for whether the deployment is the
- * hosted SaaS instance (`SAAS_MODE=true`) or an open-source self-host
+ * hosted SaaS instance (`SAAS_MODE=true`) or a self-host
  * deployment (the default — `SAAS_MODE` unset).
  *
  * All SaaS-only behaviour (billing, plan enforcement, landing page, legal

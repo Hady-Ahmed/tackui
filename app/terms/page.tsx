@@ -8,7 +8,7 @@ import { MarketingLayout } from "@/components/marketing-layout";
  * Self-host deployments redirect to `/app`: these terms describe the hosted
  * service (payments, third-party processors) and don't apply to a
  * self-hosted instance, which is governed by its operator's own terms +
- * the Apache-2.0 license.
+ * the Elastic License 2.0.
  */
 // Force request-time rendering — SAAS_MODE is a runtime env var.
 export const dynamic = "force-dynamic";

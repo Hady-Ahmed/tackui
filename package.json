@@ -3,7 +3,7 @@
   "version": "0.1.0",
   "private": true,
   "description": "Unified AG-UI frontend — a ChatGPT/Gemini-style chat app for custom agents speaking the AG-UI protocol. Pluggable agent registry, multi-tenant, SaaS-ready.",
-  "license": "Apache-2.0",
+  "license": "Elastic-2.0",
   "author": "Hady Ahmed",
   "homepage": "https://github.com/Hady-Ahmed/tackui#readme",
   "repository": {

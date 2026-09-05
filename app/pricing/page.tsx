@@ -128,7 +128,7 @@ export default async function PricingPage() {
               rel="noreferrer"
               className="text-blue-600 hover:underline dark:text-blue-400"
             >
-              TackUI is open source (Apache-2.0)
+              TackUI is source available (Elastic License 2.0)
             </a>{" "}
             — self-host with unlimited everything.
           </p>

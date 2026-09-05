@@ -445,4 +445,8 @@ See [AGENTS.md](AGENTS.md) for architecture details, development conventions, an
 
 ## License
 
-Apache License 2.0 — see [LICENSE](LICENSE).
+Elastic License 2.0 (ELv2) — see [LICENSE](LICENSE).
+
+In short: you are free to use, modify, and redistribute the software, including
+for commercial and internal business purposes. The restriction: you may not
+offer the software itself to third parties as a hosted or managed service.

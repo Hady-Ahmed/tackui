@@ -75,7 +75,7 @@ const FEATURES = [
   },
   {
     title: "Self-host or use ours",
-    body: "Apache-2.0 licensed. Run it yourself with unlimited everything, or let us host it for you.",
+    body: "Elastic License 2.0. Run it yourself with unlimited everything, or let us host it for you.",
     icon: (
       <path
         d="M5 12H3l9-9 9 9h-2M5 12v7a2 2 0 002 2h10a2 2 0 002-2v-7M9 21v-6a2 2 0 012-2h2a2 2 0 012 2v6"
@@ -155,7 +155,7 @@ export async function Landing() {
           </div>
 
           <p className="mt-4 text-sm text-zinc-400 dark:text-zinc-600">
-            Apache-2.0 · No credit card required
+            Elastic License 2.0 · No credit card required
           </p>
         </div>
       </section>

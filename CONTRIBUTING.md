@@ -112,4 +112,4 @@ By participating, you agree to abide by the [Contributor Covenant Code of Conduc
 
 ## License
 
-By contributing, you agree your contributions will be licensed under the [Apache License 2.0](./LICENSE) that covers the project.
+By contributing, you agree your contributions will be licensed under the [Elastic License 2.0](./LICENSE) that covers the project.
