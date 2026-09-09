@@ -1,6 +1,19 @@
 # TackUI
 
+<p align="center">
+  <a href="https://tackui.com">
+    <img src="docs/images/demo.gif" alt="TackUI — adding an agent and streaming a chat with tool calls" width="820">
+  </a>
+</p>
+
 A unified frontend for custom agents speaking the [AG-UI protocol](https://docs.ag-ui.com). Built on [CopilotKit](https://copilotkit.ai) with a pluggable agent registry — add any AG-UI-compatible backend with zero UI code changes.
+
+**[🌐 Try the hosted version → tackui.com](https://tackui.com)** · [Quick start](#quick-start) · [Supported backends](#supported-backends) · [Report an issue](https://github.com/Hady-Ahmed/tackui/issues)
+
+[![License: Elastic-2.0](https://img.shields.io/badge/license-Elastic--2.0-blue.svg)](LICENSE)
+[![CI](https://github.com/Hady-Ahmed/tackui/actions/workflows/ci.yml/badge.svg)](https://github.com/Hady-Ahmed/tackui/actions/workflows/ci.yml)
+[![Release](https://img.shields.io/github/v/release/Hady-Ahmed/tackui?include_prereleases)](https://github.com/Hady-Ahmed/tackui/releases)
+[![Docker Image](https://img.shields.io/badge/docker-ghcr.io-2496ED?logo=docker&logoColor=white)](https://ghcr.io/hady-ahmed/tackui)
 
 ## Features
 
@@ -24,22 +37,42 @@ A unified frontend for custom agents speaking the [AG-UI protocol](https://docs.
 
 ## Quick Start
 
-### Option A: Docker Compose (easiest)
+> **Prefer not to self-host?** [tackui.com](https://tackui.com) runs the same app with a free tier.
+
+### Option A: Prebuilt image (no clone)
 
 ```bash
-git clone <repo-url>
-cd tackui
-docker-compose up
+mkdir tackui && cd tackui
+curl -fsSL https://raw.githubusercontent.com/Hady-Ahmed/tackui/main/docker-compose.yml -o docker-compose.yml
+docker compose up
 ```
 
-Open [http://localhost:3000](http://localhost:3000). That's it — Postgres,
+Pulls the published image from GHCR — no source checkout, no local build.
+To update later: `docker compose pull && docker compose up -d`.
+
+> Note: `NEXT_PUBLIC_SENTRY_DSN` (client-side Sentry) is baked into the image at build time and can't be set on the prebuilt image. Server-side Sentry (`SENTRY_DSN`) works normally as a runtime variable. This only matters if you want client-side Sentry in your self-hosted deployment — everything else is identical.
+
+### Option B: Build from source (development / patches)
+
+```bash
+git clone https://github.com/Hady-Ahmed/tackui.git
+cd tackui
+docker compose -f docker-compose.dev.yml up --build
+```
+
+Same stack, but builds the app image locally from your checkout — changes
+to the code show up on rebuild. Plain `docker compose up` in a cloned repo
+pulls the *released* image, not your local changes; use `-f docker-compose.dev.yml`
+whenever you're working on the source.
+
+Either way, open [http://localhost:3000](http://localhost:3000) — Postgres,
 migrations, and the app all start automatically. Auth is disabled by default
 (solo mode); see [Self-hosting](#self-hosting-with-docker) to enable it.
 
-### Option B: Manual setup
+### Option C: Manual setup
 
 ```bash
-git clone <repo-url>
+git clone https://github.com/Hady-Ahmed/tackui.git
 cd tackui
 npm install
 ```
@@ -120,9 +153,17 @@ docker-compose down -v
 
 ### Updating
 
+Prebuilt image (default):
+
+```bash
+docker compose pull && docker compose up -d
+```
+
+From source:
+
 ```bash
 git pull
-docker-compose up --build
+docker compose -f docker-compose.dev.yml up --build
 ```
 
 The app re-runs migrations on boot — new schema changes apply automatically.
@@ -130,7 +171,7 @@ The app re-runs migrations on boot — new schema changes apply automatically.
 ### Custom port
 
 ```bash
-APP_PORT=8080 docker-compose up
+APP_PORT=8080 docker compose up
 # → http://localhost:8080
 ```
 
@@ -138,16 +179,16 @@ APP_PORT=8080 docker-compose up
 
 Next.js inlines any variable prefixed with `NEXT_PUBLIC_` into the client JavaScript bundle **at build time**. These cannot be supplied at runtime — once `next build` (or `docker build`) runs, the value is frozen in the generated `.next/static/chunks/*.js` files.
 
-This matters when deploying via Docker. The `docker-compose.yml` passes `NEXT_PUBLIC_SENTRY_DSN` and `NEXT_PUBLIC_SENTRY_TRACES_SAMPLE_RATE` as **build args** (under `build.args`), not runtime environment variables. Supply them in your shell before building:
+This matters when deploying via Docker. The prebuilt image (`docker-compose.yml`) ships with client-side Sentry disabled — there is no way to inject `NEXT_PUBLIC_*` variables into it at runtime. To bake your own, build from source with `docker-compose.dev.yml`, which passes `NEXT_PUBLIC_SENTRY_DSN` and `NEXT_PUBLIC_SENTRY_TRACES_SAMPLE_RATE` as **build args**. Supply them in your shell before building:
 
 ```bash
 NEXT_PUBLIC_SENTRY_DSN=https://...@o123.ingest.sentry.io/456 \
-docker-compose up --build
+docker compose -f docker-compose.dev.yml up --build
 ```
 
 Without them, client-side Sentry silently stays a no-op (`instrumentation-client.ts` guards on presence). Server-side Sentry (`SENTRY_DSN`, no prefix) is a runtime variable and can be changed with a container restart — no rebuild needed.
 
-All other environment variables (`DATABASE_URL`, `BETTER_AUTH_SECRET`, Stripe keys, etc.) are runtime-only and can be rotated without rebuilding the image.
+All other environment variables (`DATABASE_URL`, `BETTER_AUTH_SECRET`, OAuth credentials, etc.) are runtime-only and can be rotated without rebuilding the image.
 
 ## Authentication
 
@@ -264,7 +305,7 @@ See [`.env.example`](.env.example) for the full list with comments.
 | `BETTER_AUTH_SECRET` | Yes (unless `AUTH_DISABLED=true`) | Secret for signing session cookies. Generate with `openssl rand -hex 32`. The app refuses to boot without it when auth is enabled. |
 | `BETTER_AUTH_URL` | Yes (unless `AUTH_DISABLED=true`) | Public base URL of the app (e.g. `http://localhost:3000`) |
 | `AUTH_DISABLED` | No | Set to `true` to skip login (solo mode). **Never use this in any deployment exposed to the internet or shared users.** |
-| `ALLOW_PRIVATE_ENDPOINTS` | No | Set to `true` to allow creating/editing agents with endpoints that resolve to private/internal IPs (e.g. when agent backends run on the same host). Defaults to `false` (blocks private IPs to prevent SSRF). Hard-locked off under `SAAS_MODE` regardless of this flag. |
+| `ALLOW_PRIVATE_ENDPOINTS` | No | Set to `true` to allow creating/editing agents with endpoints that resolve to private/internal IPs (e.g. when agent backends run on the same host). Defaults to `false` (blocks private IPs to prevent SSRF). |
 | `TRUSTED_PROXY_HOPS` | No | Number of trusted reverse-proxy hops in front of the server, used to resolve the real client IP from `X-Forwarded-For` (default `1`). Set to `2` for Cloudflare → Nginx → app, etc. When behind Cloudflare → Traefik (Coolify), the proxy checks `CF-Connecting-IP` first (Traefik overwrites XFF with the edge IP). This env var is the fallback for non-Cloudflare deploys. |
 | `CONCURRENT_RUN_TIMEOUT_MS` | No | Watchdog timeout (ms) for concurrent-run rate-limit slots. Default `600000` (10 min). Floor `60000`. Safety net only — the actual SSE stream / agent run is NOT cancelled; only the counter is decremented to prevent slot leaks when a client opens a run and drops TCP without triggering `ReadableStream.cancel()`. Override if your agents do legitimately long research runs. |
 | `SENTRY_DSN` | No | Sentry DSN for server-side error tracking. No-op if unset. |
@@ -281,65 +322,6 @@ See [`.env.example`](.env.example) for the full list with comments.
 | `POSTGRES_PASSWORD` | No (docker-compose only) | Postgres password (default: `postgres`) |
 | `POSTGRES_DB` | No (docker-compose only) | Postgres database name (default: `agent_frontend`) |
 | `APP_PORT` | No (docker-compose only) | Host port to expose the app on (default: `3000`) |
-
-### SaaS mode (hosted only — self-hosters ignore)
-
-These variables configure the hosted SaaS offering. They have **no effect**
-on a self-hosted deployment and can be left unset. The SaaS code paths
-(landing page at `/`, billing, plan enforcement, legal pages, forced SSRF
-guard) are gated behind `SAAS_MODE` and never run when it is unset.
-
-| Variable | Description |
-| --- | --- |
-| `SAAS_MODE` | Set to `true` on the hosted instance. Enables the landing page at `/` (chat moves to `/app`), `/terms` + `/privacy` + `/pricing` routes, plan enforcement (Free/Pro/Team), and a hard-locked SSRF guard (private endpoints are NEVER allowed on the shared host, regardless of `ALLOW_PRIVATE_ENDPOINTS`). |
-| `STRIPE_SECRET_KEY` | Stripe SDK key. Required for paid plans; without it, SaaS mode runs but all users sit on the Free plan — no checkout/portal UI renders. |
-| `STRIPE_WEBHOOK_SECRET` | Stripe webhook signing secret (from the dashboard or `stripe listen`). |
-| `STRIPE_PRICE_PRO` | Stripe Price ID for the Pro plan. The dollar amount lives in Stripe — edit it there. |
-| `STRIPE_PRICE_TEAM` | Stripe Price ID for the Team plan (per-seat). |
-
-> **Self-hosters:** do not set any of these. Self-host is the unlimited,
-> no-billing, private-endpoints-allowed experience. See
-> [Self-hosting vs SaaS](#self-hosting-vs-saas) below.
-
-## Self-hosting vs SaaS
-
-TackUI ships from one codebase in two modes, gated by a single env var
-(`SAAS_MODE`):
-
-- **Self-host (the OSS product, default — `SAAS_MODE` unset):** chat lives
-  at `/`, no billing, no plan enforcement, no landing/legal pages. Private
-  agent endpoints allowed via `ALLOW_PRIVATE_ENDPOINTS=true`. Multi-user +
-  multi-org fully supported when auth is enabled (not crippleware).
-- **SaaS (the hosted instance, `SAAS_MODE=true`):** landing page at `/`,
-  chat at `/app`, Stripe billing with Free/Pro/Team plans, plan
-  enforcement (agent count, concurrent runs, rate limits, seats), legal
-  pages, cookie notice. Private endpoints are **never** allowed on the
-  shared host (SSRF guard hard-locked on) — regardless of
-  `ALLOW_PRIVATE_ENDPOINTS`.
-
-Self-hosters never see SaaS code paths: the landing page, billing UI,
-plan checks, and legal pages are all gated behind `SAAS_MODE` and are
-inert when it's unset. There is no separate codebase to maintain or
-version-sync.
-
-**Workspace model (Vercel/GitHub pattern):** every user gets a personal
-workspace on signup (Free). Creating additional workspaces is always
-available — new workspaces start on Free (3 agents, 1 member, no invites).
-Upgrade a workspace to Pro for solo capacity, or to Team for collaboration
-(invites + per-seat billing). The org switcher appears when a user belongs
-to >1 org (created a second workspace or been invited to someone else's
-team).
-
-| | Self-host (solo) | Self-host (multi-user) | SaaS Free | SaaS Pro | SaaS Team |
-| --- | --- | --- | --- | --- | --- |
-| Agents | unlimited | unlimited | 3 | unlimited | unlimited |
-| Concurrent runs | 3 | 3 | 1 | 3 | 5 |
-| Create workspace | n/a | ✅ unlimited | ✅ (starts Free) | ✅ (starts Free) | ✅ (starts Free) |
-| Org switcher | n/a (1 org) | ✅ | n/a (1 org) | n/a (1 org) | ✅ |
-| Team seats | 1 (solo) | unlimited | 1 (personal) | 1 (personal) | per-seat (min 2, paid) |
-| Private endpoints | ✅ | ✅ | ❌ | ❌ | ❌ |
-| Support | community | community | community | priority | priority |
-
 
 ## Security
 
@@ -389,7 +371,7 @@ The app has two-layer rate limiting to protect against abuse and server overload
 | Route | Limit | Concurrent |
 | --- | --- | --- |
 | `/api/copilotkit/*` (POST runs only — connect/info exempt) | 20/min per user | 3 concurrent run streams per user |
-| `/api/agents/reachability-probe` | 10/min per user | — |
+| `/api/agents/reachability-probe` | 30/min per user | — |
 | `/api/agents` POST + PATCH/DELETE | 10/min per user | — |
 | `/api/agents` GET | 60/min per user | — |
 | `/api/threads/[id]` PATCH/DELETE | 30/min per user | — |

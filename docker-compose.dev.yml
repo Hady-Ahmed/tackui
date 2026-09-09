@@ -15,7 +15,11 @@ services:
     restart: unless-stopped
 
   app:
-    image: ghcr.io/hady-ahmed/tackui:latest
+    build:
+      context: .
+      args:
+        NEXT_PUBLIC_SENTRY_DSN: ${NEXT_PUBLIC_SENTRY_DSN:-}
+        NEXT_PUBLIC_SENTRY_TRACES_SAMPLE_RATE: ${NEXT_PUBLIC_SENTRY_TRACES_SAMPLE_RATE:-0.1}
     ports:
       - "${APP_PORT:-3000}:3000"
     environment:

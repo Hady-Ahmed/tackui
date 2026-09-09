@@ -2,49 +2,51 @@ name: CI
 
 on:
   push:
-    branches: [main, master]
+    branches: [main]
   pull_request:
-    branches: [main, master]
 
-permissions:
-  contents: read
+concurrency:
+  group: ci-${{ github.ref }}
+  # Cancel superseded runs on rapid pushes — saves runner minutes.
+  cancel-in-progress: true
 
 jobs:
-  ci:
-    name: Lint + Typecheck + Test
+  lint:
+    name: Lint
     runs-on: ubuntu-latest
     timeout-minutes: 10
-
     steps:
-      - name: Checkout
-        uses: actions/checkout@v4
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          # Match the Dockerfile (node:20-alpine) — CI validates what ships.
+          node-version: 20
+          cache: npm
+      - run: npm ci
+      - run: npm run lint
 
-      - name: Setup Node.js
-        uses: actions/setup-node@v4
+  typecheck:
+    name: Typecheck
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
         with:
           node-version: 20
           cache: npm
+      - run: npm ci
+      - run: npx tsc --noEmit
 
-      - name: Install dependencies
-        # `npm ci` is the strict install — fails if lockfile is out of sync,
-        # which catches "forgot to commit package-lock.json" PRs.
-        run: npm ci
-
-      - name: Lint
-        run: npm run lint
-
-      - name: Type-check
-        # Not wired into `npm run build` for speed — run it explicitly.
-        run: npx tsc --noEmit
-
-      - name: Test
-        # vitest with in-memory pg-mem — no Postgres service needed.
-        run: npm run test
-        env:
-          # Solo mode so the auth-disabled short-circuit paths run (matches
-          # the test setup in vitest.setup.ts). The tests mock isAuthDisabled
-          # themselves where needed; this just keeps the boot-time auth
-          # module from throwing on a missing BETTER_AUTH_SECRET.
-          AUTH_DISABLED: "true"
-          BETTER_AUTH_SECRET: "ci-placeholder-not-used-auth-disabled"
-          BETTER_AUTH_URL: "http://localhost:3000"
+  test:
+    name: Test
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+      - run: npm ci
+      - run: npm run test
