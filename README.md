@@ -295,6 +295,14 @@ The AG-UI protocol has [19 official integration packages](https://github.com/ag-
 
 To build your own, follow the [AG-UI server quickstart](https://docs.ag-ui.com/quickstart/server) — a minimal backend is a ~50-line FastAPI server that emits 5 SSE events.
 
+### Connecting to a backend on the same host (Docker)
+
+Inside a Docker container, `localhost` refers to the **container**, not your host machine. If your agent backend runs on the same host as TackUI (common for self-hosters), you need two things:
+
+1. **Use `host.docker.internal` in the endpoint** — set the agent endpoint to `http://host.docker.internal:8002/...` (not `http://localhost:8002/...`). This special hostname resolves to your host from inside the container. Uncomment the `extra_hosts` block in `docker-compose.yml` (or `docker-compose.dev.yml`) to enable it on Linux. Set `ALLOW_PRIVATE_ENDPOINTS=true` since it resolves to a private IP (the SSRF guard blocks private IPs by default).
+
+2. **Bind your backend to `0.0.0.0`** — a backend listening on `127.0.0.1` only accepts host-local traffic, not traffic arriving from the Docker bridge. For uvicorn/Agno: `agent_os.serve(..., host="0.0.0.0")`. For FastAPI directly: `uvicorn main:app --host 0.0.0.0`. Verify with `ss -tlnp | grep <port>` — you should see `0.0.0.0:<port>`, not `127.0.0.1:<port>`.
+
 ## Environment Variables
 
 See [`.env.example`](.env.example) for the full list with comments.

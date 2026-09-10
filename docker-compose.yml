@@ -39,6 +39,9 @@ services:
       CONCURRENT_RUN_TIMEOUT_MS: ${CONCURRENT_RUN_TIMEOUT_MS:-}
       SENTRY_DSN: ${SENTRY_DSN:-}
       SENTRY_TRACES_SAMPLE_RATE: ${SENTRY_TRACES_SAMPLE_RATE:-0.1}
+      # Connecting to a local agent backend? Uncomment this + see README.
+      # extra_hosts:
+      #   - "host.docker.internal:host-gateway"
     depends_on:
       db:
         condition: service_healthy
