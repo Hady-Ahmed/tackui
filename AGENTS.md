@@ -601,7 +601,7 @@ After running migrations, add an agent via the admin UI (`/agents`) or REST:
 
 ```bash
 # AUTH_DISABLED=true (solo mode) — no session cookie needed.
-# Otherwise sign in first and pass `-b cookies.txt` (see Option B in README).
+# Otherwise sign in first and pass `-b cookies.txt`.
 #
 # If the endpoint is on localhost or a private IP, set ALLOW_PRIVATE_ENDPOINTS=true
 # first — the SSRF guard on POST/PATCH will 400 otherwise.
