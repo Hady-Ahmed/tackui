@@ -1,7 +1,6 @@
 "use client";
 
 import { useEffect, useState, useRef, useCallback } from "react";
-import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { useAuthConfig } from "@/lib/auth/use-auth-config";
 import { useCanManageAgents } from "@/lib/auth/use-can-manage-agents";
@@ -9,6 +8,7 @@ import { useOrgs } from "@/lib/billing/use-orgs";
 import { useBilling } from "@/lib/billing/use-billing";
 import { resetInvitationsCache } from "@/lib/billing/use-invitations";
 import { authClient } from "@/lib/auth/auth-client";
+import { BackToChat } from "@/components/back-to-chat";
 import {
   listMembers,
   removeMember,
@@ -183,8 +183,10 @@ export default function MembersPage() {
 
   if (configLoading) {
     return (
-      <div className="mx-auto max-w-2xl px-6 py-16 text-sm text-zinc-500">
-        Loading…
+      <div className="min-h-screen bg-zinc-50 dark:bg-black">
+        <div className="mx-auto max-w-2xl px-4 py-6 md:px-6 md:py-10 text-sm text-zinc-500">
+          Loading…
+        </div>
       </div>
     );
   }
@@ -193,21 +195,21 @@ export default function MembersPage() {
   }
 
   return (
-    <div className="mx-auto max-w-2xl px-6 py-16 text-zinc-900 dark:text-zinc-100">
-      <Link
-        href="/app"
-        className="text-sm text-zinc-500 hover:underline dark:text-zinc-400"
-      >
-        ← Back to chat
-      </Link>
-      <h1 className="mt-4 text-2xl font-semibold tracking-tight">
-        Members
-      </h1>
-      <p className="mt-1 text-sm text-zinc-500">
-        {activeOrg
-          ? `${activeOrg.name}${activeOrg.seats !== null ? ` · ${activeOrg.memberCount}/${activeOrg.seats} seats` : ""}`
-          : "Workspace members."}
-      </p>
+    <div className="min-h-screen bg-zinc-50 dark:bg-black">
+      <div className="mx-auto max-w-2xl px-4 py-6 md:px-6 md:py-10 text-zinc-900 dark:text-zinc-100">
+        <header className="mb-8 flex items-center justify-between gap-3">
+          <div>
+            <h1 className="text-2xl font-semibold text-zinc-900 dark:text-zinc-50">
+              Members
+            </h1>
+            <p className="mt-1 text-sm text-zinc-500 dark:text-zinc-400">
+              {activeOrg
+                ? `${activeOrg.name}${activeOrg.seats !== null ? ` · ${activeOrg.memberCount}/${activeOrg.seats} seats` : ""}`
+                : "Workspace members."}
+            </p>
+          </div>
+          <BackToChat />
+        </header>
 
       {error && (
         <div className="mt-4 rounded-lg border border-red-200 bg-red-50 p-3 text-sm text-red-700 dark:border-red-900 dark:bg-red-950 dark:text-red-300">
@@ -255,7 +257,7 @@ export default function MembersPage() {
                 return (
                   <li
                     key={m.id}
-                    className="flex items-center justify-between gap-3 py-3"
+                    className="flex flex-col gap-3 py-3 sm:flex-row sm:items-center sm:justify-between"
                   >
                     <div className="min-w-0">
                       <p className="truncate font-medium">
@@ -268,7 +270,7 @@ export default function MembersPage() {
                         {m.email}
                       </p>
                     </div>
-                    <div className="flex shrink-0 items-center gap-2">
+                    <div className="flex shrink-0 flex-wrap items-center gap-2">
                       <span className="rounded-full bg-zinc-100 px-2 py-0.5 text-xs font-medium capitalize text-zinc-600 dark:bg-zinc-800 dark:text-zinc-300">
                         {m.role}
                       </span>
@@ -354,7 +356,7 @@ export default function MembersPage() {
                 {invitations.map((inv) => (
                   <li
                     key={inv.id}
-                    className="flex items-center justify-between gap-3 py-3"
+                    className="flex flex-col gap-3 py-3 sm:flex-row sm:items-center sm:justify-between"
                   >
                     <div className="min-w-0">
                       <p className="truncate font-medium">{inv.email}</p>
@@ -362,7 +364,7 @@ export default function MembersPage() {
                         Invited as {inv.role}
                       </p>
                     </div>
-                    <div className="flex shrink-0 items-center gap-2">
+                    <div className="flex shrink-0 flex-wrap items-center gap-2">
                       <span className="rounded-full bg-amber-100 px-2 py-0.5 text-xs font-medium text-amber-700 dark:bg-amber-950 dark:text-amber-300">
                         pending
                       </span>
@@ -385,6 +387,7 @@ export default function MembersPage() {
           )}
         </>
       )}
+      </div>
     </div>
   );
 }

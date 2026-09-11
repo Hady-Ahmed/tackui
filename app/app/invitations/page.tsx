@@ -5,6 +5,7 @@ import Link from "next/link";
 import { authClient } from "@/lib/auth/auth-client";
 import { useOrgs } from "@/lib/billing/use-orgs";
 import { useInvitations } from "@/lib/billing/use-invitations";
+import { BackToChat } from "@/components/back-to-chat";
 
 /**
  * Pending org invitations — accept/reject workspaces you've been invited
@@ -88,11 +89,19 @@ export default function InvitationsPage() {
   }
 
   return (
-    <div className="mx-auto max-w-xl px-6 py-16 text-zinc-900 dark:text-zinc-100">
-      <h1 className="text-2xl font-semibold tracking-tight">Invitations</h1>
-      <p className="mt-1 text-sm text-zinc-500">
-        Workspace invitations waiting for your response.
-      </p>
+    <div className="min-h-screen bg-zinc-50 dark:bg-black">
+      <div className="mx-auto max-w-xl px-4 py-6 md:px-6 md:py-10 text-zinc-900 dark:text-zinc-100">
+        <header className="mb-8 flex items-center justify-between gap-3">
+          <div>
+            <h1 className="text-2xl font-semibold text-zinc-900 dark:text-zinc-50">
+              Invitations
+            </h1>
+            <p className="mt-1 text-sm text-zinc-500 dark:text-zinc-400">
+              Workspace invitations waiting for your response.
+            </p>
+          </div>
+          <BackToChat />
+        </header>
 
       {error && (
         <div className="mt-4 rounded-lg border border-red-200 bg-red-50 p-3 text-sm text-red-700 dark:border-red-900 dark:bg-red-950 dark:text-red-300">
@@ -125,7 +134,7 @@ export default function InvitationsPage() {
                     Invited as {inv.role}
                   </p>
                 </div>
-                <div className="flex shrink-0 gap-2">
+                <div className="flex shrink-0 flex-wrap gap-2">
                   <button
                     onClick={() => accept(inv.id)}
                     disabled={actioning === inv.id}
@@ -146,6 +155,7 @@ export default function InvitationsPage() {
           ))}
         </ul>
       )}
+      </div>
     </div>
   );
 }

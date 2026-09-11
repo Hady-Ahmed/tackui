@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import Link from "next/link";
 import { useThreads, useAgent } from "@copilotkit/react-core/v2";
 import type { PublicAgent, AgentKind } from "@/lib/agents/agents.config";
@@ -79,6 +79,8 @@ interface AgentSidebarProps {
   onSelectThread: (threadId: string) => void;
   collapsed: boolean;
   onToggleCollapse: () => void;
+  mobileOpen: boolean;
+  onCloseMobile: () => void;
 }
 
 export function AgentSidebar({
@@ -90,6 +92,8 @@ export function AgentSidebar({
   onSelectThread,
   collapsed,
   onToggleCollapse,
+  mobileOpen,
+  onCloseMobile,
 }: AgentSidebarProps) {
   const [statuses, setStatuses] = useState<Record<string, TestResult>>({});
   const { config } = useAuthConfig();
@@ -137,36 +141,89 @@ export function AgentSidebar({
     };
   }, [agents]);
 
+  const selectAgentAndClose = useCallback(
+    (id: string) => {
+      onSelectAgent(id);
+      onCloseMobile();
+    },
+    [onSelectAgent, onCloseMobile],
+  );
+  const newChatAndClose = useCallback(() => {
+    onNewChat();
+    onCloseMobile();
+  }, [onNewChat, onCloseMobile]);
+  const selectThreadAndClose = useCallback(
+    (threadId: string) => {
+      onSelectThread(threadId);
+      onCloseMobile();
+    },
+    [onSelectThread, onCloseMobile],
+  );
+
   return (
-    <aside
-      className={`flex flex-col overflow-hidden border-r border-zinc-200 bg-white transition-[width] duration-200 ease-in-out dark:border-zinc-800 dark:bg-zinc-950 ${
-        collapsed ? "w-14 items-center py-3" : "w-64"
-      }`}
-    >
-      {collapsed ? (
-        <CollapsedContent
-          agents={agents}
-          activeAgent={activeAgent}
-          statuses={statuses}
-          onSelectAgent={onSelectAgent}
-          onNewChat={onNewChat}
-          onToggleCollapse={onToggleCollapse}
-          showManageLink={showManageLink}
+    <>
+      {/* Desktop sidebar — inline, collapsible. Hidden on mobile (<md). */}
+      <aside
+        className={`hidden md:flex flex-col overflow-hidden border-r border-zinc-200 bg-white transition-[width] duration-200 ease-in-out dark:border-zinc-800 dark:bg-zinc-950 ${
+          collapsed ? "w-14 items-center py-3" : "w-64"
+        }`}
+      >
+        {collapsed ? (
+          <CollapsedContent
+            agents={agents}
+            activeAgent={activeAgent}
+            statuses={statuses}
+            onSelectAgent={onSelectAgent}
+            onNewChat={onNewChat}
+            onToggleCollapse={onToggleCollapse}
+            showManageLink={showManageLink}
+          />
+        ) : (
+          <ExpandedContent
+            agents={agents}
+            activeAgent={activeAgent}
+            activeThreadId={activeThreadId}
+            statuses={statuses}
+            onSelectAgent={onSelectAgent}
+            onNewChat={onNewChat}
+            onSelectThread={onSelectThread}
+            onToggleCollapse={onToggleCollapse}
+            showManageLink={showManageLink}
+          />
+        )}
+      </aside>
+
+      {/* Mobile drawer — fixed overlay with backdrop. Always rendered
+          and animated via CSS transform/opacity (no mount/unmount
+          flicker). Hidden on desktop (md:hidden). */}
+      <div className="md:hidden">
+        <div
+          className={`fixed inset-0 z-40 bg-black/40 transition-opacity duration-200 ease-in-out ${
+            mobileOpen ? "opacity-100" : "pointer-events-none opacity-0"
+          }`}
+          onClick={onCloseMobile}
+          aria-hidden="true"
         />
-      ) : (
-        <ExpandedContent
-          agents={agents}
-          activeAgent={activeAgent}
-          activeThreadId={activeThreadId}
-          statuses={statuses}
-          onSelectAgent={onSelectAgent}
-          onNewChat={onNewChat}
-          onSelectThread={onSelectThread}
-          onToggleCollapse={onToggleCollapse}
-          showManageLink={showManageLink}
-        />
-      )}
-    </aside>
+        <aside
+          className={`fixed inset-y-0 left-0 z-50 flex w-64 flex-col overflow-hidden border-r border-zinc-200 bg-white shadow-xl transition-transform duration-200 ease-in-out dark:border-zinc-800 dark:bg-zinc-950 ${
+            mobileOpen ? "translate-x-0" : "-translate-x-full"
+          }`}
+        >
+          <ExpandedContent
+            agents={agents}
+            activeAgent={activeAgent}
+            activeThreadId={activeThreadId}
+            statuses={statuses}
+            onSelectAgent={selectAgentAndClose}
+            onNewChat={newChatAndClose}
+            onSelectThread={selectThreadAndClose}
+            onToggleCollapse={onCloseMobile}
+            showManageLink={showManageLink}
+            isMobile
+          />
+        </aside>
+      </div>
+    </>
   );
 }
 
@@ -180,6 +237,7 @@ function ExpandedContent({
   onSelectThread,
   onToggleCollapse,
   showManageLink,
+  isMobile = false,
 }: {
   agents: PublicAgent[];
   activeAgent: string;
@@ -190,6 +248,7 @@ function ExpandedContent({
   onSelectThread: (threadId: string) => void;
   onToggleCollapse: () => void;
   showManageLink: boolean;
+  isMobile?: boolean;
 }) {
   return (
     <>
@@ -204,22 +263,37 @@ function ExpandedContent({
         </div>
         <button
           onClick={onToggleCollapse}
-          title="Collapse sidebar"
+          title={isMobile ? "Close sidebar" : "Collapse sidebar"}
           className="shrink-0 rounded p-1 text-zinc-400 transition-colors hover:bg-zinc-100 hover:text-zinc-700 dark:hover:bg-zinc-800 dark:hover:text-zinc-200"
-          aria-label="Collapse sidebar"
+          aria-label={isMobile ? "Close sidebar" : "Collapse sidebar"}
         >
-          <svg
-            xmlns="http://www.w3.org/2000/svg"
-            viewBox="0 0 16 16"
-            fill="currentColor"
-            className="h-4 w-4"
-          >
-            <path
-              fillRule="evenodd"
-              d="M9.78 4.22a.75.75 0 0 1 0 1.06L7.06 8l2.72 2.72a.75.75 0 1 1-1.06 1.06L5.47 8.53a.75.75 0 0 1 0-1.06l3.25-3.25a.75.75 0 0 1 1.06 0Z"
-              clipRule="evenodd"
-            />
-          </svg>
+          {isMobile ? (
+            <svg
+              xmlns="http://www.w3.org/2000/svg"
+              viewBox="0 0 16 16"
+              fill="currentColor"
+              className="h-4 w-4"
+            >
+              <path
+                fillRule="evenodd"
+                d="M4.22 4.22a.75.75 0 0 1 1.06 0L8 6.94l2.72-2.72a.75.75 0 1 1 1.06 1.06L9.06 8l2.72 2.72a.75.75 0 1 1-1.06 1.06L8 9.06l-2.72 2.72a.75.75 0 0 1-1.06-1.06L6.94 8 4.22 5.28a.75.75 0 0 1 0-1.06Z"
+                clipRule="evenodd"
+              />
+            </svg>
+          ) : (
+            <svg
+              xmlns="http://www.w3.org/2000/svg"
+              viewBox="0 0 16 16"
+              fill="currentColor"
+              className="h-4 w-4"
+            >
+              <path
+                fillRule="evenodd"
+                d="M9.78 4.22a.75.75 0 0 1 0 1.06L7.06 8l2.72 2.72a.75.75 0 1 1-1.06 1.06L5.47 8.53a.75.75 0 0 1 0-1.06l3.25-3.25a.75.75 0 0 1 1.06 0Z"
+                clipRule="evenodd"
+              />
+            </svg>
+          )}
         </button>
       </div>
 
@@ -420,7 +494,7 @@ function CollapsedContent({
 
       <div className="mt-2 flex flex-col items-center gap-1">
         <ThemeToggle collapsed />
-        <AccountMenu />
+        <AccountMenu collapsed />
       </div>
     </>
   );

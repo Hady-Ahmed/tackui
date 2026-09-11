@@ -2,9 +2,9 @@
 
 import { useState, useEffect, useCallback, useRef } from "react";
 import { useRouter } from "next/navigation";
-import Link from "next/link";
 import type { PublicAgent, AgentKind } from "@/lib/agents/agents.config";
 import { UsersAdmin } from "@/components/users-admin";
+import { BackToChat } from "@/components/back-to-chat";
 import { authClient } from "@/lib/auth/auth-client";
 import { useAuthConfig } from "@/lib/auth/use-auth-config";
 import { useCanManageAgents } from "@/lib/auth/use-can-manage-agents";
@@ -233,8 +233,8 @@ export default function AgentsPage() {
 
   return (
     <div className="min-h-screen bg-zinc-50 dark:bg-black">
-      <div className="mx-auto max-w-4xl px-6 py-10">
-        <header className="mb-8 flex items-center justify-between">
+      <div className="mx-auto max-w-4xl px-4 py-6 md:px-6 md:py-10">
+        <header className="mb-8 flex items-center justify-between gap-3">
           <div>
             <h1 className="text-2xl font-semibold text-zinc-900 dark:text-zinc-50">
               Agents
@@ -244,12 +244,7 @@ export default function AgentsPage() {
               apply immediately — no restart needed.
             </p>
           </div>
-          <Link
-            href="/app"
-            className="rounded-lg border border-zinc-200 px-3 py-1.5 text-sm font-medium text-zinc-700 transition-colors hover:bg-zinc-100 dark:border-zinc-700 dark:text-zinc-300 dark:hover:bg-zinc-800"
-          >
-            ← Back to chat
-          </Link>
+          <BackToChat />
         </header>
 
         {error && (
@@ -266,7 +261,7 @@ export default function AgentsPage() {
             onSubmit={handleSubmit}
             className="space-y-4 rounded-xl border border-zinc-200 bg-white p-6 dark:border-zinc-800 dark:bg-zinc-950"
           >
-            <div className="grid grid-cols-2 gap-4">
+            <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
               <Field label="Name" required>
                 <input
                   value={form.name}
@@ -286,7 +281,7 @@ export default function AgentsPage() {
               </Field>
             </div>
 
-            <div className="grid grid-cols-2 gap-4">
+            <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
               <Field label="Kind">
                 <select
                   value={form.kind}
@@ -323,7 +318,7 @@ export default function AgentsPage() {
             </div>
 
             {form.kind === "langgraph" && (
-              <div className="grid grid-cols-2 gap-4">
+              <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
                 <Field label="Graph ID" hint="optional, defaults to 'agent'">
                   <input
                     value={form.graphId}
@@ -461,68 +456,124 @@ export default function AgentsPage() {
               immediately.
             </p>
           ) : (
-            <div className="overflow-hidden rounded-xl border border-zinc-200 dark:border-zinc-800">
-              <table className="w-full text-left text-sm">
-                <thead className="bg-zinc-100 text-xs uppercase tracking-wide text-zinc-500 dark:bg-zinc-900 dark:text-zinc-400">
-                  <tr>
-                    <th className="px-4 py-2">ID</th>
-                    <th className="px-4 py-2">Name</th>
-                    <th className="px-4 py-2">Kind</th>
-                    <th className="px-4 py-2">Endpoint</th>
-                    <th className="px-4 py-2 text-right">Actions</th>
-                  </tr>
-                </thead>
-                <tbody className="divide-y divide-zinc-200 dark:divide-zinc-800">
-                  {agents.map((agent) => {
-                    const rowTest = rowTests[agent.id] ?? { status: "idle" };
-                    return (
-                      <tr
-                        key={agent.id}
-                        className="bg-white dark:bg-zinc-950"
-                      >
-                        <td className="px-4 py-3 font-mono text-xs text-zinc-600 dark:text-zinc-400">
-                          {agent.id}
-                        </td>
-                        <td className="px-4 py-3 font-medium text-zinc-900 dark:text-zinc-50">
-                          {agent.name}
-                        </td>
-                        <td className="px-4 py-3">
-                          <span className="rounded bg-zinc-100 px-1.5 py-0.5 text-[10px] font-medium uppercase text-zinc-500 dark:bg-zinc-800 dark:text-zinc-400">
-                            {agent.kind}
-                          </span>
-                        </td>
-                        <td className="px-4 py-3 font-mono text-xs text-zinc-600 dark:text-zinc-400">
-                          {agent.endpoint}
-                        </td>
-                        <td className="px-4 py-3 text-right">
-                          <button
-                            onClick={() => startEdit(agent)}
-                            className="mr-2 text-xs font-medium text-blue-600 hover:underline dark:text-blue-400"
-                          >
-                            Edit
-                          </button>
-                          <button
-                            onClick={() => handleTestRow(agent)}
-                            disabled={rowTest.status === "loading"}
-                            className="mr-2 text-xs font-medium text-zinc-600 hover:underline disabled:opacity-50 dark:text-zinc-400"
-                            title={TEST_HELP}
-                          >
-                            {rowTest.status === "loading" ? "Testing..." : "Test"}
-                          </button>
-                          <button
-                            onClick={() => handleDelete(agent.id)}
-                            className="text-xs font-medium text-red-600 hover:underline dark:text-red-400"
-                          >
-                            Delete
-                          </button>
-                          <TestBadge result={rowTest} inline />
-                        </td>
-                      </tr>
-                    );
-                  })}
-                </tbody>
-              </table>
-            </div>
+            <>
+              {/* Desktop table — hidden on mobile. */}
+              <div className="hidden overflow-hidden rounded-xl border border-zinc-200 md:block dark:border-zinc-800">
+                <table className="w-full text-left text-sm">
+                  <thead className="bg-zinc-100 text-xs uppercase tracking-wide text-zinc-500 dark:bg-zinc-900 dark:text-zinc-400">
+                    <tr>
+                      <th className="px-4 py-2">ID</th>
+                      <th className="px-4 py-2">Name</th>
+                      <th className="px-4 py-2">Kind</th>
+                      <th className="px-4 py-2">Endpoint</th>
+                      <th className="px-4 py-2 text-right">Actions</th>
+                    </tr>
+                  </thead>
+                  <tbody className="divide-y divide-zinc-200 dark:divide-zinc-800">
+                    {agents.map((agent) => {
+                      const rowTest = rowTests[agent.id] ?? { status: "idle" };
+                      return (
+                        <tr
+                          key={agent.id}
+                          className="bg-white dark:bg-zinc-950"
+                        >
+                          <td className="px-4 py-3 font-mono text-xs text-zinc-600 dark:text-zinc-400">
+                            {agent.id}
+                          </td>
+                          <td className="px-4 py-3 font-medium text-zinc-900 dark:text-zinc-50">
+                            {agent.name}
+                          </td>
+                          <td className="px-4 py-3">
+                            <span className="rounded bg-zinc-100 px-1.5 py-0.5 text-[10px] font-medium uppercase text-zinc-500 dark:bg-zinc-800 dark:text-zinc-400">
+                              {agent.kind}
+                            </span>
+                          </td>
+                          <td className="px-4 py-3 font-mono text-xs text-zinc-600 dark:text-zinc-400">
+                            {agent.endpoint}
+                          </td>
+                          <td className="px-4 py-3 text-right">
+                            <button
+                              onClick={() => startEdit(agent)}
+                              className="mr-2 text-xs font-medium text-blue-600 hover:underline dark:text-blue-400"
+                            >
+                              Edit
+                            </button>
+                            <button
+                              onClick={() => handleTestRow(agent)}
+                              disabled={rowTest.status === "loading"}
+                              className="mr-2 text-xs font-medium text-zinc-600 hover:underline disabled:opacity-50 dark:text-zinc-400"
+                              title={TEST_HELP}
+                            >
+                              {rowTest.status === "loading" ? "Testing..." : "Test"}
+                            </button>
+                            <button
+                              onClick={() => handleDelete(agent.id)}
+                              className="text-xs font-medium text-red-600 hover:underline dark:text-red-400"
+                            >
+                              Delete
+                            </button>
+                            <TestBadge result={rowTest} inline />
+                          </td>
+                        </tr>
+                      );
+                    })}
+                  </tbody>
+                </table>
+              </div>
+
+              {/* Mobile card list — stacked per agent. Hidden on desktop. */}
+              <ul className="space-y-3 md:hidden">
+                {agents.map((agent) => {
+                  const rowTest = rowTests[agent.id] ?? { status: "idle" };
+                  return (
+                    <li
+                      key={agent.id}
+                      className="rounded-xl border border-zinc-200 bg-white p-4 dark:border-zinc-800 dark:bg-zinc-950"
+                    >
+                      <div className="flex items-start justify-between gap-2">
+                        <div className="min-w-0">
+                          <p className="font-medium text-zinc-900 dark:text-zinc-50">
+                            {agent.name}
+                          </p>
+                          <p className="mt-0.5 font-mono text-xs text-zinc-500 dark:text-zinc-400">
+                            {agent.id}
+                          </p>
+                        </div>
+                        <span className="shrink-0 rounded bg-zinc-100 px-1.5 py-0.5 text-[10px] font-medium uppercase text-zinc-500 dark:bg-zinc-800 dark:text-zinc-400">
+                          {agent.kind}
+                        </span>
+                      </div>
+                      <p className="mt-2 truncate font-mono text-xs text-zinc-600 dark:text-zinc-400">
+                        {agent.endpoint}
+                      </p>
+                      <div className="mt-3 flex flex-wrap items-center gap-3">
+                        <button
+                          onClick={() => startEdit(agent)}
+                          className="text-xs font-medium text-blue-600 hover:underline dark:text-blue-400"
+                        >
+                          Edit
+                        </button>
+                        <button
+                          onClick={() => handleTestRow(agent)}
+                          disabled={rowTest.status === "loading"}
+                          className="text-xs font-medium text-zinc-600 hover:underline disabled:opacity-50 dark:text-zinc-400"
+                          title={TEST_HELP}
+                        >
+                          {rowTest.status === "loading" ? "Testing..." : "Test"}
+                        </button>
+                        <button
+                          onClick={() => handleDelete(agent.id)}
+                          className="text-xs font-medium text-red-600 hover:underline dark:text-red-400"
+                        >
+                          Delete
+                        </button>
+                        <TestBadge result={rowTest} inline />
+                      </div>
+                    </li>
+                  );
+                })}
+              </ul>
+            </>
           )}
         </section>
 

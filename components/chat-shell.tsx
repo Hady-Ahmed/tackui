@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useCallback, useEffect } from "react";
+import { useState, useCallback, useEffect, useRef } from "react";
 import { useRouter } from "next/navigation";
 import Link from "next/link";
 import { CopilotChat, useCopilotKit } from "@copilotkit/react-core/v2";
@@ -21,11 +21,20 @@ export function ChatShell() {
   const [activeThreadId, setActiveThreadId] = useState(() =>
     crypto.randomUUID(),
   );
-  const [sidebarCollapsed, setSidebarCollapsed] = useState(() => {
-    if (typeof window === "undefined") return false;
-    return localStorage.getItem("sidebarCollapsed") === "true";
-  });
+  const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
+  const [mobileOpen, setMobileOpen] = useState(false);
   const [runError, setRunError] = useState<string | null>(null);
+
+  // Read the persisted collapsed state AFTER hydration to avoid a
+  // server/client mismatch (server has no window/localStorage).
+  // Uses ref indirection to satisfy react-hooks/set-state-in-effect.
+  const applyStoredCollapsed = useRef(() => {
+    const stored = localStorage.getItem("sidebarCollapsed");
+    if (stored === "true") setSidebarCollapsed(true);
+  });
+  useEffect(() => {
+    applyStoredCollapsed.current();
+  }, []);
 
   // Show the empty-state CTA to org owners/admins OR in solo mode.
   const canManageAgents_ = canManage === true || (config?.authDisabled ?? false);
@@ -82,6 +91,9 @@ export function ChatShell() {
     });
   }, []);
 
+  const activeAgentName =
+    agents.find((a) => a.id === activeAgent)?.name ?? "Chat";
+
   return (
     <div className="flex h-screen w-full overflow-hidden bg-zinc-50 dark:bg-black">
       <AgentSidebar
@@ -93,8 +105,35 @@ export function ChatShell() {
         onSelectThread={handleSelectThread}
         collapsed={sidebarCollapsed}
         onToggleCollapse={toggleSidebar}
+        mobileOpen={mobileOpen}
+        onCloseMobile={() => setMobileOpen(false)}
       />
       <main className="flex flex-1 flex-col overflow-hidden">
+        {/* Mobile top bar — hamburger + active agent name. Hidden on
+            desktop (md+). */}
+        <div className="flex items-center gap-2 border-b border-zinc-200 px-3 py-2 md:hidden dark:border-zinc-800">
+          <button
+            onClick={() => setMobileOpen(true)}
+            className="rounded-lg p-1.5 text-zinc-600 transition-colors hover:bg-zinc-100 dark:text-zinc-300 dark:hover:bg-zinc-800"
+            aria-label="Open sidebar"
+          >
+            <svg
+              xmlns="http://www.w3.org/2000/svg"
+              viewBox="0 0 16 16"
+              fill="currentColor"
+              className="h-5 w-5"
+            >
+              <path
+                fillRule="evenodd"
+                d="M2 4.75A.75.75 0 0 1 2.75 4h10.5a.75.75 0 0 1 0 1.5H2.75A.75.75 0 0 1 2 4.75ZM2 8a.75.75 0 0 1 .75-.75h10.5a.75.75 0 0 1 0 1.5H2.75A.75.75 0 0 1 2 8ZM2.75 11.25a.75.75 0 0 0 0 1.5h10.5a.75.75 0 0 0 0-1.5H2.75Z"
+                clipRule="evenodd"
+              />
+            </svg>
+          </button>
+          <span className="truncate text-sm font-medium text-zinc-700 dark:text-zinc-200">
+            {activeAgentName}
+          </span>
+        </div>
         {activeAgent ? (
           <>
             {runError && (

@@ -1,6 +1,7 @@
 "use client";
 
 import { useState, useRef, useEffect } from "react";
+import { createPortal } from "react-dom";
 import { useRouter } from "next/navigation";
 import { authClient } from "@/lib/auth/auth-client";
 import { useAuthConfig } from "@/lib/auth/use-auth-config";
@@ -12,7 +13,7 @@ import { InviteDialog } from "@/components/invite-dialog";
 import { UpgradeDialog } from "@/components/upgrade-dialog";
 import { NewWorkspaceDialog } from "@/components/new-workspace-dialog";
 
-export function AccountMenu() {
+export function AccountMenu({ collapsed = false }: { collapsed?: boolean } = {}) {
   const { data: session, isPending } = authClient.useSession();
   const { config } = useAuthConfig();
   const { billing } = useBilling();
@@ -23,7 +24,9 @@ export function AccountMenu() {
   const [inviteOpen, setInviteOpen] = useState(false);
   const [upgradeOpen, setUpgradeOpen] = useState(false);
   const [newWorkspaceOpen, setNewWorkspaceOpen] = useState(false);
+  const [popupPos, setPopupPos] = useState<{ left: number; bottom: number } | null>(null);
   const ref = useRef<HTMLDivElement>(null);
+  const btnRef = useRef<HTMLButtonElement>(null);
 
   useEffect(() => {
     function onClick(e: MouseEvent) {
@@ -53,6 +56,15 @@ export function AccountMenu() {
   if (!session && config?.authDisabled) {
     const synth = config.user;
     const initials = (synth?.name || "?").charAt(0).toUpperCase();
+    if (collapsed) {
+      return (
+        <div className="flex h-9 w-9 items-center justify-center" title={synth?.name ?? "Local user"}>
+          <div className="flex h-8 w-8 shrink-0 items-center justify-center rounded-full bg-blue-600 text-sm font-medium text-white">
+            {initials}
+          </div>
+        </div>
+      );
+    }
     return (
       <div className="rounded-lg px-2 py-1.5">
         <div className="flex w-full items-center gap-2">
@@ -87,31 +99,54 @@ export function AccountMenu() {
     .charAt(0)
     .toUpperCase();
 
+  const handleToggle = () => {
+    if (!open && collapsed && btnRef.current) {
+      const rect = btnRef.current.getBoundingClientRect();
+      setPopupPos({ left: rect.right + 8, bottom: window.innerHeight - rect.top + 4 });
+    }
+    setOpen((v) => !v);
+  };
+
+  const popupClassName = collapsed
+    ? "fixed z-50 w-64 rounded-lg border border-zinc-200 bg-white py-1 shadow-lg dark:border-zinc-800 dark:bg-zinc-950"
+    : "absolute bottom-full left-0 right-0 mb-1 rounded-lg border border-zinc-200 bg-white py-1 shadow-lg dark:border-zinc-800 dark:bg-zinc-950";
+  const popupStyle = collapsed && popupPos ? { left: popupPos.left, bottom: popupPos.bottom } : undefined;
+
   return (
     <div ref={ref} className="relative">
       <button
-        onClick={() => setOpen((v) => !v)}
-        className="flex w-full items-center gap-2 rounded-lg px-2 py-1.5 text-left transition-colors hover:bg-zinc-100 dark:hover:bg-zinc-800"
+        ref={btnRef}
+        onClick={handleToggle}
+        className={`${collapsed ? "flex h-9 w-9 items-center justify-center" : "flex w-full items-center gap-2 px-2 py-1.5"} rounded-lg text-left transition-colors hover:bg-zinc-100 dark:hover:bg-zinc-800`}
+        title={collapsed ? session.user.name : undefined}
+        aria-label={collapsed ? session.user.name : undefined}
       >
         <div className="flex h-8 w-8 shrink-0 items-center justify-center rounded-full bg-blue-600 text-sm font-medium text-white">
           {initials}
         </div>
-        <div className="min-w-0 flex-1">
-          <p className="truncate text-sm font-medium text-zinc-900 dark:text-zinc-50">
-            {session.user.name}
-          </p>
-          <p className="truncate text-xs text-zinc-400">
-            {session.user.email}
-          </p>
-        </div>
+        {!collapsed && (
+          <div className="min-w-0 flex-1">
+            <p className="truncate text-sm font-medium text-zinc-900 dark:text-zinc-50">
+              {session.user.name}
+            </p>
+            <p className="truncate text-xs text-zinc-400">
+              {session.user.email}
+            </p>
+          </div>
+        )}
       </button>
 
-      <InviteDialog open={inviteOpen} onClose={() => setInviteOpen(false)} />
-      <UpgradeDialog open={upgradeOpen} onClose={() => setUpgradeOpen(false)} />
-      <NewWorkspaceDialog open={newWorkspaceOpen} onClose={() => setNewWorkspaceOpen(false)} />
+      {createPortal(
+        <>
+          <InviteDialog open={inviteOpen} onClose={() => setInviteOpen(false)} />
+          <UpgradeDialog open={upgradeOpen} onClose={() => setUpgradeOpen(false)} />
+          <NewWorkspaceDialog open={newWorkspaceOpen} onClose={() => setNewWorkspaceOpen(false)} />
+        </>,
+        document.body,
+      )}
 
       {open && (
-        <div className="absolute bottom-full left-0 right-0 mb-1 rounded-lg border border-zinc-200 bg-white py-1 shadow-lg dark:border-zinc-800 dark:bg-zinc-950">
+        <div className={popupClassName} style={popupStyle}>
           <div className="px-1 py-1">
             <OrgSwitcher />
           </div>
