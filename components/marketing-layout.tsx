@@ -1,6 +1,7 @@
 import Link from "next/link";
 import { getCurrentUser } from "@/lib/auth/context";
 import { BILLING_ENABLED } from "@/lib/config/saas";
+import { ThemeToggle } from "./theme-toggle";
 
 /**
  * Shared layout for SaaS marketing pages (landing, pricing, terms, privacy).
@@ -50,6 +51,7 @@ export async function MarketingLayout({
             >
               Privacy
             </Link>
+            <ThemeToggle collapsed />
             {user ? (
               <Link
                 href="/app"
@@ -75,7 +77,8 @@ export async function MarketingLayout({
             )}
           </nav>
           {/* Mobile nav — compact CTA only (Terms/Privacy/Pricing are in the footer) */}
-          <nav className="md:hidden">
+          <nav className="flex items-center gap-2 md:hidden">
+            <ThemeToggle collapsed />
             {user ? (
               <Link
                 href="/app"
