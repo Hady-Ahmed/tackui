@@ -11,9 +11,14 @@ const isProd = process.env.NODE_ENV === "production";
 // - connect-src 'self' + https + data (CopilotKit SSE is same-origin via
 //   /api/copilotkit; https covers any future CDN fetches)
 // - frame-ancestors 'none' — prevents clickjacking (nobody can iframe us)
+// - Optional: when NEXT_PUBLIC_UMAMI_URL is set (build time), its origin is
+//   added to script-src so the tracker script can load cross-origin.
+const umamiUrl = process.env.NEXT_PUBLIC_UMAMI_URL;
+const umamiOrigin = umamiUrl ? new URL(umamiUrl).origin : null;
+
 const csp = [
   "default-src 'self'",
-  `script-src 'self' 'unsafe-inline'${isDev ? " 'unsafe-eval'" : ""}`,
+  `script-src 'self' 'unsafe-inline'${isDev ? " 'unsafe-eval'" : ""}${umamiOrigin ? ` ${umamiOrigin}` : ""}`,
   "style-src 'self' 'unsafe-inline'",
   "img-src 'self' data: blob: https:",
   "font-src 'self' data:",
