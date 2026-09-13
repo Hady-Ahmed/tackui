@@ -19,7 +19,7 @@ export default async function PrivacyPage() {
     <MarketingLayout>
       <div className="py-16">
         <h1 className="text-3xl font-semibold tracking-tight">Privacy Policy</h1>
-        <p className="mt-2 text-sm text-zinc-500">Last updated: {new Date().getFullYear()}</p>
+        <p className="mt-2 text-sm text-zinc-500">Last updated: September 2026</p>
 
         <div className="mt-10 space-y-8">
           <section>
