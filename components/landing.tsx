@@ -104,7 +104,7 @@ export async function Landing() {
   return (
     <MarketingLayout>
       {/* ─── Hero ─────────────────────────────────────────────── */}
-      <section className="relative flex flex-col items-center overflow-hidden py-24 text-center">
+      <section className="relative flex flex-col items-center overflow-hidden py-16 text-center md:py-24">
         {/* Radial glow — subtle blue blur behind the headline */}
         <div
           className="animate-pulse-glow pointer-events-none absolute top-0 left-1/2 h-[400px] w-[600px] -translate-x-1/2 rounded-full bg-blue-500/10 blur-[120px]"
@@ -127,7 +127,7 @@ export async function Landing() {
           </div>
 
           {/* Headline with gradient text */}
-          <h1 className="max-w-3xl bg-gradient-to-b from-zinc-900 to-zinc-600 bg-clip-text text-5xl font-semibold tracking-tight text-transparent sm:text-6xl dark:from-white dark:to-zinc-400">
+          <h1 className="max-w-3xl bg-gradient-to-b from-zinc-900 to-zinc-600 bg-clip-text text-4xl font-semibold tracking-tight text-transparent sm:text-5xl md:text-6xl dark:from-white dark:to-zinc-400">
             One frontend for every AG-UI agent
           </h1>
 
@@ -137,7 +137,7 @@ export async function Landing() {
             stream tokens, approve interrupts, visualize tool calls.
           </p>
 
-          <div className="mt-8 flex items-center gap-3">
+          <div className="mt-8 flex flex-col items-center gap-3 sm:flex-row">
             <Link
               href="/signup"
               className="rounded-xl bg-blue-600 px-6 py-3 font-medium text-white shadow-lg shadow-blue-600/20 transition-all hover:bg-blue-700 hover:shadow-blue-600/30"
@@ -216,7 +216,7 @@ export async function Landing() {
       )}
 
       {/* ─── Final CTA ───────────────────────────────────────── */}
-      <section className="relative flex flex-col items-center overflow-hidden py-24 text-center">
+      <section className="relative flex flex-col items-center overflow-hidden py-16 text-center md:py-24">
         <div
           className="pointer-events-none absolute top-1/2 left-1/2 h-[300px] w-[500px] -translate-x-1/2 -translate-y-1/2 rounded-full bg-blue-500/5 blur-[100px]"
           aria-hidden
