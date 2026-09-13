@@ -460,7 +460,7 @@ export async function Landing() {
               Get started — free
             </Link>
             <a
-              href="https://github.com/"
+              href="https://github.com/Hady-Ahmed/tackui"
               target="_blank"
               rel="noreferrer"
               className="rounded-xl border border-zinc-300 px-6 py-3 font-medium text-zinc-700 transition-all hover:border-zinc-400 hover:bg-zinc-50 dark:border-zinc-700 dark:text-zinc-300 dark:hover:border-zinc-600 dark:hover:bg-zinc-900"

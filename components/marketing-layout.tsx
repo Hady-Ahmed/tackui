@@ -113,7 +113,7 @@ export async function MarketingLayout({
               Privacy
             </Link>
             <a
-              href="https://github.com/"
+              href="https://github.com/Hady-Ahmed/tackui"
               target="_blank"
               rel="noreferrer"
               className="hover:text-zinc-700 dark:hover:text-zinc-300"

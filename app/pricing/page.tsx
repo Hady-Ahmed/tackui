@@ -123,7 +123,7 @@ export default async function PricingPage() {
           <p>
             Prefer to host it yourself?{" "}
             <a
-              href="https://github.com/"
+              href="https://github.com/Hady-Ahmed/tackui"
               target="_blank"
               rel="noreferrer"
               className="text-blue-600 hover:underline dark:text-blue-400"
