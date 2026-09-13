@@ -31,7 +31,7 @@ const TRUSTED_PROXY_HOPS = Math.max(
 // visitors can read the marketing site. Self-host mode keeps `/` gated (it
 // IS the chat app, auth-required).
 const AUTH_ROUTES = ["/login", "/signup", "/verify-email", "/forgot-password", "/reset-password"];
-const SAAS_PUBLIC_ROUTES = ["/", "/terms", "/privacy"];
+const SAAS_PUBLIC_ROUTES = ["/", "/terms", "/privacy", "/pricing"];
 const PUBLIC_ROUTES = SAAS_MODE
   ? [...AUTH_ROUTES, ...SAAS_PUBLIC_ROUTES]
   : AUTH_ROUTES;
