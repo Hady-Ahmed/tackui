@@ -443,7 +443,7 @@ export async function Landing() {
 
           {/* Headline with gradient text */}
           <h1 className="max-w-3xl bg-gradient-to-b from-zinc-900 via-zinc-700 to-zinc-600 bg-clip-text text-4xl font-semibold tracking-tight text-transparent sm:text-5xl md:text-6xl dark:from-white dark:via-zinc-200 dark:to-blue-300">
-            One frontend for every AG-UI agent
+            One frontend for every <span className="whitespace-nowrap">AG-UI</span> agent
           </h1>
 
           <p className="mt-6 max-w-xl text-lg leading-relaxed text-zinc-600 dark:text-zinc-400">
@@ -604,7 +604,7 @@ export async function Landing() {
           />
           <div className="relative">
             <h2 className="bg-gradient-to-b from-zinc-900 to-zinc-600 bg-clip-text text-3xl font-semibold tracking-tight text-transparent sm:text-4xl dark:from-white dark:to-blue-300">
-              Start building with AG-UI today
+              Start building with <span className="whitespace-nowrap">AG-UI</span> today
             </h2>
             <p className="mt-4 text-zinc-600 dark:text-zinc-400">
               Connect your first agent in under two minutes. Free forever for
