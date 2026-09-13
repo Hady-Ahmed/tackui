@@ -85,8 +85,8 @@ export default async function TermsPage() {
           <section>
             <h2 className="text-xl font-semibold">7. Termination</h2>
             <p className="mt-3 leading-relaxed text-zinc-600 dark:text-zinc-400">
-              You may delete your account at any time. We may suspend or terminate
-              accounts that violate these Terms.
+              You may request account deletion at any time by contacting us. We
+              may suspend or terminate accounts that violate these Terms.
             </p>
           </section>
 

@@ -69,8 +69,9 @@ export default async function PrivacyPage() {
             <p className="mt-3 leading-relaxed text-zinc-600 dark:text-zinc-400">
               We retain your conversation history for as long as your account is
               active. You can delete individual conversations at any time from the
-              sidebar. Deleting your account removes your data within 30 days, except
-              where retention is required by law.
+              sidebar. To delete your account and associated data, contact us — we
+              will process your request within 30 days, except where retention is
+              required by law.
             </p>
           </section>
 
@@ -87,7 +88,7 @@ export default async function PrivacyPage() {
             <h2 className="text-xl font-semibold">6. Security</h2>
             <p className="mt-3 leading-relaxed text-zinc-600 dark:text-zinc-400">
               We use industry-standard measures: encrypted connections (TLS),
-              hashed credentials, per-tenant data isolation, SSRF protection, and
+              hashed credentials, per-organization data isolation at the application layer, SSRF protection, and
               rate limiting. No method is perfectly secure, but we work to protect
               your data.
             </p>
