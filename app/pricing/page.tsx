@@ -106,10 +106,10 @@ export default async function PricingPage() {
                 </ul>
                 <Link
                   href={href}
-                  className={`mt-6 block rounded-lg px-4 py-2 text-center text-sm font-medium transition-colors ${
+                  className={`mt-6 block rounded-lg px-4 py-2 text-center text-sm font-medium transition-all ${
                     isFree && !user
-                      ? "border border-zinc-300 text-zinc-700 hover:bg-zinc-100 dark:border-zinc-700 dark:text-zinc-300 dark:hover:bg-zinc-800"
-                      : "bg-zinc-900 text-white hover:bg-zinc-700 dark:bg-white dark:text-zinc-900 dark:hover:bg-zinc-200"
+                      ? "border border-zinc-300 text-zinc-700 hover:bg-zinc-100 dark:border-zinc-700 dark:text-zinc-300 dark:hover:bg-zinc-800 active:scale-[0.98]"
+                      : "bg-zinc-900 text-white hover:bg-zinc-700 dark:bg-white dark:text-zinc-900 dark:hover:bg-zinc-200 active:scale-[0.98]"
                   }`}
                 >
                   {label}

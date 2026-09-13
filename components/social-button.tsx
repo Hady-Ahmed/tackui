@@ -88,7 +88,7 @@ export function SocialButton({
   return (
     <button
       onClick={onClick}
-      className="flex w-full items-center justify-center gap-2.5 rounded-lg border border-zinc-200 px-4 py-2 text-sm font-medium text-zinc-700 transition-colors hover:bg-zinc-100 dark:border-zinc-700 dark:text-zinc-300 dark:hover:bg-zinc-800"
+      className="flex w-full items-center justify-center gap-2.5 rounded-lg border border-zinc-200 px-4 py-2 text-sm font-medium text-zinc-700 transition-all hover:bg-zinc-100 dark:border-zinc-700 dark:text-zinc-300 dark:hover:bg-zinc-800 active:scale-[0.98]"
     >
       {PROVIDER_ICONS[provider]}
       {label}

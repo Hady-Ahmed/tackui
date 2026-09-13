@@ -455,7 +455,7 @@ export async function Landing() {
           <div className="mt-8 flex flex-col items-center gap-3 sm:flex-row">
             <Link
               href="/signup"
-              className="rounded-xl bg-gradient-to-b from-blue-500 to-blue-600 px-6 py-3 font-medium text-white shadow-lg shadow-blue-600/25 transition-all hover:from-blue-600 hover:to-blue-700 hover:shadow-xl hover:shadow-blue-600/30"
+              className="rounded-xl bg-gradient-to-b from-blue-500 to-blue-600 px-6 py-3 font-medium text-white shadow-lg shadow-blue-600/25 transition-all hover:from-blue-600 hover:to-blue-700 hover:shadow-xl hover:shadow-blue-600/30 active:scale-[0.98]"
             >
               Get started — free
             </Link>
@@ -463,7 +463,7 @@ export async function Landing() {
               href="https://github.com/Hady-Ahmed/tackui"
               target="_blank"
               rel="noreferrer"
-              className="rounded-xl border border-zinc-300 px-6 py-3 font-medium text-zinc-700 transition-all hover:border-zinc-400 hover:bg-zinc-50 dark:border-zinc-700 dark:text-zinc-300 dark:hover:border-zinc-600 dark:hover:bg-zinc-900"
+              className="rounded-xl border border-zinc-300 px-6 py-3 font-medium text-zinc-700 transition-all hover:border-zinc-400 hover:bg-zinc-50 dark:border-zinc-700 dark:text-zinc-300 dark:hover:border-zinc-600 dark:hover:bg-zinc-900 active:scale-[0.98]"
             >
               Self-host on GitHub
             </a>
@@ -582,7 +582,7 @@ export async function Landing() {
             </p>
             <Link
               href="/pricing"
-              className="mt-6 inline-block rounded-xl border border-zinc-300 px-6 py-3 font-medium text-zinc-700 transition-all hover:border-zinc-400 hover:bg-zinc-50 dark:border-zinc-700 dark:text-zinc-300 dark:hover:border-zinc-600 dark:hover:bg-zinc-900"
+              className="mt-6 inline-block rounded-xl border border-zinc-300 px-6 py-3 font-medium text-zinc-700 transition-all hover:border-zinc-400 hover:bg-zinc-50 dark:border-zinc-700 dark:text-zinc-300 dark:hover:border-zinc-600 dark:hover:bg-zinc-900 active:scale-[0.98]"
             >
               See plans
             </Link>
@@ -612,7 +612,7 @@ export async function Landing() {
             </p>
             <Link
               href="/signup"
-              className="mt-8 inline-block rounded-xl bg-gradient-to-b from-blue-500 to-blue-600 px-6 py-3 font-medium text-white shadow-lg shadow-blue-600/25 transition-all hover:from-blue-600 hover:to-blue-700 hover:shadow-xl hover:shadow-blue-600/30"
+              className="mt-8 inline-block rounded-xl bg-gradient-to-b from-blue-500 to-blue-600 px-6 py-3 font-medium text-white shadow-lg shadow-blue-600/25 transition-all hover:from-blue-600 hover:to-blue-700 hover:shadow-xl hover:shadow-blue-600/30 active:scale-[0.98]"
             >
               Get started — free
             </Link>
