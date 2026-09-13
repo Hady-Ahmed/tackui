@@ -5,11 +5,13 @@
 :root {
   --background: #ffffff;
   --foreground: #171717;
+  --grid-color: rgba(0, 0, 0, 0.04);
 }
 
 .dark {
   --background: #0a0a0a;
   --foreground: #ededed;
+  --grid-color: rgba(255, 255, 255, 0.045);
 }
 
 @theme inline {
@@ -27,6 +29,26 @@ body {
   background: var(--background);
   color: var(--foreground);
   font-family: var(--font-geist-sans), Arial, Helvetica, sans-serif;
+}
+
+/* Dot-grid background for hero sections — fades out at edges via mask */
+.hero-grid {
+  background-image: radial-gradient(
+    circle,
+    var(--grid-color) 1px,
+    transparent 1px
+  );
+  background-size: 28px 28px;
+  -webkit-mask-image: radial-gradient(
+    ellipse 75% 70% at 50% 25%,
+    black 15%,
+    transparent 75%
+  );
+  mask-image: radial-gradient(
+    ellipse 75% 70% at 50% 25%,
+    black 15%,
+    transparent 75%
+  );
 }
 
 @keyframes fade-in-up {
