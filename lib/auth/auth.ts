@@ -140,6 +140,16 @@ export const auth = betterAuth({
       sameSite: "lax" as const,
       secure: process.env.NODE_ENV === "production",
     },
+    ipAddress: {
+      // CF-Connecting-IP is set by Cloudflare to the real client IP and
+      // passes through Railway's proxy untouched. X-Forwarded-For is the
+      // fallback (used when Cloudflare is not in front). This matches the
+      // resolution order in proxy.ts getClientIp(). Without this config,
+      // Better Auth cannot determine the client IP and falls back to a
+      // single shared rate-limit bucket — effectively disabling per-IP
+      // rate limiting on sign-in/sign-up.
+      ipAddressHeaders: ["cf-connecting-ip", "x-forwarded-for"],
+    },
   },
   emailAndPassword: {
     enabled: true,
