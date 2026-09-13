@@ -320,6 +320,8 @@ See [`.env.example`](.env.example) for the full list with comments.
 | `NEXT_PUBLIC_SENTRY_DSN` | No | Sentry DSN for client-side error tracking (public, exposed to browser). No-op if unset. |
 | `SENTRY_TRACES_SAMPLE_RATE` | No | Transaction trace sampling rate, 0.0–1.0 (default: 0.1). Set to 0 to disable. |
 | `NEXT_PUBLIC_SENTRY_TRACES_SAMPLE_RATE` | No | Client-side trace sampling rate (default: 0.1). |
+| `NEXT_PUBLIC_UMAMI_URL` | No | Base URL of a self-hosted Umami analytics instance (e.g. `https://analytics.yourdomain.com`). No-op if unset. |
+| `NEXT_PUBLIC_UMAMI_WEBSITE_ID` | No | Umami website ID for page-view tracking. No-op if unset. |
 | `GOOGLE_CLIENT_ID` / `GOOGLE_CLIENT_SECRET` | No | Google OAuth provider |
 | `GITHUB_CLIENT_ID` / `GITHUB_CLIENT_SECRET` | No | GitHub OAuth provider |
 | `OIDC_CLIENT_ID` / `OIDC_CLIENT_SECRET` / `OIDC_ISSUER` | No | External OIDC SSO (Keycloak, Authentik, Okta, Entra, etc.) |
@@ -399,6 +401,15 @@ The app integrates [Sentry](https://sentry.io) via `@sentry/nextjs` for automati
 - `SENTRY_TRACES_SAMPLE_RATE` / `NEXT_PUBLIC_SENTRY_TRACES_SAMPLE_RATE` — transaction trace sampling (default: 0.1 = 10%). Set to 0 to disable performance traces.
 
 Error boundaries (`app/error.tsx` + `app/global-error.tsx`) call `Sentry.captureException` before rendering the fallback UI, so render crashes are captured even if the user doesn't report them.
+
+### Analytics
+
+The app supports optional [Umami](https://umami.is) analytics — a cookieless, privacy-friendly, self-hostable analytics tool. It's **completely optional** — if `NEXT_PUBLIC_UMAMI_URL` and `NEXT_PUBLIC_UMAMI_WEBSITE_ID` are not set, no tracking script loads and no data is collected. Both are build-time variables (`NEXT_PUBLIC_*` prefix) — they're inlined into the client bundle at build time and require a rebuild to change.
+
+- `NEXT_PUBLIC_UMAMI_URL` — base URL of your Umami instance (e.g. `https://analytics.yourdomain.com`)
+- `NEXT_PUBLIC_UMAMI_WEBSITE_ID` — website ID from your Umami dashboard
+
+Self-host your own Umami instance (Docker image: `ghcr.io/umami-software/umami:postgresql-latest`) or skip these vars entirely. See [Umami docs](https://umami.is/docs) for setup.
 
 ### Known limitations (not yet implemented)
 

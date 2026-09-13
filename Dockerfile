@@ -31,6 +31,14 @@ ARG NEXT_PUBLIC_SENTRY_TRACES_SAMPLE_RATE="0.1"
 ENV NEXT_PUBLIC_SENTRY_DSN=$NEXT_PUBLIC_SENTRY_DSN
 ENV NEXT_PUBLIC_SENTRY_TRACES_SAMPLE_RATE=$NEXT_PUBLIC_SENTRY_TRACES_SAMPLE_RATE
 
+# Optional analytics (Umami). Same build-arg pattern as Sentry above.
+# Default to empty (no tracking script renders when unset, matching
+# app/layout.tsx's truthy guard on both vars).
+ARG NEXT_PUBLIC_UMAMI_URL=""
+ARG NEXT_PUBLIC_UMAMI_WEBSITE_ID=""
+ENV NEXT_PUBLIC_UMAMI_URL=$NEXT_PUBLIC_UMAMI_URL
+ENV NEXT_PUBLIC_UMAMI_WEBSITE_ID=$NEXT_PUBLIC_UMAMI_WEBSITE_ID
+
 RUN npm run build
 
 # ─── Stage 3: Runner ───────────────────────────────────────────────────────
