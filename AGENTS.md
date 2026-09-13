@@ -1061,3 +1061,6 @@ strategy it uses so users know whether server-side session storage is required.
   [Messages](https://docs.ag-ui.com/concepts/messages), and
   [Build a server](https://docs.ag-ui.com/quickstart/server) for the backend
   contract.
+- Commit messages follow [Conventional Commits](https://www.conventionalcommits.org/)
+  (`feat:`, `fix:`, `docs:`, `test:`, `chore:` with optional scope).
+  See CONTRIBUTING.md for examples.
