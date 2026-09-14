@@ -114,12 +114,12 @@ The first user to sign up becomes the admin.
 
 The bundled `docker-compose.yml` runs the app + Postgres with one command.
 Migrations run automatically on boot (via `instrumentation.ts`) — no manual
-`npm run migrate` needed.
+step needed.
 
 ### Solo mode (default)
 
 ```bash
-docker-compose up
+docker compose up
 ```
 
 Auth is disabled (`AUTH_DISABLED=true`). Everyone is the admin. Good for
@@ -130,7 +130,7 @@ local dev, trying the app, or single-user self-hosted deployments.
 ```bash
 BETTER_AUTH_SECRET=$(openssl rand -hex 32) \
 AUTH_DISABLED=false \
-docker-compose up
+docker compose up
 ```
 
 The first user to sign up becomes the admin. Configure social login providers
@@ -141,16 +141,16 @@ BETTER_AUTH_SECRET=$(openssl rand -hex 32) \
 AUTH_DISABLED=false \
 GITHUB_CLIENT_ID=your_id \
 GITHUB_CLIENT_SECRET=your_secret \
-docker-compose up
+docker compose up
 ```
 
 ### Data persistence
 
 Postgres data is stored in a named Docker volume (`pg_data`) and persists
-across `docker-compose down` + `up`. To wipe all data:
+across `docker compose down` + `up`. To wipe all data:
 
 ```bash
-docker-compose down -v
+docker compose down -v
 ```
 
 ### Updating
