@@ -3,7 +3,7 @@ import { runMigrations } from "../lib/db/migrate";
 async function main() {
   if (!process.env.DATABASE_URL) {
     console.error("DATABASE_URL is not set. Set it in your environment or .env.local.");
-    console.error("Example: postgres://user:pass@localhost:5432/agent_frontend");
+    console.error("Example: postgres://user:pass@localhost:5432/tackui");
     process.exit(1);
   }
 

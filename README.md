@@ -26,7 +26,7 @@ A unified frontend for custom agents speaking the [AG-UI protocol](https://docs.
 - **Test connection** — server-side reachability probe with sidebar status indicators
 - **Collapsible sidebar** — icon-only mode with smooth transition, persists across reloads
 - **Authentication** — email/password, Google, GitHub, and OIDC SSO (Keycloak, Authentik, Okta, Entra, etc.)
-- **Organizations** — every user gets a personal workspace on signup; agents and conversations are scoped to the workspace
+- **Organizations** — every user gets a personal workspace on signup; agents are scoped to the workspace (shared among members)
 - **Roles & user management** — admin/member roles, first user is admin, ban/unban, set roles
 - **Per-user scoping** — each user only sees their own conversations within their active workspace
 - **Email verification + password reset** — optional, via Resend. When enabled, accounts require email verification before sign-in.
@@ -44,13 +44,13 @@ A unified frontend for custom agents speaking the [AG-UI protocol](https://docs.
 ```bash
 mkdir tackui && cd tackui
 curl -fsSL https://raw.githubusercontent.com/Hady-Ahmed/tackui/main/docker-compose.yml -o docker-compose.yml
-docker compose up
+docker compose up -d
 ```
 
 Pulls the published image from GHCR — no source checkout, no local build.
 To update later: `docker compose pull && docker compose up -d`.
 
-> Note: `NEXT_PUBLIC_SENTRY_DSN` (client-side Sentry) is baked into the image at build time and can't be set on the prebuilt image. Server-side Sentry (`SENTRY_DSN`) works normally as a runtime variable. This only matters if you want client-side Sentry in your self-hosted deployment — everything else is identical.
+> Note: `NEXT_PUBLIC_*` vars (Sentry client, Umami analytics) are baked at build time — the prebuilt image can't enable them. See [Build-time vs runtime](#build-time-vs-runtime-environment-variables) below.
 
 ### Option B: Build from source (development / patches)
 
@@ -95,14 +95,16 @@ BETTER_AUTH_URL=http://localhost:3000
 # AUTH_DISABLED=true
 ```
 
-Migrations run automatically on boot — no manual `npm run migrate` needed.
-For local dev (without Docker), you can trigger them explicitly:
+Migrations run automatically on boot (via `instrumentation.ts`) — no manual
+step needed. This applies to both Docker and `npm run dev`.
+
+To run migrations standalone without starting the dev server:
 
 ```bash
-npm run dev
+npm run migrate
 ```
 
-The dev server boots, runs migrations against `DATABASE_URL`, and starts the app. The first user to sign up becomes the admin.
+The first user to sign up becomes the admin.
 
 > **Env changes require a restart.** Next.js reads `.env.local` at boot and does not hot-reload env vars. After editing `.env.local`, stop the dev server (`Ctrl+C`) and run `npm run dev` again.
 
@@ -179,14 +181,16 @@ APP_PORT=8080 docker compose up
 
 Next.js inlines any variable prefixed with `NEXT_PUBLIC_` into the client JavaScript bundle **at build time**. These cannot be supplied at runtime — once `next build` (or `docker build`) runs, the value is frozen in the generated `.next/static/chunks/*.js` files.
 
-This matters when deploying via Docker. The prebuilt image (`docker-compose.yml`) ships with client-side Sentry disabled — there is no way to inject `NEXT_PUBLIC_*` variables into it at runtime. To bake your own, build from source with `docker-compose.dev.yml`, which passes `NEXT_PUBLIC_SENTRY_DSN` and `NEXT_PUBLIC_SENTRY_TRACES_SAMPLE_RATE` as **build args**. Supply them in your shell before building:
+This matters when deploying via Docker. The prebuilt image (`docker-compose.yml`) ships with client-side Sentry and Umami analytics **disabled** — there is no way to inject `NEXT_PUBLIC_*` variables into it at runtime. To bake your own, build from source with `docker-compose.dev.yml`, which passes `NEXT_PUBLIC_SENTRY_DSN`, `NEXT_PUBLIC_SENTRY_TRACES_SAMPLE_RATE`, `NEXT_PUBLIC_UMAMI_URL`, and `NEXT_PUBLIC_UMAMI_WEBSITE_ID` as **build args**. Supply them in your shell before building:
 
 ```bash
 NEXT_PUBLIC_SENTRY_DSN=https://...@o123.ingest.sentry.io/456 \
+NEXT_PUBLIC_UMAMI_URL=https://analytics.yourdomain.com \
+NEXT_PUBLIC_UMAMI_WEBSITE_ID=your-website-id \
 docker compose -f docker-compose.dev.yml up --build
 ```
 
-Without them, client-side Sentry silently stays a no-op (`instrumentation-client.ts` guards on presence). Server-side Sentry (`SENTRY_DSN`, no prefix) is a runtime variable and can be changed with a container restart — no rebuild needed.
+Without them, client-side Sentry and Umami silently stay a no-op (`instrumentation-client.ts` guards on `SENTRY_DSN` presence; `app/layout.tsx` guards on both `UMAMI_URL` and `UMAMI_WEBSITE_ID` presence). Server-side Sentry (`SENTRY_DSN`, no prefix) is a runtime variable and can be changed with a container restart — no rebuild needed.
 
 All other environment variables (`DATABASE_URL`, `BETTER_AUTH_SECRET`, OAuth credentials, etc.) are runtime-only and can be rotated without rebuilding the image.
 
@@ -214,7 +218,7 @@ OAuth callback URLs follow the pattern `{BETTER_AUTH_URL}/api/auth/callback/{pro
 
 - **Admin** — can add/edit/delete agents, test connections, manage users (set roles, ban/unban). First user to sign up is automatically promoted to admin.
 - **User** — can chat with all agents and manage their own conversations. Cannot manage agents.
-- Use `npm run create-admin <email> <password> [name]` to create or promote an admin explicitly.
+- Existing admins can promote users via the **user management** panel on the `/agents` page (set role, ban/unban). To bootstrap an admin on a fresh database before the UI is accessible, use the CLI: `npm run create-admin <email> <password> [name]`.
 
 ### Account linking
 
@@ -319,7 +323,7 @@ See [`.env.example`](.env.example) for the full list with comments.
 | `SENTRY_DSN` | No | Sentry DSN for server-side error tracking. No-op if unset. |
 | `NEXT_PUBLIC_SENTRY_DSN` | No | Sentry DSN for client-side error tracking (public, exposed to browser). No-op if unset. |
 | `SENTRY_TRACES_SAMPLE_RATE` | No | Transaction trace sampling rate, 0.0–1.0 (default: 0.1). Set to 0 to disable. |
-| `NEXT_PUBLIC_SENTRY_TRACES_SAMPLE_RATE` | No | Client-side trace sampling rate (default: 0.1). |
+| `NEXT_PUBLIC_SENTRY_TRACES_SAMPLE_RATE` | No | Client-side trace sampling rate, 0.0–1.0 (default: 0.1). Set to 0 to disable (public, exposed to browser). |
 | `NEXT_PUBLIC_UMAMI_URL` | No | Base URL of a self-hosted Umami analytics instance (e.g. `https://analytics.yourdomain.com`). No-op if unset. |
 | `NEXT_PUBLIC_UMAMI_WEBSITE_ID` | No | Umami website ID for page-view tracking. No-op if unset. |
 | `GOOGLE_CLIENT_ID` / `GOOGLE_CLIENT_SECRET` | No | Google OAuth provider |
@@ -330,7 +334,7 @@ See [`.env.example`](.env.example) for the full list with comments.
 | `PG_POOL_MAX` | No | Max connections in the Postgres pool (default: `10`) |
 | `PG_CONNECT_TIMEOUT` | No | Postgres connection timeout in ms (default: `5000`) |
 | `POSTGRES_PASSWORD` | No (docker-compose only) | Postgres password (default: `postgres`) |
-| `POSTGRES_DB` | No (docker-compose only) | Postgres database name (default: `agent_frontend`) |
+| `POSTGRES_DB` | No (docker-compose only) | Postgres database name (default: `tackui`) |
 | `APP_PORT` | No (docker-compose only) | Host port to expose the app on (default: `3000`) |
 
 ## Security
@@ -424,7 +428,7 @@ These are documented for transparency and will be addressed in future releases:
 - [CopilotKit v2](https://copilotkit.ai) (AG-UI client + runtime)
 - [AG-UI Protocol](https://docs.ag-ui.com) (event-based agent communication)
 - [Better Auth](https://better-auth.com) (email/password, OAuth, OIDC SSO, admin roles, organizations)
-- Postgres (conversation persistence + agent registry + auth via `pg`)
+- [Postgres](https://www.postgresql.org) (conversation persistence + agent registry + auth via `pg`)
 - [Zod](https://zod.dev) (runtime validation)
 
 ## Development

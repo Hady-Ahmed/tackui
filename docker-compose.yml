@@ -4,7 +4,7 @@ services:
     environment:
       POSTGRES_USER: postgres
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-postgres}
-      POSTGRES_DB: ${POSTGRES_DB:-agent_frontend}
+      POSTGRES_DB: ${POSTGRES_DB:-tackui}
     volumes:
       - pg_data:/var/lib/postgresql/data
     healthcheck:
@@ -19,7 +19,7 @@ services:
     ports:
       - "${APP_PORT:-3000}:3000"
     environment:
-      DATABASE_URL: postgres://postgres:${POSTGRES_PASSWORD:-postgres}@db:5432/${POSTGRES_DB:-agent_frontend}
+      DATABASE_URL: postgres://postgres:${POSTGRES_PASSWORD:-postgres}@db:5432/${POSTGRES_DB:-tackui}
       PG_CONNECT_TIMEOUT: ${PG_CONNECT_TIMEOUT:-5000}
       PG_POOL_MAX: ${PG_POOL_MAX:-10}
       AUTH_DISABLED: ${AUTH_DISABLED:-true}
