@@ -239,6 +239,23 @@ Raw error messages are masked in the response (they can leak internal
 hostnames via DNS errors); the full error is logged server-side via
 `console.error("[reachability-probe] ...")`.
 
+### User identity forwarding
+
+For `agui` agents, the runtime injects the authenticated user's id into
+`input.forwardedProps.user_id` on every run (Agno's documented convention
+for anonymous-caller attribution — Agno's `/agui` interface reads
+`forwardedProps.user_id` to key per-user memory and sessions). This is
+done server-side in `lib/agents/registry.ts`: `getAgents(request)` already
+resolves the user per-request, and the constructed `HttpAgent` gets a
+`FunctionMiddleware` via `agent.use()` that enriches `forwardedProps`
+before forwarding to the backend. The value is the Better Auth user UUID
+(or `"local"` in solo mode), never trusting client-supplied identity.
+Client-supplied `forwardedProps` are preserved (spread, not overwritten).
+The middleware survives CopilotKit's per-run `agent.clone()` (the SDK's
+`clone()` copies the `middlewares` array). `langgraph` agents are
+unchanged. Auth-protected agents requiring per-user JWTs are a future
+feature.
+
 ### Security
 
 - **SSRF guard on agent create/edit** — `POST /api/agents` and `PATCH /api/agents/[id]`

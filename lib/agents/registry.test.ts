@@ -1,0 +1,204 @@
+import { describe, it, expect, vi, beforeEach } from "vitest";
+import type { AgentEntry } from "./agents.config";
+import type { RequestUser } from "@/lib/auth/request-context";
+
+// vi.mock factories are hoisted above all other code, so any values
+// they close over must be declared via vi.hoisted (also hoisted).
+const { testUser } = vi.hoisted(() => ({
+  testUser: {
+    id: "u-123",
+    role: "user",
+    name: "Test User",
+    email: "test@example.com",
+    orgId: "org-1",
+  } as RequestUser,
+}));
+
+// Mock getRequestUser so we don't depend on the session/DB layer.
+vi.mock("@/lib/auth/context", () => ({
+  getRequestUser: vi.fn().mockResolvedValue(testUser),
+}));
+
+// Mock listAgents so we don't touch the DB. We control entries per-test
+// via the mock's return value.
+vi.mock("./agent-store", () => ({
+  listAgents: vi.fn(),
+}));
+
+import { getAgents } from "./registry";
+import { listAgents } from "./agent-store";
+import { getRequestUser } from "@/lib/auth/context";
+
+const aguiEntry = (overrides: Partial<AgentEntry> = {}): AgentEntry => ({
+  id: "ag1",
+  name: "Agno Agent",
+  description: "test agui agent",
+  kind: "agui",
+  endpoint: "http://localhost:8001/agent",
+  orgId: "org-1",
+  ...overrides,
+});
+
+const langgraphEntry = (overrides: Partial<AgentEntry> = {}): AgentEntry => ({
+  id: "lg1",
+  name: "LangGraph Agent",
+  description: "test langgraph agent",
+  kind: "langgraph",
+  endpoint: "http://localhost:8123",
+  orgId: "org-1",
+  graphId: "agent",
+  ...overrides,
+});
+
+beforeEach(() => {
+  vi.mocked(listAgents).mockReset();
+  vi.mocked(getRequestUser).mockReset();
+  vi.mocked(getRequestUser).mockResolvedValue(testUser);
+});
+
+describe("getAgents", () => {
+  it("builds a map keyed by agent id for agui entries", async () => {
+    vi.mocked(listAgents).mockResolvedValue([
+      aguiEntry({ id: "a1" }),
+      aguiEntry({ id: "a2" }),
+    ]);
+    const map = await getAgents(new Request("http://localhost"));
+    expect(Object.keys(map).sort()).toEqual(["a1", "a2"]);
+  });
+
+  it("throws 'No agents configured' when the org has zero agents", async () => {
+    vi.mocked(listAgents).mockResolvedValue([]);
+    await expect(getAgents(new Request("http://localhost"))).rejects.toThrow(
+      /No agents configured/,
+    );
+  });
+
+  it("throws 'not authenticated' when getRequestUser returns null", async () => {
+    vi.mocked(getRequestUser).mockResolvedValue(null);
+    vi.mocked(listAgents).mockResolvedValue([aguiEntry()]);
+    await expect(getAgents(new Request("http://localhost"))).rejects.toThrow(
+      /not authenticated/,
+    );
+  });
+
+  it("injects forwardedProps.user_id for agui agents", async () => {
+    vi.mocked(listAgents).mockResolvedValue([aguiEntry({ id: "ag1" })]);
+    const map = await getAgents(new Request("http://localhost"));
+    const agent = map["ag1"];
+
+    // The injected FunctionMiddleware is the last entry in the agent's
+    // private middlewares array (after the SDK's backward-compat
+    // middlewares). Drive it with a stub `next` that captures the input.
+    const middlewares = (agent as unknown as {
+      middlewares: { run: (input: unknown, next: { run: (i: unknown) => unknown }) => unknown }[];
+    }).middlewares;
+    expect(middlewares.length).toBeGreaterThan(0);
+    const injected = middlewares[middlewares.length - 1];
+
+    const captured: { forwardedProps?: Record<string, unknown> } = {};
+    const stubNext = {
+      run: (input: typeof captured) => {
+        Object.assign(captured, input);
+        return { subscribe: () => {} }; // minimal fake observable
+      },
+    };
+
+    injected.run(
+      {
+        threadId: "t1",
+        runId: "r1",
+        messages: [],
+        tools: [],
+        context: [],
+        state: {},
+        forwardedProps: { existing: "keep" },
+      },
+      stubNext as never,
+    );
+
+    expect(captured.forwardedProps).toBeDefined();
+    expect(captured.forwardedProps?.user_id).toBe("u-123");
+    // Existing client-supplied forwardedProps are preserved, not overwritten.
+    expect(captured.forwardedProps?.existing).toBe("keep");
+  });
+
+  it("does not inject user_id into langgraph agents", async () => {
+    vi.mocked(listAgents).mockResolvedValue([langgraphEntry({ id: "lg1" })]);
+    const map = await getAgents(new Request("http://localhost"));
+    const agent = map["lg1"];
+
+    // LangGraphAgent has no use() middleware attached by our registry —
+    // its middlewares array (if any) is the SDK's own, none of which
+    // enrich forwardedProps with user_id. We assert the agent is not an
+    // HttpAgent with our injected FunctionMiddleware by checking that
+    // there is no middleware whose run() sets forwardedProps.user_id.
+    const middlewares = (agent as unknown as {
+      middlewares?: { run: (input: unknown, next: { run: (i: unknown) => unknown }) => unknown }[];
+    }).middlewares;
+
+    if (middlewares && middlewares.length > 0) {
+      for (const m of middlewares) {
+        const captured: { forwardedProps?: Record<string, unknown> } = {};
+        const stubNext = {
+          run: (input: typeof captured) => {
+            Object.assign(captured, input);
+            return { subscribe: () => {} };
+          },
+        };
+        try {
+          m.run(
+            {
+              threadId: "t1",
+              runId: "r1",
+              messages: [],
+              tools: [],
+              context: [],
+              state: {},
+              forwardedProps: {},
+            },
+            stubNext as never,
+          );
+        } catch {
+          // Some SDK middlewares may throw on stub input; that's fine —
+          // we only care that none of them set user_id.
+        }
+        expect(captured.forwardedProps?.user_id).toBeUndefined();
+      }
+    }
+  });
+
+  it("each agui agent gets its own middleware with the resolved user id", async () => {
+    vi.mocked(listAgents).mockResolvedValue([
+      aguiEntry({ id: "a1" }),
+      aguiEntry({ id: "a2" }),
+    ]);
+    const map = await getAgents(new Request("http://localhost"));
+
+    for (const id of ["a1", "a2"]) {
+      const agent = map[id];
+      const middlewares = (agent as unknown as {
+        middlewares: { run: (input: unknown, next: { run: (i: unknown) => unknown }) => unknown }[];
+      }).middlewares;
+      const injected = middlewares[middlewares.length - 1];
+      const captured: { forwardedProps?: Record<string, unknown> } = {};
+      injected.run(
+        {
+          threadId: "t1",
+          runId: "r1",
+          messages: [],
+          tools: [],
+          context: [],
+          state: {},
+          forwardedProps: {},
+        },
+        {
+          run: (input: typeof captured) => {
+            Object.assign(captured, input);
+            return { subscribe: () => {} };
+          },
+        } as never,
+      );
+      expect(captured.forwardedProps?.user_id).toBe("u-123");
+    }
+  });
+});
