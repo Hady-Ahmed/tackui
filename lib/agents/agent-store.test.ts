@@ -8,6 +8,7 @@ import {
   createAgentBodySchema,
   updateAgentBodySchema,
   generateAgentId,
+  toPublicAgent,
 } from "./agent-store";
 import type { CreateAgentInput } from "./agent-store";
 import { runMigrations } from "@/lib/db/migrate";
@@ -20,6 +21,7 @@ const validInput: CreateAgentInput = {
   description: "A test agent",
   kind: "agui",
   endpoint: "http://localhost:8000/agent",
+  authMode: "none",
 };
 
 async function cleanup() {
@@ -69,6 +71,38 @@ describe("createAgentBodySchema", () => {
       langsmithApiKey: "ls-xxx",
     });
     expect(result.success).toBe(true);
+  });
+
+  it("defaults authMode to 'none' when omitted", () => {
+    const result = createAgentBodySchema.safeParse(validInput);
+    expect(result.success).toBe(true);
+    expect(result.success && result.data.authMode).toBe("none");
+  });
+
+  it("accepts authMode 'jwt' with a ≥32-char jwtSecret", () => {
+    const result = createAgentBodySchema.safeParse({
+      ...validInput,
+      authMode: "jwt",
+      jwtSecret: "a".repeat(32),
+    });
+    expect(result.success).toBe(true);
+  });
+
+  it("rejects jwtSecret shorter than 32 chars", () => {
+    const result = createAgentBodySchema.safeParse({
+      ...validInput,
+      authMode: "jwt",
+      jwtSecret: "short",
+    });
+    expect(result.success).toBe(false);
+  });
+
+  it("rejects invalid authMode", () => {
+    const result = createAgentBodySchema.safeParse({
+      ...validInput,
+      authMode: "oauth",
+    });
+    expect(result.success).toBe(false);
   });
 
   it("rejects empty name", () => {
@@ -125,6 +159,66 @@ describe("createAgent", () => {
     }, TEST_ORG);
     expect(created.graphId).toBe("my-graph");
     expect(created.langsmithApiKey).toBe("ls-key");
+  });
+
+  it("stores authMode and jwtSecret", async () => {
+    const created = await createAgent({
+      ...validInput,
+      authMode: "jwt",
+      jwtSecret: "s".repeat(32),
+    }, TEST_ORG);
+    expect(created.authMode).toBe("jwt");
+    expect(created.jwtSecret).toBe("s".repeat(32));
+  });
+
+  it("defaults authMode to 'none' when not specified", async () => {
+    const created = await createAgent(validInput, TEST_ORG);
+    expect(created.authMode).toBe("none");
+    expect(created.jwtSecret).toBeUndefined();
+  });
+
+  it("toPublicAgent strips jwtSecret and langsmithApiKey, exposes booleans", async () => {
+    const created = await createAgent({
+      ...validInput,
+      authMode: "jwt",
+      jwtSecret: "s".repeat(32),
+      langsmithApiKey: "ls-key",
+    }, TEST_ORG);
+    const pub = toPublicAgent(created);
+    expect(pub.authMode).toBe("jwt");
+    expect(pub.hasJwtSecret).toBe(true);
+    expect(pub.hasLangsmithApiKey).toBe(true);
+    expect("jwtSecret" in pub).toBe(false);
+    expect("langsmithApiKey" in pub).toBe(false);
+  });
+
+  it("stores and retrieves jwtScopes as a comma-separated string", async () => {
+    const created = await createAgent({
+      ...validInput,
+      authMode: "jwt",
+      jwtSecret: "s".repeat(32),
+      jwtScopes: ["agents:run", "app:superadmin"],
+    }, TEST_ORG);
+    expect(created.jwtScopes).toEqual(["agents:run", "app:superadmin"]);
+
+    const fetched = await getAgent(created.id, TEST_ORG);
+    expect(fetched!.jwtScopes).toEqual(["agents:run", "app:superadmin"]);
+  });
+
+  it("toPublicAgent exposes jwtScopes as an array", async () => {
+    const created = await createAgent({
+      ...validInput,
+      authMode: "jwt",
+      jwtSecret: "s".repeat(32),
+      jwtScopes: ["agents:run"],
+    }, TEST_ORG);
+    const pub = toPublicAgent(created);
+    expect(pub.jwtScopes).toEqual(["agents:run"]);
+  });
+
+  it("defaults jwtScopes to undefined when not specified", async () => {
+    const created = await createAgent(validInput, TEST_ORG);
+    expect(created.jwtScopes).toBeUndefined();
   });
 
   it("generates distinct ids for two creates in the same org", async () => {
@@ -233,6 +327,67 @@ describe("updateAgent", () => {
   it("does not throw on missing id — returns null cleanly", async () => {
     const result = await updateAgent("totally-missing", { name: "X" }, TEST_ORG);
     expect(result).toBeNull();
+  });
+
+  it("preserves jwtSecret when patch omits it (blank-preserve)", async () => {
+    const secret = "s".repeat(32);
+    const created = await createAgent({
+      ...validInput,
+      authMode: "jwt",
+      jwtSecret: secret,
+    }, TEST_ORG);
+    // Patch name only — jwtSecret not in patch → existing value kept
+    const updated = await updateAgent(created.id, { name: "Renamed" }, TEST_ORG);
+    expect(updated!.authMode).toBe("jwt");
+    expect(updated!.jwtSecret).toBe(secret);
+  });
+
+  it("overwrites jwtSecret when patch provides a new value", async () => {
+    const created = await createAgent({
+      ...validInput,
+      authMode: "jwt",
+      jwtSecret: "s".repeat(32),
+    }, TEST_ORG);
+    const newSecret = "t".repeat(40);
+    const updated = await updateAgent(created.id, { jwtSecret: newSecret }, TEST_ORG);
+    expect(updated!.jwtSecret).toBe(newSecret);
+  });
+
+  it("updates authMode from none to jwt", async () => {
+    const created = await createAgent(validInput, TEST_ORG);
+    expect(created.authMode).toBe("none");
+    const updated = await updateAgent(created.id, {
+      authMode: "jwt",
+      jwtSecret: "x".repeat(32),
+    }, TEST_ORG);
+    expect(updated!.authMode).toBe("jwt");
+    expect(updated!.jwtSecret).toBe("x".repeat(32));
+  });
+
+  it("updates jwtScopes", async () => {
+    const created = await createAgent({
+      ...validInput,
+      authMode: "jwt",
+      jwtSecret: "s".repeat(32),
+      jwtScopes: ["agents:run"],
+    }, TEST_ORG);
+    const updated = await updateAgent(created.id, {
+      jwtScopes: ["agents:run", "app:superadmin"],
+    }, TEST_ORG);
+    expect(updated!.jwtScopes).toEqual(["agents:run", "app:superadmin"]);
+  });
+
+  it("clears jwtScopes when patch sends an empty array", async () => {
+    const created = await createAgent({
+      ...validInput,
+      authMode: "jwt",
+      jwtSecret: "s".repeat(32),
+      jwtScopes: ["agents:run", "app:superadmin"],
+    }, TEST_ORG);
+    expect(created.jwtScopes).toEqual(["agents:run", "app:superadmin"]);
+    // Empty array = "remove all scopes" (not blank-preserve like jwtSecret)
+    const updated = await updateAgent(created.id, { jwtScopes: [] }, TEST_ORG);
+    expect(updated!.jwtScopes).toBeUndefined();
   });
 });
 

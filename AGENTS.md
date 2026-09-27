@@ -96,8 +96,8 @@ app/
 lib/
   agents/
     agents.config.ts           # AgentEntry / AgentKind / PublicAgent types (no runtime config)
-    agent-store.ts             # Async CRUD for agents table (zod-validated, pg.Pool-backed) + generateAgentId (random 12-char hex) + toPublicAgent/toPublicAgents (strips langsmithApiKey)
-    registry.ts                # getAgents() factory — reads DB, builds agents map (async)
+    agent-store.ts             # Async CRUD for agents table (zod-validated, pg.Pool-backed) + generateAgentId (random 12-char hex) + toPublicAgent/toPublicAgents (strips langsmithApiKey + jwtSecret)
+    registry.ts                # getAgents() factory — reads DB, builds agents map (async) + per-agent JWT minting (HS256, sub=user.id) for agui agents with authMode "jwt"
     pg-runner.ts               # PostgresAgentRunner — AgentRunner impl with thread endpoints + smart-replay connect() (RUN_ERROR filtering) + in-memory cache bridging sync interface to async PG
     runner-instance.ts         # Shared runner singleton (used by runtime + thread API)
   auth/
@@ -116,6 +116,8 @@ lib/
       0002_org_id_not_null.sql  # Makes org_id NOT NULL (wipe-and-restart for existing deploys)
       0003_agent_id_org_scoped.sql # Composite PK (id, org_id) — same id can exist in different orgs
       0004_subscriptions.sql    # SaaS subscriptions table (org_id PK, plan/status/seats, Stripe IDs) — SaaS-only, inert on self-host
+      0006_agent_auth.sql       # Per-agent JWT auth (auth_mode + jwt_secret columns on agents) — defaults to 'none', inert on existing agents
+      0007_agent_jwt_scopes.sql # Optional JWT scopes claim (jwt_scopes column on agents) — nullable, only set when backend has authorization=True
   config/
     saas.ts                     # SAAS_MODE / BILLING_ENABLED / SSRF_GUARD_FORCE_ON / SSRF_REJECTION_MESSAGE flags (module-load consts)
     saas.test.ts                # 5 tests — flag combinations across modes
@@ -204,7 +206,10 @@ Via the admin UI (`/agents` page → "Add agent" form) or `POST /api/agents` wit
 }
 ```
 
-Optional fields: `graphId` (langgraph only), `langsmithApiKey` (langgraph only).
+Optional fields: `graphId` (langgraph only), `langsmithApiKey` (langgraph only),
+`authMode` (agui only, defaults to `"none"`), `jwtSecret` (agui only, required when
+`authMode` is `"jwt"`, ≥32 chars), `jwtScopes` (agui only, optional `string[]` —
+only when the backend has `authorization=True` enabled).
 
 `id` is **server-generated** (12-char random hex) — never send it in the
 POST body. The response includes the generated `id`, which you use in
@@ -253,8 +258,53 @@ before forwarding to the backend. The value is the Better Auth user UUID
 Client-supplied `forwardedProps` are preserved (spread, not overwritten).
 The middleware survives CopilotKit's per-run `agent.clone()` (the SDK's
 `clone()` copies the `middlewares` array). `langgraph` agents are
-unchanged. Auth-protected agents requiring per-user JWTs are a future
-feature.
+unchanged. `forwardedProps.user_id` is sent in **both** auth modes —
+additive, not either/or. When a valid JWT is present, Agno pins to `sub`
+and ignores `forwardedProps.user_id`; when no JWT (`authMode: "none"`),
+Agno uses it. Other AG-UI backends pick whichever they prefer.
+
+### Per-agent JWT authentication
+
+`agui` agents support optional per-agent JWT auth (HS256) so the runtime
+can authenticate to backends that require it (e.g. Agno with
+`AuthMiddleware` / `authorization=True`). This is opt-in per agent via
+the admin form (`/agents` page) or the REST API.
+
+**How it works:**
+- Each agent has an `authMode` field: `"none"` (default, anonymous) or
+  `"jwt"`. When `"jwt"`, the agent also stores a `jwtSecret` (shared
+  HS256 signing secret, ≥32 chars).
+- On every run, `lib/agents/registry.ts` mints a short-lived JWT
+  (`exp: +1h`) with `sub` = the authenticated user's Better Auth id,
+  signs it with the agent's `jwtSecret`, and sends it as
+  `Authorization: Bearer <token>` on the HTTP request to the backend.
+- The backend verifies the signature (proving tackui minted it) and
+  uses `sub` to identify the caller. **Authorization (what the user can
+  do) stays the backend's job** — tackui only vouches for *who* the user
+  is. The JWT carries no audience claim in v1.
+- **Optional `jwtScopes`**: when configured, the JWT includes a `scopes`
+  claim (a `string[]`) so backends with `authorization=True` enabled
+  (e.g. Agno's `AuthMiddleware` with RBAC) can check permission scopes.
+  Only needed when the backend requires specific scopes — omit entirely
+  when the backend's authorization is off (the default). Set scopes per
+  agent to match what the backend expects (e.g. `["agents:run"]` or
+  `["app:superadmin"]`).
+- To configure: set `authMode: "jwt"` on the agent, set `jwtSecret` to
+  the same value as the backend's JWT verification key (e.g. Agno's
+  `JWT_VERIFICATION_KEY` env var), and optionally set `jwtScopes` to
+  the scopes the backend requires.
+
+**Secret handling:** `jwtSecret` is **write-only** — accepted on
+POST/PATCH but never returned in GET responses. `PublicAgent.hasJwtSecret:
+boolean` replaces the raw value (same pattern as `langsmithApiKey`).
+The admin edit form shows "Key set ✓" when true; submitting a blank
+field preserves the existing value. Stored in plaintext in the
+`agents` table (matching `langsmithApiKey`); future hardening will
+encrypt both secrets at rest.
+
+`langgraph` agents do not support JWT auth (LangGraphAgent has different
+header plumbing). RS256 (asymmetric) and audience claims are future
+enhancements.
 
 ### Security
 
@@ -272,6 +322,12 @@ feature.
   `toPublicAgent()` / `toPublicAgents()` in `lib/agents/agent-store.ts` do the
   stripping. The admin edit form shows "Key set ✓" when true; blank submit
   preserves the existing value.
+- **`jwtSecret` is write-only** — accepted on POST/PATCH, never returned in
+  GET responses. `PublicAgent.hasJwtSecret: boolean` replaces it (same
+  pattern as `langsmithApiKey`). The admin edit form shows "Key set ✓" when
+  true; blank submit preserves the existing value. Stored in plaintext in
+  the `agents` table (matching `langsmithApiKey`); future hardening will
+  encrypt both secrets at rest.
 - **Security headers** (`next.config.ts`) — CSP (`'unsafe-inline'` scripts/styles,
   `'unsafe-eval'` dev-only, `frame-ancestors 'none'`), `X-Frame-Options: DENY`,
   `X-Content-Type-Options: nosniff`, `Referrer-Policy: strict-origin-when-cross-origin`,
@@ -1055,6 +1111,21 @@ strategy it uses so users know whether server-side session storage is required.
 - Nonce-based CSP — current CSP uses `'unsafe-inline'` for scripts (pragmatic
   v1). A nonce-based policy requires threading a per-request nonce through
   Next's middleware + script tags — stronger XSS defense.
+- RS256 (asymmetric) JWT auth — v1 uses HS256 (symmetric shared secret).
+  RS256 lets the private key never leave tackui (backend holds only the
+  public key), but requires PEM key management + rotation story. Add as an
+  alternative `jwtAlgorithm` field per agent.
+- JWT audience claims — v1 sends only `sub` (who the user is) + optional
+  `scopes` (what the backend allows). An audience (`aud`) claim is
+  deliberately omitted — add an optional `jwtAudience` field if a
+  backend genuinely requires it (rare).
+- Encryption-at-rest for DB secrets — `jwtSecret` and `langsmithApiKey`
+  are stored in plaintext in the `agents` table (a DB dump leaks both).
+  Add a `DB_ENCRYPTION_KEY` env var + `lib/crypto/encrypt.ts` helper
+  (AES-256-GCM), encrypt both at write, decrypt at read. Should apply to
+  both secrets together for consistency.
+- `langgraph` JWT auth — `LangGraphAgent` has different header plumbing
+  than `HttpAgent`; add if a LangGraph backend needs JWT auth.
 
 ## Notes
 

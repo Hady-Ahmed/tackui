@@ -2,7 +2,7 @@
 
 import { useState, useEffect, useCallback, useRef } from "react";
 import { useRouter } from "next/navigation";
-import type { PublicAgent, AgentKind } from "@/lib/agents/agents.config";
+import type { PublicAgent, AgentKind, AgentAuthMode } from "@/lib/agents/agents.config";
 import { UsersAdmin } from "@/components/users-admin";
 import { BackToChat } from "@/components/back-to-chat";
 import { authClient } from "@/lib/auth/auth-client";
@@ -32,6 +32,9 @@ type FormState = {
   endpoint: string;
   graphId: string;
   langsmithApiKey: string;
+  authMode: AgentAuthMode;
+  jwtSecret: string;
+  jwtScopes: string;
 };
 
 const emptyForm: FormState = {
@@ -41,6 +44,9 @@ const emptyForm: FormState = {
   endpoint: "",
   graphId: "",
   langsmithApiKey: "",
+  authMode: "none",
+  jwtSecret: "",
+  jwtScopes: "",
 };
 
 type TestStatus = "idle" | "loading" | "ok" | "fail";
@@ -92,6 +98,7 @@ export default function AgentsPage() {
   const [form, setForm] = useState<FormState>(emptyForm);
   const [editingId, setEditingId] = useState<string | null>(null);
   const [editingHasKey, setEditingHasKey] = useState(false);
+  const [editingHasJwtSecret, setEditingHasJwtSecret] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [submitting, setSubmitting] = useState(false);
   const [formTest, setFormTest] = useState<TestResult>({ status: "idle" });
@@ -139,16 +146,20 @@ export default function AgentsPage() {
   const startEdit = (agent: PublicAgent) => {
     setEditingId(agent.id);
     setEditingHasKey(agent.hasLangsmithApiKey);
+    setEditingHasJwtSecret(agent.hasJwtSecret);
     setForm({
       name: agent.name,
       description: agent.description,
       kind: agent.kind,
       endpoint: agent.endpoint,
       graphId: agent.graphId ?? "",
-      // Never pre-fill the secret. The field starts empty; submitting
-      // blank omits it from the PATCH (preserving the stored value).
-      // hasLangsmithApiKey drives helper text below.
+      // Never pre-fill secrets. The fields start empty; submitting
+      // blank omits them from the PATCH (preserving the stored values).
+      // hasLangsmithApiKey / hasJwtSecret drive helper text below.
       langsmithApiKey: "",
+      authMode: agent.authMode,
+      jwtSecret: "",
+      jwtScopes: agent.jwtScopes?.join(", ") ?? "",
     });
     setError(null);
     setFormTest({ status: "idle" });
@@ -158,6 +169,7 @@ export default function AgentsPage() {
     setForm(emptyForm);
     setEditingId(null);
     setEditingHasKey(false);
+    setEditingHasJwtSecret(false);
     setError(null);
     setFormTest({ status: "idle" });
   };
@@ -187,6 +199,16 @@ export default function AgentsPage() {
       endpoint: form.endpoint,
       ...(form.graphId ? { graphId: form.graphId } : {}),
       ...(form.langsmithApiKey ? { langsmithApiKey: form.langsmithApiKey } : {}),
+      // authMode is always sent (defaults to "none"). jwtSecret follows
+      // the same blank-preserve pattern as langsmithApiKey — only sent
+      // when non-blank, so blank submit on PATCH keeps the existing value.
+      authMode: form.authMode,
+      ...(form.jwtSecret ? { jwtSecret: form.jwtSecret } : {}),
+      // jwtScopes: comma-separated text → string[]. Always sent (even
+      // when empty) so clearing the field clears the stored value —
+      // unlike jwtSecret, scopes are config, not a secret, so blank
+      // means "remove all scopes", not "keep existing".
+      jwtScopes: form.jwtScopes.split(",").map((s) => s.trim()).filter(Boolean),
     };
 
     try {
@@ -290,7 +312,8 @@ export default function AgentsPage() {
                     if (kind !== "langgraph") {
                       updateForm({ kind, graphId: "", langsmithApiKey: "" });
                     } else {
-                      updateForm({ kind });
+                      // langgraph doesn't support JWT auth — reset agui-only fields
+                      updateForm({ kind, authMode: "none", jwtSecret: "", jwtScopes: "" });
                     }
                   }}
                   className={inputClass()}
@@ -345,6 +368,66 @@ export default function AgentsPage() {
                     placeholder={editingId && editingHasKey ? "(unchanged)" : "ls-..."}
                   />
                 </Field>
+              </div>
+            )}
+
+            {form.kind === "agui" && (
+              <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
+                <Field
+                  label="Auth mode"
+                  hint={
+                    form.authMode === "jwt"
+                      ? "Runtime mints a short-lived JWT per run, signed with the secret below, sent as Authorization: Bearer"
+                      : "No auth — the agent endpoint is anonymous. User id is forwarded via forwardedProps.user_id"
+                  }
+                >
+                  <select
+                    value={form.authMode}
+                    onChange={(e) => {
+                      const authMode = e.target.value as AgentAuthMode;
+                      updateForm({ authMode, jwtSecret: "", jwtScopes: "" });
+                    }}
+                    className={inputClass()}
+                  >
+                    <option value="none">None (anonymous)</option>
+                    <option value="jwt">JWT (HS256)</option>
+                  </select>
+                </Field>
+                {form.authMode === "jwt" && (
+                  <>
+                    <Field
+                      label="JWT secret"
+                      hint={
+                        editingId && editingHasJwtSecret
+                          ? "Key set ✓ — leave blank to keep existing, type a new value to replace"
+                          : "Shared HS256 secret (≥32 chars). Set this to the same value as your backend's JWT verification key."
+                      }
+                    >
+                      <input
+                        value={form.jwtSecret}
+                        onChange={(e) => updateForm({ jwtSecret: e.target.value })}
+                        type="password"
+                        className={inputClass()}
+                        placeholder={
+                          editingId && editingHasJwtSecret
+                            ? "(unchanged)"
+                            : "at least 32 characters"
+                        }
+                      />
+                    </Field>
+                    <Field
+                      label="JWT scopes"
+                      hint="Comma-separated, e.g. agents:run. Only needed if your backend has authorization=True enabled — otherwise leave blank."
+                    >
+                      <input
+                        value={form.jwtScopes}
+                        onChange={(e) => updateForm({ jwtScopes: e.target.value })}
+                        className={inputClass()}
+                        placeholder="agents:run"
+                      />
+                    </Field>
+                  </>
+                )}
               </div>
             )}
 

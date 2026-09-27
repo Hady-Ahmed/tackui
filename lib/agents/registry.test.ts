@@ -1,4 +1,5 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
+import jwt from "jsonwebtoken";
 import type { AgentEntry } from "./agents.config";
 import type { RequestUser } from "@/lib/auth/request-context";
 
@@ -36,6 +37,7 @@ const aguiEntry = (overrides: Partial<AgentEntry> = {}): AgentEntry => ({
   kind: "agui",
   endpoint: "http://localhost:8001/agent",
   orgId: "org-1",
+  authMode: "none",
   ...overrides,
 });
 
@@ -47,6 +49,7 @@ const langgraphEntry = (overrides: Partial<AgentEntry> = {}): AgentEntry => ({
   endpoint: "http://localhost:8123",
   orgId: "org-1",
   graphId: "agent",
+  authMode: "none",
   ...overrides,
 });
 
@@ -200,5 +203,105 @@ describe("getAgents", () => {
       );
       expect(captured.forwardedProps?.user_id).toBe("u-123");
     }
+  });
+
+  describe("JWT auth (authMode: 'jwt')", () => {
+    const TEST_SECRET = "test-secret-at-least-32-chars-long!!";
+
+    it("sets Authorization: Bearer header on the HttpAgent when authMode is jwt", async () => {
+      vi.mocked(listAgents).mockResolvedValue([
+        aguiEntry({ id: "ag1", authMode: "jwt", jwtSecret: TEST_SECRET }),
+      ]);
+      const map = await getAgents(new Request("http://localhost"));
+      const agent = map["ag1"];
+
+      // HttpAgent stores headers passed to its constructor.
+      const headers = (agent as unknown as { headers: Record<string, string> }).headers;
+      expect(headers.Authorization).toMatch(/^Bearer .+\..+\..+$/);
+    });
+
+    it("mints a JWT with sub = user.id and ~1h exp", async () => {
+      vi.mocked(listAgents).mockResolvedValue([
+        aguiEntry({ id: "ag1", authMode: "jwt", jwtSecret: TEST_SECRET }),
+      ]);
+      const map = await getAgents(new Request("http://localhost"));
+      const agent = map["ag1"];
+
+      const headers = (agent as unknown as { headers: Record<string, string> }).headers;
+      const token = headers.Authorization.replace("Bearer ", "");
+      const decoded = jwt.verify(token, TEST_SECRET, { algorithms: ["HS256"] }) as jwt.JwtPayload;
+
+      expect(decoded.sub).toBe("u-123");
+      expect(decoded.iat).toBeLessThanOrEqual(Math.floor(Date.now() / 1000));
+      expect(decoded.exp).toBeGreaterThan(Math.floor(Date.now() / 1000));
+      // exp should be ~1h (3600s) after iat
+      expect(decoded.exp! - decoded.iat!).toBe(3600);
+      // No scopes or aud claim when jwtScopes is not configured
+      expect(decoded.scopes).toBeUndefined();
+      expect(decoded.aud).toBeUndefined();
+    });
+
+    it("includes scopes claim in the JWT when jwtScopes is configured", async () => {
+      vi.mocked(listAgents).mockResolvedValue([
+        aguiEntry({
+          id: "ag1",
+          authMode: "jwt",
+          jwtSecret: TEST_SECRET,
+          jwtScopes: ["agents:run", "app:superadmin"],
+        }),
+      ]);
+      const map = await getAgents(new Request("http://localhost"));
+      const agent = map["ag1"];
+
+      const headers = (agent as unknown as { headers: Record<string, string> }).headers;
+      const token = headers.Authorization.replace("Bearer ", "");
+      const decoded = jwt.verify(token, TEST_SECRET, { algorithms: ["HS256"] }) as jwt.JwtPayload;
+
+      expect(decoded.sub).toBe("u-123");
+      expect(decoded.scopes).toEqual(["agents:run", "app:superadmin"]);
+    });
+
+    it("does NOT set Authorization header when authMode is none", async () => {
+      vi.mocked(listAgents).mockResolvedValue([
+        aguiEntry({ id: "ag1", authMode: "none" }),
+      ]);
+      const map = await getAgents(new Request("http://localhost"));
+      const agent = map["ag1"];
+      const headers = (agent as unknown as { headers: Record<string, string> }).headers;
+      expect(headers.Authorization).toBeUndefined();
+    });
+
+    it("still injects forwardedProps.user_id even when JWT auth is enabled", async () => {
+      vi.mocked(listAgents).mockResolvedValue([
+        aguiEntry({ id: "ag1", authMode: "jwt", jwtSecret: TEST_SECRET }),
+      ]);
+      const map = await getAgents(new Request("http://localhost"));
+      const agent = map["ag1"];
+
+      const middlewares = (agent as unknown as {
+        middlewares: { run: (input: unknown, next: { run: (i: unknown) => unknown }) => unknown }[];
+      }).middlewares;
+      const injected = middlewares[middlewares.length - 1];
+
+      const captured: { forwardedProps?: Record<string, unknown> } = {};
+      injected.run(
+        {
+          threadId: "t1",
+          runId: "r1",
+          messages: [],
+          tools: [],
+          context: [],
+          state: {},
+          forwardedProps: {},
+        },
+        {
+          run: (input: typeof captured) => {
+            Object.assign(captured, input);
+            return { subscribe: () => {} };
+          },
+        } as never,
+      );
+      expect(captured.forwardedProps?.user_id).toBe("u-123");
+    });
   });
 });

@@ -1,8 +1,9 @@
 import { randomUUID } from "node:crypto";
 import { query } from "@/lib/db/pg";
 import { z } from "zod";
-import type { AgentEntry, AgentKind, PublicAgent } from "./agents.config";
+import type { AgentAuthMode, AgentEntry, AgentKind, PublicAgent } from "./agents.config";
 const agentKindSchema = z.enum(["langgraph", "agui"]);
+const agentAuthModeSchema = z.enum(["none", "jwt"]);
 
 // Shared field definitions — used by the create + update input schemas
 // below. `id` is intentionally absent: it is server-generated on create
@@ -14,6 +15,16 @@ const fieldShapes = {
   endpoint: z.string().url(),
   graphId: z.string().optional(),
   langsmithApiKey: z.string().optional(),
+  authMode: agentAuthModeSchema.default("none"),
+  // HS256 needs ≥256 bits = 32 chars. Only validated when present
+  // (blank submit on PATCH preserves the existing value — see
+  // updateAgent's blank-preserve pattern, same as langsmithApiKey).
+  jwtSecret: z.string().min(32).optional(),
+  // Optional JWT `scopes` claim — a list of permission scopes included
+  // in the JWT payload when the backend has authorization=True enabled.
+  // Only needed when the backend requires specific scopes; omit
+  // entirely when the backend's authorization is off (the default).
+  jwtScopes: z.array(z.string()).optional(),
 };
 
 /**
@@ -51,6 +62,9 @@ interface AgentRow {
   org_id: string;
   graph_id: string | null;
   langsmith_api_key: string | null;
+  auth_mode: string | null;
+  jwt_secret: string | null;
+  jwt_scopes: string | null;
 }
 
 function rowToEntry(row: AgentRow): AgentEntry {
@@ -63,14 +77,19 @@ function rowToEntry(row: AgentRow): AgentEntry {
     orgId: row.org_id,
     graphId: row.graph_id ?? undefined,
     langsmithApiKey: row.langsmith_api_key ?? undefined,
+    authMode: (row.auth_mode ?? "none") as AgentAuthMode,
+    jwtSecret: row.jwt_secret ?? undefined,
+    jwtScopes: row.jwt_scopes
+      ? row.jwt_scopes.split(",").map((s) => s.trim()).filter(Boolean)
+      : undefined,
   };
 }
 
 /**
- * Strip the raw `langsmithApiKey` from an AgentEntry and replace it
- * with a boolean `hasLangsmithApiKey`. Use this for any response that
- * leaves the server (REST GET endpoints, admin UI fetches). The raw key
- * is only ever read by `lib/agents/registry.ts` server-side.
+ * Strip raw secrets (`langsmithApiKey`, `jwtSecret`) from an AgentEntry
+ * and replace each with a boolean. Use this for any response that
+ * leaves the server (REST GET endpoints, admin UI fetches). The raw
+ * secrets are only ever read by `lib/agents/registry.ts` server-side.
  */
 export function toPublicAgent(entry: AgentEntry): PublicAgent {
   return {
@@ -82,6 +101,9 @@ export function toPublicAgent(entry: AgentEntry): PublicAgent {
     orgId: entry.orgId,
     ...(entry.graphId !== undefined ? { graphId: entry.graphId } : {}),
     hasLangsmithApiKey: Boolean(entry.langsmithApiKey),
+    authMode: entry.authMode,
+    hasJwtSecret: Boolean(entry.jwtSecret),
+    ...(entry.jwtScopes !== undefined ? { jwtScopes: entry.jwtScopes } : {}),
   };
 }
 
@@ -121,13 +143,13 @@ export async function listAgents(
 ): Promise<AgentEntry[]> {
   if (opts?.bypassOrgScope) {
     const result = await query<AgentRow>(
-      `SELECT id, name, description, kind, endpoint, org_id, graph_id, langsmith_api_key
+      `SELECT id, name, description, kind, endpoint, org_id, graph_id, langsmith_api_key, auth_mode, jwt_secret, jwt_scopes
        FROM agents ORDER BY created_at ASC`,
     );
     return result.rows.map(rowToEntry);
   }
   const result = await query<AgentRow>(
-    `SELECT id, name, description, kind, endpoint, org_id, graph_id, langsmith_api_key
+    `SELECT id, name, description, kind, endpoint, org_id, graph_id, langsmith_api_key, auth_mode, jwt_secret, jwt_scopes
      FROM agents WHERE org_id = $1 ORDER BY created_at ASC`,
     [orgId],
   );
@@ -145,14 +167,14 @@ export async function getAgent(
 ): Promise<AgentEntry | null> {
   if (opts?.bypassOrgScope) {
     const result = await query<AgentRow>(
-      `SELECT id, name, description, kind, endpoint, org_id, graph_id, langsmith_api_key
+      `SELECT id, name, description, kind, endpoint, org_id, graph_id, langsmith_api_key, auth_mode, jwt_secret, jwt_scopes
        FROM agents WHERE id = $1`,
       [id],
     );
     return result.rows[0] ? rowToEntry(result.rows[0]) : null;
   }
   const result = await query<AgentRow>(
-    `SELECT id, name, description, kind, endpoint, org_id, graph_id, langsmith_api_key
+    `SELECT id, name, description, kind, endpoint, org_id, graph_id, langsmith_api_key, auth_mode, jwt_secret, jwt_scopes
      FROM agents WHERE id = $1 AND org_id = $2`,
     [id, orgId],
   );
@@ -170,9 +192,9 @@ export async function createAgent(
 ): Promise<AgentEntry> {
   const id = generateAgentId();
   const result = await query<AgentRow>(
-    `INSERT INTO agents (id, name, description, kind, endpoint, org_id, graph_id, langsmith_api_key)
-     VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
-     RETURNING id, name, description, kind, endpoint, org_id, graph_id, langsmith_api_key`,
+    `INSERT INTO agents (id, name, description, kind, endpoint, org_id, graph_id, langsmith_api_key, auth_mode, jwt_secret, jwt_scopes)
+     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
+     RETURNING id, name, description, kind, endpoint, org_id, graph_id, langsmith_api_key, auth_mode, jwt_secret, jwt_scopes`,
     [
       id,
       input.name,
@@ -182,6 +204,9 @@ export async function createAgent(
       orgId,
       input.graphId ?? null,
       input.langsmithApiKey ?? null,
+      input.authMode,
+      input.jwtSecret ?? null,
+      input.jwtScopes?.join(",") ?? null,
     ],
   );
   return rowToEntry(result.rows[0]);
@@ -208,6 +233,9 @@ export async function updateAgent(
     endpoint: existing.endpoint,
     graphId: existing.graphId,
     langsmithApiKey: existing.langsmithApiKey,
+    authMode: existing.authMode,
+    jwtSecret: existing.jwtSecret,
+    jwtScopes: existing.jwtScopes,
     ...patch,
   };
   const parsed = agentRowSchema.parse(merged);
@@ -215,9 +243,10 @@ export async function updateAgent(
     const result = await query<AgentRow>(
       `UPDATE agents
        SET name = $1, description = $2, kind = $3, endpoint = $4,
-           graph_id = $5, langsmith_api_key = $6, updated_at = now()
-       WHERE id = $7
-       RETURNING id, name, description, kind, endpoint, org_id, graph_id, langsmith_api_key`,
+           graph_id = $5, langsmith_api_key = $6,
+           auth_mode = $7, jwt_secret = $8, jwt_scopes = $9, updated_at = now()
+       WHERE id = $10
+       RETURNING id, name, description, kind, endpoint, org_id, graph_id, langsmith_api_key, auth_mode, jwt_secret, jwt_scopes`,
       [
         parsed.name,
         parsed.description,
@@ -225,6 +254,9 @@ export async function updateAgent(
         parsed.endpoint,
         parsed.graphId ?? null,
         parsed.langsmithApiKey ?? null,
+        parsed.authMode,
+        parsed.jwtSecret ?? null,
+        parsed.jwtScopes?.join(",") ?? null,
         id,
       ],
     );
@@ -233,9 +265,10 @@ export async function updateAgent(
   const result = await query<AgentRow>(
     `UPDATE agents
      SET name = $1, description = $2, kind = $3, endpoint = $4,
-         graph_id = $5, langsmith_api_key = $6, updated_at = now()
-     WHERE id = $7 AND org_id = $8
-     RETURNING id, name, description, kind, endpoint, org_id, graph_id, langsmith_api_key`,
+         graph_id = $5, langsmith_api_key = $6,
+         auth_mode = $7, jwt_secret = $8, jwt_scopes = $9, updated_at = now()
+     WHERE id = $10 AND org_id = $11
+     RETURNING id, name, description, kind, endpoint, org_id, graph_id, langsmith_api_key, auth_mode, jwt_secret, jwt_scopes`,
     [
       parsed.name,
       parsed.description,
@@ -243,6 +276,9 @@ export async function updateAgent(
       parsed.endpoint,
       parsed.graphId ?? null,
       parsed.langsmithApiKey ?? null,
+      parsed.authMode,
+      parsed.jwtSecret ?? null,
+      parsed.jwtScopes?.join(",") ?? null,
       id,
       orgId,
     ],

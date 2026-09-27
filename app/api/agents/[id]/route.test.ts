@@ -40,6 +40,7 @@ const validInput: CreateAgentInput = {
   description: "A test agent",
   kind: "agui",
   endpoint: "http://localhost:8000/agent",
+  authMode: "none",
 };
 
 function makeParams(id: string) {
