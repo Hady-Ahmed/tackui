@@ -55,7 +55,6 @@ RUN addgroup --system --gid 1001 nodejs && \
 # node_modules — much smaller than copying the full node_modules).
 COPY --from=builder /app/.next/standalone ./
 COPY --from=builder /app/.next/static ./.next/static
-COPY --from=builder /app/public ./public
 
 # Migration SQL files are NOT included in the standalone build (Next.js only
 # bundles JS/TS). Copy them separately so instrumentation.ts can read them
