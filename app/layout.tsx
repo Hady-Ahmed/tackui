@@ -16,6 +16,9 @@ const geistMono = Geist_Mono({
 });
 
 export const metadata: Metadata = {
+  metadataBase: process.env.BETTER_AUTH_URL
+    ? new URL(process.env.BETTER_AUTH_URL)
+    : undefined,
   title: "TackUI",
   description: "Unified frontend for custom agents speaking the AG-UI protocol",
 };
