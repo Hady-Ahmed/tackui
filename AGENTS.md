@@ -89,9 +89,13 @@ app/
   verify-email/page.tsx        # Email verification callback — Better Auth verifies token server-side, redirects here. Shows success/failure + resend form (does NOT call verifyEmail — uses ?error= param from redirect)
   forgot-password/page.tsx     # Password reset request — calls authClient.requestPasswordReset (anti-enumeration)
   reset-password/page.tsx      # Password reset form — reads ?token=, calls authClient.resetPassword
-  layout.tsx                   # Root layout — wraps app in CopilotKitProvider + FOUC-free theme init script + CookieNotice (SaaS only)
+  layout.tsx                   # Root layout — wraps app in CopilotKitProvider + FOUC-free theme init script + CookieNotice (SaaS only) + metadataBase (reads BETTER_AUTH_URL for absolute OG/Twitter image URLs)
   page.tsx                     # SaaS-aware root router — SAAS_MODE renders <Landing/>, else redirects to /app
   globals.css                  # Global styles + Tailwind (class-based dark mode via @custom-variant)
+  icon.svg                     # Static SVG favicon — 3D thumbtack glyph on blue gradient chip (theme-aware via prefers-color-scheme)
+  apple-icon.tsx               # Generated 180×180 PNG apple-touch icon (next/og ImageResponse — no committed binary)
+  opengraph-image.tsx          # Generated 1200×630 PNG social-share card for OG link previews (next/og ImageResponse — auto-injects <meta property="og:image">)
+  twitter-image.tsx            # Generated 1200×630 PNG social-share card for X/Twitter link previews (reuses OgCard from lib/brand/pin.tsx — auto-injects <meta name="twitter:image">)
 
 lib/
   agents/
@@ -150,6 +154,8 @@ lib/
     middleware.test.ts          # 10 tests — 429 responses, checkUserLimit, acquireConcurrent + release
     stream-wrap.test.ts         # 7 tests — stream lifecycle: release on completion, error, cancel, no-body, header preservation
   theme.ts                     # useTheme() hook — class-based light/dark, persists to localStorage (useSyncExternalStore)
+  brand/
+    pin.tsx                    # PinMark (3D thumbtack SVG for Satori — mirrors app/icon.svg geometry) + OgCard (1200×630 social-share card layout: dark canvas, blue radial glow, centered mark + wordmark + tagline)
   org-members.ts                # Typed wrappers around better-auth organization client for member management (listMembers + removeMember + updateMemberRole incl. owner role for transfer + listInvitations pending-only + cancelInvitation) — pure API mapping, returns {data, error}, UI side-effects live in the page
   org-members.test.ts           # 16 tests — roster typing + empty-members, remove by id/email, only-owner + not-allowed error propagation, role change incl. owner, pending-only filter, cancel invite
 
@@ -1076,6 +1082,19 @@ strategy it uses so users know whether server-side session storage is required.
     checks for `?error=` param (failure) vs no error (success).
   - Login + signup use `window.location.href` (hard navigation) after
     successful auth to avoid client-side session hydration races.
+- Branded icon set — `app/icon.svg` (static SVG favicon: 3D thumbtack on blue
+  gradient chip, theme-aware via `prefers-color-scheme`) + `app/apple-icon.tsx`
+  (generated 180×180 PNG via `next/og`) + `app/opengraph-image.tsx` +
+  `app/twitter-image.tsx` (generated 1200×630 social-share cards via `next/og`,
+  reusing `OgCard` from `lib/brand/pin.tsx`). `app/layout.tsx` sets
+  `metadataBase` from `BETTER_AUTH_URL` so OG/Twitter image URLs resolve to
+  absolute production URLs. Replaced the stock Next.js `favicon.ico` + removed
+  unreferenced template SVGs from `public/`. The Dockerfile's
+  `COPY --from=builder /app/public ./public` line was removed (the directory
+  is now empty — all icons use the `app/` file convention, which Next.js
+  auto-wires into `<head>` with content-hashing; `public/` is only needed for
+  static URL-referenced assets like `robots.txt`, re-add the COPY line if any
+  are added later).
 
 ## Future (structured for easy upgrade)
 
