@@ -76,7 +76,7 @@ export async function MarketingLayout({
               </>
             )}
           </nav>
-          {/* Mobile nav — compact CTA only (Terms/Privacy/Pricing are in the footer) */}
+          {/* Mobile nav — compact CTA set (Terms/Privacy/Pricing are in the footer) */}
           <nav className="flex items-center gap-2 md:hidden">
             <ThemeToggle collapsed />
             {user ? (
@@ -87,12 +87,20 @@ export async function MarketingLayout({
                 Go to app
               </Link>
             ) : (
-              <Link
-                href="/signup"
-                className="rounded-lg bg-zinc-900 px-4 py-2 text-sm font-medium text-white transition-colors hover:bg-zinc-700 dark:bg-white dark:text-zinc-900 dark:hover:bg-zinc-200 active:scale-[0.98]"
-              >
-                Sign up
-              </Link>
+              <>
+                <Link
+                  href="/login"
+                  className="px-2 text-sm text-zinc-600 transition-colors hover:text-zinc-900 dark:text-zinc-400 dark:hover:text-zinc-100"
+                >
+                  Sign in
+                </Link>
+                <Link
+                  href="/signup"
+                  className="rounded-lg bg-zinc-900 px-4 py-2 text-sm font-medium text-white transition-colors hover:bg-zinc-700 dark:bg-white dark:text-zinc-900 dark:hover:bg-zinc-200 active:scale-[0.98]"
+                >
+                  Sign up
+                </Link>
+              </>
             )}
           </nav>
         </div>
