@@ -72,7 +72,6 @@ function makeRequest(body: unknown) {
 
 const validBody = {
   endpoint: "http://localhost:8000/agent",
-  kind: "agui" as const,
 };
 
 describe("POST /api/agents/reachability-probe", () => {
@@ -122,11 +121,12 @@ describe("POST /api/agents/reachability-probe", () => {
     expect(res.status).toBe(400);
   });
 
-  it("returns 400 for invalid kind", async () => {
-    const res = await POST(
-      makeRequest({ ...validBody, kind: "openai" }),
-    );
-    expect(res.status).toBe(400);
+  it("accepts legacy bodies that still send kind (unknown fields stripped)", async () => {
+    mockFetchOk(200);
+    const res = await POST(makeRequest({ ...validBody, kind: "agui" }));
+    expect(res.status).toBe(200);
+    const data = await res.json();
+    expect(data.ok).toBe(true);
   });
 
   it("returns 400 for invalid JSON", async () => {

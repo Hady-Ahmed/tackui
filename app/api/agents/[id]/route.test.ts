@@ -38,7 +38,6 @@ async function cleanup() {
 const validInput: CreateAgentInput = {
   name: "Test Agent",
   description: "A test agent",
-  kind: "agui",
   endpoint: "http://localhost:8000/agent",
   authMode: "none",
 };
@@ -149,16 +148,19 @@ describe("PATCH /api/agents/[id]", () => {
     expect(res.status).toBe(404);
   });
 
-  it("returns 400 for invalid patch (bad kind)", async () => {
+  it("accepts a patch that sends kind (unknown fields stripped)", async () => {
     const res = await PATCH(
       new Request(`http://localhost/api/agents/${agentId}`, {
         method: "PATCH",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ kind: "openai" }),
+        body: JSON.stringify({ kind: "agui", name: "Renamed" }),
       }),
       makeParams(agentId),
     );
-    expect(res.status).toBe(400);
+    expect(res.status).toBe(200);
+    const data = await res.json();
+    expect(data.name).toBe("Renamed");
+    expect("kind" in data).toBe(false);
   });
 
   it("returns 400 for invalid JSON", async () => {

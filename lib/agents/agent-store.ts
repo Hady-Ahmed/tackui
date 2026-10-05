@@ -1,8 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { query } from "@/lib/db/pg";
 import { z } from "zod";
-import type { AgentAuthMode, AgentEntry, AgentKind, PublicAgent } from "./agents.config";
-const agentKindSchema = z.enum(["langgraph", "agui"]);
+import type { AgentAuthMode, AgentEntry, PublicAgent } from "./agents.config";
 const agentAuthModeSchema = z.enum(["none", "jwt"]);
 
 // Shared field definitions — used by the create + update input schemas
@@ -11,14 +10,11 @@ const agentAuthModeSchema = z.enum(["none", "jwt"]);
 const fieldShapes = {
   name: z.string().min(1).max(100),
   description: z.string().max(300),
-  kind: agentKindSchema,
   endpoint: z.string().url(),
-  graphId: z.string().optional(),
-  langsmithApiKey: z.string().optional(),
   authMode: agentAuthModeSchema.default("none"),
   // HS256 needs ≥256 bits = 32 chars. Only validated when present
   // (blank submit on PATCH preserves the existing value — see
-  // updateAgent's blank-preserve pattern, same as langsmithApiKey).
+  // updateAgent's blank-preserve pattern).
   jwtSecret: z.string().min(32).optional(),
   // Optional JWT `scopes` claim — a list of permission scopes included
   // in the JWT payload when the backend has authorization=True enabled.
@@ -57,11 +53,8 @@ interface AgentRow {
   id: string;
   name: string;
   description: string | null;
-  kind: string;
   endpoint: string;
   org_id: string;
-  graph_id: string | null;
-  langsmith_api_key: string | null;
   auth_mode: string | null;
   jwt_secret: string | null;
   jwt_scopes: string | null;
@@ -72,11 +65,8 @@ function rowToEntry(row: AgentRow): AgentEntry {
     id: row.id,
     name: row.name,
     description: row.description ?? "",
-    kind: row.kind as AgentKind,
     endpoint: row.endpoint,
     orgId: row.org_id,
-    graphId: row.graph_id ?? undefined,
-    langsmithApiKey: row.langsmith_api_key ?? undefined,
     authMode: (row.auth_mode ?? "none") as AgentAuthMode,
     jwtSecret: row.jwt_secret ?? undefined,
     jwtScopes: row.jwt_scopes
@@ -86,21 +76,18 @@ function rowToEntry(row: AgentRow): AgentEntry {
 }
 
 /**
- * Strip raw secrets (`langsmithApiKey`, `jwtSecret`) from an AgentEntry
- * and replace each with a boolean. Use this for any response that
- * leaves the server (REST GET endpoints, admin UI fetches). The raw
- * secrets are only ever read by `lib/agents/registry.ts` server-side.
+ * Strip raw secrets (`jwtSecret`) from an AgentEntry and replace them
+ * with a boolean. Use this for any response that leaves the server (REST
+ * GET endpoints, admin UI fetches). The raw secrets are only ever read
+ * by `lib/agents/registry.ts` server-side.
  */
 export function toPublicAgent(entry: AgentEntry): PublicAgent {
   return {
     id: entry.id,
     name: entry.name,
     description: entry.description,
-    kind: entry.kind,
     endpoint: entry.endpoint,
     orgId: entry.orgId,
-    ...(entry.graphId !== undefined ? { graphId: entry.graphId } : {}),
-    hasLangsmithApiKey: Boolean(entry.langsmithApiKey),
     authMode: entry.authMode,
     hasJwtSecret: Boolean(entry.jwtSecret),
     ...(entry.jwtScopes !== undefined ? { jwtScopes: entry.jwtScopes } : {}),
@@ -143,13 +130,13 @@ export async function listAgents(
 ): Promise<AgentEntry[]> {
   if (opts?.bypassOrgScope) {
     const result = await query<AgentRow>(
-      `SELECT id, name, description, kind, endpoint, org_id, graph_id, langsmith_api_key, auth_mode, jwt_secret, jwt_scopes
+      `SELECT id, name, description, endpoint, org_id, auth_mode, jwt_secret, jwt_scopes
        FROM agents ORDER BY created_at ASC`,
     );
     return result.rows.map(rowToEntry);
   }
   const result = await query<AgentRow>(
-    `SELECT id, name, description, kind, endpoint, org_id, graph_id, langsmith_api_key, auth_mode, jwt_secret, jwt_scopes
+    `SELECT id, name, description, endpoint, org_id, auth_mode, jwt_secret, jwt_scopes
      FROM agents WHERE org_id = $1 ORDER BY created_at ASC`,
     [orgId],
   );
@@ -167,14 +154,14 @@ export async function getAgent(
 ): Promise<AgentEntry | null> {
   if (opts?.bypassOrgScope) {
     const result = await query<AgentRow>(
-      `SELECT id, name, description, kind, endpoint, org_id, graph_id, langsmith_api_key, auth_mode, jwt_secret, jwt_scopes
+      `SELECT id, name, description, endpoint, org_id, auth_mode, jwt_secret, jwt_scopes
        FROM agents WHERE id = $1`,
       [id],
     );
     return result.rows[0] ? rowToEntry(result.rows[0]) : null;
   }
   const result = await query<AgentRow>(
-    `SELECT id, name, description, kind, endpoint, org_id, graph_id, langsmith_api_key, auth_mode, jwt_secret, jwt_scopes
+    `SELECT id, name, description, endpoint, org_id, auth_mode, jwt_secret, jwt_scopes
      FROM agents WHERE id = $1 AND org_id = $2`,
     [id, orgId],
   );
@@ -192,18 +179,15 @@ export async function createAgent(
 ): Promise<AgentEntry> {
   const id = generateAgentId();
   const result = await query<AgentRow>(
-    `INSERT INTO agents (id, name, description, kind, endpoint, org_id, graph_id, langsmith_api_key, auth_mode, jwt_secret, jwt_scopes)
-     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
-     RETURNING id, name, description, kind, endpoint, org_id, graph_id, langsmith_api_key, auth_mode, jwt_secret, jwt_scopes`,
+    `INSERT INTO agents (id, name, description, endpoint, org_id, auth_mode, jwt_secret, jwt_scopes)
+     VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+     RETURNING id, name, description, endpoint, org_id, auth_mode, jwt_secret, jwt_scopes`,
     [
       id,
       input.name,
       input.description,
-      input.kind,
       input.endpoint,
       orgId,
-      input.graphId ?? null,
-      input.langsmithApiKey ?? null,
       input.authMode,
       input.jwtSecret ?? null,
       input.jwtScopes?.join(",") ?? null,
@@ -229,10 +213,7 @@ export async function updateAgent(
     id,
     name: existing.name,
     description: existing.description,
-    kind: existing.kind,
     endpoint: existing.endpoint,
-    graphId: existing.graphId,
-    langsmithApiKey: existing.langsmithApiKey,
     authMode: existing.authMode,
     jwtSecret: existing.jwtSecret,
     jwtScopes: existing.jwtScopes,
@@ -242,18 +223,14 @@ export async function updateAgent(
   if (opts?.bypassOrgScope) {
     const result = await query<AgentRow>(
       `UPDATE agents
-       SET name = $1, description = $2, kind = $3, endpoint = $4,
-           graph_id = $5, langsmith_api_key = $6,
-           auth_mode = $7, jwt_secret = $8, jwt_scopes = $9, updated_at = now()
-       WHERE id = $10
-       RETURNING id, name, description, kind, endpoint, org_id, graph_id, langsmith_api_key, auth_mode, jwt_secret, jwt_scopes`,
+       SET name = $1, description = $2, endpoint = $3,
+           auth_mode = $4, jwt_secret = $5, jwt_scopes = $6, updated_at = now()
+       WHERE id = $7
+       RETURNING id, name, description, endpoint, org_id, auth_mode, jwt_secret, jwt_scopes`,
       [
         parsed.name,
         parsed.description,
-        parsed.kind,
         parsed.endpoint,
-        parsed.graphId ?? null,
-        parsed.langsmithApiKey ?? null,
         parsed.authMode,
         parsed.jwtSecret ?? null,
         parsed.jwtScopes?.join(",") ?? null,
@@ -264,18 +241,14 @@ export async function updateAgent(
   }
   const result = await query<AgentRow>(
     `UPDATE agents
-     SET name = $1, description = $2, kind = $3, endpoint = $4,
-         graph_id = $5, langsmith_api_key = $6,
-         auth_mode = $7, jwt_secret = $8, jwt_scopes = $9, updated_at = now()
-     WHERE id = $10 AND org_id = $11
-     RETURNING id, name, description, kind, endpoint, org_id, graph_id, langsmith_api_key, auth_mode, jwt_secret, jwt_scopes`,
+     SET name = $1, description = $2, endpoint = $3,
+         auth_mode = $4, jwt_secret = $5, jwt_scopes = $6, updated_at = now()
+     WHERE id = $7 AND org_id = $8
+     RETURNING id, name, description, endpoint, org_id, auth_mode, jwt_secret, jwt_scopes`,
     [
       parsed.name,
       parsed.description,
-      parsed.kind,
       parsed.endpoint,
-      parsed.graphId ?? null,
-      parsed.langsmithApiKey ?? null,
       parsed.authMode,
       parsed.jwtSecret ?? null,
       parsed.jwtScopes?.join(",") ?? null,

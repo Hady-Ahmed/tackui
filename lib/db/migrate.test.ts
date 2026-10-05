@@ -22,9 +22,9 @@ afterEach(async () => {
 });
 
 describe("runMigrations", () => {
-  it("applies 0001–0006 migrations, creates all expected tables", async () => {
+  it("applies 0001–0009 migrations, creates all expected tables", async () => {
     const result = await runMigrations();
-    expect(result.applied).toEqual(["0001", "0002", "0003", "0004", "0006", "0007"]);
+    expect(result.applied).toEqual(["0001", "0002", "0003", "0004", "0006", "0007", "0008", "0009"]);
     expect(result.skipped).toEqual([]);
 
     const tables = await query<{ table_name: string }>(`
@@ -46,7 +46,7 @@ describe("runMigrations", () => {
   it("records each applied migration in schema_migrations", async () => {
     await runMigrations();
     const applied = await listAppliedMigrations();
-    expect(applied).toHaveLength(6);
+    expect(applied).toHaveLength(8);
     expect(applied[0].id).toBe("0001");
     expect(applied[0].filename).toBe("0001_init.sql");
     expect(applied[1].id).toBe("0002");
@@ -59,6 +59,10 @@ describe("runMigrations", () => {
     expect(applied[4].filename).toBe("0006_agent_auth.sql");
     expect(applied[5].id).toBe("0007");
     expect(applied[5].filename).toBe("0007_agent_jwt_scopes.sql");
+    expect(applied[6].id).toBe("0008");
+    expect(applied[6].filename).toBe("0008_drop_langgraph_kind.sql");
+    expect(applied[7].id).toBe("0009");
+    expect(applied[7].filename).toBe("0009_drop_agent_kind.sql");
     // applied_at is returned as a Date by pg-mem and as an ISO string by real
     // pg (depending on driver parsing). Accept both.
     const appliedAt = applied[0].applied_at;
@@ -69,12 +73,12 @@ describe("runMigrations", () => {
   it("is idempotent — second run reports skipped, no new inserts", async () => {
     const first = await runMigrations();
     const second = await runMigrations();
-    expect(first.applied).toEqual(["0001", "0002", "0003", "0004", "0006", "0007"]);
+    expect(first.applied).toEqual(["0001", "0002", "0003", "0004", "0006", "0007", "0008", "0009"]);
     expect(second.applied).toEqual([]);
-    expect(second.skipped).toEqual(["0001", "0002", "0003", "0004", "0006", "0007"]);
+    expect(second.skipped).toEqual(["0001", "0002", "0003", "0004", "0006", "0007", "0008", "0009"]);
 
     const applied = await listAppliedMigrations();
-    expect(applied).toHaveLength(6);
+    expect(applied).toHaveLength(8);
   });
 
   it("creates the agents table with the documented columns", async () => {
@@ -88,8 +92,9 @@ describe("runMigrations", () => {
     const colMap = new Map(cols.rows.map((r) => [r.column_name, r.data_type]));
     expect(colMap.get("id")).toBe("text");
     expect(colMap.get("name")).toBe("text");
-    expect(colMap.get("kind")).toBe("text");
     expect(colMap.get("endpoint")).toBe("text");
+    // `kind` was dropped by migration 0009 (single-kind agents).
+    expect(colMap.has("kind")).toBe(false);
     // pg-mem returns "timestamptz"; real PG normalizes to "timestamp with time zone".
     // Both refer to the same type.
     expect(["timestamptz", "timestamp with time zone"]).toContain(colMap.get("created_at"));

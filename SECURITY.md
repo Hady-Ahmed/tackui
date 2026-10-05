@@ -43,7 +43,7 @@ This policy covers the code in this repository. It does **not** cover:
 
 ## Hardening your deployment
 
-The README's [Security](./README.md#security) section covers the project's security posture in detail: the SSRF guard, rate limiting, session-cookie flags, `BETTER_AUTH_SECRET` enforcement, open-redirect protection, security headers, secret handling (write-only `langsmithApiKey`), and known limitations. Read it before deploying publicly.
+The README's [Security](./README.md#security) section covers the project's security posture in detail: the SSRF guard, rate limiting, session-cookie flags, `BETTER_AUTH_SECRET` enforcement, open-redirect protection, security headers, secret handling (write-only `jwtSecret`), and known limitations. Read it before deploying publicly.
 
 ## Acknowledgements
 

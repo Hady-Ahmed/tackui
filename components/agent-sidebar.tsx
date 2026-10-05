@@ -3,7 +3,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import Link from "next/link";
 import { useThreads, useAgent } from "@copilotkit/react-core/v2";
-import type { PublicAgent, AgentKind } from "@/lib/agents/agents.config";
+import type { PublicAgent } from "@/lib/agents/agents.config";
 import { AccountMenu } from "./account-menu";
 import { ThemeToggle } from "./theme-toggle";
 import { useAuthConfig } from "@/lib/auth/use-auth-config";
@@ -17,15 +17,12 @@ const TEST_HELP =
   "A success does NOT validate auth, AG-UI protocol compliance, or that the agent will actually run. " +
   "A failure usually means the URL is wrong or the server is down.";
 
-async function testEndpoint(
-  endpoint: string,
-  kind: AgentKind,
-): Promise<TestResult> {
+async function testEndpoint(endpoint: string): Promise<TestResult> {
   try {
     const res = await fetch("/api/agents/reachability-probe", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ endpoint, kind }),
+      body: JSON.stringify({ endpoint }),
     });
     const data = await res.json().catch(() => ({}));
     if (!res.ok) {
@@ -108,7 +105,6 @@ export function AgentSidebar({
       const entries = agents.map((a) => ({
         id: a.id,
         endpoint: a.endpoint,
-        kind: a.kind,
       }));
       setStatuses((prev) => {
         const next: Record<string, TestResult> = {};
@@ -122,7 +118,7 @@ export function AgentSidebar({
       const results = await Promise.all(
         entries.map(async (e) => ({
           id: e.id,
-          result: await testEndpoint(e.endpoint, e.kind),
+          result: await testEndpoint(e.endpoint),
         })),
       );
       if (cancelled) return;
@@ -360,9 +356,6 @@ function ExpandedContent({
                 </div>
                 <span className="mt-0.5 text-xs text-zinc-400">
                   {agent.description}
-                </span>
-                <span className="mt-1 inline-block rounded bg-zinc-100 px-1.5 py-0.5 text-[10px] font-medium uppercase text-zinc-500 dark:bg-zinc-800 dark:text-zinc-400">
-                  {agent.kind}
                 </span>
               </button>
             </li>

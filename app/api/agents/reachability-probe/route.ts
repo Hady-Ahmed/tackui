@@ -5,9 +5,11 @@ import { SSRF_REJECTION_MESSAGE } from "@/lib/config/saas";
 import { assertSafeUrl, UnsafeUrlError } from "@/lib/net/safe-fetch";
 import { checkUserLimit } from "@/lib/ratelimit/middleware";
 
+// Note: no `kind` field — the probe never used it (it was validated and
+// discarded). Unknown body fields are stripped by zod, so legacy clients
+// that still send `kind` keep working.
 const testSchema = z.object({
   endpoint: z.string().url(),
-  kind: z.enum(["langgraph", "agui"]),
 });
 
 export async function POST(request: Request) {

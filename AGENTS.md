@@ -103,7 +103,7 @@ app/
 lib/
   agents/
     agents.config.ts           # AgentEntry / AgentKind / PublicAgent types (no runtime config)
-    agent-store.ts             # Async CRUD for agents table (zod-validated, pg.Pool-backed) + generateAgentId (random 12-char hex) + toPublicAgent/toPublicAgents (strips langsmithApiKey + jwtSecret)
+    agent-store.ts             # Async CRUD for agents table (zod-validated, pg.Pool-backed) + generateAgentId (random 12-char hex) + toPublicAgent/toPublicAgents (strips jwtSecret)
     registry.ts                # getAgents() factory — reads DB, builds agents map (async) + per-agent JWT minting (HS256, sub=user.id) for agui agents with authMode "jwt"
     pg-runner.ts               # PostgresAgentRunner — AgentRunner impl with thread endpoints + smart-replay connect() (RUN_ERROR filtering) + in-memory cache bridging sync interface to async PG
     runner-instance.ts         # Shared runner singleton (used by runtime + thread API)
@@ -125,6 +125,8 @@ lib/
       0004_subscriptions.sql    # SaaS subscriptions table (org_id PK, plan/status/seats, Stripe IDs) — SaaS-only, inert on self-host
       0006_agent_auth.sql       # Per-agent JWT auth (auth_mode + jwt_secret columns on agents) — defaults to 'none', inert on existing agents
       0007_agent_jwt_scopes.sql # Optional JWT scopes claim (jwt_scopes column on agents) — nullable, only set when backend has authorization=True
+      0008_drop_langgraph_kind.sql # Removes the untested `langgraph` kind — deletes langgraph agent rows + drops graph_id/langsmith_api_key columns
+      0009_drop_agent_kind.sql  # Drops the `kind` column entirely — with langgraph gone, a constant column for a single value was pure ceremony
   config/
     saas.ts                     # SAAS_MODE / BILLING_ENABLED / SSRF_GUARD_FORCE_ON / SSRF_REJECTION_MESSAGE flags (module-load consts)
     saas.test.ts                # 5 tests — flag combinations across modes
@@ -215,25 +217,17 @@ Via the admin UI (`/agents` page → "Add agent" form) or `POST /api/agents` wit
 {
   "name": "Research Agent",
   "description": "LangGraph-powered web research assistant",
-  "kind": "agui",
   "endpoint": "http://localhost:8001/agent"
 }
 ```
 
-Optional fields: `graphId` (langgraph only), `langsmithApiKey` (langgraph only),
-`authMode` (agui only, defaults to `"none"`), `jwtSecret` (agui only, required when
-`authMode` is `"jwt"`, ≥32 chars), `jwtScopes` (agui only, optional `string[]` —
+Optional fields: `authMode` (defaults to `"none"`), `jwtSecret` (required when
+`authMode` is `"jwt"`, ≥32 chars), `jwtScopes` (optional `string[]` —
 only when the backend has `authorization=True` enabled).
 
 `id` is **server-generated** (12-char random hex) — never send it in the
 POST body. The response includes the generated `id`, which you use in
 PATCH/DELETE URLs. The id is immutable after creation.
-
-> **Secret handling:** `langsmithApiKey` is **write-only** — accepted on
-> POST/PATCH but never returned in GET responses. The API exposes a
-> `hasLangsmithApiKey: boolean` instead (see `PublicAgent` in
-> `lib/agents/agents.config.ts`). The admin edit form shows "Key set ✓"
-> when true; submitting a blank field preserves the existing value.
 
 > **SSRF guard:** Creating or editing an agent with an endpoint that
 > resolves to a private/internal IP (`127.x`, `10.x`, `192.168.x`,
@@ -271,8 +265,8 @@ before forwarding to the backend. The value is the Better Auth user UUID
 (or `"local"` in solo mode), never trusting client-supplied identity.
 Client-supplied `forwardedProps` are preserved (spread, not overwritten).
 The middleware survives CopilotKit's per-run `agent.clone()` (the SDK's
-`clone()` copies the `middlewares` array). `langgraph` agents are
-unchanged. `forwardedProps.user_id` is sent in **both** auth modes —
+`clone()` copies the `middlewares` array). `forwardedProps.user_id` is
+sent in **both** auth modes —
 additive, not either/or. When a valid JWT is present, Agno pins to `sub`
 and ignores `forwardedProps.user_id`; when no JWT (`authMode: "none"`),
 Agno uses it. Other AG-UI backends pick whichever they prefer.
@@ -310,15 +304,10 @@ the admin form (`/agents` page) or the REST API.
 
 **Secret handling:** `jwtSecret` is **write-only** — accepted on
 POST/PATCH but never returned in GET responses. `PublicAgent.hasJwtSecret:
-boolean` replaces the raw value (same pattern as `langsmithApiKey`).
-The admin edit form shows "Key set ✓" when true; submitting a blank
-field preserves the existing value. Stored in plaintext in the
-`agents` table (matching `langsmithApiKey`); future hardening will
-encrypt both secrets at rest.
-
-`langgraph` agents do not support JWT auth (LangGraphAgent has different
-header plumbing). RS256 (asymmetric) and audience claims are future
-enhancements.
+boolean` replaces the raw value. The admin edit form shows "Key set ✓"
+when true; submitting a blank field preserves the existing value. Stored
+in plaintext in the `agents` table; future hardening will encrypt it at
+rest. RS256 (asymmetric) and audience claims are future enhancements.
 
 ### Security
 
@@ -331,17 +320,12 @@ enhancements.
   private-endpoint agent works without the flag. Once stored, the CopilotKit
   runtime fetches the endpoint during runs without re-checking (intentional —
   existing agents keep working even if the env var changes).
-- **`langsmithApiKey` is write-only** — accepted on POST/PATCH, never returned
-  in GET responses. `PublicAgent.hasLangsmithApiKey: boolean` replaces it.
+- **`jwtSecret` is write-only** — accepted on POST/PATCH, never returned in
+  GET responses. `PublicAgent.hasJwtSecret: boolean` replaces it.
   `toPublicAgent()` / `toPublicAgents()` in `lib/agents/agent-store.ts` do the
   stripping. The admin edit form shows "Key set ✓" when true; blank submit
-  preserves the existing value.
-- **`jwtSecret` is write-only** — accepted on POST/PATCH, never returned in
-  GET responses. `PublicAgent.hasJwtSecret: boolean` replaces it (same
-  pattern as `langsmithApiKey`). The admin edit form shows "Key set ✓" when
-  true; blank submit preserves the existing value. Stored in plaintext in
-  the `agents` table (matching `langsmithApiKey`); future hardening will
-  encrypt both secrets at rest.
+  preserves the existing value. Stored in plaintext in the `agents` table;
+  future hardening will encrypt it at rest.
 - **Security headers** (`next.config.ts`) — CSP (`'unsafe-inline'` scripts/styles,
   `'unsafe-eval'` dev-only, `frame-ancestors 'none'`), `X-Frame-Options: DENY`,
   `X-Content-Type-Options: nosniff`, `Referrer-Policy: strict-origin-when-cross-origin`,
@@ -670,17 +654,21 @@ entirely by simply not setting the env vars.
 
 ### Supported agent kinds
 
-| Kind       | Adapter                        | When to use                              | Endpoint format                          |
-| ---------- | ------------------------------ | ---------------------------------------- | ---------------------------------------- |
-| `agui`     | `HttpAgent` (from @ag-ui/client) | Any AG-UI-speaking endpoint — Agno, CrewAI, Pydantic AI, Mastra, LangGraph (via ag-ui-langgraph), or custom | Full URL (e.g. `http://localhost:8000/agent`) |
-| `langgraph`| `LangGraphAgent`               | LangGraph Cloud / Studio (LangGraph Platform API) | LangGraph deployment URL (e.g. `:8123`) |
+There are no agent kinds — agents were reduced to a single AG-UI adapter.
+The runtime connects via `HttpAgent` (from `@ag-ui/client`) to any
+AG-UI-speaking endpoint — Agno, CrewAI, Pydantic AI, Mastra, LangGraph
+(via ag-ui-langgraph), or custom — at a full URL
+(e.g. `http://localhost:8000/agent`).
 
-> **Which to pick?** If your backend speaks the AG-UI protocol (most
-> do, including LangGraph via `ag-ui-langgraph`), use `agui`. Use
-> `langgraph` only for LangGraph Cloud / Studio deployments that expose
-> the LangGraph Platform API (`/assistants/search`, `/threads`, etc.).
-> The admin form shows Graph ID + LangSmith API Key fields only when
-> `langgraph` is selected — they're not needed for `agui`.
+> **Note:** The `langgraph` kind (LangGraphAgent + LangGraph Platform API)
+> was removed in migration 0008 — it shipped without ever being
+> smoke-tested against a real deployment. LangGraph users are served by
+> the generic AG-UI path via `ag-ui-langgraph`. The `kind` field itself
+> (column, type, zod schema, registry switch) was then removed entirely in
+> migration 0009 — a constant column for a single value was pure ceremony.
+> When a second kind is genuinely demanded, re-add the column + adapter in
+> the same migration as its config fields (git history has both
+> removals).
 
 ### Smoke testing the agent registry
 
@@ -697,7 +685,7 @@ After running migrations, add an agent via the admin UI (`/agents`) or REST:
 # The response includes the generated `id`, which you use in PATCH/DELETE URLs.
 curl -X POST http://localhost:3000/api/agents \
   -H 'Content-Type: application/json' \
-  -d '{"name":"Test","description":"smoke test","kind":"agui","endpoint":"http://localhost:8000/agent"}'
+  -d '{"name":"Test","description":"smoke test","endpoint":"http://localhost:8000/agent"}'
 # → 201 { "id": "a1b2c3d4e5f6", "name": "Test", ... }
 
 curl http://localhost:3000/api/agents                 # list
@@ -1042,9 +1030,8 @@ strategy it uses so users know whether server-side session storage is required.
   swallowed). No logging library — `console.error` with JSON context
 - Login/signup auth-disabled redirect fix — moved `router.push(redirect)`
   from render into `useEffect` to avoid React warnings + brief form flash
-- Security hardening (OSS release) — `langsmithApiKey` stripped from all
-  GET responses (`PublicAgent.hasLangsmithApiKey` boolean replaces it);
-  SSRF guard on agent create/edit (`lib/net/safe-fetch.ts` +
+- Security hardening (OSS release) — SSRF guard on agent create/edit
+  (`lib/net/safe-fetch.ts` +
   `ALLOW_PRIVATE_ENDPOINTS` opt-in); security headers in `next.config.ts`
   (CSP, HSTS, X-Frame-Options, Referrer-Policy, Permissions-Policy,
   `poweredByHeader: false`); `BETTER_AUTH_SECRET` throws on boot if unset
@@ -1155,13 +1142,10 @@ strategy it uses so users know whether server-side session storage is required.
   `scopes` (what the backend allows). An audience (`aud`) claim is
   deliberately omitted — add an optional `jwtAudience` field if a
   backend genuinely requires it (rare).
-- Encryption-at-rest for DB secrets — `jwtSecret` and `langsmithApiKey`
-  are stored in plaintext in the `agents` table (a DB dump leaks both).
-  Add a `DB_ENCRYPTION_KEY` env var + `lib/crypto/encrypt.ts` helper
-  (AES-256-GCM), encrypt both at write, decrypt at read. Should apply to
-  both secrets together for consistency.
-- `langgraph` JWT auth — `LangGraphAgent` has different header plumbing
-  than `HttpAgent`; add if a LangGraph backend needs JWT auth.
+- Encryption-at-rest for DB secrets — `jwtSecret` is stored in plaintext
+  in the `agents` table (a DB dump leaks it). Add a `DB_ENCRYPTION_KEY`
+  env var + `lib/crypto/encrypt.ts` helper (AES-256-GCM), encrypt at
+  write, decrypt at read.
 
 ## Notes
 

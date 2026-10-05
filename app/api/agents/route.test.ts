@@ -52,14 +52,12 @@ beforeEach(async () => {
 const validBody = {
   name: "Test Agent",
   description: "A test agent",
-  kind: "agui",
   endpoint: "http://localhost:8000/agent",
 };
 
 const validInput: CreateAgentInput = {
   name: "Test Agent",
   description: "A test agent",
-  kind: "agui",
   endpoint: "http://localhost:8000/agent",
   authMode: "none",
 };
@@ -141,15 +139,17 @@ describe("POST /api/agents", () => {
     expect(data.error).toContain("Validation");
   });
 
-  it("returns 400 for invalid body (bad kind)", async () => {
+  it("accepts legacy bodies that still send kind (unknown fields stripped)", async () => {
     const res = await POST(
       new Request("http://localhost/api/agents", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ ...validBody, kind: "openai" }),
+        body: JSON.stringify({ ...validBody, kind: "agui" }),
       }),
     );
-    expect(res.status).toBe(400);
+    expect(res.status).toBe(201);
+    const data = await res.json();
+    expect("kind" in data).toBe(false);
   });
 
   it("returns 400 for invalid JSON", async () => {

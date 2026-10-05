@@ -275,23 +275,19 @@ Via the admin UI (`/agents` page → "Add agent" form) or `POST /api/agents`:
 {
   "name": "Research Agent",
   "description": "LangGraph-powered web research assistant",
-  "kind": "agui",
   "endpoint": "http://localhost:8001/agent"
 }
 ```
 
 `id` is **server-generated** (12-char random hex) — never send it in the POST body. The response includes the generated `id`, which you use in PATCH/DELETE URLs.
 
-Optional fields: `graphId` (langgraph only), `langsmithApiKey` (langgraph only).
+Optional fields: `authMode` (defaults to `"none"`), `jwtSecret` (required
+when `authMode` is `"jwt"`, ≥32 chars), `jwtScopes` (optional `string[]` —
+only when the backend has `authorization=True` enabled).
 
 ### Supported Backends
 
-| Kind | Adapter | When to use | Endpoint format |
-| --- | --- | --- | --- |
-| `agui` | `HttpAgent` (from @ag-ui/client) | Any AG-UI-speaking endpoint — Agno, CrewAI, Pydantic AI, Mastra, LangGraph (via ag-ui-langgraph), or custom | Full URL (e.g. `http://localhost:8000/agent`) |
-| `langgraph` | `LangGraphAgent` | LangGraph Cloud / Studio backends using the LangGraph Platform API | LangGraph deployment URL (e.g. `:8123`) |
-
-> **Confused about which to pick?** If your backend speaks the AG-UI protocol (most do, including LangGraph via `ag-ui-langgraph`), use `agui`. Use `langgraph` only for LangGraph Cloud / Studio deployments that expose the LangGraph Platform API.
+All agents speak the AG-UI protocol — the runtime connects via `HttpAgent` (from `@ag-ui/client`) to any AG-UI-speaking endpoint: Agno, CrewAI, Pydantic AI, Mastra, LangGraph (via ag-ui-langgraph), or a custom backend. The endpoint is a full URL (e.g. `http://localhost:8000/agent`).
 
 ### Finding or building an agent backend
 
@@ -360,7 +356,7 @@ If your agent backends run on the same host as the frontend (common for self-hos
 ### Secret handling
 
 - **`BETTER_AUTH_SECRET`** — the app refuses to boot in auth mode without it. A missing secret would silently sign session cookies with a publicly-known value, allowing account forgery.
-- **`langsmithApiKey`** — stored encrypted at rest in Postgres (via your database's disk encryption) and never returned in API responses. The admin edit form shows whether a key is set (via `hasLangsmithApiKey: boolean`) but never displays the value. To replace it, type a new value; to keep the existing one, leave the field blank.
+- **`jwtSecret`** — stored in plaintext in Postgres (protect via your database's disk encryption) and never returned in API responses. The admin edit form shows whether a key is set (via `hasJwtSecret: boolean`) but never displays the value. To replace it, type a new value; to keep the existing one, leave the field blank.
 - **Social/OIDC client secrets** — only read from environment variables, never stored in the database or exposed via API responses.
 
 ### Security headers

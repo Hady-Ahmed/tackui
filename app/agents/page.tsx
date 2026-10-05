@@ -2,7 +2,7 @@
 
 import { useState, useEffect, useCallback, useRef } from "react";
 import { useRouter } from "next/navigation";
-import type { PublicAgent, AgentKind, AgentAuthMode } from "@/lib/agents/agents.config";
+import type { PublicAgent, AgentAuthMode } from "@/lib/agents/agents.config";
 import { UsersAdmin } from "@/components/users-admin";
 import { BackToChat } from "@/components/back-to-chat";
 import { authClient } from "@/lib/auth/auth-client";
@@ -10,28 +10,10 @@ import { useAuthConfig } from "@/lib/auth/use-auth-config";
 import { useCanManageAgents } from "@/lib/auth/use-can-manage-agents";
 import { useBilling } from "@/lib/billing/use-billing";
 
-const KIND_OPTIONS: { value: AgentKind; label: string; description: string }[] = [
-  {
-    value: "agui",
-    label: "AG-UI / Generic",
-    description:
-      "For any AG-UI-speaking endpoint — Agno, CrewAI, Pydantic AI, Mastra, LangGraph (via ag-ui-langgraph), or a custom backend.",
-  },
-  {
-    value: "langgraph",
-    label: "LangGraph Platform",
-    description:
-      "For LangGraph Cloud / Studio backends using the LangGraph Platform API. Needs a Graph ID.",
-  },
-];
-
 type FormState = {
   name: string;
   description: string;
-  kind: AgentKind;
   endpoint: string;
-  graphId: string;
-  langsmithApiKey: string;
   authMode: AgentAuthMode;
   jwtSecret: string;
   jwtScopes: string;
@@ -40,10 +22,7 @@ type FormState = {
 const emptyForm: FormState = {
   name: "",
   description: "",
-  kind: "agui",
   endpoint: "",
-  graphId: "",
-  langsmithApiKey: "",
   authMode: "none",
   jwtSecret: "",
   jwtScopes: "",
@@ -57,15 +36,12 @@ const TEST_HELP =
   "A success does NOT validate auth, AG-UI protocol compliance, or that the agent will actually run. " +
   "A failure usually means the URL is wrong or the server is down.";
 
-async function testEndpoint(
-  endpoint: string,
-  kind: AgentKind,
-): Promise<TestResult> {
+async function testEndpoint(endpoint: string): Promise<TestResult> {
   try {
     const res = await fetch("/api/agents/reachability-probe", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ endpoint, kind }),
+      body: JSON.stringify({ endpoint }),
     });
     const data = await res.json().catch(() => ({}));
     if (!res.ok) {
@@ -97,7 +73,6 @@ export default function AgentsPage() {
   const [loading, setLoading] = useState(true);
   const [form, setForm] = useState<FormState>(emptyForm);
   const [editingId, setEditingId] = useState<string | null>(null);
-  const [editingHasKey, setEditingHasKey] = useState(false);
   const [editingHasJwtSecret, setEditingHasJwtSecret] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [submitting, setSubmitting] = useState(false);
@@ -145,18 +120,14 @@ export default function AgentsPage() {
 
   const startEdit = (agent: PublicAgent) => {
     setEditingId(agent.id);
-    setEditingHasKey(agent.hasLangsmithApiKey);
     setEditingHasJwtSecret(agent.hasJwtSecret);
     setForm({
       name: agent.name,
       description: agent.description,
-      kind: agent.kind,
       endpoint: agent.endpoint,
-      graphId: agent.graphId ?? "",
       // Never pre-fill secrets. The fields start empty; submitting
       // blank omits them from the PATCH (preserving the stored values).
-      // hasLangsmithApiKey / hasJwtSecret drive helper text below.
-      langsmithApiKey: "",
+      // hasJwtSecret drives helper text below.
       authMode: agent.authMode,
       jwtSecret: "",
       jwtScopes: agent.jwtScopes?.join(", ") ?? "",
@@ -168,7 +139,6 @@ export default function AgentsPage() {
   const resetForm = () => {
     setForm(emptyForm);
     setEditingId(null);
-    setEditingHasKey(false);
     setEditingHasJwtSecret(false);
     setError(null);
     setFormTest({ status: "idle" });
@@ -177,13 +147,13 @@ export default function AgentsPage() {
   const handleTestForm = async () => {
     if (!form.endpoint) return;
     setFormTest({ status: "loading" });
-    const result = await testEndpoint(form.endpoint, form.kind);
+    const result = await testEndpoint(form.endpoint);
     setFormTest(result);
   };
 
   const handleTestRow = async (agent: PublicAgent) => {
     setRowTests((prev) => ({ ...prev, [agent.id]: { status: "loading" } }));
-    const result = await testEndpoint(agent.endpoint, agent.kind);
+    const result = await testEndpoint(agent.endpoint);
     setRowTests((prev) => ({ ...prev, [agent.id]: result }));
   };
 
@@ -195,13 +165,10 @@ export default function AgentsPage() {
     const payload = {
       name: form.name,
       description: form.description,
-      kind: form.kind,
       endpoint: form.endpoint,
-      ...(form.graphId ? { graphId: form.graphId } : {}),
-      ...(form.langsmithApiKey ? { langsmithApiKey: form.langsmithApiKey } : {}),
       // authMode is always sent (defaults to "none"). jwtSecret follows
-      // the same blank-preserve pattern as langsmithApiKey — only sent
-      // when non-blank, so blank submit on PATCH keeps the existing value.
+      // the same blank-preserve pattern — only sent when non-blank, so
+      // blank submit on PATCH keeps the existing value.
       authMode: form.authMode,
       ...(form.jwtSecret ? { jwtSecret: form.jwtSecret } : {}),
       // jwtScopes: comma-separated text → string[]. Always sent (even
@@ -303,133 +270,74 @@ export default function AgentsPage() {
               </Field>
             </div>
 
+            <Field label="Endpoint" required hint="full URL including port">
+              <input
+                value={form.endpoint}
+                onChange={(e) => updateForm({ endpoint: e.target.value })}
+                required
+                type="url"
+                className={inputClass()}
+                placeholder="http://localhost:8001/agent"
+              />
+            </Field>
+
             <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
-              <Field label="Kind">
+              <Field
+                label="Auth mode"
+                hint={
+                  form.authMode === "jwt"
+                    ? "Runtime mints a short-lived JWT per run, signed with the secret below, sent as Authorization: Bearer"
+                    : "No auth — the agent endpoint is anonymous. User id is forwarded via forwardedProps.user_id"
+                }
+              >
                 <select
-                  value={form.kind}
+                  value={form.authMode}
                   onChange={(e) => {
-                    const kind = e.target.value as AgentKind;
-                    if (kind !== "langgraph") {
-                      updateForm({ kind, graphId: "", langsmithApiKey: "" });
-                    } else {
-                      // langgraph doesn't support JWT auth — reset agui-only fields
-                      updateForm({ kind, authMode: "none", jwtSecret: "", jwtScopes: "" });
-                    }
+                    const authMode = e.target.value as AgentAuthMode;
+                    updateForm({ authMode, jwtSecret: "", jwtScopes: "" });
                   }}
                   className={inputClass()}
                 >
-                  {KIND_OPTIONS.map((k) => (
-                    <option key={k.value} value={k.value}>
-                      {k.label}
-                    </option>
-                  ))}
+                  <option value="none">None (anonymous)</option>
+                  <option value="jwt">JWT (HS256)</option>
                 </select>
-                <p className="mt-1 text-xs text-zinc-500">
-                  {KIND_OPTIONS.find((k) => k.value === form.kind)?.description}
-                </p>
               </Field>
-              <Field label="Endpoint" required hint="full URL including port">
-                <input
-                  value={form.endpoint}
-                  onChange={(e) => updateForm({ endpoint: e.target.value })}
-                  required
-                  type="url"
-                  className={inputClass()}
-                  placeholder="http://localhost:8001/agent"
-                />
-              </Field>
-            </div>
-
-            {form.kind === "langgraph" && (
-              <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
-                <Field label="Graph ID" hint="optional, defaults to 'agent'">
-                  <input
-                    value={form.graphId}
-                    onChange={(e) => updateForm({ graphId: e.target.value })}
-                    className={inputClass()}
-                    placeholder="agent"
-                  />
-                </Field>
-                <Field
-                  label="LangSmith API Key"
-                  hint={
-                    editingId && editingHasKey
-                      ? "Key set ✓ — leave blank to keep existing, type a new value to replace"
-                      : "optional — enables LangSmith tracing"
-                  }
-                >
-                  <input
-                    value={form.langsmithApiKey}
-                    onChange={(e) =>
-                      updateForm({ langsmithApiKey: e.target.value })
+              {form.authMode === "jwt" && (
+                <>
+                  <Field
+                    label="JWT secret"
+                    hint={
+                      editingId && editingHasJwtSecret
+                        ? "Key set ✓ — leave blank to keep existing, type a new value to replace"
+                        : "Shared HS256 secret (≥32 chars). Set this to the same value as your backend's JWT verification key."
                     }
-                    type="password"
-                    className={inputClass()}
-                    placeholder={editingId && editingHasKey ? "(unchanged)" : "ls-..."}
-                  />
-                </Field>
-              </div>
-            )}
-
-            {form.kind === "agui" && (
-              <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
-                <Field
-                  label="Auth mode"
-                  hint={
-                    form.authMode === "jwt"
-                      ? "Runtime mints a short-lived JWT per run, signed with the secret below, sent as Authorization: Bearer"
-                      : "No auth — the agent endpoint is anonymous. User id is forwarded via forwardedProps.user_id"
-                  }
-                >
-                  <select
-                    value={form.authMode}
-                    onChange={(e) => {
-                      const authMode = e.target.value as AgentAuthMode;
-                      updateForm({ authMode, jwtSecret: "", jwtScopes: "" });
-                    }}
-                    className={inputClass()}
                   >
-                    <option value="none">None (anonymous)</option>
-                    <option value="jwt">JWT (HS256)</option>
-                  </select>
-                </Field>
-                {form.authMode === "jwt" && (
-                  <>
-                    <Field
-                      label="JWT secret"
-                      hint={
+                    <input
+                      value={form.jwtSecret}
+                      onChange={(e) => updateForm({ jwtSecret: e.target.value })}
+                      type="password"
+                      className={inputClass()}
+                      placeholder={
                         editingId && editingHasJwtSecret
-                          ? "Key set ✓ — leave blank to keep existing, type a new value to replace"
-                          : "Shared HS256 secret (≥32 chars). Set this to the same value as your backend's JWT verification key."
+                          ? "(unchanged)"
+                          : "at least 32 characters"
                       }
-                    >
-                      <input
-                        value={form.jwtSecret}
-                        onChange={(e) => updateForm({ jwtSecret: e.target.value })}
-                        type="password"
-                        className={inputClass()}
-                        placeholder={
-                          editingId && editingHasJwtSecret
-                            ? "(unchanged)"
-                            : "at least 32 characters"
-                        }
-                      />
-                    </Field>
-                    <Field
-                      label="JWT scopes"
-                      hint="Comma-separated, e.g. agents:run. Only needed if your backend has authorization=True enabled — otherwise leave blank."
-                    >
-                      <input
-                        value={form.jwtScopes}
-                        onChange={(e) => updateForm({ jwtScopes: e.target.value })}
-                        className={inputClass()}
-                        placeholder="agents:run"
-                      />
-                    </Field>
-                  </>
-                )}
-              </div>
-            )}
+                    />
+                  </Field>
+                  <Field
+                    label="JWT scopes"
+                    hint="Comma-separated, e.g. agents:run. Only needed if your backend has authorization=True enabled — otherwise leave blank."
+                  >
+                    <input
+                      value={form.jwtScopes}
+                      onChange={(e) => updateForm({ jwtScopes: e.target.value })}
+                      className={inputClass()}
+                      placeholder="agents:run"
+                    />
+                  </Field>
+                </>
+              )}
+            </div>
 
             <p className="text-xs text-zinc-500">
               Need an agent backend?{" "}
@@ -547,7 +455,6 @@ export default function AgentsPage() {
                     <tr>
                       <th className="px-4 py-2">ID</th>
                       <th className="px-4 py-2">Name</th>
-                      <th className="px-4 py-2">Kind</th>
                       <th className="px-4 py-2">Endpoint</th>
                       <th className="px-4 py-2 text-right">Actions</th>
                     </tr>
@@ -565,11 +472,6 @@ export default function AgentsPage() {
                           </td>
                           <td className="px-4 py-3 font-medium text-zinc-900 dark:text-zinc-50">
                             {agent.name}
-                          </td>
-                          <td className="px-4 py-3">
-                            <span className="rounded bg-zinc-100 px-1.5 py-0.5 text-[10px] font-medium uppercase text-zinc-500 dark:bg-zinc-800 dark:text-zinc-400">
-                              {agent.kind}
-                            </span>
                           </td>
                           <td className="px-4 py-3 font-mono text-xs text-zinc-600 dark:text-zinc-400">
                             {agent.endpoint}
@@ -622,9 +524,6 @@ export default function AgentsPage() {
                             {agent.id}
                           </p>
                         </div>
-                        <span className="shrink-0 rounded bg-zinc-100 px-1.5 py-0.5 text-[10px] font-medium uppercase text-zinc-500 dark:bg-zinc-800 dark:text-zinc-400">
-                          {agent.kind}
-                        </span>
                       </div>
                       <p className="mt-2 truncate font-mono text-xs text-zinc-600 dark:text-zinc-400">
                         {agent.endpoint}

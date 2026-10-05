@@ -1,4 +1,10 @@
-export type AgentKind = "langgraph" | "agui";
+// Agents speak the AG-UI protocol via `HttpAgent` — Agno, CrewAI,
+// Pydantic AI, Mastra, LangGraph (via ag-ui-langgraph), or a custom
+// backend. There is no `kind` field: the speculative `langgraph` kind
+// (LangGraph Platform API) was removed in migration 0008 and the whole
+// `kind` field in migration 0009. When a second kind is genuinely
+// demanded, re-add the column + adapter in the same migration as its
+// config fields.
 
 export type AgentAuthMode = "none" | "jwt";
 
@@ -6,11 +12,8 @@ export interface AgentEntry {
   id: string;
   name: string;
   description: string;
-  kind: AgentKind;
   endpoint: string;
   orgId: string;
-  graphId?: string;
-  langsmithApiKey?: string;
   /**
    * How the runtime authenticates to the agent's backend.
    * - "none" (default): no auth — the agent endpoint is anonymous and
@@ -56,11 +59,8 @@ export interface PublicAgent {
   id: string;
   name: string;
   description: string;
-  kind: AgentKind;
   endpoint: string;
   orgId: string;
-  graphId?: string;
-  hasLangsmithApiKey: boolean;
   authMode: AgentAuthMode;
   hasJwtSecret: boolean;
   jwtScopes?: string[];

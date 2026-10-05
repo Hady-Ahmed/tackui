@@ -34,21 +34,8 @@ const aguiEntry = (overrides: Partial<AgentEntry> = {}): AgentEntry => ({
   id: "ag1",
   name: "Agno Agent",
   description: "test agui agent",
-  kind: "agui",
   endpoint: "http://localhost:8001/agent",
   orgId: "org-1",
-  authMode: "none",
-  ...overrides,
-});
-
-const langgraphEntry = (overrides: Partial<AgentEntry> = {}): AgentEntry => ({
-  id: "lg1",
-  name: "LangGraph Agent",
-  description: "test langgraph agent",
-  kind: "langgraph",
-  endpoint: "http://localhost:8123",
-  orgId: "org-1",
-  graphId: "agent",
   authMode: "none",
   ...overrides,
 });
@@ -123,51 +110,6 @@ describe("getAgents", () => {
     expect(captured.forwardedProps?.user_id).toBe("u-123");
     // Existing client-supplied forwardedProps are preserved, not overwritten.
     expect(captured.forwardedProps?.existing).toBe("keep");
-  });
-
-  it("does not inject user_id into langgraph agents", async () => {
-    vi.mocked(listAgents).mockResolvedValue([langgraphEntry({ id: "lg1" })]);
-    const map = await getAgents(new Request("http://localhost"));
-    const agent = map["lg1"];
-
-    // LangGraphAgent has no use() middleware attached by our registry —
-    // its middlewares array (if any) is the SDK's own, none of which
-    // enrich forwardedProps with user_id. We assert the agent is not an
-    // HttpAgent with our injected FunctionMiddleware by checking that
-    // there is no middleware whose run() sets forwardedProps.user_id.
-    const middlewares = (agent as unknown as {
-      middlewares?: { run: (input: unknown, next: { run: (i: unknown) => unknown }) => unknown }[];
-    }).middlewares;
-
-    if (middlewares && middlewares.length > 0) {
-      for (const m of middlewares) {
-        const captured: { forwardedProps?: Record<string, unknown> } = {};
-        const stubNext = {
-          run: (input: typeof captured) => {
-            Object.assign(captured, input);
-            return { subscribe: () => {} };
-          },
-        };
-        try {
-          m.run(
-            {
-              threadId: "t1",
-              runId: "r1",
-              messages: [],
-              tools: [],
-              context: [],
-              state: {},
-              forwardedProps: {},
-            },
-            stubNext as never,
-          );
-        } catch {
-          // Some SDK middlewares may throw on stub input; that's fine —
-          // we only care that none of them set user_id.
-        }
-        expect(captured.forwardedProps?.user_id).toBeUndefined();
-      }
-    }
   });
 
   it("each agui agent gets its own middleware with the resolved user id", async () => {

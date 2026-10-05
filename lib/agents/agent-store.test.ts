@@ -19,7 +19,6 @@ const OTHER_ORG = "other-org-id";
 const validInput: CreateAgentInput = {
   name: "Test Agent",
   description: "A test agent",
-  kind: "agui",
   endpoint: "http://localhost:8000/agent",
   authMode: "none",
 };
@@ -56,21 +55,13 @@ describe("createAgentBodySchema", () => {
     expect(result.success).toBe(false);
   });
 
-  it("rejects invalid kind", () => {
+  it("strips unknown fields like the removed `kind` (legacy senders keep working)", () => {
     const result = createAgentBodySchema.safeParse({
       ...validInput,
-      kind: "openai",
-    });
-    expect(result.success).toBe(false);
-  });
-
-  it("accepts optional graphId and langsmithApiKey", () => {
-    const result = createAgentBodySchema.safeParse({
-      ...validInput,
-      graphId: "agent",
-      langsmithApiKey: "ls-xxx",
+      kind: "agui",
     });
     expect(result.success).toBe(true);
+    expect(result.success && "kind" in result.data).toBe(false);
   });
 
   it("defaults authMode to 'none' when omitted", () => {
@@ -146,19 +137,8 @@ describe("createAgent", () => {
     const created = await createAgent(validInput, TEST_ORG);
     expect(created.id).toMatch(/^[0-9a-f]{12}$/);
     expect(created.name).toBe("Test Agent");
-    expect(created.kind).toBe("agui");
     expect(created.endpoint).toBe("http://localhost:8000/agent");
     expect(created.orgId).toBe(TEST_ORG);
-  });
-
-  it("stores optional fields", async () => {
-    const created = await createAgent({
-      ...validInput,
-      graphId: "my-graph",
-      langsmithApiKey: "ls-key",
-    }, TEST_ORG);
-    expect(created.graphId).toBe("my-graph");
-    expect(created.langsmithApiKey).toBe("ls-key");
   });
 
   it("stores authMode and jwtSecret", async () => {
@@ -177,19 +157,16 @@ describe("createAgent", () => {
     expect(created.jwtSecret).toBeUndefined();
   });
 
-  it("toPublicAgent strips jwtSecret and langsmithApiKey, exposes booleans", async () => {
+  it("toPublicAgent strips jwtSecret, exposes boolean", async () => {
     const created = await createAgent({
       ...validInput,
       authMode: "jwt",
       jwtSecret: "s".repeat(32),
-      langsmithApiKey: "ls-key",
     }, TEST_ORG);
     const pub = toPublicAgent(created);
     expect(pub.authMode).toBe("jwt");
     expect(pub.hasJwtSecret).toBe(true);
-    expect(pub.hasLangsmithApiKey).toBe(true);
     expect("jwtSecret" in pub).toBe(false);
-    expect("langsmithApiKey" in pub).toBe(false);
   });
 
   it("stores and retrieves jwtScopes as a comma-separated string", async () => {
