@@ -20,7 +20,7 @@ A unified frontend for custom agents speaking the [AG-UI protocol](https://docs.
 - **Streaming chat** — token streaming, multi-turn conversations, cancel/resume
 - **Multi-agent switching** — per-agent conversation threads with sidebar picker
 - **Human-in-the-loop interrupts** — approve/deny cards for agent actions
-- **Tool-call visualization** — expandable cards with arguments, results, copy button, error detection
+- **Tool-call visualization** — inline activity rows: rendered markdown, result tables, key-value arguments, copy button, error detection, escaped-result decoding
 - **Conversation persistence** — Postgres-backed threads with inline rename and delete
 - **Dynamic agent registry** — add, edit, and remove agents via the admin UI with no restart
 - **Test connection** — server-side reachability probe with sidebar status indicators

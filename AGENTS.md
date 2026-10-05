@@ -16,6 +16,9 @@ UI code changes.
 - **AG-UI Client SDK:** `@ag-ui/client` (for generic AG-UI HTTP agents)
 - **Auth:** Better Auth (`better-auth`) — email/password, OAuth (Google/GitHub),
   OIDC SSO (`genericOAuth` plugin), admin roles (`admin` plugin)
+- **Tool-result rendering:** `react-markdown` + `remark-gfm` (renders tool
+  results as markdown; no raw HTML — safe by default against backend-supplied
+  content)
 
 ## Commands
 
@@ -158,6 +161,11 @@ lib/
     pin.tsx                    # PinMark (3D thumbtack SVG for Satori — mirrors app/icon.svg geometry) + OgCard (1200×630 social-share card layout: dark canvas, blue radial glow, centered mark + wordmark + tagline)
   org-members.ts                # Typed wrappers around better-auth organization client for member management (listMembers + removeMember + updateMemberRole incl. owner role for transfer + listInvitations pending-only + cancelInvitation) — pure API mapping, returns {data, error}, UI side-effects live in the page
   org-members.test.ts           # 16 tests — roster typing + empty-members, remove by id/email, only-owner + not-allowed error propagation, role change incl. owner, pending-only filter, cancel invite
+  tools/
+    format.ts                  # Pure tool-render helpers: humanizeToolName, argPreview (collapsed-row preview),
+                               # toKeyValueRows, isArrayOfObjects (table detection), looksLikeMarkdown heuristic,
+                               # normalizeResultString (decodes JSON-escaped results — literal \n / \" / \uXXXX)
+    format.test.ts             # 40 tests — name humanizing, previews, KV rows, markdown heuristics, escape decoding
 
 components/
   agent-sidebar.tsx            # Agent picker + conversation list + status dots + rename/delete + collapsible (useThreads)
@@ -175,7 +183,7 @@ components/
   hitl/
     approval-card.tsx          # Human-in-the-loop interrupt handlers
   tools/
-    tool-renders.tsx           # Tool-call visualization (useRenderTool)
+    tool-renders.tsx           # Tool-call rendering (useRenderTool wildcard → inline activity rows: markdown, tables, KV args, Show all)
 
 proxy.ts                       # Next.js proxy (cookie gate + AUTH_DISABLED bypass + /api/health bypass + per-IP rate limiting + open-redirect-safe redirect)
 next.config.ts                 # Security headers (CSP, HSTS, X-Frame-Options, etc.) + standalone build + poweredByHeader disabled + Sentry wrapper (+ tunnelRoute for ad-blocker bypass)
@@ -954,7 +962,7 @@ contributors can connect any AG-UI-compatible backend without frontend changes.
 **When adding a new agent backend**, document in that backend's own repo which
 strategy it uses so users know whether server-side session storage is required.
 
-## v1 Scope
+## Features
 
 - Streaming chat (token streaming, multi-turn, cancel/resume)
 - Human-in-the-loop interrupts (`useInterrupt`)
@@ -963,7 +971,16 @@ strategy it uses so users know whether server-side session storage is required.
   agent's in-memory messages on unmount — this prevents duplicate messages on
   switch, since CopilotKit's `/connect` replays all historic events and
   `AbstractAgent.apply()` appends content to existing messages)
-- Tool-call visualization (`useRenderTool`)
+- Tool-call visualization (`useRenderTool` wildcard in `components/tools/tool-renders.tsx`
+  → inline ChatGPT/Claude-style activity rows: status icon (spinner → ✓/✗),
+  humanized tool name, inline arg preview; expanded panel renders args as
+  key-value rows and results as rendered markdown (`react-markdown` + `remark-gfm`),
+  HTML tables (array-of-objects), pretty JSON, or plain text. String results that
+  arrive JSON-escaped (literal `\n` / `\"` / `\uXXXX` — e.g. Agno/Tavily) are
+  decoded first via `normalizeResultString` (conservative gate: zero real newlines
+  + escape artifacts present). No size caps anywhere — only a visual height clip
+  with Show all/Show less; `useMemo` + `React.memo` keep big results parsing once.
+  Pure helpers live in `lib/tools/format.ts` (tested).
 - Postgres-backed thread runner with conversation persistence
   (`PostgresAgentRunner` in `lib/agents/pg-runner.ts` — extends `AgentRunner`
   from `@copilotkit/runtime/v2`, owns its `ACTIVE_CONNECTIONS` Map for
@@ -1171,3 +1188,10 @@ strategy it uses so users know whether server-side session storage is required.
 - Commit messages follow [Conventional Commits](https://www.conventionalcommits.org/)
   (`feat:`, `fix:`, `docs:`, `test:`, `chore:` with optional scope).
   See CONTRIBUTING.md for examples.
+- **Changelog maintenance** — notable changes (new features, behavior changes,
+  fixes, security work) get a bullet under `## [Unreleased]` in `CHANGELOG.md`
+  in the same change that introduces them, using the Keep a Changelog
+  categories (Added / Changed / Fixed / Security / Environment). Docs-only and
+  routine chores are skipped (or one-lined under Docs). Released sections
+  (`## [x.y.z]`) are frozen history — never edit them; the next release starts
+  fresh from `[Unreleased]`.

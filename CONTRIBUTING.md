@@ -67,7 +67,8 @@ See the `AGENTS.md` "Testing conventions" section for the full rationale.
 5. **Don't add `eslint-disable` / `@ts-ignore` / `@ts-expect-error` / `any`** without a strong justification in the PR description. The codebase has zero today; the goal is to keep it that way, especially in security-critical code (`lib/auth`, `lib/billing`, `lib/net`, `lib/ratelimit`).
 6. **Don't add `TODO` / `FIXME` / `HACK` comments** without an accompanying issue link. Open the issue first, then reference it: `// TODO(#123): handle X`.
 7. **Update `AGENTS.md`** when you change the project's structure, add a new agent kind, change the auth model, or modify the rate-limit/billing architecture. It's the architecture doc — keep it accurate.
-8. **Use the PR template** (`.github/PULL_REQUEST_TEMPLATE.md`) as your PR description.
+8. **Add a bullet to `CHANGELOG.md`** under `## [Unreleased]` in the same PR for any notable change (feature, behavior change, fix, security work), using the Keep a Changelog categories. Docs-only and routine chores are skipped. Never edit released sections (`## [x.y.z]`) — they're frozen history.
+9. **Use the PR template** (`.github/PULL_REQUEST_TEMPLATE.md`) as your PR description.
 
 ## Commit messages
 
