@@ -314,6 +314,7 @@ See [`.env.example`](.env.example) for the full list with comments.
 | `BETTER_AUTH_URL` | Yes (unless `AUTH_DISABLED=true`) | Public base URL of the app (e.g. `http://localhost:3000`) |
 | `AUTH_DISABLED` | No | Set to `true` to skip login (solo mode). **Never use this in any deployment exposed to the internet or shared users.** |
 | `ALLOW_PRIVATE_ENDPOINTS` | No | Set to `true` to allow creating/editing agents with endpoints that resolve to private/internal IPs (e.g. when agent backends run on the same host). Defaults to `false` (blocks private IPs to prevent SSRF). |
+| `DB_ENCRYPTION_KEY` | No | 32-byte hex key (generate with `openssl rand -hex 32`) used to encrypt agent JWT secrets at rest (AES-256-GCM). When unset, secrets are stored in plaintext (a warning is logged at boot). Rotating the key requires re-saving each agent's JWT secret. |
 | `TRUSTED_PROXY_HOPS` | No | Number of trusted reverse-proxy hops in front of the server, used to resolve the real client IP from `X-Forwarded-For` (default `1`). Set to `2` for Cloudflare → Nginx → app, etc. When behind Cloudflare → Traefik (Coolify), the proxy checks `CF-Connecting-IP` first (Traefik overwrites XFF with the edge IP). This env var is the fallback for non-Cloudflare deploys. |
 | `CONCURRENT_RUN_TIMEOUT_MS` | No | Watchdog timeout (ms) for concurrent-run rate-limit slots. Default `600000` (10 min). Floor `60000`. Safety net only — the actual SSE stream / agent run is NOT cancelled; only the counter is decremented to prevent slot leaks when a client opens a run and drops TCP without triggering `ReadableStream.cancel()`. Override if your agents do legitimately long research runs. |
 | `SENTRY_DSN` | No | Sentry DSN for server-side error tracking. No-op if unset. |
@@ -356,7 +357,7 @@ If your agent backends run on the same host as the frontend (common for self-hos
 ### Secret handling
 
 - **`BETTER_AUTH_SECRET`** — the app refuses to boot in auth mode without it. A missing secret would silently sign session cookies with a publicly-known value, allowing account forgery.
-- **`jwtSecret`** — stored in plaintext in Postgres (protect via your database's disk encryption) and never returned in API responses. The admin edit form shows whether a key is set (via `hasJwtSecret: boolean`) but never displays the value. To replace it, type a new value; to keep the existing one, leave the field blank.
+- **`jwtSecret`** — never returned in API responses. The admin edit form shows whether a key is set (via `hasJwtSecret: boolean`) but never displays the value. To replace it, type a new value; to keep the existing one, leave the field blank. When `DB_ENCRYPTION_KEY` is set, the secret is **encrypted at rest** (AES-256-GCM) — a leaked database dump alone does not expose it; it is decrypted in memory only when minting run tokens. Existing plaintext rows are re-encrypted automatically at boot.
 - **Social/OIDC client secrets** — only read from environment variables, never stored in the database or exposed via API responses.
 
 ### Security headers

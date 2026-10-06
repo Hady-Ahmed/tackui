@@ -115,6 +115,9 @@ lib/
     solo-org.ts                # ensureSoloOrg / getSoloOrgId — creates real org row on boot for solo mode
     use-auth-config.ts         # useAuthConfig() hook — fetches /api/auth/config once per page load
     use-can-manage-agents.ts   # useCanManageAgents() hook — fetches /api/auth/can-manage-agents once per page load
+  crypto/
+    encrypt.ts                 # AES-256-GCM at-rest encryption for agent jwt_secret (DB_ENCRYPTION_KEY, `enc:v1:` prefixed values, legacy-plaintext passthrough)
+    backfill.ts                # Idempotent boot pass — re-encrypts legacy plaintext jwt_secret rows (wired into instrumentation.ts)
   db/
     pg.ts                       # Shared pg.Pool singleton (DATABASE_URL) + query/withTransaction helpers
     migrate.ts                  # Versioned SQL migration runner (lib/db/migrations/*.sql)
@@ -305,9 +308,11 @@ the admin form (`/agents` page) or the REST API.
 **Secret handling:** `jwtSecret` is **write-only** — accepted on
 POST/PATCH but never returned in GET responses. `PublicAgent.hasJwtSecret:
 boolean` replaces the raw value. The admin edit form shows "Key set ✓"
-when true; submitting a blank field preserves the existing value. Stored
-in plaintext in the `agents` table; future hardening will encrypt it at
-rest. RS256 (asymmetric) and audience claims are future enhancements.
+when true; submitting a blank field preserves the existing value.
+Encrypted at rest (AES-256-GCM via `DB_ENCRYPTION_KEY`, see
+[Security](#security)); plaintext exists only in server memory while
+minting run tokens. RS256 (asymmetric) and audience claims are future
+enhancements.
 
 ### Security
 
@@ -324,8 +329,8 @@ rest. RS256 (asymmetric) and audience claims are future enhancements.
   GET responses. `PublicAgent.hasJwtSecret: boolean` replaces it.
   `toPublicAgent()` / `toPublicAgents()` in `lib/agents/agent-store.ts` do the
   stripping. The admin edit form shows "Key set ✓" when true; blank submit
-  preserves the existing value. Stored in plaintext in the `agents` table;
-  future hardening will encrypt it at rest.
+  preserves the existing value. Encrypted at rest when `DB_ENCRYPTION_KEY`
+  is set (see [Encryption-at-rest](#encryption-at-rest-for-agent-jwt-secrets) below).
 - **Security headers** (`next.config.ts`) — CSP (`'unsafe-inline'` scripts/styles,
   `'unsafe-eval'` dev-only, `frame-ancestors 'none'`), `X-Frame-Options: DENY`,
   `X-Content-Type-Options: nosniff`, `Referrer-Policy: strict-origin-when-cross-origin`,
@@ -340,6 +345,41 @@ rest. RS256 (asymmetric) and audience claims are future enhancements.
 - **`/api/health`** (`app/api/health/route.ts`) — liveness check returning
   `200 { ok: true }`. Bypassed by `proxy.ts` cookie gate so orchestrators can
   probe without a session. Wired into `docker-compose.yml` healthcheck.
+
+### Encryption-at-rest for agent JWT secrets
+
+Agent `jwt_secret` values are encrypted at rest with **AES-256-GCM**
+(`lib/crypto/encrypt.ts`) so a leaked DB dump/backup alone does not
+expose backend JWT verification keys.
+
+- **Key:** `DB_ENCRYPTION_KEY` env var — 64 hex chars = 32 bytes
+  (generate with `openssl rand -hex 32`), loaded lazily + cached.
+  Malformed key throws (boot backfill surfaces it loudly).
+- **Stored format:** `enc:v1:<iv_b64>:<ciphertext_b64>:<tag_b64>` in
+  the existing TEXT column — no schema migration. Random 12-byte IV
+  per write, 16-byte auth tag (tamper detection). The versioned prefix
+  makes values self-describing and format-evolution possible.
+- **Boundary:** encryption lives entirely inside `lib/agents/agent-store.ts`
+  — `createAgent`/`updateAgent` encrypt before the INSERT/UPDATE,
+  `rowToEntry` decrypts on read. Everything downstream (registry JWT
+  minting, `toPublicAgent` stripping, blank-preserve PATCH) works
+  unchanged on plaintext `AgentEntry.jwtSecret`.
+- **Plaintext fallback (documented):** when `DB_ENCRYPTION_KEY` is
+  unset, secrets are stored as plaintext — loud warning at boot
+  (instrumentation.ts) + once per process on write. Keeps zero-config
+  self-host working; set the key to get encryption.
+- **Boot backfill** (`lib/crypto/backfill.ts`, wired into
+  `instrumentation.ts`): idempotent pass that re-encrypts legacy
+  plaintext rows (`jwt_secret NOT LIKE 'enc:v1:%'`) so existing
+  deployments are protected without re-editing every agent. Skipped
+  (with warning) when no key is configured.
+- **Graceful decrypt failure:** a rotated/missing key or tampered value
+  logs `[agent-store] failed to decrypt jwt_secret` and treats that
+  agent as secret-less (backend returns 401) — other agents and the
+  rest of the app keep working.
+- **Key rotation:** changing `DB_ENCRYPTION_KEY` invalidates existing
+  ciphertexts (GCM auth fails). Re-save each agent's JWT secret after
+  rotation (the value itself doesn't change — only the encryption key).
 
 ### Rate limiting
 
@@ -724,6 +764,11 @@ Required unless `AUTH_DISABLED=true`:
 
 Optional security flags:
 
+- `DB_ENCRYPTION_KEY` — 32-byte hex key (generate with `openssl rand -hex 32`)
+  used to encrypt agent JWT secrets at rest (AES-256-GCM). When unset, secrets
+  are stored in plaintext (loud warning at boot). Rotating the key requires
+  re-saving each agent's JWT secret. See
+  [Encryption-at-rest](#encryption-at-rest-for-agent-jwt-secrets) above.
 - `ALLOW_PRIVATE_ENDPOINTS` — set to `true` to allow creating/editing agents
   with endpoints that resolve to private/internal IPs (for self-hosters running
   backends on the same host). Defaults to `false` (blocks private IPs to
@@ -1065,6 +1110,15 @@ strategy it uses so users know whether server-side session storage is required.
   (20 runs/min, 3 concurrent SSE streams, 10/min probe/mutations, 60/min
   reads). Better Auth `rateLimit` config (sign-in: 10/min, sign-up: 5/min
   per IP). 429 responses with standard `X-RateLimit-*` headers.
+- Encryption at rest for agent JWT secrets — `jwtSecret` stored as
+  AES-256-GCM ciphertext (`enc:v1:` prefix, `lib/crypto/encrypt.ts`,
+  `DB_ENCRYPTION_KEY` env var), encrypted in
+  `createAgent`/`updateAgent` + decrypted in `rowToEntry` — leaked DB
+  dumps/backups alone no longer expose backend verification keys.
+  Idempotent boot backfill re-encrypts legacy plaintext rows; unset key
+  = documented plaintext fallback with loud warnings; graceful per-row
+  decrypt failure (rotated key → agent treated as secret-less, rest of
+  app unaffected).
 - Error tracking — `@sentry/nextjs` integration (server + client + edge
   configs). No-op when `SENTRY_DSN` is not set. Error boundaries call
   `Sentry.captureException`. Trace sampling via `SENTRY_TRACES_SAMPLE_RATE`.
@@ -1142,10 +1196,6 @@ strategy it uses so users know whether server-side session storage is required.
   `scopes` (what the backend allows). An audience (`aud`) claim is
   deliberately omitted — add an optional `jwtAudience` field if a
   backend genuinely requires it (rare).
-- Encryption-at-rest for DB secrets — `jwtSecret` is stored in plaintext
-  in the `agents` table (a DB dump leaks it). Add a `DB_ENCRYPTION_KEY`
-  env var + `lib/crypto/encrypt.ts` helper (AES-256-GCM), encrypt at
-  write, decrypt at read.
 
 ## Notes
 

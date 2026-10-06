@@ -85,6 +85,28 @@ export async function register() {
   if (process.env.AUTH_DISABLED === "true") {
     await retryPg("solo-org", () => ensureSoloOrg());
   }
+
+  // Encrypt-at-rest backfill: re-encrypt agent JWT secrets stored in
+  // plaintext before DB_ENCRYPTION_KEY was configured. Idempotent —
+  // rows already carrying the `enc:v1:` prefix are filtered out. When
+  // no key is configured, warn loudly (secrets stay plaintext) instead
+  // of backfilling.
+  const { isEncryptionConfigured } = await import("@/lib/crypto/encrypt");
+  if (!isEncryptionConfigured()) {
+    console.warn(
+      "[encrypt] DB_ENCRYPTION_KEY is not set — agent JWT secrets will be stored in PLAINTEXT. Set DB_ENCRYPTION_KEY (generate with: openssl rand -hex 32) to enable encryption at rest.",
+    );
+  } else {
+    const { backfillEncryptedSecrets } = await import("@/lib/crypto/backfill");
+    const backfillResult = await retryPg("encrypt-backfill", () =>
+      backfillEncryptedSecrets(),
+    );
+    if (backfillResult && backfillResult.encrypted > 0) {
+      console.log(
+        `[encrypt] encrypted ${backfillResult.encrypted} agent JWT secret(s) at rest (previously plaintext)`,
+      );
+    }
+  }
 }
 
 // Capture errors from Server Components, route handlers, middleware, and

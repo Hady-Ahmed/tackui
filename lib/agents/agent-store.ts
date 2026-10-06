@@ -1,5 +1,6 @@
 import { randomUUID } from "node:crypto";
 import { query } from "@/lib/db/pg";
+import { decryptSecret, encryptSecret } from "@/lib/crypto/encrypt";
 import { z } from "zod";
 import type { AgentAuthMode, AgentEntry, PublicAgent } from "./agents.config";
 const agentAuthModeSchema = z.enum(["none", "jwt"]);
@@ -61,6 +62,22 @@ interface AgentRow {
 }
 
 function rowToEntry(row: AgentRow): AgentEntry {
+  // Decrypt at the read boundary. Legacy plaintext rows (written before
+  // DB_ENCRYPTION_KEY was configured) pass through unchanged. A decrypt
+  // failure (rotated/missing key, tampered value) degrades gracefully:
+  // the agent keeps working minus JWT auth, and other agents are
+  // unaffected — the secret was unusable either way.
+  let jwtSecret: string | undefined;
+  if (row.jwt_secret) {
+    try {
+      jwtSecret = decryptSecret(row.jwt_secret);
+    } catch (err) {
+      console.error("[agent-store] failed to decrypt jwt_secret — treating agent as secret-less", {
+        agentId: row.id,
+        error: err instanceof Error ? err.message : String(err),
+      });
+    }
+  }
   return {
     id: row.id,
     name: row.name,
@@ -68,7 +85,7 @@ function rowToEntry(row: AgentRow): AgentEntry {
     endpoint: row.endpoint,
     orgId: row.org_id,
     authMode: (row.auth_mode ?? "none") as AgentAuthMode,
-    jwtSecret: row.jwt_secret ?? undefined,
+    jwtSecret,
     jwtScopes: row.jwt_scopes
       ? row.jwt_scopes.split(",").map((s) => s.trim()).filter(Boolean)
       : undefined,
@@ -178,6 +195,9 @@ export async function createAgent(
   orgId: string,
 ): Promise<AgentEntry> {
   const id = generateAgentId();
+  // Encrypt at the write boundary (no-op passthrough when
+  // DB_ENCRYPTION_KEY is unset — see lib/crypto/encrypt.ts).
+  const jwtSecretForDb = input.jwtSecret ? encryptSecret(input.jwtSecret) : null;
   const result = await query<AgentRow>(
     `INSERT INTO agents (id, name, description, endpoint, org_id, auth_mode, jwt_secret, jwt_scopes)
      VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
@@ -189,7 +209,7 @@ export async function createAgent(
       input.endpoint,
       orgId,
       input.authMode,
-      input.jwtSecret ?? null,
+      jwtSecretForDb,
       input.jwtScopes?.join(",") ?? null,
     ],
   );
@@ -220,6 +240,11 @@ export async function updateAgent(
     ...patch,
   };
   const parsed = agentRowSchema.parse(merged);
+  // Encrypt at the write boundary. `merged.jwtSecret` is the decrypted
+  // plaintext (existing value re-encrypted with a fresh IV when the
+  // patch omits it — blank-preserve still works). No-op passthrough
+  // when DB_ENCRYPTION_KEY is unset.
+  const jwtSecretForDb = parsed.jwtSecret ? encryptSecret(parsed.jwtSecret) : null;
   if (opts?.bypassOrgScope) {
     const result = await query<AgentRow>(
       `UPDATE agents
@@ -232,7 +257,7 @@ export async function updateAgent(
         parsed.description,
         parsed.endpoint,
         parsed.authMode,
-        parsed.jwtSecret ?? null,
+        jwtSecretForDb,
         parsed.jwtScopes?.join(",") ?? null,
         id,
       ],
@@ -250,7 +275,7 @@ export async function updateAgent(
       parsed.description,
       parsed.endpoint,
       parsed.authMode,
-      parsed.jwtSecret ?? null,
+      jwtSecretForDb,
       parsed.jwtScopes?.join(",") ?? null,
       id,
       orgId,

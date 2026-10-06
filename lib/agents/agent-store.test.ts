@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeEach } from "vitest";
+import { describe, it, expect, beforeEach, beforeAll, afterAll, vi } from "vitest";
 import {
   listAgents,
   getAgent,
@@ -12,9 +12,23 @@ import {
 } from "./agent-store";
 import type { CreateAgentInput } from "./agent-store";
 import { runMigrations } from "@/lib/db/migrate";
+import { query } from "@/lib/db/pg";
 
 const TEST_ORG = "test-org-id";
 const OTHER_ORG = "other-org-id";
+
+// Deterministic 32-byte hex key — all store round-trips in this file run
+// with encryption enabled (reads decrypt transparently, so existing
+// assertions are unaffected).
+const ENCRYPTION_TEST_KEY = "ab".repeat(32);
+
+beforeAll(() => {
+  vi.stubEnv("DB_ENCRYPTION_KEY", ENCRYPTION_TEST_KEY);
+});
+
+afterAll(() => {
+  vi.unstubAllEnvs();
+});
 
 const validInput: CreateAgentInput = {
   name: "Test Agent",
@@ -382,5 +396,60 @@ describe("deleteAgent", () => {
   it("returns false when agent belongs to another org", async () => {
     const created = await createAgent(validInput, OTHER_ORG);
     expect(await deleteAgent(created.id, TEST_ORG)).toBe(false);
+  });
+});
+
+describe("jwt secret encryption at rest", () => {
+  it("stores jwt_secret as ciphertext and reads back plaintext", async () => {
+    const secret = "s".repeat(32);
+    const created = await createAgent(
+      { ...validInput, authMode: "jwt", jwtSecret: secret },
+      TEST_ORG,
+    );
+    const raw = await query<{ jwt_secret: string }>(
+      `SELECT jwt_secret FROM agents WHERE id = $1 AND org_id = $2`,
+      [created.id, TEST_ORG],
+    );
+    expect(raw.rows[0].jwt_secret).toMatch(/^enc:v1:/);
+    expect(raw.rows[0].jwt_secret).not.toContain(secret);
+    expect((await getAgent(created.id, TEST_ORG))!.jwtSecret).toBe(secret);
+  });
+
+  it("re-encrypts a new secret on update (old ciphertext replaced)", async () => {
+    const created = await createAgent(
+      { ...validInput, authMode: "jwt", jwtSecret: "s".repeat(32) },
+      TEST_ORG,
+    );
+    const newSecret = "t".repeat(40);
+    await updateAgent(created.id, { jwtSecret: newSecret }, TEST_ORG);
+    const raw = await query<{ jwt_secret: string }>(
+      `SELECT jwt_secret FROM agents WHERE id = $1 AND org_id = $2`,
+      [created.id, TEST_ORG],
+    );
+    expect(raw.rows[0].jwt_secret).toMatch(/^enc:v1:/);
+    expect(raw.rows[0].jwt_secret).not.toContain(newSecret);
+    expect((await getAgent(created.id, TEST_ORG))!.jwtSecret).toBe(newSecret);
+  });
+
+  it("legacy plaintext rows are still readable (passthrough)", async () => {
+    await query(
+      `INSERT INTO agents (id, name, description, endpoint, org_id, auth_mode, jwt_secret)
+       VALUES ($1, $2, $3, $4, $5, $6, $7)`,
+      ["legacyagent01", "Legacy", "raw plaintext row", "http://localhost:8001/agent", TEST_ORG, "jwt", "p".repeat(32)],
+    );
+    const fetched = await getAgent("legacyagent01", TEST_ORG);
+    expect(fetched!.jwtSecret).toBe("p".repeat(32));
+    expect(toPublicAgent(fetched!).hasJwtSecret).toBe(true);
+  });
+
+  it("returns decrypted plaintext (never ciphertext) through the store API", async () => {
+    const secret = "leak-check-" + "x".repeat(21);
+    const created = await createAgent(
+      { ...validInput, authMode: "jwt", jwtSecret: secret },
+      TEST_ORG,
+    );
+    const fetched = (await getAgent(created.id, TEST_ORG))!;
+    expect(fetched.jwtSecret).toBe(secret);
+    expect(toPublicAgent(fetched)).not.toHaveProperty("jwtSecret");
   });
 });

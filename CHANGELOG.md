@@ -5,7 +5,7 @@ All notable changes to this project will be documented in this file. The format 
 ## [Unreleased]
 
 ### Added
-- **Per-agent JWT auth (HS256)** — optional `authMode: "jwt"` per `agui` agent: the runtime mints a short-lived JWT (`sub` = the authenticated user's Better Auth id, `exp` +1h) signed with the agent's `jwtSecret` and sends it as `Authorization: Bearer <token>` on every run. Optional `jwtScopes` claim for backends with authorization (RBAC) enabled. `jwtSecret` is write-only (`PublicAgent.hasJwtSecret: boolean` replaces the raw value); stored plaintext in the `agents` table (encryption at rest is future work).
+- **Per-agent JWT auth (HS256)** — optional `authMode: "jwt"` per `agui` agent: the runtime mints a short-lived JWT (`sub` = the authenticated user's Better Auth id, `exp` +1h) signed with the agent's `jwtSecret` and sends it as `Authorization: Bearer <token>` on every run. Optional `jwtScopes` claim for backends with authorization (RBAC) enabled. `jwtSecret` is write-only (`PublicAgent.hasJwtSecret: boolean` replaces the raw value); encrypted at rest when `DB_ENCRYPTION_KEY` is set (see Security below).
 - **User identity forwarding** — the runtime injects the authenticated user's id into `input.forwardedProps.user_id` on every `agui` run (Agno's convention for per-user memory/sessions). Done server-side per-request in `lib/agents/registry.ts`; client-supplied `forwardedProps` are preserved. Sent in both auth modes — when a JWT is present the backend pins to `sub`, otherwise it uses `user_id`.
 - **Optional Umami analytics** — self-hosted web analytics integration (no-op when unset); CSP `script-src` origin wired accordingly.
 - **Branded icon set** — thumbtack favicon (`app/icon.svg`, theme-aware via `prefers-color-scheme`), generated apple-touch icon + OG/Twitter social-share cards via `next/og` (no committed binaries), `metadataBase` from `BETTER_AUTH_URL`; removed the dead `COPY public/` Dockerfile line that broke builds with an empty `public/`.
@@ -27,6 +27,9 @@ All notable changes to this project will be documented in this file. The format 
 - **`/pricing` public under SaaS mode** — the proxy cookie gate now allows it (was redirecting signed-out visitors to `/login`).
 - **AG-UI no longer breaks across lines** in landing page headings.
 - **Arabic/Quranic glyphs** now render via the Amiri font fallback instead of falling back to a Latin font.
+
+### Security
+- **Encryption at rest for agent JWT secrets** — `jwtSecret` values are stored as AES-256-GCM ciphertext (`enc:v1:<iv>:<ciphertext>:<tag>`, `lib/crypto/encrypt.ts`) when the new `DB_ENCRYPTION_KEY` env var is set (32-byte hex, `openssl rand -hex 32`), so a leaked DB dump/backup alone no longer exposes backend JWT verification keys. Encryption/decryption is contained inside `lib/agents/agent-store.ts` (write boundary encrypts, read boundary decrypts) — the registry, API responses, and blank-preserve PATCH flow work unchanged. An idempotent boot pass (`lib/crypto/backfill.ts`, wired into `instrumentation.ts`) re-encrypts legacy plaintext rows automatically. Unset key = documented plaintext fallback with loud boot warning. Per-row decrypt failure (rotated key, tampered value) degrades gracefully — the agent is treated as secret-less and the rest of the app is unaffected. Rotating the key requires re-saving each agent's JWT secret.
 
 ### Docs
 - README cleanup + rename agent_frontend → tackui; Docker Compose V2 syntax + migration note; self-hosting note for same-host agent backends; placeholder GitHub links replaced with the actual repo URL; legal-page updates (account deletion claims, hardcoded "Last updated" date); AGENTS.md updates (Conventional Commits, branded icon set).
