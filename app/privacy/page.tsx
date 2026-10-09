@@ -1,3 +1,4 @@
+import type { Metadata } from "next";
 import { redirect } from "next/navigation";
 import { SAAS_MODE } from "@/lib/config/saas";
 import { MarketingLayout } from "@/components/marketing-layout";
@@ -11,6 +12,11 @@ import { MarketingLayout } from "@/components/marketing-layout";
  */
 // Force request-time rendering — SAAS_MODE is a runtime env var.
 export const dynamic = "force-dynamic";
+
+export const metadata: Metadata = {
+  title: "Privacy Policy — TackUI",
+  description: "How the hosted TackUI service handles your data.",
+};
 
 export default async function PrivacyPage() {
   if (!SAAS_MODE) redirect("/app");

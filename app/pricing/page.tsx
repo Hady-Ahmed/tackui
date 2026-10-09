@@ -1,3 +1,4 @@
+import type { Metadata } from "next";
 import Link from "next/link";
 import { redirect } from "next/navigation";
 import { BILLING_ENABLED } from "@/lib/config/saas";
@@ -53,6 +54,12 @@ const TIERS: { id: PlanId; tagline: string; features: string[] }[] = [
 
 // Force request-time rendering — BILLING_ENABLED is a runtime env var.
 export const dynamic = "force-dynamic";
+
+export const metadata: Metadata = {
+  title: "Pricing — TackUI",
+  description:
+    "Free to start. Upgrade when you need more agents or team seats.",
+};
 
 export default async function PricingPage() {
   if (!BILLING_ENABLED) redirect("/app");

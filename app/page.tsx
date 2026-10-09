@@ -1,3 +1,4 @@
+import type { Metadata } from "next";
 import { redirect } from "next/navigation";
 import { SAAS_MODE } from "@/lib/config/saas";
 import { Landing } from "@/components/landing";
@@ -18,6 +19,12 @@ import { Landing } from "@/components/landing";
 // landing-vs-redirect decision must be made at request time, not baked
 // into the static HTML at build time (when SAAS_MODE is unset).
 export const dynamic = "force-dynamic";
+
+export const metadata: Metadata = {
+  title: "TackUI — One frontend for every AG-UI agent",
+  description:
+    "A ChatGPT-style chat for your custom agents. Connect any backend speaking the AG-UI protocol — switch agents, stream tokens, approve interrupts.",
+};
 
 export default function RootPage() {
   if (SAAS_MODE) {

@@ -1,3 +1,4 @@
+import type { Metadata } from "next";
 import Link from "next/link";
 import { redirect } from "next/navigation";
 import { SAAS_MODE } from "@/lib/config/saas";
@@ -15,6 +16,12 @@ import { MarketingLayout } from "@/components/marketing-layout";
  * number is never stated anywhere.
  */
 export const dynamic = "force-dynamic";
+
+export const metadata: Metadata = {
+  title: "Agent Catalog — TackUI",
+  description:
+    "Ready-to-use agents, one click to add to your workspace. No endpoints, no config — pick one and start chatting.",
+};
 
 export default async function CatalogPage() {
   if (!SAAS_MODE) redirect("/app");

@@ -549,6 +549,25 @@ export async function Landing() {
         </section>
       </RevealOnScroll>
 
+      {/* ─── Catalog strip ──────────────────────────────────── */}
+      <RevealOnScroll>
+        <section className="flex flex-col items-center py-12 text-center">
+          <h2 className="text-2xl font-semibold tracking-tight">
+            Or skip the setup entirely
+          </h2>
+          <p className="mt-2 max-w-md text-zinc-600 dark:text-zinc-400">
+            Browse the agent catalog — ready-made agents you can add to your
+            workspace with one click. No endpoints, no config.
+          </p>
+          <Link
+            href="/catalog"
+            className="mt-6 inline-block rounded-xl border border-zinc-300 px-6 py-3 font-medium text-zinc-700 transition-all hover:border-zinc-400 hover:bg-zinc-50 dark:border-zinc-700 dark:text-zinc-300 dark:hover:border-zinc-600 dark:hover:bg-zinc-900 active:scale-[0.98]"
+          >
+            Browse the agent catalog →
+          </Link>
+        </section>
+      </RevealOnScroll>
+
       {/* ─── Built on ────────────────────────────────────────── */}
       <RevealOnScroll>
         <section className="flex flex-col items-center py-12">

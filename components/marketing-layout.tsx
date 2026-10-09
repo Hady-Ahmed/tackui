@@ -31,6 +31,12 @@ export async function MarketingLayout({
           </Link>
           {/* Desktop nav — full link set */}
           <nav className="hidden items-center gap-6 text-sm md:flex">
+            <Link
+              href="/catalog"
+              className="text-zinc-600 transition-colors hover:text-zinc-900 dark:text-zinc-400 dark:hover:text-zinc-100"
+            >
+              Agents
+            </Link>
             {BILLING_ENABLED && (
               <Link
                 href="/pricing"
@@ -114,6 +120,9 @@ export async function MarketingLayout({
         <div className="mx-auto flex max-w-5xl flex-col items-center justify-between gap-3 px-4 py-6 text-sm text-zinc-500 sm:flex-row md:px-6">
           <p>© {new Date().getFullYear()} TackUI</p>
           <div className="flex items-center gap-6">
+            <Link href="/catalog" className="hover:text-zinc-700 dark:hover:text-zinc-300">
+              Agents
+            </Link>
             <Link href="/terms" className="hover:text-zinc-700 dark:hover:text-zinc-300">
               Terms
             </Link>
