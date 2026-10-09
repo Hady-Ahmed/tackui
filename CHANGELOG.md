@@ -20,6 +20,7 @@ All notable changes to this project will be documented in this file. The format 
 - **Active press feedback** on public-facing buttons.
 
 ### Changed
+- **Forms on `/agents` no longer auto-open** — the agent and catalog-template forms are hidden by default behind a quiet "+ Add agent" / "+ New template" button on each section's heading row (Cancel closes; a successful submit closes too; Edit opens the form pre-filled and scrolls it into view). Empty states carry an inline first-agent/first-template button. The page now leads with the data instead of a wall of inputs.
 - **Tool-call rendering rewrite** — the `useRenderTool` wildcard now renders inline ChatGPT/Claude-style activity rows: status icon (spinner → ✓/✗), humanized tool name, inline arg preview; the expanded panel shows arguments as key-value rows and results as rendered markdown (`react-markdown` + `remark-gfm`), HTML tables (array-of-objects), pretty JSON, or plain text. Results that arrive JSON-escaped (literal `\n` / `\"` / `\uXXXX` — e.g. Agno/Tavily) are decoded first via `normalizeResultString` (conservative gate: zero real newlines + escape artifacts present). No size caps — only a visual height clip with Show all/Show less; `useMemo` + `React.memo` keep big results parsing once. Pure helpers live in `lib/tools/format.ts` (40 tests).
 
 ### Removed
@@ -27,6 +28,7 @@ All notable changes to this project will be documented in this file. The format 
 - **Agent `kind` field removed entirely** — with `langgraph` gone, `kind` had exactly one legal value: a constant column, a single-value schema, and a one-case registry switch. Migration 0009 drops the `kind` column. POST/PATCH bodies that still send `kind` are accepted and discarded (zod strips unknown fields); the reachability probe no longer expects it (it was validated but never read); the admin sidebar no longer renders a kind badge. When a second kind is genuinely demanded, re-add the column + adapter in the same migration as its config fields.
 
 ### Fixed
+- **Missing section spacing on `/agents`** — the "Configured agents" section was the only one without bottom margin, so whatever followed it (Users in 1.0.0, now also the catalog-admin section) sat flush against the agent table. Now `mb-10` like every other section.
 - **Mobile marketing pages had no sign-in entry point** — the mobile nav in `MarketingLayout` rendered only a "Sign up" CTA when signed out ("Sign in" existed solely in the desktop nav), so mobile visitors had to go through the signup page to reach `/login`. A text "Sign in" link now sits beside the "Sign up" button on all four marketing pages (`/`, `/pricing`, `/terms`, `/privacy`).
 - **Better Auth per-IP rate limiting behind proxies** — `ipAddress` headers configured so Better Auth's own limiter resolves the real client IP instead of the proxy's.
 - **`/pricing` public under SaaS mode** — the proxy cookie gate now allows it (was redirecting signed-out visitors to `/login`).

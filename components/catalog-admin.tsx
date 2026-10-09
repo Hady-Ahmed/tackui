@@ -129,6 +129,8 @@ export function CatalogAdmin() {
   const [submitting, setSubmitting] = useState(false);
   const [formTest, setFormTest] = useState<TestResult>({ status: "idle" });
   const [rowTests, setRowTests] = useState<Record<string, TestResult>>({});
+  const [formOpen, setFormOpen] = useState(false);
+  const formRef = useRef<HTMLFormElement>(null);
 
   const fetchTemplates = useCallback(async () => {
     setLoading(true);
@@ -145,6 +147,14 @@ export function CatalogAdmin() {
   useEffect(() => {
     fetchRef.current();
   }, []);
+
+  // Bring the form into view when it opens or when the edit target
+  // changes while it's already open.
+  useEffect(() => {
+    if (formOpen) {
+      formRef.current?.scrollIntoView({ behavior: "smooth", block: "start" });
+    }
+  }, [formOpen, editingId]);
 
   const updateForm = (patch: Partial<FormState>) => {
     setForm((prev) => ({ ...prev, ...patch }));
@@ -174,6 +184,7 @@ export function CatalogAdmin() {
     });
     setError(null);
     setFormTest({ status: "idle" });
+    setFormOpen(true);
   };
 
   const resetForm = () => {
@@ -182,6 +193,18 @@ export function CatalogAdmin() {
     setEditingHasJwtSecret(false);
     setError(null);
     setFormTest({ status: "idle" });
+    setFormOpen(false);
+  };
+
+  // Header-button toggle: opening from closed starts a clean form;
+  // closing (Cancel path) resets any in-progress edit.
+  const toggleForm = () => {
+    if (formOpen) {
+      resetForm();
+    } else {
+      setError(null);
+      setFormOpen(true);
+    }
   };
 
   const handleTestForm = async () => {
@@ -290,8 +313,10 @@ export function CatalogAdmin() {
       <p className="mb-4 text-xs text-zinc-500 dark:text-zinc-400">
         Curated agents every workspace can one-click install from{" "}
         <code className="rounded bg-zinc-100 px-1 py-0.5 dark:bg-zinc-900">/app/catalog</code>.
-        Installing copies the config — later edits here do not propagate
-        automatically; users see an &quot;Update available&quot; button.
+        Installed agents run live off this template — edits here (endpoint, auth, name)
+        propagate to every installed workspace automatically, no user action needed.
+        Deleting a template tombstones installed copies (past chats stay viewable);
+        unpublishing hides the card and pauses runs (reversible).
       </p>
 
       {error && (
@@ -300,9 +325,24 @@ export function CatalogAdmin() {
         </div>
       )}
 
+      <div className="mb-3 flex items-center justify-between gap-3">
+        <h3 className="text-sm font-semibold uppercase tracking-wide text-zinc-400">
+          Published templates ({templates.length})
+        </h3>
+        <button
+          type="button"
+          onClick={toggleForm}
+          className="shrink-0 rounded-lg border border-zinc-200 px-3 py-1.5 text-xs font-medium text-zinc-700 transition-colors hover:bg-zinc-100 dark:border-zinc-700 dark:text-zinc-300 dark:hover:bg-zinc-800"
+        >
+          {formOpen ? "Close" : "+ New template"}
+        </button>
+      </div>
+
+      {formOpen && (
       <form
+        ref={formRef}
         onSubmit={handleSubmit}
-        className="mb-8 space-y-4 rounded-xl border border-zinc-200 bg-white p-6 dark:border-zinc-800 dark:bg-zinc-950"
+        className="mb-6 scroll-mt-4 space-y-4 rounded-xl border border-zinc-200 bg-white p-6 dark:border-zinc-800 dark:bg-zinc-950"
       >
         <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
           <Field label="Name" required>
@@ -505,15 +545,13 @@ export function CatalogAdmin() {
           >
             {submitting ? "Saving..." : editingId ? "Update template" : "Publish template"}
           </button>
-          {editingId && (
-            <button
-              type="button"
-              onClick={resetForm}
-              className="rounded-lg border border-zinc-200 px-4 py-2 text-sm font-medium text-zinc-700 transition-colors hover:bg-zinc-100 dark:border-zinc-700 dark:text-zinc-300 dark:hover:bg-zinc-800"
-            >
-              Cancel
-            </button>
-          )}
+          <button
+            type="button"
+            onClick={resetForm}
+            className="rounded-lg border border-zinc-200 px-4 py-2 text-sm font-medium text-zinc-700 transition-colors hover:bg-zinc-100 dark:border-zinc-700 dark:text-zinc-300 dark:hover:bg-zinc-800"
+          >
+            Cancel
+          </button>
           <button
             type="button"
             onClick={handleTestForm}
@@ -526,16 +564,26 @@ export function CatalogAdmin() {
           <TestBadge result={formTest} />
         </div>
       </form>
+      )}
 
-      <h3 className="mb-3 text-sm font-semibold uppercase tracking-wide text-zinc-400">
-        Published templates ({templates.length})
-      </h3>
       {loading ? (
         <p className="text-sm text-zinc-400">Loading...</p>
       ) : templates.length === 0 ? (
-        <p className="text-sm text-zinc-400">
-          No templates yet. Publish one above to make it installable from the catalog.
-        </p>
+        <div className="rounded-xl border border-dashed border-zinc-200 px-6 py-8 text-center dark:border-zinc-800">
+          <p className="text-sm text-zinc-400">
+            No templates yet — publish one to make it installable from{" "}
+            <code className="rounded bg-zinc-100 px-1 py-0.5 dark:bg-zinc-900">/app/catalog</code>.
+          </p>
+          {!formOpen && (
+            <button
+              type="button"
+              onClick={toggleForm}
+              className="mt-3 rounded-lg border border-zinc-200 px-3 py-1.5 text-xs font-medium text-zinc-700 transition-colors hover:bg-zinc-100 dark:border-zinc-700 dark:text-zinc-300 dark:hover:bg-zinc-800"
+            >
+              Publish your first template
+            </button>
+          )}
+        </div>
       ) : (
         <div className="overflow-x-auto rounded-xl border border-zinc-200 dark:border-zinc-800">
           <table className="w-full text-left text-sm">

@@ -1365,10 +1365,14 @@ strategy it uses so users know whether server-side session storage is required.
 - **Changelog maintenance** — notable changes (new features, behavior changes,
   fixes, security work) get a bullet under `## [Unreleased]` in `CHANGELOG.md`
   in the same change that introduces them, using the Keep a Changelog
-  categories (Added / Changed / Fixed / Security / Environment). Docs-only and
-  routine chores are skipped (or one-lined under Docs). Released sections
-  (`## [x.y.z]`) are frozen history — never edit them; the next release starts
-  fresh from `[Unreleased]`.
+  categories (Added / Changed / Fixed / Security / Environment). Entries
+  describe the delta from the last release, not work-in-progress: if
+  something is introduced and changed within the same unreleased cycle, fold
+  the final state into the feature entry — never log a fix to unreleased
+  work (release-notes readers never saw it). Docs-only and routine chores
+  are skipped (or one-lined under Docs). Released sections (`## [x.y.z]`)
+  are frozen history — never edit them; the next release starts fresh from
+  `[Unreleased]`.
 - **Documentation policy — public repo:** docs (CHANGELOG, README, code
   comments) describe **product behavior, never business strategy** — no
   personal/marketing channels, no conversion or retention framing.

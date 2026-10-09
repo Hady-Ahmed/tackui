@@ -79,6 +79,8 @@ export default function AgentsPage() {
   const [submitting, setSubmitting] = useState(false);
   const [formTest, setFormTest] = useState<TestResult>({ status: "idle" });
   const [rowTests, setRowTests] = useState<Record<string, TestResult>>({});
+  const [formOpen, setFormOpen] = useState(false);
+  const formRef = useRef<HTMLFormElement>(null);
 
   useEffect(() => {
     if (isPending || !config) return;
@@ -114,6 +116,14 @@ export default function AgentsPage() {
     fetchRef.current();
   }, []);
 
+  // Bring the form into view when it opens or when the edit target
+  // changes while it's already open.
+  useEffect(() => {
+    if (formOpen) {
+      formRef.current?.scrollIntoView({ behavior: "smooth", block: "start" });
+    }
+  }, [formOpen, editingId]);
+
   const updateForm = (patch: Partial<FormState>) => {
     setForm((prev) => ({ ...prev, ...patch }));
     setFormTest({ status: "idle" });
@@ -137,6 +147,7 @@ export default function AgentsPage() {
     });
     setError(null);
     setFormTest({ status: "idle" });
+    setFormOpen(true);
   };
 
   const resetForm = () => {
@@ -145,6 +156,18 @@ export default function AgentsPage() {
     setEditingHasJwtSecret(false);
     setError(null);
     setFormTest({ status: "idle" });
+    setFormOpen(false);
+  };
+
+  // Header-button toggle: opening from closed starts a clean form;
+  // closing (Cancel path) resets any in-progress edit.
+  const toggleForm = () => {
+    if (formOpen) {
+      resetForm();
+    } else {
+      setError(null);
+      setFormOpen(true);
+    }
   };
 
   const handleTestForm = async () => {
@@ -251,12 +274,24 @@ export default function AgentsPage() {
         )}
 
         <section className="mb-10">
-          <h2 className="mb-4 text-sm font-semibold uppercase tracking-wide text-zinc-400">
-            {editingId ? "Edit agent" : "Add agent"}
-          </h2>
+          <div className="mb-4 flex items-center justify-between gap-3">
+            <h2 className="text-sm font-semibold uppercase tracking-wide text-zinc-400">
+              Configured agents ({agents.length})
+            </h2>
+            <button
+              type="button"
+              onClick={toggleForm}
+              className="shrink-0 rounded-lg border border-zinc-200 px-3 py-1.5 text-xs font-medium text-zinc-700 transition-colors hover:bg-zinc-100 dark:border-zinc-700 dark:text-zinc-300 dark:hover:bg-zinc-800"
+            >
+              {formOpen ? "Close" : "+ Add agent"}
+            </button>
+          </div>
+
+          {formOpen && (
           <form
+            ref={formRef}
             onSubmit={handleSubmit}
-            className="space-y-4 rounded-xl border border-zinc-200 bg-white p-6 dark:border-zinc-800 dark:bg-zinc-950"
+            className="mb-6 scroll-mt-4 space-y-4 rounded-xl border border-zinc-200 bg-white p-6 dark:border-zinc-800 dark:bg-zinc-950"
           >
             <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
               <Field label="Name" required>
@@ -381,15 +416,13 @@ export default function AgentsPage() {
                     ? "Update agent"
                     : "Create agent"}
               </button>
-              {editingId && (
-                <button
-                  type="button"
-                  onClick={resetForm}
-                  className="rounded-lg border border-zinc-200 px-4 py-2 text-sm font-medium text-zinc-700 transition-colors hover:bg-zinc-100 dark:border-zinc-700 dark:text-zinc-300 dark:hover:bg-zinc-800"
-                >
-                  Cancel
-                </button>
-              )}
+              <button
+                type="button"
+                onClick={resetForm}
+                className="rounded-lg border border-zinc-200 px-4 py-2 text-sm font-medium text-zinc-700 transition-colors hover:bg-zinc-100 dark:border-zinc-700 dark:text-zinc-300 dark:hover:bg-zinc-800"
+              >
+                Cancel
+              </button>
               <button
                 type="button"
                 onClick={handleTestForm}
@@ -423,9 +456,8 @@ export default function AgentsPage() {
               <TestBadge result={formTest} />
             </div>
           </form>
-        </section>
+          )}
 
-        <section>
           {/* Over-limit banner — surfaces the post-cancellation state
               where a downgraded Team org has more agents than the Free
               3-agent cap. Informational only; existing agents keep
@@ -449,16 +481,23 @@ export default function AgentsPage() {
               ) : null;
             })()}
 
-          <h2 className="mb-4 text-sm font-semibold uppercase tracking-wide text-zinc-400">
-            Configured agents ({agents.length})
-          </h2>
           {loading ? (
             <p className="text-sm text-zinc-400">Loading...</p>
           ) : agents.length === 0 ? (
-            <p className="text-sm text-zinc-400">
-              No agents yet. Add one above — it will appear in the chat sidebar
-              immediately.
-            </p>
+            <div className="rounded-xl border border-dashed border-zinc-200 px-6 py-8 text-center dark:border-zinc-800">
+              <p className="text-sm text-zinc-400">
+                No agents yet — new ones appear in the chat sidebar immediately.
+              </p>
+              {!formOpen && (
+                <button
+                  type="button"
+                  onClick={toggleForm}
+                  className="mt-3 rounded-lg border border-zinc-200 px-3 py-1.5 text-xs font-medium text-zinc-700 transition-colors hover:bg-zinc-100 dark:border-zinc-700 dark:text-zinc-300 dark:hover:bg-zinc-800"
+                >
+                  Add your first agent
+                </button>
+              )}
+            </div>
           ) : (
             <>
               {/* Desktop table — hidden on mobile. */}
