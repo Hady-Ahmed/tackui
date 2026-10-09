@@ -20,6 +20,7 @@ const TIERS: { id: PlanId; tagline: string; features: string[] }[] = [
     tagline: "Try it out. Connect up to 3 agents.",
     features: [
       "3 agents",
+      "Catalog agents with daily usage limits",
       "1 concurrent run",
       "Standard rate limits",
       "Community support",
@@ -30,6 +31,7 @@ const TIERS: { id: PlanId; tagline: string; features: string[] }[] = [
     tagline: "For individuals with many agents.",
     features: [
       "Unlimited agents",
+      "Unlimited catalog agent usage",
       "3 concurrent runs",
       "Higher rate limits",
       "Priority support",
@@ -40,6 +42,7 @@ const TIERS: { id: PlanId; tagline: string; features: string[] }[] = [
     tagline: "Collaborate with per-seat workspaces.",
     features: [
       "Everything in Pro",
+      "Unlimited catalog agent usage",
       "5 concurrent runs",
       "Team workspaces + invites",
       "Per-seat billing",

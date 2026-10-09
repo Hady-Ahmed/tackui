@@ -271,3 +271,76 @@ describe("POST /api/agents", () => {
     expect(spy).toHaveBeenCalledTimes(1);
   });
 });
+
+describe("GET /api/agents — catalog curator-state annotation", () => {
+  const templateInput = {
+    name: "Flight Finder",
+    slug: "flight-finder",
+    tagline: "Find cheap flights",
+    description: "Searches live fares",
+    endpoint: "http://localhost:8000/agent",
+    authMode: "none" as const,
+    sortOrder: 0,
+    isActive: true,
+  };
+
+  beforeEach(async () => {
+    // The outer cleanup removes agents; templates must go too (unique
+    // slugs across tests).
+    const { listTemplates, deleteTemplate } = await import(
+      "@/lib/catalog/template-store"
+    );
+    for (const t of await listTemplates({ activeOnly: false })) {
+      await deleteTemplate(t.id);
+    }
+  });
+
+  it("live managed agents carry no flags; deactivated → templateUnpublished; deleted → tombstone", async () => {
+    const { createTemplate, installTemplate, updateTemplate, deleteTemplate } =
+      await import("@/lib/catalog/template-store");
+
+    const tpl = await createTemplate(templateInput);
+    const { agent } = await installTemplate(tpl, testOrg);
+
+    // Live template → no flags, endpoint stripped (managed).
+    let res = await GET();
+    let list = (await res.json()) as Array<Record<string, unknown>>;
+    let managed = list.find((a) => a.id === agent.id);
+    expect(managed).toBeTruthy();
+    expect(managed!.templateUnpublished).toBeUndefined();
+    expect(managed!.templateRemovedAt).toBeUndefined();
+    expect("endpoint" in managed!).toBe(false);
+
+    // Deactivated template (reversible kill switch) → Paused flag.
+    await updateTemplate(tpl.id, { isActive: false });
+    res = await GET();
+    list = (await res.json()) as Array<Record<string, unknown>>;
+    managed = list.find((a) => a.id === agent.id);
+    expect(managed!.templateUnpublished).toBe(true);
+    expect(managed!.templateRemovedAt).toBeUndefined();
+
+    // Template deleted → tombstone wins, Paused flag never set.
+    await deleteTemplate(tpl.id);
+    res = await GET();
+    list = (await res.json()) as Array<Record<string, unknown>>;
+    managed = list.find((a) => a.id === agent.id);
+    expect(managed!.templateRemovedAt).toBeTruthy();
+    expect(managed!.templateUnpublished).toBeUndefined();
+  });
+
+  it("manually-added agents are never annotated", async () => {
+    await POST(
+      new Request("http://localhost/api/agents", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(validBody),
+      }),
+    );
+    const res = await GET();
+    const list = (await res.json()) as Array<Record<string, unknown>>;
+    expect(list).toHaveLength(1);
+    expect(list[0].templateUnpublished).toBeUndefined();
+    expect(list[0].templateRemovedAt).toBeUndefined();
+    expect(list[0].endpoint).toBe("http://localhost:8000/agent");
+  });
+});

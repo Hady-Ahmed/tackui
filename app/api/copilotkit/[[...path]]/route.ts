@@ -7,13 +7,24 @@ import { runner } from "@/lib/agents/runner-instance";
 import { getRequestUser, getSyntheticAdmin } from "@/lib/auth/context";
 import { isAuthDisabled } from "@/lib/auth/auth";
 import { SAAS_MODE } from "@/lib/config/saas";
+import type { PlanId } from "@/lib/billing/plans";
 import { runWithUserAsync } from "@/lib/auth/request-context";
 import {
   checkUserLimit,
   acquireConcurrent,
 } from "@/lib/ratelimit/middleware";
 import { wrapStreamWithRelease } from "@/lib/ratelimit/stream-wrap";
-import { getEnforcementLimits } from "@/lib/plans/enforcement";
+import { getEnforcementLimits, checkCatalogRunGates } from "@/lib/plans/enforcement";
+
+/**
+ * Extract the agent id from a run request path, e.g.
+ * `/api/copilotkit/agent/{agentId}/run` → `{agentId}`. Returns null for
+ * any other path shape (control requests never reach the caller).
+ */
+function runAgentIdFromPath(pathname: string): string | null {
+  const match = /\/agent\/([^/]+)\/run\/?$/.exec(pathname);
+  return match ? decodeURIComponent(match[1]) : null;
+}
 
 const runtime = new CopilotRuntime({
   agents: ({ request }) => getAgents(request),
@@ -65,8 +76,10 @@ async function handler(request: Request): Promise<Response> {
       // LIMITS apply (getEnforcementLimits short-circuits to those).
       let planRunsPerMin: number | undefined;
       let planConcurrent: number | undefined;
+      let saasPlan: PlanId | undefined;
       if (SAAS_MODE) {
-        const { limits } = await getEnforcementLimits(user.orgId);
+        const { plan, limits } = await getEnforcementLimits(user.orgId);
+        saasPlan = plan;
         planRunsPerMin = limits.runsPerMinute;
         planConcurrent = limits.concurrentRuns;
       }
@@ -75,6 +88,19 @@ async function handler(request: Request): Promise<Response> {
           max: planRunsPerMin,
         });
         if (limited) return limited;
+
+        // Catalog agent gates: the curator-state checks (tombstone →
+        // 410, deactivated template → 402) apply in ALL modes; the
+        // monetization gates (requiredPlan + free-tier daily quota) are
+        // SaaS-only and short-circuit inside on self-host. Runs of
+        // manually-added agents are never gated. This is a product
+        // gate, not a flood guard, so it fires after the per-minute
+        // rate limit above.
+        const runAgentId = runAgentIdFromPath(url.pathname);
+        if (runAgentId) {
+          const gated = await checkCatalogRunGates(user, runAgentId, saasPlan);
+          if (gated) return gated;
+        }
       }
 
       // Concurrent SSE cap: in-flight run streams per user.
@@ -102,10 +128,20 @@ async function handler(request: Request): Promise<Response> {
       }
     }
 
-    // Solo mode — no per-user limiting (everyone is "local"). Per-IP
-    // flood protection from proxy.ts still applies.
+    // Solo mode — no per-user rate limiting or billing gates (everyone
+    // is "local"), but curator-state catalog gates still apply: a
+    // tombstoned or deactivated catalog agent must not run even for the
+    // self-host operator. Per-IP flood protection from proxy.ts still
+    // applies.
     const syntheticUser = await getSyntheticAdmin();
     userId = syntheticUser.id;
+    if (isRunRequest) {
+      const runAgentId = runAgentIdFromPath(url.pathname);
+      if (runAgentId) {
+        const gated = await checkCatalogRunGates(syntheticUser, runAgentId);
+        if (gated) return gated;
+      }
+    }
     return runWithUserAsync(syntheticUser, () => innerHandler(request));
   } catch (err) {
     console.error("[copilotkit] handler error", {

@@ -170,6 +170,12 @@ export function ChatShell() {
                 >
                   Add your first agent →
                 </Link>
+                <Link
+                  href="/app/catalog"
+                  className="text-sm text-blue-600 hover:underline dark:text-blue-400"
+                >
+                  Browse the agent catalog →
+                </Link>
                 <a
                   href="https://docs.ag-ui.com/quickstart/server"
                   target="_blank"
@@ -180,9 +186,17 @@ export function ChatShell() {
                 </a>
               </>
             ) : (
-              <p className="text-sm text-zinc-400">
-                No agents available yet. Ask your administrator to add one.
-              </p>
+              <>
+                <p className="text-sm text-zinc-400">
+                  No agents available yet. Ask your administrator to add one.
+                </p>
+                <Link
+                  href="/app/catalog"
+                  className="text-sm text-blue-600 hover:underline dark:text-blue-400"
+                >
+                  Browse the agent catalog →
+                </Link>
+              </>
             )}
           </div>
         ) : (
@@ -236,15 +250,23 @@ function AgentChat({
         ) {
           return;
         }
-        // Only surface HTTP 429s in the UI (concurrent cap + 20/min run limit).
         const status = (error as Error & { status?: number }).status;
-        if (status !== 429) return;
         const payload = (error as Error & { payload?: unknown }).payload;
         const serverMsg =
           payload && typeof payload === "object" && "error" in payload
             ? String((payload as { error: unknown }).error)
             : msg;
-        onRunError(serverMsg || "Too many requests. Try again shortly.");
+        // HTTP-backed failures (rate limits, plan/quota gates, removed
+        // agents) carry the server's human-friendly message.
+        if (status === 429 || status === 402 || status === 410) {
+          onRunError(serverMsg || "Too many requests. Try again shortly.");
+          return;
+        }
+        // Everything else (backend down, bad template endpoint, protocol
+        // failure) used to fail silently — surface a generic banner.
+        // Deliberately NOT the raw error message: non-HTTP errors can
+        // carry internal details (URLs, stack fragments).
+        onRunError("Agent failed to respond — try again shortly.");
       }}
     />
   );

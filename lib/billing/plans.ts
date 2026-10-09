@@ -124,3 +124,31 @@ export const SAAS_PLANS: { id: PlanId; priceId: string | null }[] = [
   { id: "pro", priceId: process.env.STRIPE_PRICE_PRO ?? null },
   { id: "team", priceId: process.env.STRIPE_PRICE_TEAM ?? null },
 ];
+
+/**
+ * Plan rank for catalog `requiredPlan` comparisons. "self-host" outranks
+ * everything (it's the unlimited sentinel). Lives here (not in the
+ * enforcement layer) because the client-side catalog UI needs the same
+ * comparison and plans.ts is client-safe (no DB imports).
+ */
+function planRank(plan: PlanId): number {
+  switch (plan) {
+    case "team":
+      return 3;
+    case "pro":
+      return 2;
+    case "free":
+      return 1;
+    default:
+      return 99; // self-host
+  }
+}
+
+/**
+ * Whether an org's plan satisfies a catalog template's requiredPlan
+ * gate. Shared by the server enforcement (install + run gates) and the
+ * client catalog UI (lock badges) so the two can't drift.
+ */
+export function planSatisfies(plan: PlanId, required: "pro" | "team"): boolean {
+  return planRank(plan) >= planRank(required);
+}

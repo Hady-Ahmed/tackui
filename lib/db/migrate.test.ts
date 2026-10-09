@@ -22,9 +22,9 @@ afterEach(async () => {
 });
 
 describe("runMigrations", () => {
-  it("applies 0001–0009 migrations, creates all expected tables", async () => {
+  it("applies 0001–0011 migrations, creates all expected tables", async () => {
     const result = await runMigrations();
-    expect(result.applied).toEqual(["0001", "0002", "0003", "0004", "0006", "0007", "0008", "0009"]);
+    expect(result.applied).toEqual(["0001", "0002", "0003", "0004", "0006", "0007", "0008", "0009", "0010", "0011"]);
     expect(result.skipped).toEqual([]);
 
     const tables = await query<{ table_name: string }>(`
@@ -36,6 +36,7 @@ describe("runMigrations", () => {
     const names = tables.rows.map((r) => r.table_name);
     expect(names).toContain("schema_migrations");
     expect(names).toContain("agents");
+    expect(names).toContain("agent_templates");
     expect(names).toContain("agent_runs");
     expect(names).toContain("run_state");
     expect(names).toContain("thread_messages");
@@ -46,7 +47,7 @@ describe("runMigrations", () => {
   it("records each applied migration in schema_migrations", async () => {
     await runMigrations();
     const applied = await listAppliedMigrations();
-    expect(applied).toHaveLength(8);
+    expect(applied).toHaveLength(10);
     expect(applied[0].id).toBe("0001");
     expect(applied[0].filename).toBe("0001_init.sql");
     expect(applied[1].id).toBe("0002");
@@ -63,6 +64,10 @@ describe("runMigrations", () => {
     expect(applied[6].filename).toBe("0008_drop_langgraph_kind.sql");
     expect(applied[7].id).toBe("0009");
     expect(applied[7].filename).toBe("0009_drop_agent_kind.sql");
+    expect(applied[8].id).toBe("0010");
+    expect(applied[8].filename).toBe("0010_agent_catalog.sql");
+    expect(applied[9].id).toBe("0011");
+    expect(applied[9].filename).toBe("0011_template_tombstones.sql");
     // applied_at is returned as a Date by pg-mem and as an ISO string by real
     // pg (depending on driver parsing). Accept both.
     const appliedAt = applied[0].applied_at;
@@ -73,12 +78,12 @@ describe("runMigrations", () => {
   it("is idempotent — second run reports skipped, no new inserts", async () => {
     const first = await runMigrations();
     const second = await runMigrations();
-    expect(first.applied).toEqual(["0001", "0002", "0003", "0004", "0006", "0007", "0008", "0009"]);
+    expect(first.applied).toEqual(["0001", "0002", "0003", "0004", "0006", "0007", "0008", "0009", "0010", "0011"]);
     expect(second.applied).toEqual([]);
-    expect(second.skipped).toEqual(["0001", "0002", "0003", "0004", "0006", "0007", "0008", "0009"]);
+    expect(second.skipped).toEqual(["0001", "0002", "0003", "0004", "0006", "0007", "0008", "0009", "0010", "0011"]);
 
     const applied = await listAppliedMigrations();
-    expect(applied).toHaveLength(8);
+    expect(applied).toHaveLength(10);
   });
 
   it("creates the agents table with the documented columns", async () => {
@@ -100,6 +105,12 @@ describe("runMigrations", () => {
     expect(["timestamptz", "timestamp with time zone"]).toContain(colMap.get("created_at"));
     expect(["timestamptz", "timestamp with time zone"]).toContain(colMap.get("updated_at"));
     expect(colMap.get("org_id")).toBe("text");
+    // Catalog provenance (0010): which template the agent was installed
+    // from + the template's updated_at snapshot at install/last-sync.
+    expect(colMap.get("source_template_id")).toBe("text");
+    expect(["timestamptz", "timestamp with time zone"]).toContain(
+      colMap.get("installed_template_updated_at"),
+    );
   });
 
   it("stores JSONB in agent_runs.events", async () => {

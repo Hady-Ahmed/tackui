@@ -3,9 +3,9 @@ import {
   listAgents,
   createAgent,
   createAgentBodySchema,
-  toPublicAgents,
   toPublicAgent,
 } from "@/lib/agents/agent-store";
+import { annotateAgentTemplateState } from "@/lib/catalog/template-store";
 import { getCurrentUser, canManageAgents } from "@/lib/auth/context";
 import { assertSafeUrl, UnsafeUrlError } from "@/lib/net/safe-fetch";
 import { checkUserLimit } from "@/lib/ratelimit/middleware";
@@ -19,7 +19,11 @@ export async function GET() {
   }
   const limited = checkUserLimit(user.id, "agentRead");
   if (limited) return limited;
-  return NextResponse.json(toPublicAgents(await listAgents(user.orgId)));
+  // Annotated with curator state (templateUnpublished → the sidebar's
+  // "Paused" chip) — one batched template query per call.
+  return NextResponse.json(
+    await annotateAgentTemplateState(await listAgents(user.orgId)),
+  );
 }
 
 export async function POST(request: Request) {

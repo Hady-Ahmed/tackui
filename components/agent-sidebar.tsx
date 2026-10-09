@@ -102,10 +102,15 @@ export function AgentSidebar({
   useEffect(() => {
     let cancelled = false;
     const testAll = async () => {
-      const entries = agents.map((a) => ({
-        id: a.id,
-        endpoint: a.endpoint,
-      }));
+      // Managed agents (catalog installs) carry no endpoint in the API
+      // response — the curator's backend URLs never reach the client —
+      // so there's nothing to probe. Their status dot stays "untested".
+      const entries = agents
+        .filter((a) => a.endpoint)
+        .map((a) => ({
+          id: a.id,
+          endpoint: a.endpoint as string,
+        }));
       setStatuses((prev) => {
         const next: Record<string, TestResult> = {};
         for (const e of entries) next[e.id] = { status: "loading" };
@@ -328,38 +333,63 @@ function ExpandedContent({
           </span>
         </div>
         <ul className="space-y-0.5">
-          {agents.map((agent) => (
-            <li key={agent.id}>
-              <button
-                onClick={() => onSelectAgent(agent.id)}
-                className={`flex w-full flex-col items-start rounded-lg px-3 py-2 text-left transition-colors ${
-                  activeAgent === agent.id
-                    ? "bg-blue-50 text-blue-700 dark:bg-blue-950 dark:text-blue-300"
-                    : "text-zinc-700 hover:bg-zinc-100 dark:text-zinc-300 dark:hover:bg-zinc-800"
-                }`}
-              >
-                <div className="flex w-full items-center gap-2">
-                  <span
-                    className={`inline-block h-2 w-2 shrink-0 rounded-full ${dotClass(
-                      (statuses[agent.id] ?? { status: "idle" }).status,
-                    )}`}
-                    title={dotTitle(
-                      (statuses[agent.id] ?? { status: "idle" }).status,
-                      statuses[agent.id]?.message,
+          {agents.map((agent) => {
+            const removed = Boolean(agent.templateRemovedAt);
+            // Deactivated template (reversible kill switch) — distinct
+            // from tombstones: re-show restores the agent.
+            const paused = !removed && Boolean(agent.templateUnpublished);
+            // Both states get the same muted row treatment (bg +
+            // opacity); the chip tells them apart.
+            const muted = removed || paused;
+            return (
+              <li key={agent.id}>
+                <button
+                  onClick={() => onSelectAgent(agent.id)}
+                  className={`flex w-full flex-col items-start rounded-lg px-3 py-2 text-left transition-colors ${
+                    activeAgent === agent.id
+                      ? "bg-blue-50 text-blue-700 dark:bg-blue-950 dark:text-blue-300"
+                      : muted
+                        ? "bg-zinc-100/70 text-zinc-700 hover:bg-zinc-200/70 dark:bg-zinc-900/70 dark:text-zinc-300 dark:hover:bg-zinc-800/70"
+                        : "text-zinc-700 hover:bg-zinc-100 dark:text-zinc-300 dark:hover:bg-zinc-800"
+                  } ${removed ? "opacity-60" : muted ? "opacity-70" : ""}`}
+                >
+                  <div className="flex w-full items-center gap-2">
+                    <span
+                      className={`inline-block h-2 w-2 shrink-0 rounded-full ${dotClass(
+                        (statuses[agent.id] ?? { status: "idle" }).status,
+                      )}`}
+                      title={dotTitle(
+                        (statuses[agent.id] ?? { status: "idle" }).status,
+                        statuses[agent.id]?.message,
+                      )}
+                      aria-label={`Connection status: ${dotTitle(
+                        (statuses[agent.id] ?? { status: "idle" }).status,
+                        statuses[agent.id]?.message,
+                      )}`}
+                    />
+                    <span className="text-sm font-medium">{agent.name}</span>
+                    {removed && (
+                      <span className="ml-auto shrink-0 rounded-full bg-zinc-200 px-1.5 py-0.5 text-[10px] font-medium text-zinc-600 dark:bg-zinc-800 dark:text-zinc-400">
+                        Removed
+                      </span>
                     )}
-                    aria-label={`Connection status: ${dotTitle(
-                      (statuses[agent.id] ?? { status: "idle" }).status,
-                      statuses[agent.id]?.message,
-                    )}`}
-                  />
-                  <span className="text-sm font-medium">{agent.name}</span>
-                </div>
-                <span className="mt-0.5 text-xs text-zinc-400">
-                  {agent.description}
-                </span>
-              </button>
-            </li>
-          ))}
+                    {paused && (
+                      <span className="ml-auto shrink-0 rounded-full bg-amber-100 px-1.5 py-0.5 text-[10px] font-medium text-amber-700 dark:bg-amber-950 dark:text-amber-300">
+                        Paused
+                      </span>
+                    )}
+                  </div>
+                  <span className="mt-0.5 text-xs text-zinc-400">
+                    {removed
+                      ? "No longer available — past chats remain viewable"
+                      : paused
+                        ? "Paused by the curator — unavailable right now"
+                        : agent.description}
+                  </span>
+                </button>
+              </li>
+            );
+          })}
         </ul>
 
         {activeAgent && (
@@ -375,10 +405,16 @@ function ExpandedContent({
       <div className="border-t border-zinc-200 p-3 dark:border-zinc-800">
         <AccountMenu />
         <ThemeToggle />
+        <Link
+          href="/app/catalog"
+          className="mt-2 flex w-full items-center justify-center rounded-lg px-3 py-2 text-sm font-medium text-zinc-600 transition-colors hover:bg-zinc-100 dark:text-zinc-400 dark:hover:bg-zinc-800"
+        >
+          Browse catalog
+        </Link>
         {showManageLink && (
           <Link
             href="/agents"
-            className="mt-2 flex w-full items-center justify-center rounded-lg px-3 py-2 text-sm font-medium text-zinc-600 transition-colors hover:bg-zinc-100 dark:text-zinc-400 dark:hover:bg-zinc-800"
+            className="flex w-full items-center justify-center rounded-lg px-3 py-2 text-sm font-medium text-zinc-600 transition-colors hover:bg-zinc-100 dark:text-zinc-400 dark:hover:bg-zinc-800"
           >
             Manage agents
           </Link>
@@ -440,30 +476,47 @@ function CollapsedContent({
         {agents.map((agent) => {
           const st = statuses[agent.id] ?? { status: "idle" as TestStatus };
           const isActive = activeAgent === agent.id;
+          const removed = Boolean(agent.templateRemovedAt);
+          const paused = !removed && Boolean(agent.templateUnpublished);
+          const muted = removed || paused;
           return (
             <button
               key={agent.id}
               onClick={() => onSelectAgent(agent.id)}
-              title={agent.name}
+              title={
+                removed
+                  ? `${agent.name} (removed)`
+                  : paused
+                    ? `${agent.name} (paused by the curator)`
+                    : agent.name
+              }
               className={`relative flex h-9 w-9 items-center justify-center rounded-full text-sm font-medium transition-colors ${
                 isActive
                   ? "bg-blue-100 text-blue-700 dark:bg-blue-950 dark:text-blue-300"
-                  : "text-zinc-600 hover:bg-zinc-100 dark:text-zinc-400 dark:hover:bg-zinc-800"
-              }`}
-              aria-label={agent.name}
+                  : muted
+                    ? "bg-zinc-100 text-zinc-600 hover:bg-zinc-200 dark:bg-zinc-900 dark:text-zinc-400 dark:hover:bg-zinc-800"
+                    : "text-zinc-600 hover:bg-zinc-100 dark:text-zinc-400 dark:hover:bg-zinc-800"
+              } ${removed ? "opacity-50" : muted ? "opacity-60" : ""}`}
+              aria-label={
+                removed
+                  ? `${agent.name} (removed)`
+                  : paused
+                    ? `${agent.name} (paused by the curator)`
+                    : agent.name
+              }
             >
               {agent.name.charAt(0).toUpperCase()}
               <span
-                className={`absolute bottom-0.5 right-0.5 h-2 w-2 rounded-full border border-white dark:border-zinc-950 ${dotClass(
-                  st.status,
-                )}`}
+                className={`absolute bottom-0.5 right-0.5 h-2 w-2 rounded-full border border-white dark:border-zinc-950 ${
+                  paused ? "bg-amber-400" : dotClass(st.status)
+                }`}
               />
             </button>
           );
         })}
       </nav>
 
-      {showManageLink && (
+      {showManageLink ? (
         <Link
           href="/agents"
           title="Manage agents"
@@ -483,7 +536,27 @@ function CollapsedContent({
             />
           </svg>
         </Link>
+      ) : (
+        <div className="mt-2" />
       )}
+
+      <Link
+        href="/app/catalog"
+        title="Browse catalog"
+        className="flex h-9 w-9 items-center justify-center rounded-lg text-zinc-500 transition-colors hover:bg-zinc-100 dark:text-zinc-400 dark:hover:bg-zinc-800"
+        aria-label="Browse catalog"
+      >
+        {/* 2×2 grid glyph — the catalog tile. */}
+        <svg
+          xmlns="http://www.w3.org/2000/svg"
+          viewBox="0 0 16 16"
+          fill="currentColor"
+          className="h-4 w-4"
+          aria-hidden="true"
+        >
+          <path d="M2 3.5A1.5 1.5 0 0 1 3.5 2h2A1.5 1.5 0 0 1 7 3.5v2A1.5 1.5 0 0 1 5.5 7h-2A1.5 1.5 0 0 1 2 5.5v-2ZM9 3.5A1.5 1.5 0 0 1 10.5 2h2A1.5 1.5 0 0 1 14 3.5v2A1.5 1.5 0 0 1 12.5 7h-2A1.5 1.5 0 0 1 9 5.5v-2ZM2 10.5A1.5 1.5 0 0 1 3.5 9h2A1.5 1.5 0 0 1 7 10.5v2A1.5 1.5 0 0 1 5.5 14h-2A1.5 1.5 0 0 1 2 12.5v-2ZM9 10.5A1.5 1.5 0 0 1 10.5 9h2a1.5 1.5 0 0 1 1.5 1.5v2a1.5 1.5 0 0 1-1.5 1.5h-2A1.5 1.5 0 0 1 9 12.5v-2Z" />
+        </svg>
+      </Link>
 
       <div className="mt-2 flex flex-col items-center gap-1">
         <ThemeToggle collapsed />

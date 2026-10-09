@@ -5,6 +5,7 @@ import {
   createAgent,
   updateAgent,
   deleteAgent,
+  countAgents,
   createAgentBodySchema,
   updateAgentBodySchema,
   generateAgentId,
@@ -396,6 +397,32 @@ describe("deleteAgent", () => {
   it("returns false when agent belongs to another org", async () => {
     const created = await createAgent(validInput, OTHER_ORG);
     expect(await deleteAgent(created.id, TEST_ORG)).toBe(false);
+  });
+});
+
+describe("countAgents (live agents — tombstones excluded)", () => {
+  it("counts manually-added + catalog-installed agents", async () => {
+    expect(await countAgents(TEST_ORG)).toBe(0);
+    await createAgent(validInput, TEST_ORG);
+    expect(await countAgents(TEST_ORG)).toBe(1);
+  });
+
+  it("excludes tombstones (deleted templates kept for history)", async () => {
+    await createAgent(validInput, TEST_ORG);
+    // A tombstone row: catalog install whose template was deleted.
+    await query(
+      `INSERT INTO agents (id, name, description, endpoint, org_id, auth_mode, source_template_id, template_deleted_at)
+       VALUES ('tombstone01', 'Ghost', 'removed', 'http://localhost:8002/agent', $1, 'none', 'tpl-gone', now())`,
+      [TEST_ORG],
+    );
+    expect(await countAgents(TEST_ORG)).toBe(1);
+    // but listAgents still surfaces it (sidebar history browsing)
+    expect(await listAgents(TEST_ORG)).toHaveLength(2);
+  });
+
+  it("scopes by org", async () => {
+    await createAgent(validInput, OTHER_ORG);
+    expect(await countAgents(TEST_ORG)).toBe(0);
   });
 });
 

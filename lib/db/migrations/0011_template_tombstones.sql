@@ -1,0 +1,22 @@
+-- 0011_template_tombstones.sql — tombstones for deleted catalog templates.
+--
+-- Complements 0010 (agent catalog). With the managed-plugin model, an
+-- installed catalog agent is a REFERENCE to its template: the runtime
+-- resolves endpoint/auth live from the template, and org-side config
+-- editing is locked. Deleting a template therefore must NOT leave
+-- runnable copies — but users should keep access to their conversation
+-- history.
+--
+-- `template_deleted_at` marks the installed agent as a TOMBSTONE:
+--   - stays in the org's agent list and sidebar (with a "Removed" chip)
+--   - past conversations remain fully browsable (the runtime resolves
+--     the agent from the row's last-synced config so connect/replay
+--     works; only new RUNS are blocked at the route with 410)
+--   - never counts toward the plan's agent cap
+--   - the org can "Remove" it (real delete) whenever they want
+--
+-- Deactivation (`agent_templates.is_active = false`) is the reversible
+-- kill switch (runs 402, history viewable, re-show restores); deleting
+-- is the permanent one.
+
+ALTER TABLE agents ADD COLUMN IF NOT EXISTS template_deleted_at TIMESTAMPTZ;

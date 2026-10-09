@@ -262,3 +262,76 @@ describe("DELETE /api/agents/[id]", () => {
     expect(res.status).toBe(429);
   });
 });
+
+describe("managed agents (catalog installs) — fully locked", () => {
+  const templateInput = {
+    name: "Flight Finder",
+    slug: "flight-finder",
+    tagline: "Find cheap flights",
+    description: "Searches live fares",
+    endpoint: "http://localhost:8000/agent",
+    authMode: "none" as const,
+    sortOrder: 0,
+    isActive: true,
+  };
+  let managedId: string;
+
+  beforeEach(async () => {
+    // Clean templates too — the outer cleanup only removes agents, and
+    // the slug is unique across tests.
+    const { listTemplates, deleteTemplate } = await import(
+      "@/lib/catalog/template-store"
+    );
+    for (const t of await listTemplates({ activeOnly: false })) {
+      await deleteTemplate(t.id);
+    }
+    const { createTemplate, installTemplate } = await import(
+      "@/lib/catalog/template-store"
+    );
+    const template = await createTemplate(templateInput);
+    const result = await installTemplate(template, testOrg);
+    managedId = result.agent.id;
+  });
+
+  it("GET omits the endpoint for managed agents (curator URL never leaves the server)", async () => {
+    const res = await GET(
+      new Request(`http://localhost/api/agents/${managedId}`),
+      makeParams(managedId),
+    );
+    expect(res.status).toBe(200);
+    const data = await res.json();
+    expect(data.sourceTemplateId).toBeTruthy();
+    expect("endpoint" in data).toBe(false);
+  });
+
+  it("PATCH is rejected with AGENT_MANAGED (config is curator-owned)", async () => {
+    const res = await PATCH(
+      new Request(`http://localhost/api/agents/${managedId}`, {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ name: "Renamed", endpoint: "http://evil.example/agent" }),
+      }),
+      makeParams(managedId),
+    );
+    expect(res.status).toBe(400);
+    const data = await res.json();
+    expect(data.code).toBe("AGENT_MANAGED");
+    // Nothing changed.
+    const { getAgent } = await import("@/lib/agents/agent-store");
+    const stored = await getAgent(managedId, testOrg);
+    expect(stored?.name).toBe("Flight Finder");
+    expect(stored?.endpoint).toBe("http://localhost:8000/agent");
+  });
+
+  it("DELETE (Remove from workspace) works on managed agents", async () => {
+    const res = await DELETE(
+      new Request(`http://localhost/api/agents/${managedId}`, {
+        method: "DELETE",
+      }),
+      makeParams(managedId),
+    );
+    expect(res.status).toBe(204);
+    const { getAgent } = await import("@/lib/agents/agent-store");
+    expect(await getAgent(managedId, testOrg)).toBeNull();
+  });
+});

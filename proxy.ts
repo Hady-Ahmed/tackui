@@ -27,11 +27,12 @@ const TRUSTED_PROXY_HOPS = Math.max(
 );
 
 // Auth pages are always public. Under SaaS mode the marketing landing page
-// (`/`) plus legal pages (`/terms`, `/privacy`) are also public so anonymous
-// visitors can read the marketing site. Self-host mode keeps `/` gated (it
-// IS the chat app, auth-required).
+// (`/`), legal pages (`/terms`, `/privacy`), pricing, and the public agent
+// catalog are also public so anonymous visitors can read the marketing
+// site. Self-host mode keeps `/` gated (it IS the chat app, auth-required)
+// and redirects /catalog to /app server-side.
 const AUTH_ROUTES = ["/login", "/signup", "/verify-email", "/forgot-password", "/reset-password"];
-const SAAS_PUBLIC_ROUTES = ["/", "/terms", "/privacy", "/pricing"];
+const SAAS_PUBLIC_ROUTES = ["/", "/terms", "/privacy", "/pricing", "/catalog"];
 const PUBLIC_ROUTES = SAAS_MODE
   ? [...AUTH_ROUTES, ...SAAS_PUBLIC_ROUTES]
   : AUTH_ROUTES;

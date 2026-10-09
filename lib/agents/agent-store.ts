@@ -59,6 +59,9 @@ interface AgentRow {
   auth_mode: string | null;
   jwt_secret: string | null;
   jwt_scopes: string | null;
+  source_template_id: string | null;
+  installed_template_updated_at: Date | string | null;
+  template_deleted_at: Date | string | null;
 }
 
 function rowToEntry(row: AgentRow): AgentEntry {
@@ -89,6 +92,32 @@ function rowToEntry(row: AgentRow): AgentEntry {
     jwtScopes: row.jwt_scopes
       ? row.jwt_scopes.split(",").map((s) => s.trim()).filter(Boolean)
       : undefined,
+    // Catalog provenance: which agent template this row was installed
+    // from (null for manually-added agents) + the template's updated_at
+    // snapshot at install/last-sync time (kept fresh by re-syncs — it is
+    // the config fallback that tombstone history replay relies on).
+    // Plain columns, no FK — deleting a template leaves installed copies
+    // working.
+    ...(row.source_template_id
+      ? { sourceTemplateId: row.source_template_id }
+      : {}),
+    ...(row.installed_template_updated_at
+      ? {
+          installedTemplateUpdatedAt: row.installed_template_updated_at instanceof Date
+            ? row.installed_template_updated_at.toISOString()
+            : new Date(row.installed_template_updated_at).toISOString(),
+        }
+      : {}),
+    // Tombstone (migration 0011): the template was deleted. The agent
+    // stays listed for history browsing but can never run again (route
+    // 410s runs). Presence of the timestamp IS the flag.
+    ...(row.template_deleted_at
+      ? {
+          templateRemovedAt: row.template_deleted_at instanceof Date
+            ? row.template_deleted_at.toISOString()
+            : new Date(row.template_deleted_at).toISOString(),
+        }
+      : {}),
   };
 }
 
@@ -99,15 +128,29 @@ function rowToEntry(row: AgentRow): AgentEntry {
  * by `lib/agents/registry.ts` server-side.
  */
 export function toPublicAgent(entry: AgentEntry): PublicAgent {
+  // Managed agents (catalog installs) are references to their template,
+  // not org-owned config: the endpoint is the curator's infrastructure,
+  // so it never leaves the server. Tombstones keep their name/history
+  // but are equally endpoint-less.
+  const isManaged = entry.sourceTemplateId !== undefined;
   return {
     id: entry.id,
     name: entry.name,
     description: entry.description,
-    endpoint: entry.endpoint,
+    ...(isManaged ? {} : { endpoint: entry.endpoint }),
     orgId: entry.orgId,
     authMode: entry.authMode,
     hasJwtSecret: Boolean(entry.jwtSecret),
     ...(entry.jwtScopes !== undefined ? { jwtScopes: entry.jwtScopes } : {}),
+    ...(entry.sourceTemplateId !== undefined
+      ? { sourceTemplateId: entry.sourceTemplateId }
+      : {}),
+    ...(entry.installedTemplateUpdatedAt !== undefined
+      ? { installedTemplateUpdatedAt: entry.installedTemplateUpdatedAt }
+      : {}),
+    ...(entry.templateRemovedAt !== undefined
+      ? { templateRemovedAt: entry.templateRemovedAt }
+      : {}),
   };
 }
 
@@ -147,13 +190,13 @@ export async function listAgents(
 ): Promise<AgentEntry[]> {
   if (opts?.bypassOrgScope) {
     const result = await query<AgentRow>(
-      `SELECT id, name, description, endpoint, org_id, auth_mode, jwt_secret, jwt_scopes
+      `SELECT id, name, description, endpoint, org_id, auth_mode, jwt_secret, jwt_scopes, source_template_id, installed_template_updated_at, template_deleted_at
        FROM agents ORDER BY created_at ASC`,
     );
     return result.rows.map(rowToEntry);
   }
   const result = await query<AgentRow>(
-    `SELECT id, name, description, endpoint, org_id, auth_mode, jwt_secret, jwt_scopes
+    `SELECT id, name, description, endpoint, org_id, auth_mode, jwt_secret, jwt_scopes, source_template_id, installed_template_updated_at, template_deleted_at
      FROM agents WHERE org_id = $1 ORDER BY created_at ASC`,
     [orgId],
   );
@@ -171,14 +214,14 @@ export async function getAgent(
 ): Promise<AgentEntry | null> {
   if (opts?.bypassOrgScope) {
     const result = await query<AgentRow>(
-      `SELECT id, name, description, endpoint, org_id, auth_mode, jwt_secret, jwt_scopes
+      `SELECT id, name, description, endpoint, org_id, auth_mode, jwt_secret, jwt_scopes, source_template_id, installed_template_updated_at, template_deleted_at
        FROM agents WHERE id = $1`,
       [id],
     );
     return result.rows[0] ? rowToEntry(result.rows[0]) : null;
   }
   const result = await query<AgentRow>(
-    `SELECT id, name, description, endpoint, org_id, auth_mode, jwt_secret, jwt_scopes
+    `SELECT id, name, description, endpoint, org_id, auth_mode, jwt_secret, jwt_scopes, source_template_id, installed_template_updated_at, template_deleted_at
      FROM agents WHERE id = $1 AND org_id = $2`,
     [id, orgId],
   );
@@ -302,4 +345,19 @@ export async function deleteAgent(
     [id, orgId],
   );
   return (result.rowCount ?? 0) > 0;
+}
+
+/**
+ * Count the org's LIVE agents — manually-added agents plus active
+ * catalog installs. Tombstones (deleted templates, kept for history
+ * browsing) are dead weight and must not consume the plan's agent cap.
+ */
+export async function countAgents(orgId: string): Promise<number> {
+  const result = await query<{ count: number }>(
+    `SELECT count(*)::int AS count
+     FROM agents
+     WHERE org_id = $1 AND template_deleted_at IS NULL`,
+    [orgId],
+  );
+  return result.rows[0]?.count ?? 0;
 }

@@ -6,6 +6,7 @@ import {
   updateAgentBodySchema,
   toPublicAgent,
 } from "@/lib/agents/agent-store";
+import { annotateAgentTemplateState } from "@/lib/catalog/template-store";
 import { getCurrentUser, canManageAgents } from "@/lib/auth/context";
 import { assertSafeUrl, UnsafeUrlError } from "@/lib/net/safe-fetch";
 import { checkUserLimit } from "@/lib/ratelimit/middleware";
@@ -26,7 +27,8 @@ export async function GET(
   }
   const limited = checkUserLimit(user.id, "agentRead");
   if (limited) return limited;
-  return NextResponse.json(toPublicAgent(agent));
+  const [annotated] = await annotateAgentTemplateState([agent]);
+  return NextResponse.json(annotated);
 }
 
 export async function PATCH(
@@ -45,6 +47,24 @@ export async function PATCH(
   if (limited) return limited;
 
   const { id } = await params;
+  // Managed agents (catalog installs) are references to their template:
+  // the runtime resolves config live from the template, so org-side
+  // edits would be ignored at run time — and the endpoint is curator
+  // infrastructure. Fully locked; only Remove (DELETE) is offered.
+  const existing = await getAgent(id, user.orgId);
+  if (!existing) {
+    return NextResponse.json({ error: "Agent not found" }, { status: 404 });
+  }
+  if (existing.sourceTemplateId) {
+    return NextResponse.json(
+      {
+        error:
+          "This agent is managed by the agent catalog and can't be edited. Remove it from your workspace instead.",
+        code: "AGENT_MANAGED",
+      },
+      { status: 400 },
+    );
+  }
   let body: unknown;
   try {
     body = await request.json();

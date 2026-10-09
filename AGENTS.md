@@ -67,6 +67,9 @@ app/
   api/agents/route.ts          # REST: GET/POST /api/agents (list, create) — SSRF guard on POST + plan agent-count check (SaaS)
   api/agents/[id]/route.ts     # REST: GET/PATCH/DELETE /api/agents/[id] — SSRF guard on PATCH (when endpoint changes)
   api/agents/reachability-probe/route.ts  # REST: POST /api/agents/reachability-probe (SSRF-guarded, error messages masked)
+  api/catalog/route.ts         # REST: GET (active templates; `?all=1` includes inactive — platform admin only) + POST (platform admin, SSRF-guarded, slug-unique → 409)
+  api/catalog/[id]/route.ts    # REST: GET (detail + installCount) / PATCH (SSRF when endpoint changes) / DELETE (no cascade — installed copies keep working) — platform admin
+  api/catalog/[id]/install/route.ts  # REST: POST — idempotent install/re-sync into the caller's org (canManageAgents + plan gates; count cap skipped on re-sync)
   api/auth/[...all]/route.ts   # Better Auth handler (signup, signin, callback)
   api/auth/config/route.ts     # GET enabled providers (for self-configuring login UI)
   api/auth/can-manage-agents/route.ts  # GET — returns whether user can manage agents (org owner/admin or platform admin)
@@ -80,8 +83,10 @@ app/
   api/health/route.ts          # GET — liveness health check (bypassed by proxy.ts cookie gate)
   agents/page.tsx              # Admin UI — add/edit/delete agents + test connection + user management + over-limit banner (amber when agent count exceeds plan cap post-cancellation)
   app/page.tsx                 # Chat page (client component, lives at /app in both SaaS + self-host modes)
+  app/catalog/page.tsx         # In-app agent catalog — browse curated templates + one-click install (Add / Added ✓ / plan-locked states)
   app/invitations/page.tsx     # Accept/reject pending org invitations (SaaS team + self-host multi-user)
   app/members/page.tsx         # Workspace member management — roster + remove + role change (member↔admin↔owner) + cancel invites (org owner/admin) + self-leave + ownership transfer (owner role in dropdown) + over-limit banner (SaaS team + self-host multi-user)
+  catalog/page.tsx            # Public agent catalog (SaaS marketing — shareable #slug anchors, session-aware CTAs; redirects to /app when !SAAS_MODE)
   pricing/page.tsx            # Free/Pro/Team tier cards (SaaS only — redirects to /app when !BILLING_ENABLED)
   terms/page.tsx              # Terms of Service (SaaS only — redirects to /app when !SAAS_MODE)
   privacy/page.tsx            # Privacy Policy (SaaS only — redirects to /app when !SAAS_MODE)
@@ -104,9 +109,12 @@ lib/
   agents/
     agents.config.ts           # AgentEntry / AgentKind / PublicAgent types (no runtime config)
     agent-store.ts             # Async CRUD for agents table (zod-validated, pg.Pool-backed) + generateAgentId (random 12-char hex) + toPublicAgent/toPublicAgents (strips jwtSecret)
-    registry.ts                # getAgents() factory — reads DB, builds agents map (async) + per-agent JWT minting (HS256, sub=user.id) for agui agents with authMode "jwt"
+    registry.ts                # getAgents() factory — reads DB, builds agents map (async) + live-resolves catalog agents from their template (managed-plugin) + per-agent JWT minting (HS256, sub=user.id) for agui agents with authMode "jwt"
     pg-runner.ts               # PostgresAgentRunner — AgentRunner impl with thread endpoints + smart-replay connect() (RUN_ERROR filtering) + in-memory cache bridging sync interface to async PG
     runner-instance.ts         # Shared runner singleton (used by runtime + thread API)
+  catalog/
+    catalog.config.ts          # Client-safe catalog types (AgentTemplate / PublicAgentTemplate / RequiredPlan / TemplateAuthMode) — no runtime config, no DB imports
+    template-store.ts          # Template CRUD (zod-validated, pg.Pool-backed) + installTemplate (idempotent upsert into agents) + findInstalledAgentId + countTemplateInstalls + getRunUsage (rolling-24h run count via agent_runs ⋈ thread_metadata) + annotateAgentTemplateState (templateUnpublished flag for the sidebar chip)
   auth/
     auth.ts                    # Better Auth instance (Postgres Pool adapter, plugins, first-user-is-admin, BETTER_AUTH_SECRET enforcement on boot)
     auth-client.ts             # Better Auth React client (signIn, signUp, useSession)
@@ -130,6 +138,8 @@ lib/
       0007_agent_jwt_scopes.sql # Optional JWT scopes claim (jwt_scopes column on agents) — nullable, only set when backend has authorization=True
       0008_drop_langgraph_kind.sql # Removes the untested `langgraph` kind — deletes langgraph agent rows + drops graph_id/langsmith_api_key columns
       0009_drop_agent_kind.sql  # Drops the `kind` column entirely — with langgraph gone, a constant column for a single value was pure ceremony
+      0010_agent_catalog.sql    # Agent catalog: `agent_templates` table (slug/name/tagline/icon/endpoint/auth/required_plan/free_daily_quota/sort_order/is_active) + `agents.source_template_id` + `agents.installed_template_updated_at` provenance columns
+      0011_template_tombstones.sql # `agents.template_deleted_at` — deleting a template tombstones installed copies (listed, history viewable, never runnable, don't count toward the plan cap)
   config/
     saas.ts                     # SAAS_MODE / BILLING_ENABLED / SSRF_GUARD_FORCE_ON / SSRF_REJECTION_MESSAGE flags (module-load consts)
     saas.test.ts                # 5 tests — flag combinations across modes
@@ -185,6 +195,7 @@ components/
   theme-toggle.tsx             # Light/dark toggle button (sidebar footer, icon + label)
   chat-shell.tsx               # Chat layout with agent switching + empty-state CTA + collapsible sidebar state + AgentChat wrapper
   users-admin.tsx              # Admin user management (list, set role, ban/unban)
+  catalog-admin.tsx            # Platform-admin catalog CRUD section on the /agents page (template form + table + test connection)
   hitl/
     approval-card.tsx          # Human-in-the-loop interrupt handlers
   tools/
@@ -744,6 +755,135 @@ every query). 48 bits of entropy makes intra-org collisions effectively
 impossible; the 23505 catch in the POST handler is a loud-error safety
 net, not a retry path.
 
+## Agent Catalog
+
+A curated, platform-admin-managed catalog of **agent templates** that
+any workspace can one-click install. The onboarding flow: share a
+`/catalog#slug` link → visitor signs up → clicks "Add to workspace" →
+the agent is running. No endpoints, no config.
+
+### Model (template vs. installed copy — managed-plugin)
+
+- `agent_templates` — global rows (NOT org-scoped), managed by platform
+  admins (`role === "admin"` via the Catalog section on `/agents` or the
+  `/api/catalog` REST API). Fields: `slug` (unique, shareable),
+  `name`, `tagline`, `description`, `category`, `icon` (emoji),
+  `endpoint`, `auth_mode`/`jwt_secret`/`jwt_scopes` (same machinery +
+  encryption as agents), `required_plan` (nullable — `pro`/`team`),
+  `free_daily_quota` (nullable int), `sort_order`, `is_active`.
+- Installing creates an org-scoped `agents` row via `installTemplate()`
+  — but the row is an **entitlement/reference, not a config copy**.
+  The runtime resolves endpoint/auth **live from the template** on every
+  request (`getTemplatesByIds` batch in `lib/agents/registry.ts`), so a
+  template edit (endpoint fix, secret rotation, rename) propagates to
+  every installed org with no user action. The row's copied config
+  (refreshed on every install call) is only the fallback that keeps
+  history replay working after a template is deleted (tombstones).
+  Provenance: `agents.source_template_id` +
+  `installed_template_updated_at` (last-sync snapshot).
+- **Fully locked:** any `PATCH` on an agent with `sourceTemplateId`
+  returns 400 `AGENT_MANAGED` — name/description/endpoint all come from
+  the template. Only Remove (DELETE) is offered. `GET /api/agents`
+  **strips `endpoint` for managed agents** — the curator's backend URLs
+  never leave the server (the sidebar skips probing them; the `/agents`
+  table shows "Managed by catalog" + a Catalog badge). Tombstoned agents
+  carry `templateRemovedAt` (see Lifecycle).
+
+### Install semantics
+
+`POST /api/catalog/[id]/install` gated by `canManageAgents` (installing
+changes the org's agent list) → `checkTemplateInstall` (plan gate) →
+`checkAgentCountLimit` (**skipped on re-install** — no new row) →
+`installTemplate()`:
+
+- **First install** creates the agent row → `201 { installed: true }`.
+- **Re-install** refreshes the row's config snapshot from the template
+  (id preserved) → `200 { installed: false, updated: bool }`. Invisible
+  to users — the catalog card just shows "Added ✓" (live propagation
+  means there is no user-facing update action).
+
+### Monetization gates (SaaS-only — short-circuit on `!SAAS_MODE`)
+
+- **`required_plan`** (`pro`/`team`): blocks install AND runs for lower
+  plans (402 `PLAN_AGENT_LOCKED`). Run-time enforcement in
+  `checkCatalogRunGates` catches orgs that downgrade AFTER installing.
+- **`free_daily_quota`**: rolling-24h per-user run cap for free-plan
+  orgs on catalog agents (402 `AGENT_QUOTA_EXCEEDED` with `resetsAt`).
+  Counted via `getRunUsage` — `agent_runs ⋈ thread_metadata` filtered by
+  `user_id + agent_id + created_at >= now-24h` (no counter tables; the
+  event log IS the counter). Counted fresh from the log on every run —
+  **no cache, no pre-consumed slots**: the runner only persists runs
+  that produced events (`storeRun` in pg-runner), so attempts that never
+  reached the backend (backend down, instant fetch failure — no event
+  ever emitted) don't consume quota; runs that errored mid-stream do
+  (they reached the backend). **User-aborted runs count too** — the
+  AG-UI client turns an abort into a persisted `RUN_ERROR` event
+  (code: "abort"), so stop button / agent-switch mid-stream / send-
+  while-streaming each leave a counted row. Don't be surprised when a
+  quota trips "early" — check `agent_runs` for the extra row first.
+  Free users are capped at 1 concurrent run (plan limit + "thread
+  already running" guard), so turns are sequential — no burst window.
+  Paid plans are unlimited; manually added agents are never gated.
+- **Vague-copy policy:** the quota number is never stated in product
+  copy — cards/pricing say "Daily usage limit · unlimited on
+  Pro". The exact cap appears only in the 402 JSON (debugging) and the
+  `[quota]` server log. Rationale: a hidden number keeps per-agent
+  quotas flexible and the cap adjustable without shipping UI changes.
+  The countdown IS shown ("resets in 5h 12m") so users know when usage
+  returns.
+- The chat UI surfaces 402s/410s like 429s (`AgentChat.onError` filter
+  in `chat-shell.tsx`); any other non-abort run failure surfaces a
+  generic "Agent failed to respond" banner (raw errors are never shown
+  to users).
+
+### Run gates (both modes — curator state, not billing)
+
+`checkCatalogRunGates` (in `lib/plans/enforcement.ts`, called by the
+copilotkit route on every run — including solo mode) applies the
+curator-state gates in BOTH modes; the monetization gates above stay
+SaaS-only:
+
+1. **Tombstone** (template deleted, or a managed row whose template is
+   missing) → 410 `AGENT_REMOVED` — "This agent was removed by its
+   publisher. Past conversations remain viewable." The registry still
+   resolves tombstoned agents (row config fallback) so connect/history
+   replay works; only runs die, at the route, before any backend
+   request. There is no ungated-orphan path: a run needs a live
+   template or it's blocked.
+2. **Deactivated template** (`is_active = false`) → 402
+   `AGENT_UNPUBLISHED` — "unpublished by the curator." The reversible
+   kill switch: re-show restores, history stays viewable throughout.
+3. Then the SaaS-only plan + quota gates (above).
+
+### Mode matrix
+
+| Surface | SaaS | Self-host |
+| --- | --- | --- |
+| In-app catalog (`/app/catalog`) + install | ✓ | ✓ |
+| Template admin (Catalog section on `/agents`) | platform admin | platform admin (first user) |
+| Tombstone + deactivation run gates | ✓ | ✓ |
+| Plan gate + free quota enforcement | ✓ | ✗ (short-circuit) |
+| Public `/catalog` marketing page | ✓ | redirects to `/app` |
+
+### Lifecycle rules
+
+- **Deleting a template tombstones every installed copy** — the rows
+  stay (`agents.template_deleted_at`, migration 0011) so users keep
+  browsing past conversations, with a "Removed" chip in the sidebar and
+  an endpoint-less, non-runnable agent. The delete confirm fetches
+  `GET /api/catalog/[id]` (`installCount`) and warns "N workspaces have
+  installed it". Orgs clean up tombstones via the normal Remove (their
+  own agent DELETE). Tombstones never count toward the plan's agent cap
+  (`countAgents` excludes them). Kill switch for a bad template:
+  `is_active = false` (immediate 402 on runs, reversible); deleting is
+  the permanent move.
+- **Live propagation cuts both ways** — a bad template edit reaches
+  every org on their next run. Recovery: deactivate, fix, re-show.
+  Secret rotation is painless for the same reason (no re-sync clicks).
+- Catalog routes reuse the `agentMutate`/`agentRead` rate-limit
+  buckets; template endpoints pass the same `assertSafeUrl` SSRF guard
+  as agent create/edit.
+
 ## Environment Variables
 
 Agents are managed via the `/agents` admin page (stored in Postgres) — no env
@@ -1229,3 +1369,10 @@ strategy it uses so users know whether server-side session storage is required.
   routine chores are skipped (or one-lined under Docs). Released sections
   (`## [x.y.z]`) are frozen history — never edit them; the next release starts
   fresh from `[Unreleased]`.
+- **Documentation policy — public repo:** docs (CHANGELOG, README, code
+  comments) describe **product behavior, never business strategy** — no
+  personal/marketing channels, no conversion or retention framing.
+  SaaS-only code features are documented like any other feature (the
+  changelog follows the codebase; self-hosters need to know what the
+  env vars unlock). Design rationale stays in engineering terms (e.g.
+  "the cap is a server-side tunable"), not growth terms.

@@ -4,6 +4,7 @@ import { useState, useEffect, useCallback, useRef } from "react";
 import { useRouter } from "next/navigation";
 import type { PublicAgent, AgentAuthMode } from "@/lib/agents/agents.config";
 import { UsersAdmin } from "@/components/users-admin";
+import { CatalogAdmin } from "@/components/catalog-admin";
 import { BackToChat } from "@/components/back-to-chat";
 import { authClient } from "@/lib/auth/auth-client";
 import { useAuthConfig } from "@/lib/auth/use-auth-config";
@@ -124,7 +125,9 @@ export default function AgentsPage() {
     setForm({
       name: agent.name,
       description: agent.description,
-      endpoint: agent.endpoint,
+      // Edit is only reachable for non-managed agents (managed rows hide
+      // the button), but the type is optional — default defensively.
+      endpoint: agent.endpoint ?? "",
       // Never pre-fill secrets. The fields start empty; submitting
       // blank omits them from the PATCH (preserving the stored values).
       // hasJwtSecret drives helper text below.
@@ -152,6 +155,8 @@ export default function AgentsPage() {
   };
 
   const handleTestRow = async (agent: PublicAgent) => {
+    // Only rendered for non-managed agents, which always carry endpoint.
+    if (!agent.endpoint) return;
     setRowTests((prev) => ({ ...prev, [agent.id]: { status: "loading" } }));
     const result = await testEndpoint(agent.endpoint);
     setRowTests((prev) => ({ ...prev, [agent.id]: result }));
@@ -200,8 +205,11 @@ export default function AgentsPage() {
     }
   };
 
-  const handleDelete = async (id: string) => {
-    if (!confirm(`Delete agent "${id}"? This cannot be undone.`)) return;
+  const handleDelete = async (id: string, name?: string) => {
+    // Managed agents keep their config on the server (the catalog row is
+    // a reference), so removal is just "this workspace stops having it".
+    const label = name ?? id;
+    if (!confirm(`Delete agent "${label}"? This cannot be undone.`)) return;
     const res = await fetch(`/api/agents/${id}`, { method: "DELETE" });
     if (!res.ok) {
       const data = await res.json().catch(() => ({}));
@@ -316,6 +324,7 @@ export default function AgentsPage() {
                       value={form.jwtSecret}
                       onChange={(e) => updateForm({ jwtSecret: e.target.value })}
                       type="password"
+                      minLength={32}
                       className={inputClass()}
                       placeholder={
                         editingId && editingHasJwtSecret
@@ -421,20 +430,24 @@ export default function AgentsPage() {
               where a downgraded Team org has more agents than the Free
               3-agent cap. Informational only; existing agents keep
               running, the server blocks new ones until the owner
-              removes agents or upgrades. */}
+              removes agents or upgrades. Tombstones (removed catalog
+              agents kept for history) don't count toward the cap. */}
           {!loading &&
             canManage &&
             billing !== null &&
             billing.limits.maxAgents !== null &&
-            agents.length > billing.limits.maxAgents && (
-              <div className="mb-4 rounded-lg border border-amber-200 bg-amber-50 p-3 text-sm text-amber-700 dark:border-amber-900 dark:bg-amber-950 dark:text-amber-300">
-                Your workspace is over the {billing.limits.label} plan&apos;s{" "}
-                {billing.limits.maxAgents}-agent limit. Remove{" "}
-                {agents.length - billing.limits.maxAgents} agent
-                {agents.length - billing.limits.maxAgents === 1 ? "" : "s"} or
-                upgrade in the account menu.
-              </div>
-            )}
+            (() => {
+              const liveAgents = agents.filter((a) => !a.templateRemovedAt);
+              return liveAgents.length > billing.limits.maxAgents ? (
+                <div className="mb-4 rounded-lg border border-amber-200 bg-amber-50 p-3 text-sm text-amber-700 dark:border-amber-900 dark:bg-amber-950 dark:text-amber-300">
+                  Your workspace is over the {billing.limits.label} plan&apos;s{" "}
+                  {billing.limits.maxAgents}-agent limit. Remove{" "}
+                  {liveAgents.length - billing.limits.maxAgents} agent
+                  {liveAgents.length - billing.limits.maxAgents === 1 ? "" : "s"} or
+                  upgrade in the account menu.
+                </div>
+              ) : null;
+            })()}
 
           <h2 className="mb-4 text-sm font-semibold uppercase tracking-wide text-zinc-400">
             Configured agents ({agents.length})
@@ -453,7 +466,6 @@ export default function AgentsPage() {
                 <table className="w-full text-left text-sm">
                   <thead className="bg-zinc-100 text-xs uppercase tracking-wide text-zinc-500 dark:bg-zinc-900 dark:text-zinc-400">
                     <tr>
-                      <th className="px-4 py-2">ID</th>
                       <th className="px-4 py-2">Name</th>
                       <th className="px-4 py-2">Endpoint</th>
                       <th className="px-4 py-2 text-right">Actions</th>
@@ -462,42 +474,59 @@ export default function AgentsPage() {
                   <tbody className="divide-y divide-zinc-200 dark:divide-zinc-800">
                     {agents.map((agent) => {
                       const rowTest = rowTests[agent.id] ?? { status: "idle" };
+                      const managed = Boolean(agent.sourceTemplateId);
+                      const removed = Boolean(agent.templateRemovedAt);
                       return (
                         <tr
                           key={agent.id}
                           className="bg-white dark:bg-zinc-950"
                         >
-                          <td className="px-4 py-3 font-mono text-xs text-zinc-600 dark:text-zinc-400">
-                            {agent.id}
-                          </td>
                           <td className="px-4 py-3 font-medium text-zinc-900 dark:text-zinc-50">
                             {agent.name}
+                            {managed && (
+                              <span className="ml-2 rounded-full bg-blue-100 px-1.5 py-0.5 text-[10px] font-medium text-blue-700 dark:bg-blue-950 dark:text-blue-300">
+                                {removed ? "Removed" : "Catalog"}
+                              </span>
+                            )}
                           </td>
                           <td className="px-4 py-3 font-mono text-xs text-zinc-600 dark:text-zinc-400">
-                            {agent.endpoint}
+                            {/* Managed agents carry no endpoint in the
+                                API — the curator's URL never leaves the
+                                server. */}
+                            {managed ? (
+                              <span className="font-sans text-zinc-400">
+                                Managed by catalog
+                              </span>
+                            ) : (
+                              agent.endpoint
+                            )}
                           </td>
                           <td className="px-4 py-3 text-right">
+                            {!managed && (
+                              <button
+                                onClick={() => startEdit(agent)}
+                                className="mr-2 text-xs font-medium text-blue-600 hover:underline dark:text-blue-400"
+                              >
+                                Edit
+                              </button>
+                            )}
+                            {!managed && (
+                              <button
+                                onClick={() => handleTestRow(agent)}
+                                disabled={rowTest.status === "loading"}
+                                className="mr-2 text-xs font-medium text-zinc-600 hover:underline disabled:opacity-50 dark:text-zinc-400"
+                                title={TEST_HELP}
+                              >
+                                {rowTest.status === "loading" ? "Testing..." : "Test"}
+                              </button>
+                            )}
                             <button
-                              onClick={() => startEdit(agent)}
-                              className="mr-2 text-xs font-medium text-blue-600 hover:underline dark:text-blue-400"
-                            >
-                              Edit
-                            </button>
-                            <button
-                              onClick={() => handleTestRow(agent)}
-                              disabled={rowTest.status === "loading"}
-                              className="mr-2 text-xs font-medium text-zinc-600 hover:underline disabled:opacity-50 dark:text-zinc-400"
-                              title={TEST_HELP}
-                            >
-                              {rowTest.status === "loading" ? "Testing..." : "Test"}
-                            </button>
-                            <button
-                              onClick={() => handleDelete(agent.id)}
+                              onClick={() => handleDelete(agent.id, agent.name)}
                               className="text-xs font-medium text-red-600 hover:underline dark:text-red-400"
                             >
-                              Delete
+                              {managed ? "Remove" : "Delete"}
                             </button>
-                            <TestBadge result={rowTest} inline />
+                            {!managed && <TestBadge result={rowTest} inline />}
                           </td>
                         </tr>
                       );
@@ -510,6 +539,8 @@ export default function AgentsPage() {
               <ul className="space-y-3 md:hidden">
                 {agents.map((agent) => {
                   const rowTest = rowTests[agent.id] ?? { status: "idle" };
+                  const managed = Boolean(agent.sourceTemplateId);
+                  const removed = Boolean(agent.templateRemovedAt);
                   return (
                     <li
                       key={agent.id}
@@ -519,37 +550,45 @@ export default function AgentsPage() {
                         <div className="min-w-0">
                           <p className="font-medium text-zinc-900 dark:text-zinc-50">
                             {agent.name}
-                          </p>
-                          <p className="mt-0.5 font-mono text-xs text-zinc-500 dark:text-zinc-400">
-                            {agent.id}
+                            {managed && (
+                              <span className="ml-2 rounded-full bg-blue-100 px-1.5 py-0.5 text-[10px] font-medium text-blue-700 dark:bg-blue-950 dark:text-blue-300">
+                                {removed ? "Removed" : "Catalog"}
+                              </span>
+                            )}
                           </p>
                         </div>
                       </div>
-                      <p className="mt-2 truncate font-mono text-xs text-zinc-600 dark:text-zinc-400">
-                        {agent.endpoint}
-                      </p>
+                      {!managed && (
+                        <p className="mt-2 truncate font-mono text-xs text-zinc-600 dark:text-zinc-400">
+                          {agent.endpoint}
+                        </p>
+                      )}
                       <div className="mt-3 flex flex-wrap items-center gap-3">
+                        {!managed && (
+                          <>
+                            <button
+                              onClick={() => startEdit(agent)}
+                              className="text-xs font-medium text-blue-600 hover:underline dark:text-blue-400"
+                            >
+                              Edit
+                            </button>
+                            <button
+                              onClick={() => handleTestRow(agent)}
+                              disabled={rowTest.status === "loading"}
+                              className="text-xs font-medium text-zinc-600 hover:underline disabled:opacity-50 dark:text-zinc-400"
+                              title={TEST_HELP}
+                            >
+                              {rowTest.status === "loading" ? "Testing..." : "Test"}
+                            </button>
+                          </>
+                        )}
                         <button
-                          onClick={() => startEdit(agent)}
-                          className="text-xs font-medium text-blue-600 hover:underline dark:text-blue-400"
-                        >
-                          Edit
-                        </button>
-                        <button
-                          onClick={() => handleTestRow(agent)}
-                          disabled={rowTest.status === "loading"}
-                          className="text-xs font-medium text-zinc-600 hover:underline disabled:opacity-50 dark:text-zinc-400"
-                          title={TEST_HELP}
-                        >
-                          {rowTest.status === "loading" ? "Testing..." : "Test"}
-                        </button>
-                        <button
-                          onClick={() => handleDelete(agent.id)}
+                          onClick={() => handleDelete(agent.id, agent.name)}
                           className="text-xs font-medium text-red-600 hover:underline dark:text-red-400"
                         >
-                          Delete
+                          {managed ? "Remove" : "Delete"}
                         </button>
-                        <TestBadge result={rowTest} inline />
+                        {!managed && <TestBadge result={rowTest} inline />}
                       </div>
                     </li>
                   );
@@ -558,6 +597,10 @@ export default function AgentsPage() {
             </>
           )}
         </section>
+
+        {/* Catalog admin — global templates, gated to platform admins
+            (role === "admin"). Solo mode's synthetic admin sees it too. */}
+        {(config.authDisabled || session?.user?.role === "admin") && <CatalogAdmin />}
 
         <UsersAdmin />
       </div>
