@@ -24,7 +24,7 @@ async function fetchCanManage(): Promise<boolean | null> {
  * non-members. In solo mode, the synthetic admin is a platform admin so
  * this returns true.
  *
- * Used by the sidebar (show/hide "Manage agents" link), the chat shell
+ * Used by the sidebar (show/hide the add-agent + icon), the chat shell
  * (empty-state CTA), and the /agents page (redirect if false).
  */
 export function useCanManageAgents(): {

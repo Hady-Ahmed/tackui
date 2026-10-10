@@ -95,8 +95,10 @@ export function AgentSidebar({
   const [statuses, setStatuses] = useState<Record<string, TestResult>>({});
   const { config } = useAuthConfig();
   const { canManage } = useCanManageAgents();
-  // Show the "Manage agents" link to org owners/admins (canManage from
-  // /api/auth/can-manage-agents) OR in solo mode (synthetic admin).
+  // Show the add-agent (+) icon to org owners/admins (canManage from
+  // /api/auth/can-manage-agents) OR in solo mode (synthetic admin). It
+  // links to /agents?add=1 — the workspace agent-management page with
+  // the add form already open. The catalog book icon is for everyone.
   const showManageLink = canManage === true || (config?.authDisabled ?? false);
 
   useEffect(() => {
@@ -331,6 +333,45 @@ function ExpandedContent({
               />
             </svg>
           </span>
+          <div className="ml-auto flex items-center gap-0.5">
+            <Link
+              href="/app/catalog"
+              title="Browse catalog"
+              aria-label="Browse catalog"
+              className="rounded p-1 text-zinc-400 transition-colors hover:bg-zinc-100 hover:text-zinc-600 dark:hover:bg-zinc-800 dark:hover:text-zinc-300"
+            >
+              {/* Open-book glyph — the agent catalog. */}
+              <svg
+                xmlns="http://www.w3.org/2000/svg"
+                viewBox="0 0 16 16"
+                fill="currentColor"
+                className="h-4 w-4"
+                aria-hidden="true"
+              >
+                <path d="M7.25 3.68772C6.25693 3.24568 5.15715 3 4 3C3.44413 3 2.9015 3.05669 2.37757 3.16462C2.15412 3.21064 2 3.4115 2 3.63964V11.6344C2 11.9794 2.34235 12.2215 2.67903 12.1459C3.10405 12.0504 3.54614 12 4 12C5.1977 12 6.31344 12.3509 7.25 12.9556V3.68772Z" />
+                <path d="M8.75 12.9556C9.68656 12.3509 10.8023 12 12 12C12.4539 12 12.8959 12.0504 13.321 12.1459C13.6577 12.2215 14 11.9794 14 11.6344V3.63964C14 3.4115 13.8459 3.21064 13.6224 3.16462C13.0985 3.05669 12.5559 3 12 3C10.8428 3 9.74308 3.24568 8.75 3.68772V12.9556Z" />
+              </svg>
+            </Link>
+            {showManageLink && (
+              <Link
+                href="/agents?add=1"
+                title="Add agent"
+                aria-label="Add agent"
+                className="rounded p-1 text-zinc-400 transition-colors hover:bg-zinc-100 hover:text-zinc-600 dark:hover:bg-zinc-800 dark:hover:text-zinc-300"
+              >
+                {/* Plus glyph — opens /agents with the add-agent form open. */}
+                <svg
+                  xmlns="http://www.w3.org/2000/svg"
+                  viewBox="0 0 16 16"
+                  fill="currentColor"
+                  className="h-4 w-4"
+                  aria-hidden="true"
+                >
+                  <path d="M8.75 3.75a.75.75 0 0 0-1.5 0v3.5h-3.5a.75.75 0 0 0 0 1.5h3.5v3.5a.75.75 0 0 0 1.5 0v-3.5h3.5a.75.75 0 0 0 0-1.5h-3.5v-3.5Z" />
+                </svg>
+              </Link>
+            )}
+          </div>
         </div>
         <ul className="space-y-0.5">
           {agents.map((agent) => {
@@ -405,20 +446,6 @@ function ExpandedContent({
       <div className="border-t border-zinc-200 p-3 dark:border-zinc-800">
         <AccountMenu />
         <ThemeToggle />
-        <Link
-          href="/app/catalog"
-          className="mt-2 flex w-full items-center justify-center rounded-lg px-3 py-2 text-sm font-medium text-zinc-600 transition-colors hover:bg-zinc-100 dark:text-zinc-400 dark:hover:bg-zinc-800"
-        >
-          Browse catalog
-        </Link>
-        {showManageLink && (
-          <Link
-            href="/agents"
-            className="flex w-full items-center justify-center rounded-lg px-3 py-2 text-sm font-medium text-zinc-600 transition-colors hover:bg-zinc-100 dark:text-zinc-400 dark:hover:bg-zinc-800"
-          >
-            Manage agents
-          </Link>
-        )}
       </div>
     </>
   );
@@ -516,47 +543,45 @@ function CollapsedContent({
         })}
       </nav>
 
-      {showManageLink ? (
+      <div className="mt-2 flex flex-col items-center gap-1">
+        {showManageLink && (
+          <Link
+            href="/agents?add=1"
+            title="Add agent"
+            className="flex h-9 w-9 items-center justify-center rounded-lg text-zinc-500 transition-colors hover:bg-zinc-100 dark:text-zinc-400 dark:hover:bg-zinc-800"
+            aria-label="Add agent"
+          >
+            {/* Plus glyph — opens /agents with the add-agent form open. */}
+            <svg
+              xmlns="http://www.w3.org/2000/svg"
+              viewBox="0 0 16 16"
+              fill="currentColor"
+              className="h-4 w-4"
+              aria-hidden="true"
+            >
+              <path d="M8.75 3.75a.75.75 0 0 0-1.5 0v3.5h-3.5a.75.75 0 0 0 0 1.5h3.5v3.5a.75.75 0 0 0 1.5 0v-3.5h3.5a.75.75 0 0 0 0-1.5h-3.5v-3.5Z" />
+            </svg>
+          </Link>
+        )}
         <Link
-          href="/agents"
-          title="Manage agents"
-          className="mt-2 flex h-9 w-9 items-center justify-center rounded-lg text-zinc-500 transition-colors hover:bg-zinc-100 dark:text-zinc-400 dark:hover:bg-zinc-800"
-          aria-label="Manage agents"
+          href="/app/catalog"
+          title="Browse catalog"
+          className="flex h-9 w-9 items-center justify-center rounded-lg text-zinc-500 transition-colors hover:bg-zinc-100 dark:text-zinc-400 dark:hover:bg-zinc-800"
+          aria-label="Browse catalog"
         >
+          {/* Open-book glyph — the agent catalog. */}
           <svg
             xmlns="http://www.w3.org/2000/svg"
             viewBox="0 0 16 16"
             fill="currentColor"
             className="h-4 w-4"
+            aria-hidden="true"
           >
-            <path
-              fillRule="evenodd"
-              d="M8 1a2.5 2.5 0 0 1 2.45 2.01l.05.24.24.05a2.5 2.5 0 0 1 1.7 3.7l-.12.21.12.21a2.5 2.5 0 0 1-1.7 3.7l-.24.05-.05.24a2.5 2.5 0 0 1-4.9 0l-.05-.24-.24-.05a2.5 2.5 0 0 1-1.7-3.7l.12-.21-.12-.21a2.5 2.5 0 0 1 1.7-3.7l.24-.05.05-.24A2.5 2.5 0 0 1 8 1Zm0 4.5a2.5 2.5 0 1 0 0 5 2.5 2.5 0 0 0 0-5Z"
-              clipRule="evenodd"
-            />
+            <path d="M7.25 3.68772C6.25693 3.24568 5.15715 3 4 3C3.44413 3 2.9015 3.05669 2.37757 3.16462C2.15412 3.21064 2 3.4115 2 3.63964V11.6344C2 11.9794 2.34235 12.2215 2.67903 12.1459C3.10405 12.0504 3.54614 12 4 12C5.1977 12 6.31344 12.3509 7.25 12.9556V3.68772Z" />
+            <path d="M8.75 12.9556C9.68656 12.3509 10.8023 12 12 12C12.4539 12 12.8959 12.0504 13.321 12.1459C13.6577 12.2215 14 11.9794 14 11.6344V3.63964C14 3.4115 13.8459 3.21064 13.6224 3.16462C13.0985 3.05669 12.5559 3 12 3C10.8428 3 9.74308 3.24568 8.75 3.68772V12.9556Z" />
           </svg>
         </Link>
-      ) : (
-        <div className="mt-2" />
-      )}
-
-      <Link
-        href="/app/catalog"
-        title="Browse catalog"
-        className="flex h-9 w-9 items-center justify-center rounded-lg text-zinc-500 transition-colors hover:bg-zinc-100 dark:text-zinc-400 dark:hover:bg-zinc-800"
-        aria-label="Browse catalog"
-      >
-        {/* 2×2 grid glyph — the catalog tile. */}
-        <svg
-          xmlns="http://www.w3.org/2000/svg"
-          viewBox="0 0 16 16"
-          fill="currentColor"
-          className="h-4 w-4"
-          aria-hidden="true"
-        >
-          <path d="M2 3.5A1.5 1.5 0 0 1 3.5 2h2A1.5 1.5 0 0 1 7 3.5v2A1.5 1.5 0 0 1 5.5 7h-2A1.5 1.5 0 0 1 2 5.5v-2ZM9 3.5A1.5 1.5 0 0 1 10.5 2h2A1.5 1.5 0 0 1 14 3.5v2A1.5 1.5 0 0 1 12.5 7h-2A1.5 1.5 0 0 1 9 5.5v-2ZM2 10.5A1.5 1.5 0 0 1 3.5 9h2A1.5 1.5 0 0 1 7 10.5v2A1.5 1.5 0 0 1 5.5 14h-2A1.5 1.5 0 0 1 2 12.5v-2ZM9 10.5A1.5 1.5 0 0 1 10.5 9h2a1.5 1.5 0 0 1 1.5 1.5v2a1.5 1.5 0 0 1-1.5 1.5h-2A1.5 1.5 0 0 1 9 12.5v-2Z" />
-        </svg>
-      </Link>
+      </div>
 
       <div className="mt-2 flex flex-col items-center gap-1">
         <ThemeToggle collapsed />

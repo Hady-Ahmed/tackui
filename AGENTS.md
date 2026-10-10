@@ -81,7 +81,8 @@ app/
   api/threads/[id]/route.ts    # REST: PATCH/DELETE /api/threads/[id] (rename, delete conversations)
   api/threads/[id]/route.test.ts  # Tests for PATCH/DELETE (mocked runner)
   api/health/route.ts          # GET — liveness health check (bypassed by proxy.ts cookie gate)
-  agents/page.tsx              # Admin UI — add/edit/delete agents + test connection + user management + over-limit banner (amber when agent count exceeds plan cap post-cancellation)
+  agents/page.tsx              # Workspace admin UI — add/edit/delete agents + test connection + over-limit banner (amber when agent count exceeds plan cap post-cancellation); ?add=1 opens the add form (sidebar + icon target)
+  admin/page.tsx               # Platform admin — global catalog templates (CatalogAdmin) + user management (UsersAdmin); gated to role === "admin" (solo mode passes); linked from the account menu's Admin section
   app/page.tsx                 # Chat page (client component, lives at /app in both SaaS + self-host modes)
   app/catalog/page.tsx         # In-app agent catalog — browse curated templates + one-click install (Add / Added ✓ / plan-locked states)
   app/invitations/page.tsx     # Accept/reject pending org invitations (SaaS team + self-host multi-user)
@@ -183,7 +184,7 @@ lib/
     format.test.ts             # 40 tests — name humanizing, previews, KV rows, markdown heuristics, escape decoding
 
 components/
-  agent-sidebar.tsx            # Agent picker + conversation list + status dots + rename/delete + collapsible (useThreads)
+  agent-sidebar.tsx            # Agent picker + conversation list + status dots + rename/delete + collapsible (useThreads); AGENTS-header + (add agent, canManage) and book (catalog) icons — footer is avatar + theme only
   account-menu.tsx             # User avatar, name, email, sign out (useSession) + plan badge + manage subscription + upgrade button + invite button + manage-members button + new-workspace button + pending-invitations badge + OrgSwitcher (billing buttons gated to canManage — owner/admin only)
   org-switcher.tsx             # Org switcher dropdown (pure switcher — self-renders when >1 org; workspace creation lives in NewWorkspaceDialog)
   invite-dialog.tsx            # Invite-by-email modal (org owner/admin) + live seats counter
@@ -195,7 +196,7 @@ components/
   theme-toggle.tsx             # Light/dark toggle button (sidebar footer, icon + label)
   chat-shell.tsx               # Chat layout with agent switching + empty-state CTA + collapsible sidebar state + AgentChat wrapper
   users-admin.tsx              # Admin user management (list, set role, ban/unban)
-  catalog-admin.tsx            # Platform-admin catalog CRUD section on the /agents page (template form + table + test connection)
+  catalog-admin.tsx            # Platform-admin catalog CRUD section on the /admin page (template form + table + test connection)
   hitl/
     approval-card.tsx          # Human-in-the-loop interrupt handlers
   tools/
@@ -215,7 +216,8 @@ scripts/
 
 Agents are stored in a Postgres table (`agents`, shared with the thread
 runner + Better Auth via the same `pg.Pool` — see `lib/db/pg.ts`) and managed
-at runtime via the `/agents` admin page or the `/api/agents` REST API. No
+at runtime via the `/agents` admin page (sidebar + icon or `/agents?add=1`)
+or the `/api/agents` REST API. No
 restart is needed when adding, editing, or removing agents — `CopilotRuntime`
 receives `getAgents` as a factory function, called per-request, so DB changes
 reflect immediately on the next `/run`.
@@ -765,7 +767,7 @@ the agent is running. No endpoints, no config.
 ### Model (template vs. installed copy — managed-plugin)
 
 - `agent_templates` — global rows (NOT org-scoped), managed by platform
-  admins (`role === "admin"` via the Catalog section on `/agents` or the
+  admins (`role === "admin"` via the Catalog section on `/admin` or the
   `/api/catalog` REST API). Fields: `slug` (unique, shareable),
   `name`, `tagline`, `description`, `category`, `icon` (emoji),
   `endpoint`, `auth_mode`/`jwt_secret`/`jwt_scopes` (same machinery +
@@ -860,7 +862,7 @@ SaaS-only:
 | Surface | SaaS | Self-host |
 | --- | --- | --- |
 | In-app catalog (`/app/catalog`) + install | ✓ | ✓ |
-| Template admin (Catalog section on `/agents`) | platform admin | platform admin (first user) |
+| Template admin (Catalog section on `/admin`) | platform admin | platform admin (first user) |
 | Tombstone + deactivation run gates | ✓ | ✓ |
 | Plan gate + free quota enforcement | ✓ | ✗ (short-circuit) |
 | Public `/catalog` marketing page | ✓ | redirects to `/app` |

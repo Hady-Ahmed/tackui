@@ -51,35 +51,63 @@ export function AccountMenu({ collapsed = false }: { collapsed?: boolean } = {})
     return <div className="h-8" />;
   }
 
+  // Shared popup plumbing — hoisted above the solo-mode branch so the
+  // synthetic admin identity gets the same dropdown mechanics.
+  const handleToggle = () => {
+    if (!open && collapsed && btnRef.current) {
+      const rect = btnRef.current.getBoundingClientRect();
+      setPopupPos({ left: rect.right + 8, bottom: window.innerHeight - rect.top + 4 });
+    }
+    setOpen((v) => !v);
+  };
+
+  const popupClassName = collapsed
+    ? "fixed z-50 w-64 rounded-lg border border-zinc-200 bg-white py-1 shadow-lg dark:border-zinc-800 dark:bg-zinc-950"
+    : "absolute bottom-full left-0 right-0 mb-1 rounded-lg border border-zinc-200 bg-white py-1 shadow-lg dark:border-zinc-800 dark:bg-zinc-950";
+  const popupStyle = collapsed && popupPos ? { left: popupPos.left, bottom: popupPos.bottom } : undefined;
+
   // Solo mode: render the synthetic admin identity. No sign-out button
-  // since there's no real session to sign out of.
+  // since there's no real session to sign out of; the avatar opens a
+  // minimal menu (entry point to /admin — catalog templates + users).
   if (!session && config?.authDisabled) {
     const synth = config.user;
     const initials = (synth?.name || "?").charAt(0).toUpperCase();
-    if (collapsed) {
-      return (
-        <div className="flex h-9 w-9 items-center justify-center" title={synth?.name ?? "Local user"}>
-          <div className="flex h-8 w-8 shrink-0 items-center justify-center rounded-full bg-blue-600 text-sm font-medium text-white">
-            {initials}
-          </div>
-        </div>
-      );
-    }
     return (
-      <div className="rounded-lg px-2 py-1.5">
-        <div className="flex w-full items-center gap-2">
+      <div ref={ref} className="relative">
+        <button
+          ref={btnRef}
+          onClick={handleToggle}
+          className={`${collapsed ? "flex h-9 w-9 items-center justify-center" : "flex w-full items-center gap-2 px-2 py-1.5"} rounded-lg text-left transition-colors hover:bg-zinc-100 dark:hover:bg-zinc-800`}
+          title={collapsed ? synth?.name ?? "Local user" : undefined}
+          aria-label={synth?.name ?? "Local user"}
+        >
           <div className="flex h-8 w-8 shrink-0 items-center justify-center rounded-full bg-blue-600 text-sm font-medium text-white">
             {initials}
           </div>
-          <div className="min-w-0 flex-1">
-            <p className="truncate text-sm font-medium text-zinc-900 dark:text-zinc-50">
-              {synth?.name ?? "Local user"}
-            </p>
-            <span className="text-xs font-medium uppercase tracking-wide text-blue-600 dark:text-blue-400">
-              Admin
-            </span>
+          {!collapsed && (
+            <div className="min-w-0 flex-1">
+              <p className="truncate text-sm font-medium text-zinc-900 dark:text-zinc-50">
+                {synth?.name ?? "Local user"}
+              </p>
+              <span className="text-xs font-medium uppercase tracking-wide text-blue-600 dark:text-blue-400">
+                Admin
+              </span>
+            </div>
+          )}
+        </button>
+        {open && (
+          <div className={popupClassName} style={popupStyle}>
+            <button
+              onClick={() => {
+                router.push("/admin");
+                setOpen(false);
+              }}
+              className="block w-full px-3 py-2 text-left text-sm text-zinc-700 transition-colors hover:bg-zinc-100 dark:text-zinc-300 dark:hover:bg-zinc-800"
+            >
+              Admin settings
+            </button>
           </div>
-        </div>
+        )}
       </div>
     );
   }
@@ -98,19 +126,6 @@ export function AccountMenu({ collapsed = false }: { collapsed?: boolean } = {})
   const initials = (session.user.name || session.user.email || "?")
     .charAt(0)
     .toUpperCase();
-
-  const handleToggle = () => {
-    if (!open && collapsed && btnRef.current) {
-      const rect = btnRef.current.getBoundingClientRect();
-      setPopupPos({ left: rect.right + 8, bottom: window.innerHeight - rect.top + 4 });
-    }
-    setOpen((v) => !v);
-  };
-
-  const popupClassName = collapsed
-    ? "fixed z-50 w-64 rounded-lg border border-zinc-200 bg-white py-1 shadow-lg dark:border-zinc-800 dark:bg-zinc-950"
-    : "absolute bottom-full left-0 right-0 mb-1 rounded-lg border border-zinc-200 bg-white py-1 shadow-lg dark:border-zinc-800 dark:bg-zinc-950";
-  const popupStyle = collapsed && popupPos ? { left: popupPos.left, bottom: popupPos.bottom } : undefined;
 
   return (
     <div ref={ref} className="relative">
@@ -208,9 +223,22 @@ export function AccountMenu({ collapsed = false }: { collapsed?: boolean } = {})
             </button>
           )}
           {session.user.role === "admin" && (
-            <span className="block px-3 py-1 text-xs font-medium uppercase tracking-wide text-blue-600 dark:text-blue-400">
-              Admin
-            </span>
+            <>
+              <span className="block px-3 py-1 text-xs font-medium uppercase tracking-wide text-blue-600 dark:text-blue-400">
+                Admin
+              </span>
+              {/* /admin — global catalog templates + user management.
+                  Workspace agents live on /agents (sidebar + icon). */}
+              <button
+                onClick={() => {
+                  router.push("/admin");
+                  setOpen(false);
+                }}
+                className="block w-full px-3 py-2 text-left text-sm text-zinc-700 transition-colors hover:bg-zinc-100 dark:text-zinc-300 dark:hover:bg-zinc-800"
+              >
+                Admin settings
+              </button>
+            </>
           )}
           {billing && (
             <>

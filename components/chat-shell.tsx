@@ -165,7 +165,7 @@ export function ChatShell() {
                   No agents configured yet.
                 </p>
                 <Link
-                  href="/agents"
+                  href="/agents?add=1"
                   className="rounded-lg bg-blue-600 px-4 py-2 text-sm font-medium text-white transition-colors hover:bg-blue-700"
                 >
                   Add your first agent →

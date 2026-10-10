@@ -1,10 +1,8 @@
 "use client";
 
-import { useState, useEffect, useCallback, useRef } from "react";
-import { useRouter } from "next/navigation";
+import { useState, useEffect, useCallback, useRef, Suspense } from "react";
+import { useRouter, useSearchParams } from "next/navigation";
 import type { PublicAgent, AgentAuthMode } from "@/lib/agents/agents.config";
-import { UsersAdmin } from "@/components/users-admin";
-import { CatalogAdmin } from "@/components/catalog-admin";
 import { BackToChat } from "@/components/back-to-chat";
 import { authClient } from "@/lib/auth/auth-client";
 import { useAuthConfig } from "@/lib/auth/use-auth-config";
@@ -64,8 +62,31 @@ async function testEndpoint(endpoint: string): Promise<TestResult> {
   }
 }
 
+/**
+ * /agents — workspace agent management. Wrapped in Suspense because the
+ * inner page reads ?add=1 via useSearchParams (Next requires a boundary
+ * on statically prerendered routes).
+ */
 export default function AgentsPage() {
+  return (
+    <Suspense fallback={<PageLoading />}>
+      <AgentsPageInner />
+    </Suspense>
+  );
+}
+
+function PageLoading() {
+  return (
+    <div className="flex min-h-screen items-center justify-center bg-zinc-50 dark:bg-black">
+      <p className="text-sm text-zinc-400">Loading...</p>
+    </div>
+  );
+}
+
+function AgentsPageInner() {
   const router = useRouter();
+  const searchParams = useSearchParams();
+  const addParam = searchParams.get("add");
   const { data: session, isPending } = authClient.useSession();
   const { config } = useAuthConfig();
   const { canManage, loading: canManageLoading } = useCanManageAgents();
@@ -80,6 +101,15 @@ export default function AgentsPage() {
   const [formTest, setFormTest] = useState<TestResult>({ status: "idle" });
   const [rowTests, setRowTests] = useState<Record<string, TestResult>>({});
   const [formOpen, setFormOpen] = useState(false);
+  // One-shot latch so ?add=1 opens the add form exactly once (sidebar +
+  // icon, chat empty-state CTA). Render-time adjustment — covers both
+  // direct URL visits and hydration, and never closes a form the user
+  // opened manually afterwards.
+  const [openedFromAddParam, setOpenedFromAddParam] = useState(false);
+  if (addParam === "1" && !openedFromAddParam) {
+    setOpenedFromAddParam(true);
+    setFormOpen(true);
+  }
   const formRef = useRef<HTMLFormElement>(null);
 
   useEffect(() => {
@@ -244,11 +274,7 @@ export default function AgentsPage() {
   };
 
   if (isPending || !config || canManageLoading || (!session && !config.authDisabled) || (!config.authDisabled && canManage !== true)) {
-    return (
-      <div className="flex min-h-screen items-center justify-center bg-zinc-50 dark:bg-black">
-        <p className="text-sm text-zinc-400">Loading...</p>
-      </div>
-    );
+    return <PageLoading />;
   }
 
   return (
@@ -260,8 +286,8 @@ export default function AgentsPage() {
               Agents
             </h1>
             <p className="mt-1 text-sm text-zinc-500 dark:text-zinc-400">
-              Add, edit, or remove AG-UI-compatible agent backends. Changes
-              apply immediately — no restart needed.
+              Add, edit, or remove this workspace&apos;s AG-UI-compatible
+              agent backends.
             </p>
           </div>
           <BackToChat />
@@ -515,6 +541,7 @@ export default function AgentsPage() {
                       const rowTest = rowTests[agent.id] ?? { status: "idle" };
                       const managed = Boolean(agent.sourceTemplateId);
                       const removed = Boolean(agent.templateRemovedAt);
+                      const paused = !removed && Boolean(agent.templateUnpublished);
                       return (
                         <tr
                           key={agent.id}
@@ -522,11 +549,7 @@ export default function AgentsPage() {
                         >
                           <td className="px-4 py-3 font-medium text-zinc-900 dark:text-zinc-50">
                             {agent.name}
-                            {managed && (
-                              <span className="ml-2 rounded-full bg-blue-100 px-1.5 py-0.5 text-[10px] font-medium text-blue-700 dark:bg-blue-950 dark:text-blue-300">
-                                {removed ? "Removed" : "Catalog"}
-                              </span>
-                            )}
+                            {managed && <CatalogChip removed={removed} paused={paused} />}
                           </td>
                           <td className="px-4 py-3 font-mono text-xs text-zinc-600 dark:text-zinc-400">
                             {/* Managed agents carry no endpoint in the
@@ -580,6 +603,7 @@ export default function AgentsPage() {
                   const rowTest = rowTests[agent.id] ?? { status: "idle" };
                   const managed = Boolean(agent.sourceTemplateId);
                   const removed = Boolean(agent.templateRemovedAt);
+                  const paused = !removed && Boolean(agent.templateUnpublished);
                   return (
                     <li
                       key={agent.id}
@@ -589,11 +613,7 @@ export default function AgentsPage() {
                         <div className="min-w-0">
                           <p className="font-medium text-zinc-900 dark:text-zinc-50">
                             {agent.name}
-                            {managed && (
-                              <span className="ml-2 rounded-full bg-blue-100 px-1.5 py-0.5 text-[10px] font-medium text-blue-700 dark:bg-blue-950 dark:text-blue-300">
-                                {removed ? "Removed" : "Catalog"}
-                              </span>
-                            )}
+                            {managed && <CatalogChip removed={removed} paused={paused} />}
                           </p>
                         </div>
                       </div>
@@ -636,14 +656,42 @@ export default function AgentsPage() {
             </>
           )}
         </section>
-
-        {/* Catalog admin — global templates, gated to platform admins
-            (role === "admin"). Solo mode's synthetic admin sees it too. */}
-        {(config.authDisabled || session?.user?.role === "admin") && <CatalogAdmin />}
-
-        <UsersAdmin />
       </div>
     </div>
+  );
+}
+
+function CatalogChip({
+  removed,
+  paused,
+}: {
+  removed: boolean;
+  paused: boolean;
+}) {
+  // Mirrors the sidebar's chip treatment: zinc = tombstoned (removed
+  // from the catalog, past chats stay viewable — inactive, not an
+  // error), amber = paused by the curator (reversible kill switch),
+  // blue = live catalog install.
+  const state = removed
+    ? {
+        label: "Removed",
+        cls: "bg-zinc-200 text-zinc-600 dark:bg-zinc-800 dark:text-zinc-400",
+      }
+    : paused
+      ? {
+          label: "Paused",
+          cls: "bg-amber-100 text-amber-700 dark:bg-amber-950 dark:text-amber-300",
+        }
+      : {
+          label: "Catalog",
+          cls: "bg-blue-100 text-blue-700 dark:bg-blue-950 dark:text-blue-300",
+        };
+  return (
+    <span
+      className={`ml-2 rounded-full px-1.5 py-0.5 text-[10px] font-medium ${state.cls}`}
+    >
+      {state.label}
+    </span>
   );
 }
 

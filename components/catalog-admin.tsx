@@ -4,7 +4,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import type { PublicAgentTemplate, RequiredPlan, TemplateAuthMode } from "@/lib/catalog/catalog.config";
 
 /**
- * Catalog admin — platform-admin-only section on the /agents page for
+ * Catalog admin — platform-admin-only section on the /admin page for
  * curating the global agent catalog (agent templates). Distinct from
  * org-scoped agent management: templates are cross-org, so the gate is
  * `session.user.role === "admin"` (platform admin), not canManageAgents.
