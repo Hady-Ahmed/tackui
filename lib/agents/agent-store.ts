@@ -10,7 +10,7 @@ const agentAuthModeSchema = z.enum(["none", "jwt"]);
 // (see generateAgentId) and comes from the URL path param on update.
 const fieldShapes = {
   name: z.string().min(1).max(100),
-  description: z.string().max(300),
+  description: z.string().trim().min(1, "Description is required").max(300),
   endpoint: z.string().url(),
   authMode: agentAuthModeSchema.default("none"),
   // HS256 needs ≥256 bits = 32 chars. Only validated when present

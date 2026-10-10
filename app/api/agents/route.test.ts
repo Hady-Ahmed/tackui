@@ -139,6 +139,20 @@ describe("POST /api/agents", () => {
     expect(data.error).toContain("Validation");
   });
 
+  it("returns 400 for a missing/empty description", async () => {
+    const res = await POST(
+      new Request("http://localhost/api/agents", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ ...validBody, description: "" }),
+      }),
+    );
+    expect(res.status).toBe(400);
+    const data = await res.json();
+    expect(data.error).toContain("Validation");
+    expect(data.details.fieldErrors).toHaveProperty("description");
+  });
+
   it("accepts legacy bodies that still send kind (unknown fields stripped)", async () => {
     const res = await POST(
       new Request("http://localhost/api/agents", {

@@ -123,6 +123,15 @@ describe("POST /api/catalog", () => {
     expect(data.error).toContain("Validation");
   });
 
+  it("returns 400 for a missing/empty tagline or description", async () => {
+    const res = await POST(post({ ...validBody, tagline: "", description: "" }));
+    expect(res.status).toBe(400);
+    const data = await res.json();
+    expect(data.error).toContain("Validation");
+    expect(data.details.fieldErrors).toHaveProperty("tagline");
+    expect(data.details.fieldErrors).toHaveProperty("description");
+  });
+
   it("returns 400 for invalid JSON", async () => {
     const res = await POST(post("not json"));
     expect(res.status).toBe(400);

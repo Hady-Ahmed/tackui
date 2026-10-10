@@ -2,6 +2,12 @@
 
 import { useCallback, useEffect, useRef, useState } from "react";
 import type { PublicAgentTemplate, RequiredPlan, TemplateAuthMode } from "@/lib/catalog/catalog.config";
+import {
+  TEST_HELP,
+  TestBadge,
+  useTestResults,
+  type TestStatus,
+} from "@/components/test-connection";
 
 /**
  * Catalog admin — platform-admin-only section on the /admin page for
@@ -59,41 +65,6 @@ function slugify(name: string): string {
     .slice(0, 64);
 }
 
-type TestStatus = "idle" | "loading" | "ok" | "fail";
-type TestResult = { status: TestStatus; message?: string };
-
-const TEST_HELP =
-  "Tests only that the server is reachable (an HTTP request succeeds). " +
-  "A success does NOT validate auth, AG-UI protocol compliance, or that the agent will actually run. " +
-  "A failure usually means the URL is wrong or the server is down.";
-
-async function testEndpoint(endpoint: string): Promise<TestResult> {
-  try {
-    const res = await fetch("/api/agents/reachability-probe", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ endpoint }),
-    });
-    const data = await res.json().catch(() => ({}));
-    if (!res.ok) {
-      return {
-        status: "fail",
-        message:
-          (typeof data === "object" && data && "error" in data
-            ? String((data as { error: unknown }).error)
-            : `Request failed (${res.status})`) ||
-          "Validation failed — check the URL.",
-      };
-    }
-    return {
-      status: data.ok ? "ok" : "fail",
-      message: data.message as string,
-    };
-  } catch {
-    return { status: "fail", message: "Network error talking to /api/agents/reachability-probe" };
-  }
-}
-
 /**
  * Build a user-facing error message from a route error response. Zod
  * rejections come back as `{ error: "Validation failed", details: {
@@ -127,8 +98,8 @@ export function CatalogAdmin() {
   const [editingHasJwtSecret, setEditingHasJwtSecret] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [submitting, setSubmitting] = useState(false);
-  const [formTest, setFormTest] = useState<TestResult>({ status: "idle" });
-  const [rowTests, setRowTests] = useState<Record<string, TestResult>>({});
+  const { formTest, rowTests, runFormTest, runRowTest, resetFormTest } =
+    useTestResults();
   const [formOpen, setFormOpen] = useState(false);
   const formRef = useRef<HTMLFormElement>(null);
 
@@ -158,7 +129,7 @@ export function CatalogAdmin() {
 
   const updateForm = (patch: Partial<FormState>) => {
     setForm((prev) => ({ ...prev, ...patch }));
-    setFormTest({ status: "idle" });
+    resetFormTest();
   };
 
   const startEdit = (template: PublicAgentTemplate) => {
@@ -183,7 +154,7 @@ export function CatalogAdmin() {
       isActive: template.isActive,
     });
     setError(null);
-    setFormTest({ status: "idle" });
+    resetFormTest();
     setFormOpen(true);
   };
 
@@ -192,7 +163,7 @@ export function CatalogAdmin() {
     setEditingId(null);
     setEditingHasJwtSecret(false);
     setError(null);
-    setFormTest({ status: "idle" });
+    resetFormTest();
     setFormOpen(false);
   };
 
@@ -205,18 +176,6 @@ export function CatalogAdmin() {
       setError(null);
       setFormOpen(true);
     }
-  };
-
-  const handleTestForm = async () => {
-    if (!form.endpoint) return;
-    setFormTest({ status: "loading" });
-    setFormTest(await testEndpoint(form.endpoint));
-  };
-
-  const handleTestRow = async (template: PublicAgentTemplate) => {
-    setRowTests((prev) => ({ ...prev, [template.id]: { status: "loading" } }));
-    const result = await testEndpoint(template.endpoint);
-    setRowTests((prev) => ({ ...prev, [template.id]: result }));
   };
 
   const handleSubmit = async (e: React.FormEvent) => {
@@ -372,20 +331,22 @@ export function CatalogAdmin() {
           </Field>
         </div>
 
-        <Field label="Tagline" hint="One-line pitch shown on the catalog card">
+        <Field label="Tagline" required hint="One-line pitch shown on the catalog card">
           <input
             value={form.tagline}
             onChange={(e) => updateForm({ tagline: e.target.value })}
+            required
             className={inputClass()}
             placeholder="Find cheap flights across airlines"
           />
         </Field>
 
-        <Field label="Description">
+        <Field label="Description" required>
           <textarea
             value={form.description}
             onChange={(e) => updateForm({ description: e.target.value })}
             rows={2}
+            required
             className={inputClass()}
             placeholder="What the agent does, what to expect."
           />
@@ -554,7 +515,7 @@ export function CatalogAdmin() {
           </button>
           <button
             type="button"
-            onClick={handleTestForm}
+            onClick={() => runFormTest(form.endpoint)}
             disabled={formTest.status === "loading" || !form.endpoint}
             className="rounded-lg border border-zinc-200 px-4 py-2 text-sm font-medium text-zinc-700 transition-colors hover:bg-zinc-100 disabled:opacity-50 dark:border-zinc-700 dark:text-zinc-300 dark:hover:bg-zinc-800"
             title={TEST_HELP}
@@ -647,7 +608,7 @@ export function CatalogAdmin() {
                         {template.isActive ? "Unpublish" : "Publish"}
                       </button>
                       <button
-                        onClick={() => handleTestRow(template)}
+                        onClick={() => runRowTest(template.id, template.endpoint)}
                         disabled={rowTest.status === "loading"}
                         className="mr-2 text-xs font-medium text-zinc-600 hover:underline disabled:opacity-50 dark:text-zinc-400"
                         title={TEST_HELP}
@@ -670,32 +631,6 @@ export function CatalogAdmin() {
         </div>
       )}
     </section>
-  );
-}
-
-function TestBadge({
-  result,
-  inline = false,
-}: {
-  result: TestResult;
-  inline?: boolean;
-}) {
-  if (result.status === "idle") return null;
-  if (result.status === "loading") {
-    return (
-      <span className={`${inline ? "ml-2" : ""} text-xs text-zinc-400`}>...</span>
-    );
-  }
-  const ok = result.status === "ok";
-  return (
-    <span
-      className={`${inline ? "ml-2" : ""} text-xs font-medium ${
-        ok ? "text-green-600 dark:text-green-400" : "text-red-600 dark:text-red-400"
-      }`}
-      title={result.message}
-    >
-      {ok ? "✓" : "✗"} {result.message}
-    </span>
   );
 }
 

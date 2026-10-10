@@ -26,8 +26,8 @@ const fieldShapes = {
       /^[a-z0-9]+(?:-[a-z0-9]+)*$/,
       "Use lowercase letters, numbers, and dashes",
     ),
-  tagline: z.string().max(200),
-  description: z.string().max(2000),
+  tagline: z.string().trim().min(1, "Tagline is required").max(200),
+  description: z.string().trim().min(1, "Description is required").max(2000),
   // Clearable optional fields: `null` clears the stored value, absent
   // key preserves it (partial-update semantics).
   category: z.string().max(50).nullable().optional(),
@@ -258,8 +258,8 @@ export async function createTemplate(
       id,
       input.slug,
       input.name,
-      input.tagline ?? "",
-      input.description ?? "",
+      input.tagline,
+      input.description,
       input.category ?? null,
       input.icon ?? null,
       input.endpoint,

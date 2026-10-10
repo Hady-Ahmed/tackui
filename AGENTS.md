@@ -201,6 +201,7 @@ components/
     approval-card.tsx          # Human-in-the-loop interrupt handlers
   tools/
     tool-renders.tsx           # Tool-call rendering (useRenderTool wildcard → inline activity rows: markdown, tables, KV args, Show all)
+  test-connection.tsx          # Shared reachability-probe plumbing for /agents + /admin (useTestResults hook w/ 5s auto-dismiss badges + TestBadge)
 
 proxy.ts                       # Next.js proxy (cookie gate + AUTH_DISABLED bypass + /api/health bypass + per-IP rate limiting + open-redirect-safe redirect)
 next.config.ts                 # Security headers (CSP, HSTS, X-Frame-Options, etc.) + standalone build + poweredByHeader disabled + Sentry wrapper (+ tunnelRoute for ad-blocker bypass)
@@ -769,7 +770,9 @@ the agent is running. No endpoints, no config.
 - `agent_templates` — global rows (NOT org-scoped), managed by platform
   admins (`role === "admin"` via the Catalog section on `/admin` or the
   `/api/catalog` REST API). Fields: `slug` (unique, shareable),
-  `name`, `tagline`, `description`, `category`, `icon` (emoji),
+  `name`, `tagline` + `description` (both required — zod-enforced on
+  create and PATCH, trimmed; blank catalog cards can't be published),
+  `category`, `icon` (emoji),
   `endpoint`, `auth_mode`/`jwt_secret`/`jwt_scopes` (same machinery +
   encryption as agents), `required_plan` (nullable — `pro`/`team`),
   `free_daily_quota` (nullable int), `sort_order`, `is_active`.

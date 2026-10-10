@@ -118,6 +118,24 @@ describe("createAgentBodySchema", () => {
     });
     expect(result.success).toBe(false);
   });
+
+  it("rejects empty or whitespace-only description", () => {
+    expect(
+      createAgentBodySchema.safeParse({ ...validInput, description: "" }).success,
+    ).toBe(false);
+    expect(
+      createAgentBodySchema.safeParse({ ...validInput, description: "   " }).success,
+    ).toBe(false);
+  });
+
+  it("trims description", () => {
+    const result = createAgentBodySchema.safeParse({
+      ...validInput,
+      description: "  padded  ",
+    });
+    expect(result.success).toBe(true);
+    expect(result.success && result.data.description).toBe("padded");
+  });
 });
 
 describe("updateAgentBodySchema", () => {
@@ -313,6 +331,13 @@ describe("updateAgent", () => {
     const created = await createAgent(validInput, TEST_ORG);
     await expect(
       updateAgent(created.id, { endpoint: "not-a-url" }, TEST_ORG),
+    ).rejects.toThrow();
+  });
+
+  it("rejects an empty description on the merged row", async () => {
+    const created = await createAgent(validInput, TEST_ORG);
+    await expect(
+      updateAgent(created.id, { description: "" }, TEST_ORG),
     ).rejects.toThrow();
   });
 

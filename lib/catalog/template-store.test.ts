@@ -134,6 +134,34 @@ describe("createTemplateBodySchema", () => {
     });
     expect(result.success).toBe(false);
   });
+
+  it("rejects empty or whitespace-only tagline/description", () => {
+    expect(
+      createTemplateBodySchema.safeParse({ ...validInput, tagline: "" }).success,
+    ).toBe(false);
+    expect(
+      createTemplateBodySchema.safeParse({ ...validInput, tagline: "   " }).success,
+    ).toBe(false);
+    expect(
+      createTemplateBodySchema.safeParse({ ...validInput, description: "" }).success,
+    ).toBe(false);
+    expect(
+      createTemplateBodySchema.safeParse({ ...validInput, description: "  " }).success,
+    ).toBe(false);
+  });
+
+  it("trims tagline/description", () => {
+    const result = createTemplateBodySchema.safeParse({
+      ...validInput,
+      tagline: "  padded  ",
+      description: " padded ",
+    });
+    expect(result.success).toBe(true);
+    if (result.success) {
+      expect(result.data.tagline).toBe("padded");
+      expect(result.data.description).toBe("padded");
+    }
+  });
 });
 
 describe("updateTemplateBodySchema", () => {
@@ -141,6 +169,11 @@ describe("updateTemplateBodySchema", () => {
     expect(updateTemplateBodySchema.safeParse({ name: "Renamed" }).success).toBe(true);
     expect(updateTemplateBodySchema.safeParse({ isActive: false }).success).toBe(true);
     expect(updateTemplateBodySchema.safeParse({}).success).toBe(true);
+  });
+
+  it("rejects an empty tagline/description when present", () => {
+    expect(updateTemplateBodySchema.safeParse({ tagline: "" }).success).toBe(false);
+    expect(updateTemplateBodySchema.safeParse({ description: "" }).success).toBe(false);
   });
 
   it("accepts explicit null on clearable fields", () => {
@@ -288,6 +321,13 @@ describe("updateTemplate", () => {
     const created = await createTemplate(validInput);
     await expect(
       updateTemplate(created.id, { endpoint: "not-a-url" }),
+    ).rejects.toThrow();
+  });
+
+  it("rejects an empty tagline on the merged row", async () => {
+    const created = await createTemplate(validInput);
+    await expect(
+      updateTemplate(created.id, { tagline: "" }),
     ).rejects.toThrow();
   });
 

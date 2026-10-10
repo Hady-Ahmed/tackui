@@ -8,6 +8,11 @@ import { authClient } from "@/lib/auth/auth-client";
 import { useAuthConfig } from "@/lib/auth/use-auth-config";
 import { useCanManageAgents } from "@/lib/auth/use-can-manage-agents";
 import { useBilling } from "@/lib/billing/use-billing";
+import {
+  TEST_HELP,
+  TestBadge,
+  useTestResults,
+} from "@/components/test-connection";
 
 type FormState = {
   name: string;
@@ -26,41 +31,6 @@ const emptyForm: FormState = {
   jwtSecret: "",
   jwtScopes: "",
 };
-
-type TestStatus = "idle" | "loading" | "ok" | "fail";
-type TestResult = { status: TestStatus; message?: string };
-
-const TEST_HELP =
-  "Tests only that the server is reachable (an HTTP request succeeds). " +
-  "A success does NOT validate auth, AG-UI protocol compliance, or that the agent will actually run. " +
-  "A failure usually means the URL is wrong or the server is down.";
-
-async function testEndpoint(endpoint: string): Promise<TestResult> {
-  try {
-    const res = await fetch("/api/agents/reachability-probe", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ endpoint }),
-    });
-    const data = await res.json().catch(() => ({}));
-    if (!res.ok) {
-      return {
-        status: "fail",
-        message:
-          (typeof data === "object" && data && "error" in data
-            ? String((data as { error: unknown }).error)
-            : `Request failed (${res.status})`) ||
-          "Validation failed — check the URL.",
-      };
-    }
-    return {
-      status: data.ok ? "ok" : "fail",
-      message: data.message as string,
-    };
-  } catch {
-    return { status: "fail", message: "Network error talking to /api/agents/reachability-probe" };
-  }
-}
 
 /**
  * /agents — workspace agent management. Wrapped in Suspense because the
@@ -98,8 +68,8 @@ function AgentsPageInner() {
   const [editingHasJwtSecret, setEditingHasJwtSecret] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [submitting, setSubmitting] = useState(false);
-  const [formTest, setFormTest] = useState<TestResult>({ status: "idle" });
-  const [rowTests, setRowTests] = useState<Record<string, TestResult>>({});
+  const { formTest, rowTests, runFormTest, runRowTest, resetFormTest } =
+    useTestResults();
   const [formOpen, setFormOpen] = useState(false);
   // One-shot latch so ?add=1 opens the add form exactly once (sidebar +
   // icon, chat empty-state CTA). Render-time adjustment — covers both
@@ -156,7 +126,7 @@ function AgentsPageInner() {
 
   const updateForm = (patch: Partial<FormState>) => {
     setForm((prev) => ({ ...prev, ...patch }));
-    setFormTest({ status: "idle" });
+    resetFormTest();
   };
 
   const startEdit = (agent: PublicAgent) => {
@@ -176,7 +146,7 @@ function AgentsPageInner() {
       jwtScopes: agent.jwtScopes?.join(", ") ?? "",
     });
     setError(null);
-    setFormTest({ status: "idle" });
+    resetFormTest();
     setFormOpen(true);
   };
 
@@ -185,7 +155,7 @@ function AgentsPageInner() {
     setEditingId(null);
     setEditingHasJwtSecret(false);
     setError(null);
-    setFormTest({ status: "idle" });
+    resetFormTest();
     setFormOpen(false);
   };
 
@@ -198,21 +168,6 @@ function AgentsPageInner() {
       setError(null);
       setFormOpen(true);
     }
-  };
-
-  const handleTestForm = async () => {
-    if (!form.endpoint) return;
-    setFormTest({ status: "loading" });
-    const result = await testEndpoint(form.endpoint);
-    setFormTest(result);
-  };
-
-  const handleTestRow = async (agent: PublicAgent) => {
-    // Only rendered for non-managed agents, which always carry endpoint.
-    if (!agent.endpoint) return;
-    setRowTests((prev) => ({ ...prev, [agent.id]: { status: "loading" } }));
-    const result = await testEndpoint(agent.endpoint);
-    setRowTests((prev) => ({ ...prev, [agent.id]: result }));
   };
 
   const handleSubmit = async (e: React.FormEvent) => {
@@ -329,10 +284,11 @@ function AgentsPageInner() {
                   placeholder="Research Agent"
                 />
               </Field>
-              <Field label="Description">
+              <Field label="Description" required>
                 <input
                   value={form.description}
                   onChange={(e) => updateForm({ description: e.target.value })}
+                  required
                   className={inputClass()}
                   placeholder="LangGraph-powered web research assistant"
                 />
@@ -451,7 +407,7 @@ function AgentsPageInner() {
               </button>
               <button
                 type="button"
-                onClick={handleTestForm}
+                onClick={() => runFormTest(form.endpoint)}
                 disabled={
                   formTest.status === "loading" || !form.endpoint
                 }
@@ -574,7 +530,7 @@ function AgentsPageInner() {
                             )}
                             {!managed && (
                               <button
-                                onClick={() => handleTestRow(agent)}
+                                onClick={() => runRowTest(agent.id, agent.endpoint ?? "")}
                                 disabled={rowTest.status === "loading"}
                                 className="mr-2 text-xs font-medium text-zinc-600 hover:underline disabled:opacity-50 dark:text-zinc-400"
                                 title={TEST_HELP}
@@ -632,7 +588,7 @@ function AgentsPageInner() {
                               Edit
                             </button>
                             <button
-                              onClick={() => handleTestRow(agent)}
+                              onClick={() => runRowTest(agent.id, agent.endpoint ?? "")}
                               disabled={rowTest.status === "loading"}
                               className="text-xs font-medium text-zinc-600 hover:underline disabled:opacity-50 dark:text-zinc-400"
                               title={TEST_HELP}
@@ -691,39 +647,6 @@ function CatalogChip({
       className={`ml-2 rounded-full px-1.5 py-0.5 text-[10px] font-medium ${state.cls}`}
     >
       {state.label}
-    </span>
-  );
-}
-
-function TestBadge({
-  result,
-  inline = false,
-}: {
-  result: TestResult;
-  inline?: boolean;
-}) {
-  if (result.status === "idle" || result.status === "loading") {
-    if (result.status === "loading") {
-      return (
-        <span className={`${inline ? "ml-2" : ""} text-xs text-zinc-400`}>
-          ...
-        </span>
-      );
-    }
-    return null;
-  }
-
-  const ok = result.status === "ok";
-  return (
-    <span
-      className={`${inline ? "ml-2" : ""} text-xs font-medium ${
-        ok
-          ? "text-green-600 dark:text-green-400"
-          : "text-red-600 dark:text-red-400"
-      }`}
-      title={result.message}
-    >
-      {ok ? "✓" : "✗"} {result.message}
     </span>
   );
 }
