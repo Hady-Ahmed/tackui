@@ -189,9 +189,11 @@ function CatalogCard({
     isSaas &&
     !!template.requiredPlan &&
     !planSatisfies(orgPlan, template.requiredPlan);
-  // Vague-copy policy: never state the quota number. The card shows the
-  // tier difference, not the cap.
-  const showQuotaNote = isSaas && template.freeDailyQuota != null && orgPlan === "free";
+  // Usage limits never appear on cards — the card describes the agent;
+  // the limit surfaces in the run 402 (countdown + free-tier-only
+  // plan-upgrade clause) and on the pricing page, never in the browsing
+  // UI. Plan-gated cards state their gate instead (installability
+  // info, not a usage limit).
 
   return (
     <div className="flex flex-col rounded-xl border border-zinc-200 bg-white p-5 dark:border-zinc-800 dark:bg-zinc-950">
@@ -235,11 +237,6 @@ function CatalogCard({
       )}
 
       <div className="mt-auto pt-4">
-        {showQuotaNote && (
-          <p className="mb-3 text-xs text-zinc-400">
-            Daily usage limit · unlimited on Pro
-          </p>
-        )}
         {locked ? (
           <button
             onClick={onUpgrade}

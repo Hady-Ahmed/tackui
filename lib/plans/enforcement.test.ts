@@ -323,10 +323,13 @@ describe("lib/plans/enforcement", () => {
       expect(data.quota).toBe(10);
       expect(data.used).toBe(10);
       expect(typeof data.resetsAt).toBe("number");
-      // Vague-copy policy: the message never states the run number.
+      // Vague-copy policy: the message never states the run number and
+      // never promises "unlimited".
       expect(data.error).not.toContain("10");
-      expect(data.error).toContain("resets in");
+      expect(data.error).toContain("use it again in");
       expect(data.error).toContain("Upgrade to Pro");
+      expect(data.error).toContain("more usage");
+      expect(data.error).not.toContain("unlimited");
     });
 
     it("unlimited (no quota) templates never gate free runs (SaaS)", async () => {
@@ -337,12 +340,59 @@ describe("lib/plans/enforcement", () => {
       expect(mockGetRunUsage).not.toHaveBeenCalled();
     });
 
-    it("paid plans skip the quota (unlimited catalog usage, SaaS)", async () => {
+    it("paid plans run unlimited when the template has no paidDailyQuota (SaaS)", async () => {
       mockGetAgent.mockResolvedValue(catalogAgent);
       mockGetTemplate.mockResolvedValue({ ...activeTemplate, freeDailyQuota: 10 });
       const { checkCatalogRunGates } = await loadSaaS();
       expect(await checkCatalogRunGates(user as never, "agent-1", "pro")).toBeNull();
       expect(mockGetRunUsage).not.toHaveBeenCalled();
+    });
+
+    it("applies paidDailyQuota to pro-plan runs — 402 without the plan-upgrade clause (SaaS)", async () => {
+      mockGetAgent.mockResolvedValue(catalogAgent);
+      mockGetTemplate.mockResolvedValue({
+        ...activeTemplate,
+        freeDailyQuota: 10,
+        paidDailyQuota: 100,
+      });
+      mockGetRunUsage.mockResolvedValue({ count: 100, oldestAt: new Date().toISOString() });
+      const { checkCatalogRunGates } = await loadSaaS();
+      const res = await checkCatalogRunGates(user as never, "agent-1", "pro");
+      expect(res!.status).toBe(402);
+      const data = await res!.json();
+      expect(data.code).toBe("AGENT_QUOTA_EXCEEDED");
+      expect(data.quota).toBe(100);
+      expect(data.used).toBe(100);
+      expect(data.error).toContain("use it again in");
+      // Paid users get the countdown, with no plan-upgrade clause —
+      // there is no higher tier to point them to. Copy never says
+      // "unlimited".
+      expect(data.error).not.toContain("Upgrade");
+      expect(data.error).not.toContain("unlimited");
+    });
+
+    it("shares the paid cap with Team — pro cap gates team runs too (SaaS)", async () => {
+      mockGetAgent.mockResolvedValue(catalogAgent);
+      mockGetTemplate.mockResolvedValue({ ...activeTemplate, paidDailyQuota: 100 });
+      mockGetRunUsage.mockResolvedValue({ count: 100, oldestAt: new Date().toISOString() });
+      const { checkCatalogRunGates } = await loadSaaS();
+      const res = await checkCatalogRunGates(user as never, "agent-1", "team");
+      expect(res!.status).toBe(402);
+      expect((await res!.json()).code).toBe("AGENT_QUOTA_EXCEEDED");
+    });
+
+    it("picks the cap by plan — 50 runs trip the free cap (10) but pass the paid cap (100) (SaaS)", async () => {
+      mockGetAgent.mockResolvedValue(catalogAgent);
+      mockGetTemplate.mockResolvedValue({
+        ...activeTemplate,
+        freeDailyQuota: 10,
+        paidDailyQuota: 100,
+      });
+      mockGetRunUsage.mockResolvedValue({ count: 50, oldestAt: new Date().toISOString() });
+      const { checkCatalogRunGates } = await loadSaaS();
+      const freeRes = await checkCatalogRunGates(user as never, "agent-1", "free");
+      expect(freeRes!.status).toBe(402);
+      expect(await checkCatalogRunGates(user as never, "agent-1", "pro")).toBeNull();
     });
 
     it("re-fetches the plan from the DB when the caller doesn't pass one (SaaS)", async () => {

@@ -1,0 +1,29 @@
+-- 0012_paid_daily_quota.sql — per-template paid-tier usage caps.
+--
+-- Adds `paid_daily_quota` to agent_templates: a rolling-24h per-user run
+-- cap for Pro AND Team orgs (one shared value — Team members get Pro's
+-- personal allowance). Complements `free_daily_quota`, which caps
+-- free-plan orgs only.
+--
+-- NULL = no cap for that tier (the per-minute/concurrent rate limits from
+-- lib/ratelimit still bound abuse). Enforcement is SaaS-only and
+-- plan-aware, in checkCatalogRunGates (lib/plans/enforcement.ts): the
+-- gate picks the cap by the org's plan — free → free_daily_quota,
+-- pro/team → paid_daily_quota.
+--
+-- Schema invariants (template-store.ts, enforced at the zod level):
+--   - free_daily_quota stays mutually exclusive with required_plan
+--     (a plan-gated template has no free tier).
+--   - paid_daily_quota IS allowed alongside required_plan (a Pro-only
+--     template can still cap its paid usage).
+--   - On an ungated template, paid_daily_quota requires free_daily_quota —
+--     without a free cap, paid users would be strictly worse off than
+--     free users (uncapped), which is never intended.
+--   - paid_daily_quota must exceed free_daily_quota when both are set
+--     (Pro is the higher tier).
+--
+-- No agents-table change: quotas resolve live from the template on every
+-- run (same as the rest of the gate chain); tombstoned copies can't run
+-- at all, so the fallback snapshot never needs quota values.
+
+ALTER TABLE agent_templates ADD COLUMN IF NOT EXISTS paid_daily_quota INTEGER;

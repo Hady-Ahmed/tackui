@@ -22,9 +22,9 @@ afterEach(async () => {
 });
 
 describe("runMigrations", () => {
-  it("applies 0001–0011 migrations, creates all expected tables", async () => {
+  it("applies 0001–0012 migrations, creates all expected tables", async () => {
     const result = await runMigrations();
-    expect(result.applied).toEqual(["0001", "0002", "0003", "0004", "0006", "0007", "0008", "0009", "0010", "0011"]);
+    expect(result.applied).toEqual(["0001", "0002", "0003", "0004", "0006", "0007", "0008", "0009", "0010", "0011", "0012"]);
     expect(result.skipped).toEqual([]);
 
     const tables = await query<{ table_name: string }>(`
@@ -47,7 +47,7 @@ describe("runMigrations", () => {
   it("records each applied migration in schema_migrations", async () => {
     await runMigrations();
     const applied = await listAppliedMigrations();
-    expect(applied).toHaveLength(10);
+    expect(applied).toHaveLength(11);
     expect(applied[0].id).toBe("0001");
     expect(applied[0].filename).toBe("0001_init.sql");
     expect(applied[1].id).toBe("0002");
@@ -68,6 +68,8 @@ describe("runMigrations", () => {
     expect(applied[8].filename).toBe("0010_agent_catalog.sql");
     expect(applied[9].id).toBe("0011");
     expect(applied[9].filename).toBe("0011_template_tombstones.sql");
+    expect(applied[10].id).toBe("0012");
+    expect(applied[10].filename).toBe("0012_paid_daily_quota.sql");
     // applied_at is returned as a Date by pg-mem and as an ISO string by real
     // pg (depending on driver parsing). Accept both.
     const appliedAt = applied[0].applied_at;
@@ -78,12 +80,12 @@ describe("runMigrations", () => {
   it("is idempotent — second run reports skipped, no new inserts", async () => {
     const first = await runMigrations();
     const second = await runMigrations();
-    expect(first.applied).toEqual(["0001", "0002", "0003", "0004", "0006", "0007", "0008", "0009", "0010", "0011"]);
+    expect(first.applied).toEqual(["0001", "0002", "0003", "0004", "0006", "0007", "0008", "0009", "0010", "0011", "0012"]);
     expect(second.applied).toEqual([]);
-    expect(second.skipped).toEqual(["0001", "0002", "0003", "0004", "0006", "0007", "0008", "0009", "0010", "0011"]);
+    expect(second.skipped).toEqual(["0001", "0002", "0003", "0004", "0006", "0007", "0008", "0009", "0010", "0011", "0012"]);
 
     const applied = await listAppliedMigrations();
-    expect(applied).toHaveLength(10);
+    expect(applied).toHaveLength(11);
   });
 
   it("creates the agents table with the documented columns", async () => {

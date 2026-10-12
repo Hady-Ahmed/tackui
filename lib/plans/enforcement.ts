@@ -181,10 +181,11 @@ export async function checkTemplateInstall(
 // against. One indexed COUNT per free-plan catalog run is cheap.
 
 /**
- * Human-friendly countdown for the quota 402 message. The product
- * never states the free tier's run number — copy shows the tier
- * difference ("Daily usage limit · unlimited on Pro") plus this
- * countdown; the exact cap stays a server-side tunable.
+ * Human-friendly countdown for the quota 402 message. Product copy
+ * never states the run number and never promises "unlimited" (a promise
+ * that outlives the cap's nullness) — the 402 itself is the one
+ * in-product surface that mentions the limit. The exact caps stay
+ * server-side tunables.
  */
 function formatCountdown(ms: number): string {
   if (ms <= 60_000) return "less than a minute";
@@ -218,8 +219,11 @@ const QUOTA_WINDOW_MS = 24 * 60 * 60 * 1000;
  * 2. Monetization — SaaS-only (short-circuits on !SAAS_MODE):
  *    - requiredPlan at run time (catches orgs that downgraded AFTER
  *      installing) → 402 PLAN_AGENT_LOCKED.
- *    - freeDailyQuota: rolling-24h per-user cap for free-plan orgs →
- *      402 AGENT_QUOTA_EXCEEDED with resetsAt.
+ *    - Per-tier daily quota: rolling-24h per-user cap, picked by the
+ *      org's plan — free → freeDailyQuota, pro/team → paidDailyQuota
+ *      (one shared paid value; Team members get Pro's allowance).
+ *      null for the tier = unlimited → 402 AGENT_QUOTA_EXCEEDED with
+ *      resetsAt when the tier's cap is set and reached.
  *
  * Runs of manually-added agents (no sourceTemplateId) are never gated.
  *
@@ -283,8 +287,13 @@ export async function checkCatalogRunGates(
     );
   }
 
-  // Daily quota applies to free-plan orgs only (paid = unlimited).
-  if (template.freeDailyQuota == null || plan !== "free") return null;
+  // Daily quota, per plan tier: free orgs draw against the template's
+  // freeDailyQuota; pro/team orgs share paidDailyQuota (Team members get
+  // Pro's allowance). null for the tier = unlimited — the per-minute /
+  // concurrent rate limits still bound abuse.
+  const quota =
+    plan === "free" ? template.freeDailyQuota : template.paidDailyQuota;
+  if (quota == null) return null;
 
   // Count fresh from the event log on EVERY run — no cache, no
   // pre-consumed slots. The runner only persists runs that produced
@@ -295,27 +304,34 @@ export async function checkCatalogRunGates(
   // running" guard), so message turns are sequential and every check
   // sees all prior rows — no burst window, no cache staleness.
   const usage = await getRunUsage(user.id, agent.id, QUOTA_WINDOW_MS);
-  if (usage.count < template.freeDailyQuota) return null;
+  if (usage.count < quota) return null;
 
   // Reset moment: the oldest run inside the window falls out of it in
   // exactly (oldestAt + window). Fallback (oldest missing) is 1 hour —
   // a conservative "try again soon" rather than a wrong promise.
   const oldest = usage.oldestAt ? new Date(usage.oldestAt).getTime() : null;
   const resetsAt = oldest ? oldest + QUOTA_WINDOW_MS : Date.now() + 3_600_000;
-  console.warn("[quota] free daily limit hit", {
+  console.warn("[quota] daily limit hit", {
     userId: user.id,
     orgId: user.orgId,
     agentId: agent.id,
     templateId: template.id,
+    plan,
     used: usage.count,
-    quota: template.freeDailyQuota,
+    quota,
   });
+  // The plan-upgrade clause is free-tier only — a paid user who
+  // exhausted a paid cap gets the countdown; there is no higher tier to
+  // point them to. Copy never says "unlimited" (see the usage-limit
+  // copy policy in AGENTS.md), so caps can change without contradicting
+  // anything a customer saw when they subscribed.
+  const upgradeClause = plan === "free" ? " Upgrade to Pro for more usage." : "";
   return NextResponse.json(
     {
-      error: `You've reached your daily usage limit for this agent. It resets in ${formatCountdown(resetsAt - Date.now())}. Upgrade to Pro for unlimited usage.`,
+      error: `You've reached your daily usage limit for this agent. You can use it again in ${formatCountdown(resetsAt - Date.now())}.${upgradeClause}`,
       code: "AGENT_QUOTA_EXCEEDED",
       resetsAt,
-      quota: template.freeDailyQuota,
+      quota,
       used: usage.count,
     },
     { status: 402 },

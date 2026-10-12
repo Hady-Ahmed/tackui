@@ -14,6 +14,7 @@ import {
   findInstalledAgentId,
   installTemplate,
   getRunUsage,
+  annotateAgentTemplateState,
 } from "./template-store";
 import { toPublicAgent } from "@/lib/agents/agent-store";
 import type { CreateTemplateInput } from "./template-store";
@@ -126,6 +127,48 @@ describe("createTemplateBodySchema", () => {
     expect(result.success).toBe(true);
   });
 
+  it("rejects paidDailyQuota < 1 or non-integer", () => {
+    expect(
+      createTemplateBodySchema.safeParse({ ...validInput, freeDailyQuota: 10, paidDailyQuota: 0 })
+        .success,
+    ).toBe(false);
+    expect(
+      createTemplateBodySchema.safeParse({ ...validInput, freeDailyQuota: 10, paidDailyQuota: 1.5 })
+        .success,
+    ).toBe(false);
+  });
+
+  it("rejects paidDailyQuota on an ungated template without freeDailyQuota (paid can't be worse off than free)", () => {
+    expect(
+      createTemplateBodySchema.safeParse({ ...validInput, paidDailyQuota: 100 }).success,
+    ).toBe(false);
+  });
+
+  it("accepts paidDailyQuota alongside freeDailyQuota (per-tier caps)", () => {
+    expect(
+      createTemplateBodySchema.safeParse({ ...validInput, freeDailyQuota: 10, paidDailyQuota: 100 })
+        .success,
+    ).toBe(true);
+  });
+
+  it("accepts paidDailyQuota alongside requiredPlan (gated templates can cap paid usage)", () => {
+    expect(
+      createTemplateBodySchema.safeParse({ ...validInput, requiredPlan: "pro", paidDailyQuota: 100 })
+        .success,
+    ).toBe(true);
+  });
+
+  it("rejects paidDailyQuota <= freeDailyQuota (Pro is the higher tier)", () => {
+    expect(
+      createTemplateBodySchema.safeParse({ ...validInput, freeDailyQuota: 10, paidDailyQuota: 10 })
+        .success,
+    ).toBe(false);
+    expect(
+      createTemplateBodySchema.safeParse({ ...validInput, freeDailyQuota: 10, paidDailyQuota: 5 })
+        .success,
+    ).toBe(false);
+  });
+
   it("rejects jwtSecret shorter than 32 chars", () => {
     const result = createTemplateBodySchema.safeParse({
       ...validInput,
@@ -182,8 +225,22 @@ describe("updateTemplateBodySchema", () => {
       icon: null,
       requiredPlan: null,
       freeDailyQuota: null,
+      paidDailyQuota: null,
     });
     expect(result.success).toBe(true);
+  });
+
+  it("defers paidDailyQuota context rules to merged-row validation when freeDailyQuota is absent", () => {
+    // A patch setting only paidDailyQuota can't know the stored free
+    // tier — accepted here; updateTemplate re-validates the merged state.
+    expect(updateTemplateBodySchema.safeParse({ paidDailyQuota: 100 }).success).toBe(true);
+    expect(updateTemplateBodySchema.safeParse({ paidDailyQuota: null }).success).toBe(true);
+  });
+
+  it("rejects paidDailyQuota set together with an explicit freeDailyQuota clear on an ungated patch", () => {
+    expect(
+      updateTemplateBodySchema.safeParse({ paidDailyQuota: 100, freeDailyQuota: null }).success,
+    ).toBe(false);
   });
 });
 
@@ -324,6 +381,30 @@ describe("updateTemplate", () => {
     ).rejects.toThrow();
   });
 
+  it("stores, preserves, and clears paidDailyQuota", async () => {
+    const created = await createTemplate({
+      ...validInput,
+      freeDailyQuota: 10,
+      paidDailyQuota: 100,
+    });
+    expect(created.paidDailyQuota).toBe(100);
+    // Absent keys preserve.
+    const kept = await updateTemplate(created.id, { name: "Renamed" });
+    expect(kept?.freeDailyQuota).toBe(10);
+    expect(kept?.paidDailyQuota).toBe(100);
+    // Explicit null clears only the paid cap.
+    const cleared = await updateTemplate(created.id, { paidDailyQuota: null });
+    expect(cleared?.paidDailyQuota).toBeUndefined();
+    expect(cleared?.freeDailyQuota).toBe(10);
+  });
+
+  it("rejects a merged row where paidDailyQuota lacks a free tier on an ungated template", async () => {
+    const created = await createTemplate(validInput);
+    await expect(
+      updateTemplate(created.id, { paidDailyQuota: 100 }),
+    ).rejects.toThrow();
+  });
+
   it("rejects an empty tagline on the merged row", async () => {
     const created = await createTemplate(validInput);
     await expect(
@@ -442,6 +523,63 @@ describe("installTemplate (idempotent upsert)", () => {
     expect(await findInstalledAgentId(template.id, TEST_ORG)).toBe(a.agent.id);
     expect(await findInstalledAgentId(template.id, OTHER_ORG)).toBe(b.agent.id);
     expect(await findInstalledAgentId("missing-template", TEST_ORG)).toBeNull();
+  });
+});
+
+describe("annotateAgentTemplateState (curator-state chips)", () => {
+  it("copies the live template's requiredPlan onto managed agents", async () => {
+    const template = await createTemplate({
+      ...validInput,
+      slug: "gated-live",
+      requiredPlan: "pro",
+    });
+    const { agent } = await installTemplate(template, TEST_ORG);
+    const [pub] = await annotateAgentTemplateState(
+      await listAgents(TEST_ORG),
+    );
+    expect(pub.id).toBe(agent.id);
+    expect(pub.templateRequiredPlan).toBe("pro");
+  });
+
+  it("omits templateRequiredPlan for ungated templates", async () => {
+    const template = await createTemplate({ ...validInput, slug: "ungated" });
+    await installTemplate(template, TEST_ORG);
+    const [pub] = await annotateAgentTemplateState(
+      await listAgents(TEST_ORG),
+    );
+    expect(pub.templateRequiredPlan).toBeUndefined();
+    expect(pub.templateUnpublished).toBeUndefined();
+  });
+
+  it("flags deactivated templates as unpublished (annotations ride along; the UI's chip precedence decides)", async () => {
+    const template = await createTemplate({
+      ...validInput,
+      slug: "paused-gated",
+      requiredPlan: "team",
+      isActive: false,
+    });
+    await installTemplate(template, TEST_ORG);
+    const [pub] = await annotateAgentTemplateState(
+      await listAgents(TEST_ORG),
+    );
+    expect(pub.templateUnpublished).toBe(true);
+    expect(pub.templateRequiredPlan).toBe("team");
+  });
+
+  it("tombstoned agents carry no annotations — Removed wins", async () => {
+    const template = await createTemplate({
+      ...validInput,
+      slug: "tombstoned",
+      requiredPlan: "pro",
+    });
+    await installTemplate(template, TEST_ORG);
+    await deleteTemplate(template.id);
+    const [pub] = await annotateAgentTemplateState(
+      await listAgents(TEST_ORG),
+    );
+    expect(pub.templateRemovedAt).toBeTruthy();
+    expect(pub.templateRequiredPlan).toBeUndefined();
+    expect(pub.templateUnpublished).toBeUndefined();
   });
 });
 

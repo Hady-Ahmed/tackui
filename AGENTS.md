@@ -115,7 +115,7 @@ lib/
     runner-instance.ts         # Shared runner singleton (used by runtime + thread API)
   catalog/
     catalog.config.ts          # Client-safe catalog types (AgentTemplate / PublicAgentTemplate / RequiredPlan / TemplateAuthMode) — no runtime config, no DB imports
-    template-store.ts          # Template CRUD (zod-validated, pg.Pool-backed) + installTemplate (idempotent upsert into agents) + findInstalledAgentId + countTemplateInstalls + getRunUsage (rolling-24h run count via agent_runs ⋈ thread_metadata) + annotateAgentTemplateState (templateUnpublished flag for the sidebar chip)
+    template-store.ts          # Template CRUD (zod-validated, pg.Pool-backed) + installTemplate (idempotent upsert into agents) + findInstalledAgentId + countTemplateInstalls + getRunUsage (rolling-24h run count via agent_runs ⋈ thread_metadata) + annotateAgentTemplateState (templateUnpublished + templateRequiredPlan flags for the sidebar chips)
   auth/
     auth.ts                    # Better Auth instance (Postgres Pool adapter, plugins, first-user-is-admin, BETTER_AUTH_SECRET enforcement on boot)
     auth-client.ts             # Better Auth React client (signIn, signUp, useSession)
@@ -141,6 +141,7 @@ lib/
       0009_drop_agent_kind.sql  # Drops the `kind` column entirely — with langgraph gone, a constant column for a single value was pure ceremony
       0010_agent_catalog.sql    # Agent catalog: `agent_templates` table (slug/name/tagline/icon/endpoint/auth/required_plan/free_daily_quota/sort_order/is_active) + `agents.source_template_id` + `agents.installed_template_updated_at` provenance columns
       0011_template_tombstones.sql # `agents.template_deleted_at` — deleting a template tombstones installed copies (listed, history viewable, never runnable, don't count toward the plan cap)
+      0012_paid_daily_quota.sql # `agent_templates.paid_daily_quota` — per-template rolling-24h run cap for Pro/Team orgs (nullable = uncapped); picked by org plan in checkCatalogRunGates
   config/
     saas.ts                     # SAAS_MODE / BILLING_ENABLED / SSRF_GUARD_FORCE_ON / SSRF_REJECTION_MESSAGE flags (module-load consts)
     saas.test.ts                # 5 tests — flag combinations across modes
@@ -260,6 +261,10 @@ with a 5s timeout and reports reachability. It catches URL typos and down
 servers — it does **not** validate auth, AG-UI protocol compliance, or that the
 agent will actually run. The sidebar also shows a status dot per agent (gray =
 untested, green = reachable, red = unreachable), re-tested on window focus.
+Managed (catalog) agents show no dot — their endpoint never reaches the
+client, so the sidebar can't probe them; connection health is the curator's
+responsibility (`/admin` → Test connection). The dot spot carries state flags
+instead: amber = Paused, blue = plan-locked.
 
 The probe applies the same `assertSafeUrl` SSRF guard as agent
 create/edit — so it cannot be used to port-scan internal services or hit
@@ -775,7 +780,9 @@ the agent is running. No endpoints, no config.
   `category`, `icon` (emoji),
   `endpoint`, `auth_mode`/`jwt_secret`/`jwt_scopes` (same machinery +
   encryption as agents), `required_plan` (nullable — `pro`/`team`),
-  `free_daily_quota` (nullable int), `sort_order`, `is_active`.
+  `free_daily_quota` + `paid_daily_quota` (nullable ints — per-tier
+  rolling-24h run caps, see Monetization gates), `sort_order`,
+  `is_active`.
 - Installing creates an org-scoped `agents` row via `installTemplate()`
   — but the row is an **entitlement/reference, not a config copy**.
   The runtime resolves endpoint/auth **live from the template** on every
@@ -812,9 +819,13 @@ changes the org's agent list) → `checkTemplateInstall` (plan gate) →
 - **`required_plan`** (`pro`/`team`): blocks install AND runs for lower
   plans (402 `PLAN_AGENT_LOCKED`). Run-time enforcement in
   `checkCatalogRunGates` catches orgs that downgrade AFTER installing.
-- **`free_daily_quota`**: rolling-24h per-user run cap for free-plan
-  orgs on catalog agents (402 `AGENT_QUOTA_EXCEEDED` with `resetsAt`).
-  Counted via `getRunUsage` — `agent_runs ⋈ thread_metadata` filtered by
+- **Per-tier daily quotas** (`free_daily_quota` + `paid_daily_quota`,
+  both nullable ints = uncapped): rolling-24h per-user run caps on
+  catalog agents (402 `AGENT_QUOTA_EXCEEDED` with `resetsAt`).
+  `checkCatalogRunGates` picks the cap by the org's plan — free →
+  `free_daily_quota`, pro/team → `paid_daily_quota` (one shared paid
+  value; Team members get Pro's personal allowance). Counted via
+  `getRunUsage` — `agent_runs ⋈ thread_metadata` filtered by
   `user_id + agent_id + created_at >= now-24h` (no counter tables; the
   event log IS the counter). Counted fresh from the log on every run —
   **no cache, no pre-consumed slots**: the runner only persists runs
@@ -828,14 +839,43 @@ changes the org's agent list) → `checkTemplateInstall` (plan gate) →
   quota trips "early" — check `agent_runs` for the extra row first.
   Free users are capped at 1 concurrent run (plan limit + "thread
   already running" guard), so turns are sequential — no burst window.
-  Paid plans are unlimited; manually added agents are never gated.
-- **Vague-copy policy:** the quota number is never stated in product
-  copy — cards/pricing say "Daily usage limit · unlimited on
-  Pro". The exact cap appears only in the 402 JSON (debugging) and the
-  `[quota]` server log. Rationale: a hidden number keeps per-agent
-  quotas flexible and the cap adjustable without shipping UI changes.
-  The countdown IS shown ("resets in 5h 12m") so users know when usage
-  returns.
+  Manually added agents are never gated.
+- **Schema invariants** (zod refinements in `template-store.ts`): a
+  plan-gated template has no free tier (`freeDailyQuota` is rejected
+  alongside `requiredPlan`), but a paid cap IS allowed on gated
+  templates (a Pro-only agent can cap its paid usage). On an ungated
+  template, `paidDailyQuota` requires `freeDailyQuota` — without a free
+  cap, paid users would be strictly worse off than free users
+  (uncapped), which is never intended. And `paidDailyQuota` must exceed
+  `freeDailyQuota` when both are set (Pro is the higher tier).
+- **Sidebar chip for gated installs** — `annotateAgentTemplateState`
+  copies the live template's `requiredPlan` onto
+  `PublicAgent.templateRequiredPlan` (curator state, billing-free); the
+  sidebar compares it against `useBilling()`'s plan (`planSatisfies`)
+  and renders a 🔒 Pro/Team chip when unsatisfied (SaaS-only — self-host
+  never gates; plan is null without billing). Covers gated-after-install
+  AND downgrade-after-install (same run-time gate state). Sidebar chip
+  precedence: Removed > Paused > plan-locked; plan-locked rows are NOT
+  muted (recoverable by upgrading — Paused/Removed are curator actions),
+  past chats stay viewable, and the run 402 ("Upgrade to keep using it")
+  remains the explainer when they try.
+- **Usage-limit copy policy (three rules):** (1) the quota numbers are
+  never stated in product copy — they appear only in the 402 JSON
+  (debugging) and the `[quota]` server log; (2) **maximal promises are
+  banned** — copy never says "unlimited" for catalog usage, because a
+  cap added later would contradict what a subscriber saw when they paid
+  (a null cap is simply uncapped, never described as infinite); (3)
+  **catalog cards never mention usage limits at all** — the card
+  describes the agent; the limit surfaces where it's actually
+  encountered: the run 402 ("You've reached your daily usage limit for
+  this agent. You can use it again in 5h 12m." + the free-tier-only
+  "Upgrade to Pro for more usage." clause) and the pricing page (Free
+  tier lists "Catalog agents with daily usage limits"). Plan-gated
+  cards DO state their gate ("Available on the Pro plan") — that's
+  installability info, not a usage limit. The disclosure points are
+  deliberate: the 402 arrives while the user is actively trying to use
+  the agent, so the constraint, the reset countdown, and — on the free
+  tier — the upgrade path all surface in the same message.
 - The chat UI surfaces 402s/410s like 429s (`AgentChat.onError` filter
   in `chat-shell.tsx`); any other non-abort run failure surfaces a
   generic "Agent failed to respond" banner (raw errors are never shown
@@ -867,7 +907,7 @@ SaaS-only:
 | In-app catalog (`/app/catalog`) + install | ✓ | ✓ |
 | Template admin (Catalog section on `/admin`) | platform admin | platform admin (first user) |
 | Tombstone + deactivation run gates | ✓ | ✓ |
-| Plan gate + free quota enforcement | ✓ | ✗ (short-circuit) |
+| Plan gate + per-tier quota enforcement | ✓ | ✗ (short-circuit) |
 | Public `/catalog` marketing page | ✓ | redirects to `/app` |
 
 ### Lifecycle rules

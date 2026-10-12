@@ -4,10 +4,17 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import Link from "next/link";
 import { useThreads, useAgent } from "@copilotkit/react-core/v2";
 import type { PublicAgent } from "@/lib/agents/agents.config";
+import type { RequiredPlan } from "@/lib/catalog/catalog.config";
+import { planSatisfies, type PlanId } from "@/lib/billing/plans";
+import { useBilling } from "@/lib/billing/use-billing";
 import { AccountMenu } from "./account-menu";
 import { ThemeToggle } from "./theme-toggle";
 import { useAuthConfig } from "@/lib/auth/use-auth-config";
 import { useCanManageAgents } from "@/lib/auth/use-can-manage-agents";
+
+function planLabel(required: RequiredPlan): string {
+  return required === "pro" ? "Pro" : "Team";
+}
 
 type TestStatus = "idle" | "loading" | "ok" | "fail";
 type TestResult = { status: TestStatus; message?: string };
@@ -95,6 +102,11 @@ export function AgentSidebar({
   const [statuses, setStatuses] = useState<Record<string, TestResult>>({});
   const { config } = useAuthConfig();
   const { canManage } = useCanManageAgents();
+  // The viewer's org plan (null when billing isn't configured —
+  // self-host, or SaaS without Stripe). Cached module-level and already
+  // fetched by the AccountMenu in this sidebar, so no extra request.
+  const { billing } = useBilling();
+  const plan = billing?.plan ?? null;
   // Show the add-agent (+) icon to org owners/admins (canManage from
   // /api/auth/can-manage-agents) OR in solo mode (synthetic admin). It
   // links to /agents?add=1 — the workspace agent-management page with
@@ -106,7 +118,8 @@ export function AgentSidebar({
     const testAll = async () => {
       // Managed agents (catalog installs) carry no endpoint in the API
       // response — the curator's backend URLs never reach the client —
-      // so there's nothing to probe. Their status dot stays "untested".
+      // so there's nothing to probe. They show no status dot; their
+      // connection health is the curator's responsibility.
       const entries = agents
         .filter((a) => a.endpoint)
         .map((a) => ({
@@ -176,6 +189,7 @@ export function AgentSidebar({
             agents={agents}
             activeAgent={activeAgent}
             statuses={statuses}
+            plan={plan}
             onSelectAgent={onSelectAgent}
             onNewChat={onNewChat}
             onToggleCollapse={onToggleCollapse}
@@ -187,6 +201,7 @@ export function AgentSidebar({
             activeAgent={activeAgent}
             activeThreadId={activeThreadId}
             statuses={statuses}
+            plan={plan}
             onSelectAgent={onSelectAgent}
             onNewChat={onNewChat}
             onSelectThread={onSelectThread}
@@ -217,6 +232,7 @@ export function AgentSidebar({
             activeAgent={activeAgent}
             activeThreadId={activeThreadId}
             statuses={statuses}
+            plan={plan}
             onSelectAgent={selectAgentAndClose}
             onNewChat={newChatAndClose}
             onSelectThread={selectThreadAndClose}
@@ -235,6 +251,7 @@ function ExpandedContent({
   activeAgent,
   activeThreadId,
   statuses,
+  plan,
   onSelectAgent,
   onNewChat,
   onSelectThread,
@@ -246,6 +263,8 @@ function ExpandedContent({
   activeAgent: string;
   activeThreadId: string;
   statuses: Record<string, TestResult>;
+  /** Viewer's org plan (null when billing isn't configured — never gate). */
+  plan: string | null;
   onSelectAgent: (id: string) => void;
   onNewChat: () => void;
   onSelectThread: (threadId: string) => void;
@@ -379,7 +398,19 @@ function ExpandedContent({
             // Deactivated template (reversible kill switch) — distinct
             // from tombstones: re-show restores the agent.
             const paused = !removed && Boolean(agent.templateUnpublished);
-            // Both states get the same muted row treatment (bg +
+            // Plan-gated install whose template's requiredPlan outranks
+            // the viewer's plan (gated-after-install, or the org
+            // downgraded) — the third silently-dead state. Not muted:
+            // unlike Removed/Paused it's recoverable by upgrading.
+            // SaaS-only: plan is null without billing; self-host never
+            // gates. Chip precedence: Removed > Paused > plan-locked.
+            const planLocked =
+              plan != null &&
+              !removed &&
+              !paused &&
+              !!agent.templateRequiredPlan &&
+              !planSatisfies(plan as PlanId, agent.templateRequiredPlan);
+            // Both dead states get the same muted row treatment (bg +
             // opacity); the chip tells them apart.
             const muted = removed || paused;
             return (
@@ -395,19 +426,42 @@ function ExpandedContent({
                   } ${removed ? "opacity-60" : muted ? "opacity-70" : ""}`}
                 >
                   <div className="flex w-full items-center gap-2">
-                    <span
-                      className={`inline-block h-2 w-2 shrink-0 rounded-full ${dotClass(
-                        (statuses[agent.id] ?? { status: "idle" }).status,
-                      )}`}
-                      title={dotTitle(
-                        (statuses[agent.id] ?? { status: "idle" }).status,
-                        statuses[agent.id]?.message,
-                      )}
-                      aria-label={`Connection status: ${dotTitle(
-                        (statuses[agent.id] ?? { status: "idle" }).status,
-                        statuses[agent.id]?.message,
-                      )}`}
-                    />
+                    {/* The dot is probe status, which only manual agents
+                        (endpoint present) have — managed agents' endpoints
+                        never reach the client, so the sidebar can't probe
+                        them. The spot carries state flags instead: amber =
+                        Paused, blue = plan-locked; otherwise managed
+                        agents render an invisible spacer so their names
+                        stay aligned with manual-agent rows. */}
+                    {paused ? (
+                      <span
+                        className="inline-block h-2 w-2 shrink-0 rounded-full bg-amber-400"
+                        title="Paused by the curator"
+                      />
+                    ) : planLocked && agent.templateRequiredPlan ? (
+                      <span
+                        className="inline-block h-2 w-2 shrink-0 rounded-full bg-blue-500"
+                        title={`Requires the ${planLabel(
+                          agent.templateRequiredPlan,
+                        )} plan`}
+                      />
+                    ) : agent.endpoint ? (
+                      <span
+                        className={`inline-block h-2 w-2 shrink-0 rounded-full ${dotClass(
+                          (statuses[agent.id] ?? { status: "idle" }).status,
+                        )}`}
+                        title={dotTitle(
+                          (statuses[agent.id] ?? { status: "idle" }).status,
+                          statuses[agent.id]?.message,
+                        )}
+                        aria-label={`Connection status: ${dotTitle(
+                          (statuses[agent.id] ?? { status: "idle" }).status,
+                          statuses[agent.id]?.message,
+                        )}`}
+                      />
+                    ) : (
+                      <span className="h-2 w-2 shrink-0" aria-hidden="true" />
+                    )}
                     <span className="text-sm font-medium">{agent.name}</span>
                     {removed && (
                       <span className="ml-auto shrink-0 rounded-full bg-zinc-200 px-1.5 py-0.5 text-[10px] font-medium text-zinc-600 dark:bg-zinc-800 dark:text-zinc-400">
@@ -417,6 +471,16 @@ function ExpandedContent({
                     {paused && (
                       <span className="ml-auto shrink-0 rounded-full bg-amber-100 px-1.5 py-0.5 text-[10px] font-medium text-amber-700 dark:bg-amber-950 dark:text-amber-300">
                         Paused
+                      </span>
+                    )}
+                    {planLocked && agent.templateRequiredPlan && (
+                      <span
+                        className="ml-auto shrink-0 rounded-full bg-blue-600 px-1.5 py-0.5 text-[10px] font-medium text-white"
+                        title={`Requires the ${planLabel(
+                          agent.templateRequiredPlan,
+                        )} plan — your workspace's plan doesn't include it. Past chats stay viewable.`}
+                      >
+                        🔒 {planLabel(agent.templateRequiredPlan)}
                       </span>
                     )}
                   </div>
@@ -455,6 +519,7 @@ function CollapsedContent({
   agents,
   activeAgent,
   statuses,
+  plan,
   onSelectAgent,
   onNewChat,
   onToggleCollapse,
@@ -463,6 +528,8 @@ function CollapsedContent({
   agents: PublicAgent[];
   activeAgent: string;
   statuses: Record<string, TestResult>;
+  /** Viewer's org plan (null when billing isn't configured — never gate). */
+  plan: string | null;
   onSelectAgent: (id: string) => void;
   onNewChat: () => void;
   onToggleCollapse: () => void;
@@ -505,7 +572,18 @@ function CollapsedContent({
           const isActive = activeAgent === agent.id;
           const removed = Boolean(agent.templateRemovedAt);
           const paused = !removed && Boolean(agent.templateUnpublished);
+          // Plan-locked (see ExpandedContent) — recoverable, so no mute;
+          // the blue dot + tooltip carry the state.
+          const planLocked =
+            plan != null &&
+            !removed &&
+            !paused &&
+            !!agent.templateRequiredPlan &&
+            !planSatisfies(plan as PlanId, agent.templateRequiredPlan);
           const muted = removed || paused;
+          const lockedLabel = agent.templateRequiredPlan
+            ? planLabel(agent.templateRequiredPlan)
+            : "";
           return (
             <button
               key={agent.id}
@@ -515,7 +593,9 @@ function CollapsedContent({
                   ? `${agent.name} (removed)`
                   : paused
                     ? `${agent.name} (paused by the curator)`
-                    : agent.name
+                    : planLocked
+                      ? `${agent.name} (requires the ${lockedLabel} plan)`
+                      : agent.name
               }
               className={`relative flex h-9 w-9 items-center justify-center rounded-full text-sm font-medium transition-colors ${
                 isActive
@@ -529,15 +609,26 @@ function CollapsedContent({
                   ? `${agent.name} (removed)`
                   : paused
                     ? `${agent.name} (paused by the curator)`
-                    : agent.name
+                    : planLocked
+                      ? `${agent.name} (requires the ${lockedLabel} plan)`
+                      : agent.name
               }
             >
               {agent.name.charAt(0).toUpperCase()}
-              <span
-                className={`absolute bottom-0.5 right-0.5 h-2 w-2 rounded-full border border-white dark:border-zinc-950 ${
-                  paused ? "bg-amber-400" : dotClass(st.status)
-                }`}
-              />
+              {/* State flags keep the dot spot (amber = Paused, blue =
+                  plan-locked); manual agents get the probe dot; managed
+                  agents without a flag show no dot — never probed. */}
+              {paused ? (
+                <span className="absolute bottom-0.5 right-0.5 h-2 w-2 rounded-full border border-white bg-amber-400 dark:border-zinc-950" />
+              ) : planLocked ? (
+                <span className="absolute bottom-0.5 right-0.5 h-2 w-2 rounded-full border border-white bg-blue-500 dark:border-zinc-950" />
+              ) : agent.endpoint ? (
+                <span
+                  className={`absolute bottom-0.5 right-0.5 h-2 w-2 rounded-full border border-white dark:border-zinc-950 ${dotClass(
+                    st.status,
+                  )}`}
+                />
+              ) : null}
             </button>
           );
         })}

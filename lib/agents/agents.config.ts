@@ -6,6 +6,8 @@
 // demanded, re-add the column + adapter in the same migration as its
 // config fields.
 
+import type { RequiredPlan } from "@/lib/catalog/catalog.config";
+
 export type AgentAuthMode = "none" | "jwt";
 
 export interface AgentEntry {
@@ -108,4 +110,13 @@ export interface PublicAgent {
    * annotation on GET /api/agents (batch template lookup).
    */
   templateUnpublished?: boolean;
+  /**
+   * The template is plan-gated (`required_plan` set) and the viewer's
+   * org plan doesn't satisfy it — the third silently-dead state (along
+   * Removed/Paused). Pure curator state, billing-free: the server sends
+   * the gate; the client (sidebar) compares it against useBilling()'s
+   * plan and renders a 🔒 Pro/Team chip, SaaS-only. Tombstones never
+   * carry it — Removed wins. Server-side annotation on GET /api/agents.
+   */
+  templateRequiredPlan?: RequiredPlan;
 }

@@ -40,17 +40,30 @@ const fieldShapes = {
   jwtScopes: z.array(z.string()).optional(),
   requiredPlan: requiredPlanSchema.nullable().optional(),
   freeDailyQuota: z.number().int().min(1).max(100000).nullable().optional(),
+  paidDailyQuota: z.number().int().min(1).max(100000).nullable().optional(),
   sortOrder: z.number().int().min(0).max(10000).default(0),
   isActive: z.boolean().default(true),
 };
 
 /**
- * A plan-gated template has no free tier at all — free users can't run
- * it, so a free quota alongside requiredPlan is contradictory. Rejected
- * at the schema level to keep the admin form honest.
+ * Quota-consistency invariants, enforced at the schema level to keep the
+ * admin form honest:
+ *
+ * 1. A plan-gated template has no free tier — free users can't run it at
+ *    all, so a free quota alongside requiredPlan is contradictory.
+ * 2. paidDailyQuota IS allowed alongside requiredPlan (a Pro-only template
+ *    can still cap its paid usage), but on an UNGATED template it requires
+ *    freeDailyQuota: without a free cap, paid users would be strictly
+ *    worse off than free users (uncapped) — never intended.
+ * 3. paidDailyQuota must exceed freeDailyQuota when both are set — Pro is
+ *    the higher tier; equal or lower paid caps make the upgrade pointless.
  */
-function refineNoQuotaWhenPlanGated(
-  data: { requiredPlan?: RequiredPlan | null; freeDailyQuota?: number | null },
+function refineQuotaConsistency(
+  data: {
+    requiredPlan?: RequiredPlan | null;
+    freeDailyQuota?: number | null;
+    paidDailyQuota?: number | null;
+  },
   ctx: z.RefinementCtx,
 ): void {
   if (data.requiredPlan && data.freeDailyQuota != null) {
@@ -61,6 +74,80 @@ function refineNoQuotaWhenPlanGated(
         "freeDailyQuota cannot be set when requiredPlan is set — a plan-gated agent has no free tier.",
     });
   }
+  if (
+    data.paidDailyQuota != null &&
+    !data.requiredPlan &&
+    data.freeDailyQuota == null
+  ) {
+    ctx.addIssue({
+      code: z.ZodIssueCode.custom,
+      path: ["paidDailyQuota"],
+      message:
+        "paidDailyQuota on an ungated agent requires freeDailyQuota — without a free cap, paid users would be strictly worse off than free users.",
+    });
+  }
+  if (
+    data.paidDailyQuota != null &&
+    data.freeDailyQuota != null &&
+    data.paidDailyQuota <= data.freeDailyQuota
+  ) {
+    ctx.addIssue({
+      code: z.ZodIssueCode.custom,
+      path: ["paidDailyQuota"],
+      message:
+        "paidDailyQuota must be greater than freeDailyQuota — Pro is the higher tier.",
+    });
+  }
+}
+
+/**
+ * Partial-payload variant for the PATCH body. Absent keys mean "preserve
+ * the stored value", so relationship rules only fire when the fields they
+ * relate are all present in the payload — otherwise they defer to
+ * updateTemplate's merged-row validation (templateRowSchema), which sees
+ * the full post-patch state.
+ */
+function refineQuotaConsistencyPartial(
+  data: {
+    requiredPlan?: RequiredPlan | null;
+    freeDailyQuota?: number | null;
+    paidDailyQuota?: number | null;
+  },
+  ctx: z.RefinementCtx,
+): void {
+  if (data.requiredPlan && data.freeDailyQuota != null) {
+    ctx.addIssue({
+      code: z.ZodIssueCode.custom,
+      path: ["freeDailyQuota"],
+      message:
+        "freeDailyQuota cannot be set when requiredPlan is set — a plan-gated agent has no free tier.",
+    });
+  }
+  if (
+    "freeDailyQuota" in data &&
+    data.paidDailyQuota != null &&
+    !data.requiredPlan &&
+    data.freeDailyQuota == null
+  ) {
+    ctx.addIssue({
+      code: z.ZodIssueCode.custom,
+      path: ["paidDailyQuota"],
+      message:
+        "paidDailyQuota on an ungated agent requires freeDailyQuota — without a free cap, paid users would be strictly worse off than free users.",
+    });
+  }
+  if (
+    data.paidDailyQuota != null &&
+    data.freeDailyQuota != null &&
+    data.paidDailyQuota <= data.freeDailyQuota
+  ) {
+    ctx.addIssue({
+      code: z.ZodIssueCode.custom,
+      path: ["paidDailyQuota"],
+      message:
+        "paidDailyQuota must be greater than freeDailyQuota — Pro is the higher tier.",
+    });
+  }
 }
 
 /**
@@ -69,7 +156,7 @@ function refineNoQuotaWhenPlanGated(
  */
 export const createTemplateBodySchema = z
   .object(fieldShapes)
-  .superRefine(refineNoQuotaWhenPlanGated);
+  .superRefine(refineQuotaConsistency);
 export type CreateTemplateInput = z.infer<typeof createTemplateBodySchema>;
 
 /**
@@ -79,7 +166,7 @@ export type CreateTemplateInput = z.infer<typeof createTemplateBodySchema>;
 export const updateTemplateBodySchema = z
   .object(fieldShapes)
   .partial()
-  .superRefine(refineNoQuotaWhenPlanGated);
+  .superRefine(refineQuotaConsistencyPartial);
 export type UpdateTemplateInput = z.infer<typeof updateTemplateBodySchema>;
 
 /**
@@ -89,7 +176,7 @@ export type UpdateTemplateInput = z.infer<typeof updateTemplateBodySchema>;
  */
 const templateRowSchema = z
   .object({ id: z.string().min(1).max(64), ...fieldShapes })
-  .superRefine(refineNoQuotaWhenPlanGated);
+  .superRefine(refineQuotaConsistency);
 
 interface TemplateRow {
   id: string;
@@ -105,6 +192,7 @@ interface TemplateRow {
   jwt_scopes: string | null;
   required_plan: string | null;
   free_daily_quota: number | null;
+  paid_daily_quota: number | null;
   sort_order: number;
   is_active: boolean;
   created_at: Date | string;
@@ -146,6 +234,7 @@ function rowToTemplate(row: TemplateRow): AgentTemplate {
       : undefined,
     ...(row.required_plan ? { requiredPlan: row.required_plan as RequiredPlan } : {}),
     ...(row.free_daily_quota != null ? { freeDailyQuota: row.free_daily_quota } : {}),
+    ...(row.paid_daily_quota != null ? { paidDailyQuota: row.paid_daily_quota } : {}),
     sortOrder: row.sort_order,
     isActive: row.is_active,
     createdAt: iso(row.created_at),
@@ -172,6 +261,7 @@ export function toPublicTemplate(template: AgentTemplate): PublicAgentTemplate {
     ...(template.jwtScopes !== undefined ? { jwtScopes: template.jwtScopes } : {}),
     ...(template.requiredPlan !== undefined ? { requiredPlan: template.requiredPlan } : {}),
     ...(template.freeDailyQuota !== undefined ? { freeDailyQuota: template.freeDailyQuota } : {}),
+    ...(template.paidDailyQuota !== undefined ? { paidDailyQuota: template.paidDailyQuota } : {}),
     sortOrder: template.sortOrder,
     isActive: template.isActive,
     createdAt: template.createdAt,
@@ -185,7 +275,7 @@ export function toPublicTemplates(templates: AgentTemplate[]): PublicAgentTempla
 
 const TEMPLATE_COLUMNS = `id, slug, name, tagline, description, category, icon, endpoint,
   auth_mode, jwt_secret, jwt_scopes, required_plan, free_daily_quota,
-  sort_order, is_active, created_at, updated_at`;
+  paid_daily_quota, sort_order, is_active, created_at, updated_at`;
 
 /**
  * List templates. `activeOnly` (the default) hides deactivated ones —
@@ -251,8 +341,8 @@ export async function createTemplate(
     `INSERT INTO agent_templates
        (id, slug, name, tagline, description, category, icon, endpoint,
         auth_mode, jwt_secret, jwt_scopes, required_plan, free_daily_quota,
-        sort_order, is_active)
-     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15)
+        paid_daily_quota, sort_order, is_active)
+     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16)
      RETURNING ${TEMPLATE_COLUMNS}`,
     [
       id,
@@ -268,6 +358,7 @@ export async function createTemplate(
       input.jwtScopes?.join(",") ?? null,
       input.requiredPlan ?? null,
       input.freeDailyQuota ?? null,
+      input.paidDailyQuota ?? null,
       input.sortOrder ?? 0,
       input.isActive ?? true,
     ],
@@ -302,6 +393,7 @@ export async function updateTemplate(
     jwtScopes: existing.jwtScopes,
     requiredPlan: existing.requiredPlan ?? null,
     freeDailyQuota: existing.freeDailyQuota ?? null,
+    paidDailyQuota: existing.paidDailyQuota ?? null,
     sortOrder: existing.sortOrder,
     isActive: existing.isActive,
     ...patch,
@@ -315,9 +407,9 @@ export async function updateTemplate(
      SET name = $1, slug = $2, tagline = $3, description = $4,
          category = $5, icon = $6, endpoint = $7, auth_mode = $8,
          jwt_secret = $9, jwt_scopes = $10, required_plan = $11,
-         free_daily_quota = $12, sort_order = $13, is_active = $14,
-         updated_at = now()
-     WHERE id = $15
+         free_daily_quota = $12, paid_daily_quota = $13,
+         sort_order = $14, is_active = $15, updated_at = now()
+     WHERE id = $16
      RETURNING ${TEMPLATE_COLUMNS}`,
     [
       parsed.name,
@@ -332,6 +424,7 @@ export async function updateTemplate(
       parsed.jwtScopes?.join(",") ?? null,
       parsed.requiredPlan ?? null,
       parsed.freeDailyQuota ?? null,
+      parsed.paidDailyQuota ?? null,
       parsed.sortOrder,
       parsed.isActive,
       id,
@@ -495,11 +588,17 @@ export interface RunUsage {
 }
 
 /**
- * Annotate public agents with curator state for the UI: managed agents
- * whose template is currently deactivated get `templateUnpublished: true`
- * (the sidebar's "Paused" chip; runs 402 "unpublished by the curator"
- * until re-shown). Tombstones never carry it — Removed wins. Batched:
- * one template query per call regardless of agent count.
+ * Annotate public agents with curator state for the UI. Batched: one
+ * template query per call regardless of agent count.
+ *
+ * - `templateUnpublished: true` — managed agents whose template is
+ *   currently deactivated (the sidebar's "Paused" chip; runs 402
+ *   "unpublished by the curator" until re-shown). Tombstones never
+ *   carry it — Removed wins.
+ * - `templateRequiredPlan` — the live template's `requiredPlan` gate,
+ *   sent as plain curator state (billing-free). The sidebar client
+ *   compares it against the org's plan and renders the 🔒 Pro/Team
+ *   chip when unsatisfied. Tombstones never carry it — Removed wins.
  *
  * Lives here (not agent-store) because it needs the templates table and
  * agent-store must not import template-store (template-store already
@@ -517,10 +616,19 @@ export async function annotateAgentTemplateState(
   const inactive = new Set(
     templates.filter((t) => !t.isActive).map((t) => t.id),
   );
+  const planGates = new Map(
+    templates
+      .filter((t) => t.requiredPlan)
+      .map((t) => [t.id, t.requiredPlan as RequiredPlan]),
+  );
   return entries.map((entry) => {
     const pub = toPublicAgent(entry);
     if (entry.sourceTemplateId && inactive.has(entry.sourceTemplateId)) {
       pub.templateUnpublished = true;
+    }
+    if (entry.sourceTemplateId && !entry.templateRemovedAt) {
+      const required = planGates.get(entry.sourceTemplateId);
+      if (required) pub.templateRequiredPlan = required;
     }
     return pub;
   });

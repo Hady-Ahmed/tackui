@@ -43,6 +43,15 @@ export interface AgentTemplate {
    * users can't run a gated agent at all).
    */
   freeDailyQuota?: number;
+  /**
+   * Rolling-24h per-user run cap for Pro AND Team orgs (SaaS enforcement;
+   * one shared value — Team members get Pro's allowance). undefined =
+   * no cap for paid tiers. Allowed alongside requiredPlan (a gated
+   * template can cap its paid usage); on an ungated template it requires
+   * freeDailyQuota — without a free cap, paid users would be strictly
+   * worse off than free users (uncapped).
+   */
+  paidDailyQuota?: number;
   sortOrder: number;
   isActive: boolean;
   createdAt: string;
@@ -68,6 +77,7 @@ export interface PublicAgentTemplate {
   jwtScopes?: string[];
   requiredPlan?: RequiredPlan;
   freeDailyQuota?: number;
+  paidDailyQuota?: number;
   sortOrder: number;
   isActive: boolean;
   createdAt: string;

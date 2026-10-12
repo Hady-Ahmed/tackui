@@ -35,6 +35,7 @@ type FormState = {
   jwtScopes: string;
   requiredPlan: "" | RequiredPlan;
   freeDailyQuota: string;
+  paidDailyQuota: string;
   sortOrder: string;
   isActive: boolean;
 };
@@ -53,6 +54,7 @@ const emptyForm: FormState = {
   jwtScopes: "",
   requiredPlan: "",
   freeDailyQuota: "",
+  paidDailyQuota: "",
   sortOrder: "0",
   isActive: true,
 };
@@ -150,6 +152,7 @@ export function CatalogAdmin() {
       jwtScopes: template.jwtScopes?.join(", ") ?? "",
       requiredPlan: template.requiredPlan ?? "",
       freeDailyQuota: template.freeDailyQuota != null ? String(template.freeDailyQuota) : "",
+      paidDailyQuota: template.paidDailyQuota != null ? String(template.paidDailyQuota) : "",
       sortOrder: String(template.sortOrder),
       isActive: template.isActive,
     });
@@ -201,6 +204,11 @@ export function CatalogAdmin() {
         !form.requiredPlan && form.freeDailyQuota
           ? Number(form.freeDailyQuota)
           : null,
+      // Unlike the free quota, a paid cap is valid on plan-gated agents
+      // too (a Pro-only template can still cap its paid usage). The
+      // "paid needs free on ungated templates" invariant is enforced
+      // server-side by the zod refinement.
+      paidDailyQuota: form.paidDailyQuota ? Number(form.paidDailyQuota) : null,
       sortOrder: Number(form.sortOrder) || 0,
       isActive: form.isActive,
     };
@@ -331,7 +339,7 @@ export function CatalogAdmin() {
           </Field>
         </div>
 
-        <Field label="Tagline" required hint="One-line pitch shown on the catalog card">
+        <Field label="Tagline" required hint="One-line summary shown on the catalog card">
           <input
             value={form.tagline}
             onChange={(e) => updateForm({ tagline: e.target.value })}
@@ -477,6 +485,19 @@ export function CatalogAdmin() {
               placeholder="unlimited"
             />
           </Field>
+          <Field
+            label="Paid daily quota"
+            hint="Runs per user per rolling 24h on Pro/Team (SaaS). Blank = unlimited. Applies to plan-gated agents too."
+          >
+            <input
+              value={form.paidDailyQuota}
+              onChange={(e) => updateForm({ paidDailyQuota: e.target.value })}
+              type="number"
+              min={1}
+              className={inputClass()}
+              placeholder="e.g. 100"
+            />
+          </Field>
           <Field label="Sort order" hint="Lower numbers appear first">
             <input
               value={form.sortOrder}
@@ -575,9 +596,9 @@ export function CatalogAdmin() {
                     </td>
                     <td className="px-4 py-3 text-xs text-zinc-600 dark:text-zinc-400">
                       {template.requiredPlan
-                        ? template.requiredPlan === "pro"
-                          ? "Pro+"
-                          : "Team"
+                        ? `${template.requiredPlan === "pro" ? "Pro+" : "Team"}${
+                            template.paidDailyQuota != null ? " · capped" : ""
+                          }`
                         : template.freeDailyQuota != null
                           ? "Free: daily limit"
                           : "—"}

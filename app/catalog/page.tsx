@@ -94,19 +94,18 @@ export default async function CatalogPage() {
                 )}
 
                 <div className="mt-auto pt-4">
-                  {(template.requiredPlan || template.freeDailyQuota != null) && (
+                  {template.requiredPlan && (
+                    // Plain statement — no "free" promise on a gated
+                    // card; the plan gate is enforced in-app after
+                    // signup (the 🔒 state + upgrade dialog). This is
+                    // installability info, not a usage limit — usage
+                    // limits never appear on cards; they surface on
+                    // the pricing page and in the run 402, not in the
+                    // browsing UI.
                     <p className="mb-3 text-xs text-zinc-400">
-                      {template.requiredPlan
-                        ? // Plain statement — no "free" promise on a
-                          // gated card; the plan gate is enforced
-                          // in-app after signup (the 🔒 state +
-                          // upgrade dialog).
-                          `Available on the ${template.requiredPlan === "pro" ? "Pro" : "Team"} plan`
-                        : // No "Free plan" prefix — ungated cards without
-                          // a quota don't say anything, and mentioning
-                          // free on quota'd cards implied the others
-                          // weren't on free.
-                          "Daily usage limit · unlimited on Pro"}
+                      {`Available on the ${
+                        template.requiredPlan === "pro" ? "Pro" : "Team"
+                      } plan`}
                     </p>
                   )}
                   <Link

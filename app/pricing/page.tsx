@@ -32,7 +32,7 @@ const TIERS: { id: PlanId; tagline: string; features: string[] }[] = [
     tagline: "For individuals with many agents.",
     features: [
       "Unlimited agents",
-      "Unlimited catalog agent usage",
+      "Much higher daily limits on catalog agents",
       "3 concurrent runs",
       "Higher rate limits",
       "Priority support",
@@ -43,7 +43,7 @@ const TIERS: { id: PlanId; tagline: string; features: string[] }[] = [
     tagline: "Collaborate with per-seat workspaces.",
     features: [
       "Everything in Pro",
-      "Unlimited catalog agent usage",
+      "Much higher daily limits on catalog agents",
       "5 concurrent runs",
       "Team workspaces + invites",
       "Per-seat billing",
@@ -127,6 +127,14 @@ export default async function PricingPage() {
               </div>
             );
           })}
+        </div>
+
+        <div className="mt-12 text-center text-sm text-zinc-500">
+          <p>
+            Catalog usage allowances are per agent and reset on a rolling
+            24-hour window. They apply to catalog agents only — agents you
+            connect yourself are not part of the catalog.
+          </p>
         </div>
 
         <div className="mt-12 text-center text-sm text-zinc-500">
