@@ -339,22 +339,32 @@ export function CatalogAdmin() {
           </Field>
         </div>
 
-        <Field label="Tagline" required hint="One-line summary shown on the catalog card">
+        <Field
+          label="Tagline"
+          required
+          hint={`One-line summary shown on the catalog card · ${form.tagline.length}/200`}
+        >
           <input
             value={form.tagline}
             onChange={(e) => updateForm({ tagline: e.target.value })}
             required
+            maxLength={200}
             className={inputClass()}
             placeholder="Find cheap flights across airlines"
           />
         </Field>
 
-        <Field label="Description" required>
+        <Field
+          label="Description"
+          required
+          hint={`What the agent does, what to expect · ${form.description.length}/2000`}
+        >
           <textarea
             value={form.description}
             onChange={(e) => updateForm({ description: e.target.value })}
             rows={2}
             required
+            maxLength={2000}
             className={inputClass()}
             placeholder="What the agent does, what to expect."
           />

@@ -621,6 +621,15 @@ export interface RunUsage {
  *   sent as plain curator state (billing-free). The sidebar client
  *   compares it against the org's plan and renders the 🔒 Pro/Team
  *   chip when unsatisfied. Tombstones never carry it — Removed wins.
+ * - `templateTagline`/`templateDescription` — the live template's
+ *   display copy, stamped onto managed agents so a template edit
+ *   reaches every installed workspace's UI with no re-install (same
+ *   live-propagation principle as the runtime's endpoint/auth
+ *   resolution). Paused agents get live values too — the template row
+ *   still exists, and freezing text during a pause would turn the
+ *   un-pause transition into a visible stale→live jump. Tombstones
+ *   never carry them — the template row is gone, so the agent row's
+ *   install-time snapshot (its own `description`) is all that's left.
  *
  * Lives here (not agent-store) because it needs the templates table and
  * agent-store must not import template-store (template-store already
@@ -638,6 +647,7 @@ export async function annotateAgentTemplateState(
   const inactive = new Set(
     templates.filter((t) => !t.isActive).map((t) => t.id),
   );
+  const templatesById = new Map(templates.map((t) => [t.id, t]));
   const planGates = new Map(
     templates
       .filter((t) => t.requiredPlan)
@@ -649,8 +659,17 @@ export async function annotateAgentTemplateState(
       pub.templateUnpublished = true;
     }
     if (entry.sourceTemplateId && !entry.templateRemovedAt) {
-      const required = planGates.get(entry.sourceTemplateId);
-      if (required) pub.templateRequiredPlan = required;
+      const template = templatesById.get(entry.sourceTemplateId);
+      if (template) {
+        // Empty-string-safe: stamp only real copy so a (legacy) null
+        // row falls back to the agent's own description client-side.
+        if (template.tagline) pub.templateTagline = template.tagline;
+        if (template.description) {
+          pub.templateDescription = template.description;
+        }
+        const required = planGates.get(entry.sourceTemplateId);
+        if (required) pub.templateRequiredPlan = required;
+      }
     }
     return pub;
   });

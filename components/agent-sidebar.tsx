@@ -417,6 +417,7 @@ function ExpandedContent({
               <li key={agent.id}>
                 <button
                   onClick={() => onSelectAgent(agent.id)}
+                  title={agent.templateDescription ?? agent.description}
                   className={`flex w-full flex-col items-start rounded-lg px-3 py-2 text-left transition-colors ${
                     activeAgent === agent.id
                       ? "bg-blue-50 text-blue-700 dark:bg-blue-950 dark:text-blue-300"
@@ -489,7 +490,12 @@ function ExpandedContent({
                       ? "No longer available — past chats remain viewable"
                       : paused
                         ? "Paused by the curator — unavailable right now"
-                        : agent.description}
+                        : // Managed agents show the live template's
+                          // tagline (annotateAgentTemplateState stamps it
+                          // on GET /api/agents) so template edits show up
+                          // without a re-install; tombstones/manual agents
+                          // fall back to the row's own description.
+                          (agent.templateTagline ?? agent.description)}
                   </span>
                 </button>
               </li>

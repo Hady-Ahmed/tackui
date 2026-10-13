@@ -115,7 +115,7 @@ lib/
     runner-instance.ts         # Shared runner singleton (used by runtime + thread API)
   catalog/
     catalog.config.ts          # Client-safe catalog types (AgentTemplate / PublicAgentTemplate / RequiredPlan / TemplateAuthMode) — no runtime config, no DB imports
-    template-store.ts          # Template CRUD (zod-validated, pg.Pool-backed) + installTemplate (idempotent upsert into agents) + findInstalledAgentId + countTemplateInstalls + getRunUsage (rolling-24h run count via agent_runs ⋈ thread_metadata) + annotateAgentTemplateState (templateUnpublished + templateRequiredPlan flags for the sidebar chips)
+    template-store.ts          # Template CRUD (zod-validated, pg.Pool-backed) + installTemplate (idempotent upsert into agents) + findInstalledAgentId + countTemplateInstalls + getRunUsage (rolling-24h run count via agent_runs ⋈ thread_metadata) + annotateAgentTemplateState (templateUnpublished + templateRequiredPlan chips + live templateTagline/templateDescription copy for the sidebar)
   auth/
     auth.ts                    # Better Auth instance (Postgres Pool adapter, plugins, first-user-is-admin, BETTER_AUTH_SECRET enforcement on boot)
     auth-client.ts             # Better Auth React client (signIn, signUp, useSession)
@@ -788,9 +788,18 @@ the agent is running. No endpoints, no config.
   The runtime resolves endpoint/auth **live from the template** on every
   request (`getTemplatesByIds` batch in `lib/agents/registry.ts`), so a
   template edit (endpoint fix, secret rotation, rename) propagates to
-  every installed org with no user action. The row's copied config
-  (refreshed on every install call) is only the fallback that keeps
-  history replay working after a template is deleted (tombstones).
+  every installed org with no user action. **Display copy propagates
+  live too:** `annotateAgentTemplateState` (on `GET /api/agents`)
+  stamps the live template's tagline/description onto managed agents
+  (`templateTagline`/`templateDescription` on `PublicAgent`) — the
+  sidebar shows the fresh tagline (hover title: description) on the
+  next fetch. Tombstones are the one snapshot case — the template row
+  is gone, so clients fall back to the agent row's install-time
+  `description`. Paused agents keep live values (the template row
+  still exists; freezing text during a pause would make un-pause a
+  visible stale→live jump). The row's copied config (refreshed on
+  every install call) is only the fallback that keeps history replay
+  working after a template is deleted (tombstones).
   Provenance: `agents.source_template_id` +
   `installed_template_updated_at` (last-sync snapshot).
 - **Fully locked:** any `PATCH` on an agent with `sourceTemplateId`
@@ -858,7 +867,23 @@ changes the org's agent list) → `checkTemplateInstall` (plan gate) →
   precedence: Removed > Paused > plan-locked; plan-locked rows are NOT
   muted (recoverable by upgrading — Paused/Removed are curator actions),
   past chats stay viewable, and the run 402 ("Upgrade to keep using it")
-  remains the explainer when they try.
+  remains the explainer when they try. The same annotation pass also
+  stamps the live template's **tagline/description**
+  (`templateTagline`/`templateDescription`) — the sidebar subtitle
+  shows the live tagline (hover title: description), so template text
+  edits reach installed workspaces without a re-install. Tombstones
+  get neither (the row snapshot stands); paused agents get live copy
+  (see "entitlement/reference" above for the pause rationale).
+- **Catalog card text clamping** — tagline clamps to 2 lines and
+  description to 4 (`ExpandableText` in
+  `components/expandable-text.tsx`: `line-clamp` + a Show more/less
+  toggle rendered only when the text actually overflows, measured at
+  hydration/resize/font-load). Applied on the in-app `/app/catalog`
+  grid and the public `/catalog` marketing page (server-rendered —
+  the server emits the clamped `<p>`, the client adds the toggle), so
+  a 2000-char description can't stretch cards into giant uneven rows.
+  The `/admin` template form surfaces the zod limits in-field
+  (`maxLength` + live `n/200` and `n/2000` counters in the hints).
 - **Usage-limit copy policy (three rules):** (1) the quota numbers are
   never stated in product copy — they appear only in the 402 JSON
   (debugging) and the `[quota]` server log; (2) **maximal promises are

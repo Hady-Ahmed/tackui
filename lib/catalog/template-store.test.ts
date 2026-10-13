@@ -576,6 +576,39 @@ describe("annotateAgentTemplateState (curator-state chips)", () => {
     expect(pub.templateRequiredPlan).toBe("pro");
   });
 
+  it("stamps the live template's tagline/description onto managed agents (display copy propagates, no re-install)", async () => {
+    const template = await createTemplate({
+      ...validInput,
+      slug: "copy-live",
+      tagline: "Live tagline",
+      description: "Live description",
+    });
+    const { agent } = await installTemplate(template, TEST_ORG);
+    const [pub] = await annotateAgentTemplateState(
+      await listAgents(TEST_ORG),
+    );
+    expect(pub.id).toBe(agent.id);
+    expect(pub.templateTagline).toBe("Live tagline");
+    expect(pub.templateDescription).toBe("Live description");
+  });
+
+  it("stamps live copy on paused (deactivated-template) agents too — the template row still exists", async () => {
+    const template = await createTemplate({
+      ...validInput,
+      slug: "copy-paused",
+      tagline: "Paused tagline",
+      description: "Paused description",
+      isActive: false,
+    });
+    await installTemplate(template, TEST_ORG);
+    const [pub] = await annotateAgentTemplateState(
+      await listAgents(TEST_ORG),
+    );
+    expect(pub.templateUnpublished).toBe(true);
+    expect(pub.templateTagline).toBe("Paused tagline");
+    expect(pub.templateDescription).toBe("Paused description");
+  });
+
   it("omits templateRequiredPlan for ungated templates", async () => {
     const template = await createTemplate({ ...validInput, slug: "ungated" });
     await installTemplate(template, TEST_ORG);
@@ -615,6 +648,23 @@ describe("annotateAgentTemplateState (curator-state chips)", () => {
     expect(pub.templateRemovedAt).toBeTruthy();
     expect(pub.templateRequiredPlan).toBeUndefined();
     expect(pub.templateUnpublished).toBeUndefined();
+  });
+
+  it("tombstoned agents carry no live copy — the install-time row snapshot stands", async () => {
+    const template = await createTemplate({
+      ...validInput,
+      slug: "copy-tombstoned",
+      tagline: "Gone tagline",
+      description: "Gone description",
+    });
+    await installTemplate(template, TEST_ORG);
+    await deleteTemplate(template.id);
+    const [pub] = await annotateAgentTemplateState(
+      await listAgents(TEST_ORG),
+    );
+    expect(pub.templateRemovedAt).toBeTruthy();
+    expect(pub.templateTagline).toBeUndefined();
+    expect(pub.templateDescription).toBeUndefined();
   });
 });
 

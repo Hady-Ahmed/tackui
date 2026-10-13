@@ -8,6 +8,7 @@ import { useCanManageAgents } from "@/lib/auth/use-can-manage-agents";
 import { useBilling } from "@/lib/billing/use-billing";
 import { UpgradeDialog } from "@/components/upgrade-dialog";
 import { BackToChat } from "@/components/back-to-chat";
+import { ExpandableText } from "@/components/expandable-text";
 
 /**
  * In-app agent catalog — one-click install of curated templates into the
@@ -225,15 +226,22 @@ function CatalogCard({
         )}
       </div>
 
+      {/* Cards clamp long copy (tagline 2 / description 4 lines) so one
+          verbose template can't blow the grid into giant uneven rows —
+          the Show more/less toggle only renders on actual overflow. */}
       {template.tagline && (
-        <p className="mt-3 text-sm font-medium text-zinc-700 dark:text-zinc-300">
-          {template.tagline}
-        </p>
+        <ExpandableText
+          text={template.tagline}
+          lines={2}
+          className="mt-3 text-sm font-medium text-zinc-700 dark:text-zinc-300"
+        />
       )}
       {template.description && (
-        <p className="mt-1 text-sm text-zinc-500 dark:text-zinc-400">
-          {template.description}
-        </p>
+        <ExpandableText
+          text={template.description}
+          lines={4}
+          className="mt-2 text-sm text-zinc-500 dark:text-zinc-400"
+        />
       )}
 
       <div className="mt-auto pt-4">

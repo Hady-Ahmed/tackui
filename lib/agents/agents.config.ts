@@ -119,4 +119,18 @@ export interface PublicAgent {
    * carry it — Removed wins. Server-side annotation on GET /api/agents.
    */
   templateRequiredPlan?: RequiredPlan;
+  /**
+   * The live template's tagline/description, stamped by
+   * annotateAgentTemplateState on GET /api/agents for managed
+   * (non-tombstoned) agents. Display text propagates live the same way
+   * endpoint/auth do at run time — a template edit reaches every
+   * installed workspace's UI on the next fetch, with no re-install.
+   * Tombstones never carry them (the template row is gone; the agent
+   * row's install-time snapshot is all that's left), so clients fall
+   * back to `description` there. Paused agents DO get live values —
+   * the template row still exists, and freezing text during a pause
+   * would make the un-pause transition a visible stale→live jump.
+   */
+  templateTagline?: string;
+  templateDescription?: string;
 }

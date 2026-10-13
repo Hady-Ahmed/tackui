@@ -5,6 +5,7 @@ import { SAAS_MODE } from "@/lib/config/saas";
 import { listTemplates } from "@/lib/catalog/template-store";
 import { getCurrentUser } from "@/lib/auth/context";
 import { MarketingLayout } from "@/components/marketing-layout";
+import { ExpandableText } from "@/components/expandable-text";
 
 /**
  * Public agent catalog — the marketing-facing list of curated agents
@@ -82,15 +83,24 @@ export default async function CatalogPage() {
                   )}
                 </div>
 
+                {/* Same clamp as the in-app catalog: tagline 2 /
+                    description 4 lines, toggle on overflow only (the
+                    server renders the clamped <p>; hydration adds the
+                    toggle). mt-2 gives the bold tagline breathing room
+                    above the muted description. */}
                 {template.tagline && (
-                  <p className="mt-3 text-sm font-medium text-zinc-700 dark:text-zinc-300">
-                    {template.tagline}
-                  </p>
+                  <ExpandableText
+                    text={template.tagline}
+                    lines={2}
+                    className="mt-3 text-sm font-medium text-zinc-700 dark:text-zinc-300"
+                  />
                 )}
                 {template.description && (
-                  <p className="mt-1 text-sm text-zinc-500 dark:text-zinc-400">
-                    {template.description}
-                  </p>
+                  <ExpandableText
+                    text={template.description}
+                    lines={4}
+                    className="mt-2 text-sm text-zinc-500 dark:text-zinc-400"
+                  />
                 )}
 
                 <div className="mt-auto pt-4">
