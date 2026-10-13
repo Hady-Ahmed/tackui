@@ -132,6 +132,13 @@ describe("POST /api/catalog", () => {
     expect(data.details.fieldErrors).toHaveProperty("description");
   });
 
+  it("returns 400 when the icon is a word rather than a single emoji", async () => {
+    const res = await POST(post({ ...validBody, icon: "hady" }));
+    expect(res.status).toBe(400);
+    const data = await res.json();
+    expect(data.details.fieldErrors).toHaveProperty("icon");
+  });
+
   it("returns 400 for invalid JSON", async () => {
     const res = await POST(post("not json"));
     expect(res.status).toBe(400);

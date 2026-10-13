@@ -205,6 +205,35 @@ describe("createTemplateBodySchema", () => {
       expect(result.data.description).toBe("padded");
     }
   });
+
+  it("accepts single-emoji icons across Unicode tricks", () => {
+    // Every real emoji is exactly one Intl.Segmenter grapheme cluster —
+    // including ZWJ sequences, flags, keycaps, and skin-tone modifiers.
+    for (const icon of ["✈️", "👨‍👩‍👧‍👦", "🇹🇷", "1️⃣", "🫱🏻‍🫲🏽", "🏳️‍🌈"]) {
+      expect(createTemplateBodySchema.safeParse({ ...validInput, icon }).success).toBe(true);
+    }
+  });
+
+  it("rejects words and other pure-ASCII icons", () => {
+    // The original bug: "hady" passed the old max(16) length cap and
+    // rendered as giant text in the card's emoji slot.
+    for (const icon of ["hady", "Travel", "a", "", "   ", "<script>"]) {
+      expect(createTemplateBodySchema.safeParse({ ...validInput, icon }).success).toBe(false);
+    }
+  });
+
+  it("rejects multi-emoji and emoji+letter mixes (2+ grapheme clusters)", () => {
+    expect(createTemplateBodySchema.safeParse({ ...validInput, icon: "🚀🚀" }).success).toBe(false);
+    expect(createTemplateBodySchema.safeParse({ ...validInput, icon: "h🚀" }).success).toBe(false);
+  });
+
+  it("trims surrounding whitespace off icons before validating", () => {
+    const result = createTemplateBodySchema.safeParse({ ...validInput, icon: " ✈️ " });
+    expect(result.success).toBe(true);
+    if (result.success) {
+      expect(result.data.icon).toBe("✈️");
+    }
+  });
 });
 
 describe("updateTemplateBodySchema", () => {
@@ -228,6 +257,12 @@ describe("updateTemplateBodySchema", () => {
       paidDailyQuota: null,
     });
     expect(result.success).toBe(true);
+  });
+
+  it("applies the single-emoji rule to patched icons too", () => {
+    expect(updateTemplateBodySchema.safeParse({ icon: "🚀" }).success).toBe(true);
+    expect(updateTemplateBodySchema.safeParse({ icon: "hady" }).success).toBe(false);
+    expect(updateTemplateBodySchema.safeParse({ icon: "🚀🚀" }).success).toBe(false);
   });
 
   it("defers paidDailyQuota context rules to merged-row validation when freeDailyQuota is absent", () => {

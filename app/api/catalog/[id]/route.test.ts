@@ -152,6 +152,19 @@ describe("PATCH /api/catalog/[id]", () => {
     expect(res.status).toBe(400);
   });
 
+  it("returns 400 when a patched icon is a word rather than a single emoji", async () => {
+    const tpl = await createTemplate(validInput);
+    const res = await PATCH(
+      new Request("http://localhost/api/catalog/x", {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ icon: "hady" }),
+      }),
+      ctx(tpl.id),
+    );
+    expect(res.status).toBe(400);
+  });
+
   it("returns 400 when SSRF guard rejects a changed endpoint", async () => {
     vi.mocked(assertSafeUrl).mockRejectedValueOnce(
       new UnsafeUrlError("private address"),

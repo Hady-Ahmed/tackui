@@ -369,7 +369,7 @@ export function CatalogAdmin() {
               placeholder="Travel"
             />
           </Field>
-          <Field label="Icon" hint="Optional emoji shown on the card">
+          <Field label="Icon" hint="Optional single emoji shown on the card">
             <input
               value={form.icon}
               onChange={(e) => updateForm({ icon: e.target.value })}

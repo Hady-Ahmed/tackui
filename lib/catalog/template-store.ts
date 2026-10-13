@@ -13,6 +13,28 @@ import type { AgentEntry, PublicAgent } from "@/lib/agents/agents.config";
 const templateAuthModeSchema = z.enum(["none", "jwt"]);
 const requiredPlanSchema = z.enum(["pro", "team"]);
 
+/**
+ * Template icons render in a single emoji slot on catalog cards, so a
+ * valid icon is exactly one grapheme cluster that is not pure printable
+ * ASCII. The ASCII gate is what rejects words ("hady") — a bare grapheme
+ * count would still pass single-letter strings — and it is used instead
+ * of an `Extended_Pictographic` check because keycaps (1️⃣) are emoji
+ * without a pictographic base. Every real emoji — ZWJ sequences, flags,
+ * skin tones, keycaps — is exactly one grapheme cluster under
+ * Intl.Segmenter (multi-emoji strings like "🚀🚀" are 2+ and rejected).
+ */
+const iconSegmenter = new Intl.Segmenter();
+
+export function isValidTemplateIcon(value: string): boolean {
+  if (/^[\x20-\x7E]*$/.test(value)) return false;
+  return [...iconSegmenter.segment(value)].length === 1;
+}
+
+const iconSchema = z
+  .string()
+  .trim()
+  .refine(isValidTemplateIcon, "Icon must be a single emoji");
+
 // Shared field definitions — used by the create + update input schemas.
 // `id` is intentionally absent: server-generated on create, URL path
 // param on update.
@@ -31,7 +53,7 @@ const fieldShapes = {
   // Clearable optional fields: `null` clears the stored value, absent
   // key preserves it (partial-update semantics).
   category: z.string().max(50).nullable().optional(),
-  icon: z.string().max(16).nullable().optional(),
+  icon: iconSchema.nullable().optional(),
   endpoint: z.string().url(),
   authMode: templateAuthModeSchema.default("none"),
   // HS256 needs ≥256 bits = 32 chars. Only validated when present
