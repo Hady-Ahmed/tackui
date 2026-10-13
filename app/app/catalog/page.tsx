@@ -240,7 +240,9 @@ function CatalogCard({
         <ExpandableText
           text={template.description}
           lines={4}
-          className="mt-2 text-sm text-zinc-500 dark:text-zinc-400"
+          // pre-line: literal line breaks typed in the admin form render
+          // as breaks (HTML collapses newlines in a plain <p> otherwise).
+          className="mt-2 whitespace-pre-line text-sm text-zinc-500 dark:text-zinc-400"
         />
       )}
 

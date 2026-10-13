@@ -776,7 +776,10 @@ the agent is running. No endpoints, no config.
   admins (`role === "admin"` via the Catalog section on `/admin` or the
   `/api/catalog` REST API). Fields: `slug` (unique, shareable),
   `name`, `tagline` + `description` (both required — zod-enforced on
-  create and PATCH, trimmed; blank catalog cards can't be published),
+  create and PATCH, trimmed; blank catalog cards can't be published;
+  the tagline is additionally single-line — `[\r\n]` rejected — since
+  its job is a one-line summary, while descriptions are multi-line and
+  render literal line breaks),
   `category`, `icon` (emoji),
   `endpoint`, `auth_mode`/`jwt_secret`/`jwt_scopes` (same machinery +
   encryption as agents), `required_plan` (nullable — `pro`/`team`),
@@ -792,7 +795,8 @@ the agent is running. No endpoints, no config.
   live too:** `annotateAgentTemplateState` (on `GET /api/agents`)
   stamps the live template's tagline/description onto managed agents
   (`templateTagline`/`templateDescription` on `PublicAgent`) — the
-  sidebar shows the fresh tagline (hover title: description) on the
+  sidebar shows the fresh tagline (hover title: tagline + description)
+  on the
   next fetch. Tombstones are the one snapshot case — the template row
   is gone, so clients fall back to the agent row's install-time
   `description`. Paused agents keep live values (the template row
@@ -870,7 +874,8 @@ changes the org's agent list) → `checkTemplateInstall` (plan gate) →
   remains the explainer when they try. The same annotation pass also
   stamps the live template's **tagline/description**
   (`templateTagline`/`templateDescription`) — the sidebar subtitle
-  shows the live tagline (hover title: description), so template text
+  shows the live tagline (hover title: tagline + description — the
+  hover completes the clamped subtitle), so template text
   edits reach installed workspaces without a re-install. Tombstones
   get neither (the row snapshot stands); paused agents get live copy
   (see "entitlement/reference" above for the pause rationale).
@@ -878,12 +883,19 @@ changes the org's agent list) → `checkTemplateInstall` (plan gate) →
   description to 4 (`ExpandableText` in
   `components/expandable-text.tsx`: `line-clamp` + a Show more/less
   toggle rendered only when the text actually overflows, measured at
-  hydration/resize/font-load). Applied on the in-app `/app/catalog`
-  grid and the public `/catalog` marketing page (server-rendered —
-  the server emits the clamped `<p>`, the client adds the toggle), so
-  a 2000-char description can't stretch cards into giant uneven rows.
-  The `/admin` template form surfaces the zod limits in-field
-  (`maxLength` + live `n/200` and `n/2000` counters in the hints).
+  hydration/resize/font-load). Descriptions carry `whitespace-pre-line`
+  so literal line breaks typed in the admin form render as breaks
+  (newlines are stored verbatim; HTML just collapses them in a plain
+  `<p>` — single-line-enforced taglines don't need the class). The chat
+  sidebar's subtitle is `line-clamp-2 whitespace-pre-line` (needed for
+  manual agents, whose subtitle is their multi-line description; a
+  no-op for managed agents' single-line taglines). Applied on the
+  in-app `/app/catalog` grid and the public `/catalog` marketing page
+  (server-rendered — the server emits the clamped `<p>`, the client
+  adds the toggle), so a 2000-char description can't stretch cards
+  into giant uneven rows. The `/admin` template form surfaces the zod
+  limits in-field (`maxLength` + live `n/200` and `n/2000` counters in
+  the hints).
 - **Usage-limit copy policy (three rules):** (1) the quota numbers are
   never stated in product copy — they appear only in the 402 JSON
   (debugging) and the `[quota]` server log; (2) **maximal promises are

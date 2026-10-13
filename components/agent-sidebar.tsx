@@ -413,11 +413,21 @@ function ExpandedContent({
             // Both dead states get the same muted row treatment (bg +
             // opacity); the chip tells them apart.
             const muted = removed || paused;
+            // Hover completes the clamped subtitle: managed agents get
+            // the live tagline (whose tail the 2-line clamp may hide)
+            // plus the description — the tooltip renders the newlines
+            // as breaks, and a blank line separates the two. Everyone
+            // else (manual/tombstoned — no template fields annotated)
+            // just the description.
+            const hoverTitle =
+              [agent.templateTagline, agent.templateDescription]
+                .filter(Boolean)
+                .join("\n\n") || agent.description;
             return (
               <li key={agent.id}>
                 <button
                   onClick={() => onSelectAgent(agent.id)}
-                  title={agent.templateDescription ?? agent.description}
+                  title={hoverTitle}
                   className={`flex w-full flex-col items-start rounded-lg px-3 py-2 text-left transition-colors ${
                     activeAgent === agent.id
                       ? "bg-blue-50 text-blue-700 dark:bg-blue-950 dark:text-blue-300"
@@ -485,7 +495,7 @@ function ExpandedContent({
                       </span>
                     )}
                   </div>
-                  <span className="mt-0.5 text-xs text-zinc-400">
+                  <span className="mt-0.5 line-clamp-2 whitespace-pre-line text-xs text-zinc-400">
                     {removed
                       ? "No longer available — past chats remain viewable"
                       : paused

@@ -85,6 +85,28 @@ describe("createTemplateBodySchema", () => {
     expect(result.success).toBe(false);
   });
 
+  it("rejects multi-line taglines (single-line field — line breaks belong in the description)", () => {
+    expect(
+      createTemplateBodySchema.safeParse({
+        ...validInput,
+        tagline: "Line one\nLine two",
+      }).success,
+    ).toBe(false);
+    expect(
+      createTemplateBodySchema.safeParse({
+        ...validInput,
+        tagline: "Line one\r\nLine two",
+      }).success,
+    ).toBe(false);
+    // Multi-line descriptions stay legal (rendered as real breaks).
+    expect(
+      createTemplateBodySchema.safeParse({
+        ...validInput,
+        description: "Line one\nLine two",
+      }).success,
+    ).toBe(true);
+  });
+
   it("rejects non-URL endpoints", () => {
     const result = createTemplateBodySchema.safeParse({
       ...validInput,
@@ -246,6 +268,12 @@ describe("updateTemplateBodySchema", () => {
   it("rejects an empty tagline/description when present", () => {
     expect(updateTemplateBodySchema.safeParse({ tagline: "" }).success).toBe(false);
     expect(updateTemplateBodySchema.safeParse({ description: "" }).success).toBe(false);
+  });
+
+  it("rejects multi-line taglines when present (field-level refine survives .partial())", () => {
+    expect(
+      updateTemplateBodySchema.safeParse({ tagline: "Line one\nLine two" }).success,
+    ).toBe(false);
   });
 
   it("accepts explicit null on clearable fields", () => {
