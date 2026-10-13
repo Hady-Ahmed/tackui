@@ -43,11 +43,9 @@ const TIERS: { id: PlanId; tagline: string; features: string[] }[] = [
     tagline: "Collaborate with per-seat workspaces.",
     features: [
       "Everything in Pro",
-      "Much higher daily limits on catalog agents",
       "5 concurrent runs",
       "Team workspaces + invites",
       "Per-seat billing",
-      "Priority support",
     ],
   },
 ];

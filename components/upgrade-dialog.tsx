@@ -66,7 +66,7 @@ export function UpgradeDialog({
       id: "pro",
       name: "Pro",
       price: "Unlimited agents · 3 concurrent runs",
-      features: ["Unlimited agents", "3 concurrent runs", "Higher rate limits", "Priority support"],
+      features: ["Unlimited agents", "Much higher daily limits on catalog agents", "3 concurrent runs", "Higher rate limits", "Priority support"],
     },
     {
       id: "team",
