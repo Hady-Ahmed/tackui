@@ -74,6 +74,80 @@ function dotTitle(status: TestStatus, message?: string): string {
   }
 }
 
+/**
+ * Resolved state-dot spec for an agent's avatar corner — null = no dot.
+ * Precedence: Paused (amber) > plan-locked (blue) > probe status (manual
+ * agents only — managed agents' endpoints never reach the client, so
+ * there's nothing to probe). Removed agents get no dot (the "Removed"
+ * chip carries it); healthy managed agents get none either. Shared by
+ * the expanded rows and the collapsed rail — one source of truth for
+ * the precedence order.
+ */
+interface DotSpec {
+  cls: string;
+  title: string;
+  aria: string;
+}
+
+function agentDot(
+  agent: PublicAgent,
+  statuses: Record<string, TestResult>,
+  plan: string | null,
+): DotSpec | null {
+  const removed = Boolean(agent.templateRemovedAt);
+  const paused = !removed && Boolean(agent.templateUnpublished);
+  // Plan-gated install whose template's requiredPlan outranks the
+  // viewer's plan (gated-after-install, or the org downgraded).
+  // SaaS-only: plan is null without billing; self-host never gates.
+  const planLocked =
+    !removed &&
+    !paused &&
+    plan != null &&
+    !!agent.templateRequiredPlan &&
+    !planSatisfies(plan as PlanId, agent.templateRequiredPlan);
+  if (paused) {
+    return {
+      cls: "bg-amber-400",
+      title: "Paused by the curator",
+      aria: "Paused by the curator",
+    };
+  }
+  if (planLocked && agent.templateRequiredPlan) {
+    const label = planLabel(agent.templateRequiredPlan);
+    return {
+      cls: "bg-blue-500",
+      title: `Requires the ${label} plan`,
+      aria: `Requires the ${label} plan`,
+    };
+  }
+  if (agent.endpoint) {
+    const status = (statuses[agent.id] ?? { status: "idle" }).status;
+    const title = dotTitle(status, statuses[agent.id]?.message);
+    return {
+      cls: dotClass(status),
+      title,
+      aria: `Connection status: ${title}`,
+    };
+  }
+  return null;
+}
+
+/**
+ * The state dot as a corner overlay on the row avatar (white ring keeps
+ * it legible where it crosses the avatar's edge). `titled` adds the
+ * hover tooltip + aria label — the expanded rows use it; the collapsed
+ * rail omits it since its button title/aria covers the whole tile.
+ */
+function AgentDot({ dot, titled = true }: { dot: DotSpec; titled?: boolean }) {
+  return (
+    <span
+      className={`absolute -bottom-0.5 -right-0.5 inline-block h-2 w-2 rounded-full border border-white dark:border-zinc-950 ${dot.cls}`}
+      title={titled ? dot.title : undefined}
+      aria-label={titled ? dot.aria : undefined}
+    />
+  );
+}
+
 interface AgentSidebarProps {
   agents: PublicAgent[];
   activeAgent: string;
@@ -413,6 +487,11 @@ function ExpandedContent({
             // Both dead states get the same muted row treatment (bg +
             // opacity); the chip tells them apart.
             const muted = removed || paused;
+            // State dot for the avatar's corner (shared resolver with
+            // the collapsed rail): amber = Paused, blue = plan-locked,
+            // probe colors for manual agents; removed + healthy managed
+            // agents show none.
+            const dot = agentDot(agent, statuses, plan);
             // Hover completes the clamped subtitle: managed agents get
             // the live tagline (whose tail the 2-line clamp may hide)
             // plus the description — the tooltip renders the newlines
@@ -437,42 +516,28 @@ function ExpandedContent({
                   } ${removed ? "opacity-60" : muted ? "opacity-70" : ""}`}
                 >
                   <div className="flex w-full items-center gap-2">
-                    {/* The dot is probe status, which only manual agents
-                        (endpoint present) have — managed agents' endpoints
-                        never reach the client, so the sidebar can't probe
-                        them. The spot carries state flags instead: amber =
-                        Paused, blue = plan-locked; otherwise managed
-                        agents render an invisible spacer so their names
-                        stay aligned with manual-agent rows. */}
-                    {paused ? (
-                      <span
-                        className="inline-block h-2 w-2 shrink-0 rounded-full bg-amber-400"
-                        title="Paused by the curator"
-                      />
-                    ) : planLocked && agent.templateRequiredPlan ? (
-                      <span
-                        className="inline-block h-2 w-2 shrink-0 rounded-full bg-blue-500"
-                        title={`Requires the ${planLabel(
-                          agent.templateRequiredPlan,
-                        )} plan`}
-                      />
-                    ) : agent.endpoint ? (
-                      <span
-                        className={`inline-block h-2 w-2 shrink-0 rounded-full ${dotClass(
-                          (statuses[agent.id] ?? { status: "idle" }).status,
-                        )}`}
-                        title={dotTitle(
-                          (statuses[agent.id] ?? { status: "idle" }).status,
-                          statuses[agent.id]?.message,
-                        )}
-                        aria-label={`Connection status: ${dotTitle(
-                          (statuses[agent.id] ?? { status: "idle" }).status,
-                          statuses[agent.id]?.message,
-                        )}`}
-                      />
-                    ) : (
-                      <span className="h-2 w-2 shrink-0" aria-hidden="true" />
-                    )}
+                    {/* Avatar in the old dot spot — every row gets the
+                        same left structure, so healthy managed agents no
+                        longer sit on an invisible spacer that shifted
+                        their titles. Emoji = the template's icon (live-
+                        stamped on GET /api/agents, no re-install); no
+                        icon = the catalog-style first-letter
+                        placeholder. The state dot rides the corner. */}
+                    <div className="relative shrink-0">
+                      {agent.templateIcon ? (
+                        <span
+                          className="flex h-6 w-6 items-center justify-center text-lg leading-none"
+                          aria-hidden="true"
+                        >
+                          {agent.templateIcon}
+                        </span>
+                      ) : (
+                        <span className="flex h-6 w-6 items-center justify-center rounded-full bg-blue-100 text-[11px] font-medium text-blue-700 dark:bg-blue-950 dark:text-blue-300">
+                          {agent.name.charAt(0).toUpperCase()}
+                        </span>
+                      )}
+                      {dot && <AgentDot dot={dot} />}
+                    </div>
                     <span className="text-sm font-medium">{agent.name}</span>
                     {removed && (
                       <span className="ml-auto shrink-0 rounded-full bg-zinc-200 px-1.5 py-0.5 text-[10px] font-medium text-zinc-600 dark:bg-zinc-800 dark:text-zinc-400">
@@ -584,7 +649,6 @@ function CollapsedContent({
 
       <nav className="flex flex-1 flex-col items-center gap-1 overflow-y-auto">
         {agents.map((agent) => {
-          const st = statuses[agent.id] ?? { status: "idle" as TestStatus };
           const isActive = activeAgent === agent.id;
           const removed = Boolean(agent.templateRemovedAt);
           const paused = !removed && Boolean(agent.templateUnpublished);
@@ -597,6 +661,11 @@ function CollapsedContent({
             !!agent.templateRequiredPlan &&
             !planSatisfies(plan as PlanId, agent.templateRequiredPlan);
           const muted = removed || paused;
+          // State dot on the avatar's corner — shared resolver with the
+          // expanded rows (amber = Paused, blue = plan-locked, probe
+          // colors for manual agents; managed agents without a flag show
+          // none — never probed).
+          const dot = agentDot(agent, statuses, plan);
           const lockedLabel = agent.templateRequiredPlan
             ? planLabel(agent.templateRequiredPlan)
             : "";
@@ -630,21 +699,17 @@ function CollapsedContent({
                       : agent.name
               }
             >
-              {agent.name.charAt(0).toUpperCase()}
-              {/* State flags keep the dot spot (amber = Paused, blue =
-                  plan-locked); manual agents get the probe dot; managed
-                  agents without a flag show no dot — never probed. */}
-              {paused ? (
-                <span className="absolute bottom-0.5 right-0.5 h-2 w-2 rounded-full border border-white bg-amber-400 dark:border-zinc-950" />
-              ) : planLocked ? (
-                <span className="absolute bottom-0.5 right-0.5 h-2 w-2 rounded-full border border-white bg-blue-500 dark:border-zinc-950" />
-              ) : agent.endpoint ? (
-                <span
-                  className={`absolute bottom-0.5 right-0.5 h-2 w-2 rounded-full border border-white dark:border-zinc-950 ${dotClass(
-                    st.status,
-                  )}`}
-                />
-              ) : null}
+              {agent.templateIcon ? (
+                <span className="text-lg leading-none" aria-hidden="true">
+                  {agent.templateIcon}
+                </span>
+              ) : (
+                agent.name.charAt(0).toUpperCase()
+              )}
+              {/* State dot rides the avatar's corner — same overlay
+                  treatment as the expanded rows (AgentDot's `titled` is
+                  off here; the button's own title/aria covers the tile). */}
+              {dot && <AgentDot dot={dot} titled={false} />}
             </button>
           );
         })}

@@ -20,7 +20,7 @@ import { toPublicAgent } from "@/lib/agents/agent-store";
 import type { CreateTemplateInput } from "./template-store";
 import { runMigrations } from "@/lib/db/migrate";
 import { query } from "@/lib/db/pg";
-import { listAgents, deleteAgent } from "@/lib/agents/agent-store";
+import { createAgent, listAgents, deleteAgent } from "@/lib/agents/agent-store";
 
 const TEST_ORG = "test-org-id";
 const OTHER_ORG = "other-org-id";
@@ -626,6 +626,7 @@ describe("annotateAgentTemplateState (curator-state chips)", () => {
       slug: "copy-paused",
       tagline: "Paused tagline",
       description: "Paused description",
+      icon: "⏸️",
       isActive: false,
     });
     await installTemplate(template, TEST_ORG);
@@ -635,6 +636,50 @@ describe("annotateAgentTemplateState (curator-state chips)", () => {
     expect(pub.templateUnpublished).toBe(true);
     expect(pub.templateTagline).toBe("Paused tagline");
     expect(pub.templateDescription).toBe("Paused description");
+    expect(pub.templateIcon).toBe("⏸️");
+  });
+
+  it("stamps the live template's icon onto managed agents (sidebar avatar glyph)", async () => {
+    const template = await createTemplate({
+      ...validInput,
+      slug: "icon-live",
+      icon: "✈️",
+    });
+    const { agent } = await installTemplate(template, TEST_ORG);
+    const [pub] = await annotateAgentTemplateState(
+      await listAgents(TEST_ORG),
+    );
+    expect(pub.id).toBe(agent.id);
+    expect(pub.templateIcon).toBe("✈️");
+  });
+
+  it("omits templateIcon when the template has none — clients fall back to the first-letter placeholder", async () => {
+    const template = await createTemplate({
+      ...validInput,
+      slug: "icon-less",
+    });
+    await installTemplate(template, TEST_ORG);
+    const [pub] = await annotateAgentTemplateState(
+      await listAgents(TEST_ORG),
+    );
+    expect(pub.templateIcon).toBeUndefined();
+  });
+
+  it("manual agents carry no templateIcon — nothing to annotate", async () => {
+    await createAgent(
+      {
+        name: "Manual",
+        description: "Hand-added agent",
+        endpoint: "http://localhost:8000/agent",
+        authMode: "none",
+      },
+      TEST_ORG,
+    );
+    const [pub] = await annotateAgentTemplateState(
+      await listAgents(TEST_ORG),
+    );
+    expect(pub.sourceTemplateId).toBeUndefined();
+    expect(pub.templateIcon).toBeUndefined();
   });
 
   it("omits templateRequiredPlan for ungated templates", async () => {
@@ -684,6 +729,7 @@ describe("annotateAgentTemplateState (curator-state chips)", () => {
       slug: "copy-tombstoned",
       tagline: "Gone tagline",
       description: "Gone description",
+      icon: "🧳",
     });
     await installTemplate(template, TEST_ORG);
     await deleteTemplate(template.id);
@@ -693,6 +739,7 @@ describe("annotateAgentTemplateState (curator-state chips)", () => {
     expect(pub.templateRemovedAt).toBeTruthy();
     expect(pub.templateTagline).toBeUndefined();
     expect(pub.templateDescription).toBeUndefined();
+    expect(pub.templateIcon).toBeUndefined();
   });
 });
 

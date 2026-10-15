@@ -115,7 +115,7 @@ lib/
     runner-instance.ts         # Shared runner singleton (used by runtime + thread API)
   catalog/
     catalog.config.ts          # Client-safe catalog types (AgentTemplate / PublicAgentTemplate / RequiredPlan / TemplateAuthMode) — no runtime config, no DB imports
-    template-store.ts          # Template CRUD (zod-validated, pg.Pool-backed) + installTemplate (idempotent upsert into agents) + findInstalledAgentId + countTemplateInstalls + getRunUsage (rolling-24h run count via agent_runs ⋈ thread_metadata) + annotateAgentTemplateState (templateUnpublished + templateRequiredPlan chips + live templateTagline/templateDescription copy for the sidebar)
+    template-store.ts          # Template CRUD (zod-validated, pg.Pool-backed) + installTemplate (idempotent upsert into agents) + findInstalledAgentId + countTemplateInstalls + getRunUsage (rolling-24h run count via agent_runs ⋈ thread_metadata) + annotateAgentTemplateState (templateUnpublished + templateRequiredPlan chips + live templateTagline/templateDescription/templateIcon copy for the sidebar)
   auth/
     auth.ts                    # Better Auth instance (Postgres Pool adapter, plugins, first-user-is-admin, BETTER_AUTH_SECRET enforcement on boot)
     auth-client.ts             # Better Auth React client (signIn, signUp, useSession)
@@ -259,11 +259,15 @@ Both the admin form and the agents table have a "Test connection" button that
 hits `POST /api/agents/reachability-probe`. This performs a server-side `GET` to the endpoint
 with a 5s timeout and reports reachability. It catches URL typos and down
 servers — it does **not** validate auth, AG-UI protocol compliance, or that the
-agent will actually run. The sidebar also shows a status dot per agent (gray =
-untested, green = reachable, red = unreachable), re-tested on window focus.
-Managed (catalog) agents show no dot — their endpoint never reaches the
+agent will actually run. The sidebar also shows a status dot per manual agent
+(gray = untested, green = reachable, red = unreachable), re-tested on window
+focus — rendered as a corner overlay on the row's avatar. Rows lead with an
+agent avatar (the template's emoji icon, live-stamped via
+`templateIcon`, or the catalog's first-letter placeholder when it has none);
+the status dot rides the avatar's corner in both sidebar modes. Managed
+(catalog) agents show no probe dot — their endpoint never reaches the
 client, so the sidebar can't probe them; connection health is the curator's
-responsibility (`/admin` → Test connection). The dot spot carries state flags
+responsibility (`/admin` → Test connection). The corner carries state flags
 instead: amber = Paused, blue = plan-locked.
 
 The probe applies the same `assertSafeUrl` SSRF guard as agent
@@ -793,13 +797,16 @@ the agent is running. No endpoints, no config.
   template edit (endpoint fix, secret rotation, rename) propagates to
   every installed org with no user action. **Display copy propagates
   live too:** `annotateAgentTemplateState` (on `GET /api/agents`)
-  stamps the live template's tagline/description onto managed agents
-  (`templateTagline`/`templateDescription` on `PublicAgent`) — the
+  stamps the live template's tagline/description/icon onto managed
+  agents (`templateTagline`/`templateDescription`/`templateIcon` on
+  `PublicAgent`) — the
   sidebar shows the fresh tagline (hover title: tagline + description)
   on the
   next fetch. Tombstones are the one snapshot case — the template row
   is gone, so clients fall back to the agent row's install-time
-  `description`. Paused agents keep live values (the template row
+  `description` (and the first-letter avatar placeholder, since
+  `templateIcon` is also unstamped). Paused agents keep live values
+  (the template row
   still exists; freezing text during a pause would make un-pause a
   visible stale→live jump). The row's copied config (refreshed on
   every install call) is only the fallback that keeps history replay
@@ -872,10 +879,13 @@ changes the org's agent list) → `checkTemplateInstall` (plan gate) →
   muted (recoverable by upgrading — Paused/Removed are curator actions),
   past chats stay viewable, and the run 402 ("Upgrade to keep using it")
   remains the explainer when they try. The same annotation pass also
-  stamps the live template's **tagline/description**
-  (`templateTagline`/`templateDescription`) — the sidebar subtitle
+  stamps the live template's **tagline/description/icon**
+  (`templateTagline`/`templateDescription`/`templateIcon`) — the sidebar
+  subtitle
   shows the live tagline (hover title: tagline + description — the
-  hover completes the clamped subtitle), so template text
+  hover completes the clamped subtitle), and the row's avatar glyph is
+  the live icon (emoji, catalog-card treatment; first-letter placeholder
+  when the template has none), so template text
   edits reach installed workspaces without a re-install. Tombstones
   get neither (the row snapshot stands); paused agents get live copy
   (see "entitlement/reference" above for the pause rationale).

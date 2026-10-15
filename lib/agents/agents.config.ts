@@ -133,4 +133,13 @@ export interface PublicAgent {
    */
   templateTagline?: string;
   templateDescription?: string;
+  /**
+   * The live template's icon (emoji), stamped by
+   * annotateAgentTemplateState alongside the tagline/description copy —
+   * same live-propagation rule: managed (non-tombstoned) agents get it,
+   * tombstones and manual agents don't (the client falls back to the
+   * first-letter placeholder). The sidebar renders it as the row's
+   * avatar glyph (catalog-card treatment).
+   */
+  templateIcon?: string;
 }

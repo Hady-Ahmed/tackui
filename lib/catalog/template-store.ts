@@ -629,15 +629,17 @@ export interface RunUsage {
  *   sent as plain curator state (billing-free). The sidebar client
  *   compares it against the org's plan and renders the 🔒 Pro/Team
  *   chip when unsatisfied. Tombstones never carry it — Removed wins.
- * - `templateTagline`/`templateDescription` — the live template's
- *   display copy, stamped onto managed agents so a template edit
- *   reaches every installed workspace's UI with no re-install (same
+ * - `templateTagline`/`templateDescription`/`templateIcon` — the live
+ *   template's display copy + emoji, stamped onto managed agents so a
+ *   template edit reaches every installed workspace's UI with no re-install (same
  *   live-propagation principle as the runtime's endpoint/auth
  *   resolution). Paused agents get live values too — the template row
  *   still exists, and freezing text during a pause would turn the
  *   un-pause transition into a visible stale→live jump. Tombstones
  *   never carry them — the template row is gone, so the agent row's
  *   install-time snapshot (its own `description`) is all that's left.
+ *   Empty-string/null-safe: only real values stamp, so a (legacy) null
+ *   row falls back to the agent's own copy client-side.
  *
  * Lives here (not agent-store) because it needs the templates table and
  * agent-store must not import template-store (template-store already
@@ -675,6 +677,7 @@ export async function annotateAgentTemplateState(
         if (template.description) {
           pub.templateDescription = template.description;
         }
+        if (template.icon) pub.templateIcon = template.icon;
         const required = planGates.get(entry.sourceTemplateId);
         if (required) pub.templateRequiredPlan = required;
       }
