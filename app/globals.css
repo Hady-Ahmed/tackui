@@ -47,6 +47,46 @@ body {
   unicode-bidi: plaintext;
 }
 
+/* Markdown tables in chat messages (Streamdown inside CopilotKit).
+
+   Streamdown 1.6.x stamps the inner <table> with its wrapper's
+   data-streamdown="table-wrapper" attribute (prop-spread bug; fixed in
+   streamdown 2.x, but CopilotKit pins ^1.3.0). CopilotKit's stylesheet
+   gives [data-streamdown="table-wrapper"] display:flex — applied to the
+   table itself this destroys the table's column grid: thead/tbody turn
+   into independent shrink-wrapped boxes, so header and body columns stop
+   aligning, row separators stop at content width, and the 100%-wide box
+   leaves dead space to the right. display:table restores the real grid;
+   the selector only matches the buggy attribute shape, so it goes dormant
+   once streamdown is upgraded past the bug.
+
+   Polish on top: tables hug content (wide ones still scroll via the
+   wrapper's overflow-x-auto), solid header band, transparent body rows
+   riding on the existing hairline row separators instead of the stacked
+   translucent header/body tints, and a touch more horizontal cell padding
+   than CopilotKit's default so the outermost text doesn't sit against the
+   hairline border. */
+[data-copilotkit] [data-streamdown="table-wrapper"] table {
+  display: table;
+  width: auto;
+  max-width: 100%;
+  border-color: var(--border);
+}
+
+[data-copilotkit] [data-streamdown="table-wrapper"] thead {
+  background-color: var(--muted);
+}
+
+[data-copilotkit] [data-streamdown="table-wrapper"] tbody {
+  background-color: transparent;
+}
+
+[data-copilotkit] [data-streamdown="table-wrapper"] th,
+[data-copilotkit] [data-streamdown="table-wrapper"] td {
+  padding-inline: 1.25rem; /* 20px vs CopilotKit's 16px — breathing room vs the border */
+  padding-block: 0.5rem;   /* keep the 8px vertical rhythm */
+}
+
 /* Dot-grid background for hero sections — fades out at edges via mask */
 .hero-grid {
   background-image: radial-gradient(

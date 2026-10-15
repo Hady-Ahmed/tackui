@@ -100,7 +100,7 @@ app/
   reset-password/page.tsx      # Password reset form — reads ?token=, calls authClient.resetPassword
   layout.tsx                   # Root layout — wraps app in CopilotKitProvider + FOUC-free theme init script + CookieNotice (SaaS only) + metadataBase (reads BETTER_AUTH_URL for absolute OG/Twitter image URLs)
   page.tsx                     # SaaS-aware root router — SAAS_MODE renders <Landing/>, else redirects to /app
-  globals.css                  # Global styles + Tailwind (class-based dark mode via @custom-variant)
+  globals.css                  # Global styles + Tailwind (class-based dark mode via @custom-variant) + CopilotKit overrides (chat fonts, RTL bidi, chat-table Streamdown-bug shim)
   icon.svg                     # Static SVG favicon — 3D thumbtack glyph on blue gradient chip (theme-aware via prefers-color-scheme)
   apple-icon.tsx               # Generated 180×180 PNG apple-touch icon (next/og ImageResponse — no committed binary)
   opengraph-image.tsx          # Generated 1200×630 PNG social-share card for OG link previews (next/og ImageResponse — auto-injects <meta property="og:image">)
@@ -1446,6 +1446,34 @@ strategy it uses so users know whether server-side session storage is required.
 - `CopilotChat` is imported from `@copilotkit/react-core/v2` (v2 version with
   `agentId`/`threadId` props), NOT from `@copilotkit/react-ui` (which exports
   the v1 version without those props) or `@copilotkit/react-core` (v1 root).
+- **Chat markdown tables + the Streamdown attribute bug** — assistant/user
+  messages render through Streamdown (transitive via CopilotKit, which pins
+  `streamdown: ^1.3.0` → resolves 1.6.x). Streamdown 1.6.x's table component
+  stamps the inner `<table>` with its wrapper's `data-streamdown="table-wrapper"`
+  attribute (prop-spread bug; fixed upstream in streamdown 2.x). CopilotKit's
+  stylesheet styles `[data-streamdown="table-wrapper"]` with `display: flex`, so
+  that rule lands on the table itself and destroys the table's column grid —
+  header and body columns sized independently (misaligned), rows shrink-wrapped
+  inside the full-width box (dead right space), black gap between header band
+  and first row. `app/globals.css` carries a deliberate CSS shim
+  (`[data-copilotkit] [data-streamdown="table-wrapper"] table { display: table }`
+  + hug-content/band/hairline polish): don't "clean it up" without first
+  confirming the installed streamdown is past the bug — the selector only
+  matches the buggy DOM (once the attribute is fixed upstream it stops matching
+  and the rule can be deleted). Upgrading CopilotKit alone does NOT fix it
+  (verified through 1.79.0 — every release, canary included, still pins
+  `^1.3.0`); the root-cause path is an npm override to streamdown 2.7.0 with its
+  own regression pass (2.x restructured code-block rendering). Two related
+  traps: (1) the utility classes Streamdown emits are partially inert — the
+  app's Tailwind build doesn't scan node_modules, so `bg-muted/80`,
+  `bg-muted/40`, `divide-border`, `border-border` have no rules in the built
+  CSS; the effective chat-table styling comes from CopilotKit's
+  `[data-streamdown=…]` attribute selectors (inside `@layer components`, which
+  unlayered `globals.css` rules beat on cascade + specificity). (2) Customizing
+  the renderer (`CopilotChat`'s `chatView → messageView → assistantMessage`
+  slot chain, e.g. `markdownRenderer`) is available if Streamdown misbehaves
+  further — the markdown renderer slot receives `{ content }` and defaults to
+  `<Streamdown>`.
 - AG-UI protocol spec: https://docs.ag-ui.com — see
   [Events](https://docs.ag-ui.com/concepts/events),
   [Messages](https://docs.ag-ui.com/concepts/messages), and
