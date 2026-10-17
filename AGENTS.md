@@ -1493,6 +1493,16 @@ strategy it uses so users know whether server-side session storage is required.
   are skipped (or one-lined under Docs). Released sections (`## [x.y.z]`)
   are frozen history — never edit them; the next release starts fresh from
   `[Unreleased]`.
+  **Entry discipline:** write each bullet for someone deciding whether to
+  upgrade, not for the implementer. Keep what that reader would act on or
+  observe — the behavior, where it surfaces, migrations, env vars, and
+  user-facing error codes. Cut internals: schema field lists, internal
+  identifiers/column names, refactoring moves, zod rules, and rationale
+  clauses ("since X isn't Y") — if a detail wouldn't change the reader's
+  decision, it doesn't belong in the entry. Size guide: the longest entries
+  in 1.0.0 (~700 chars) are the ceiling; a bullet at double that length is
+  internals leaking. Never narrate the cycle's own history ("previously
+  accepted X") — state the final behavior only.
 - **Documentation policy — public repo:** docs (CHANGELOG, README, code
   comments) describe **product behavior, never business strategy** — no
   personal/marketing channels, no conversion or retention framing.
