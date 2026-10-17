@@ -2,11 +2,11 @@
 
 ## Supported versions
 
-Only the latest release line receives security fixes. The project is pre-1.0 — there is no separate patch line.
+Only the latest release line receives security fixes.
 
 | Version | Supported |
 | --- | --- |
-| `0.1.x` (current) | ✅ |
+| `2.x` (current) | ✅ |
 | Older | ❌ — upgrade to the latest |
 
 ## Reporting a vulnerability
