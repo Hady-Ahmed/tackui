@@ -75,6 +75,7 @@ jobs:
           tags: |
             type=semver,pattern={{version}}
             type=semver,pattern={{major}}.{{minor}}
+            type=semver,pattern={{major}}
             type=raw,value=latest,enable=${{ !contains(github.ref, '-rc') }}
 
       - name: Merge per-arch images into multi-arch manifest

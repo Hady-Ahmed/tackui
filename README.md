@@ -37,7 +37,7 @@ A unified frontend for custom agents speaking the [AG-UI protocol](https://docs.
 
 ## Quick Start
 
-> **Prefer not to self-host?** [tackui.com](https://tackui.com) runs the same app with a free tier.
+> A hosted instance is available at [tackui.com](https://tackui.com).
 
 ### Option A: Prebuilt image (no clone)
 
