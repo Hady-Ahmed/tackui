@@ -58,7 +58,7 @@ const SCHEMA_VERSION = 1;
  *
  * `connect()` uses smart replay: filters RUN_ERROR events from the raw
  * event stream before compacting. This sidesteps the AG-UI verifier lock
- * bug documented in AGENTS.md ("Thread history recovery on revisit")
+ * bug documented in docs/architecture.md ("Thread persistence")
  * while preserving all other event types (messages, tool calls,
  * STATE_*, REASONING_*, STEP_*). Live-bridging to an in-flight run via
  * ACTIVE_CONNECTIONS is preserved.
@@ -96,7 +96,7 @@ const SCHEMA_VERSION = 1;
  *   - Polling refresh on a timer (e.g. every 5s)
  *   - Sticky sessions at the load balancer (user always hits same instance)
  *
- * See AGENTS.md "In-memory cache" section for the full design notes.
+ * See docs/architecture.md ("In-memory cache") for the full design notes.
  */
 export class PostgresAgentRunner extends AgentRunner {
   readonly ɵsupportsLocalThreadEndpoints = true as const;
@@ -357,7 +357,7 @@ export class PostgresAgentRunner extends AgentRunner {
     // ─── Smart replay: filter RUN_ERROR events before compacting ─────
     // AG-UI's verifier locks when it sees a RUN_ERROR mid-stream, which
     // makes failed-run threads permanently unreadable on reconnect (the
-    // bug documented in AGENTS.md "Thread history recovery on revisit").
+    // bug documented in docs/architecture.md "Thread persistence").
     // Filtering RUN_ERROR out before compactEvents sidesteps the lock
     // while preserving all other event types (messages, tool calls,
     // STATE_*, REASONING_*, STEP_*).

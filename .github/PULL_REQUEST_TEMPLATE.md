@@ -20,7 +20,7 @@
 - [ ] No `eslint-disable` / `@ts-ignore` / `@ts-expect-error` / `any` added without justification in this PR description
 - [ ] No `TODO` / `FIXME` / `HACK` comments added without an accompanying issue link
 - [ ] If this touches security-sensitive code (`lib/auth/`, `lib/billing/`, `lib/net/`, `lib/ratelimit/`), I've added tests for the bypass attempt (what an attacker would try) — see the **Security** section below
-- [ ] If this changes architecture (new agent kind, auth model, rate-limit/billing structure), I've updated [`AGENTS.md`](../AGENTS.md)
+- [ ] If this changes architecture (agent registry, auth model, rate-limit/billing structure), I've updated the matching [`docs/*.md`](../docs/) file — and `AGENTS.md` Gotchas if the change introduced a new trap
 - [ ] If this adds a new env var, I've added it to [`.env.example`](../.env.example) and the README's Environment Variables section
 - [ ] No secrets committed (`.env.local` / `.env.production` stay git-ignored)
 

@@ -38,7 +38,16 @@ Type-checking is not wired into `npm run build` for speed — please run `npx ts
 
 ## Project architecture
 
-Before making changes, read [`AGENTS.md`](./AGENTS.md) — it's the comprehensive guide to the project's architecture, conventions, agent registry, auth model, rate limiting, billing, and the full file structure. The README has a higher-level overview; AGENTS.md is the source of truth for implementation details.
+Before making changes, read [`AGENTS.md`](./AGENTS.md) — agent-facing rules: commands, testing conventions, and the gotchas that prevent common mistakes. The deep architecture documentation lives in [`docs/`](./docs):
+
+- [`docs/architecture.md`](./docs/architecture.md) — request flow, runtime, thread persistence, rendering
+- [`docs/agent-registry.md`](./docs/agent-registry.md) — agent registry, CRUD, per-agent JWT auth, encryption at rest
+- [`docs/catalog.md`](./docs/catalog.md) — template catalog, install semantics, run gates, lifecycle
+- [`docs/auth-and-orgs.md`](./docs/auth-and-orgs.md) — Better Auth, access control, orgs, members
+- [`docs/security.md`](./docs/security.md) — SSRF guard, headers, rate limiting
+- [`docs/saas-mode.md`](./docs/saas-mode.md) — SaaS flags, Stripe billing, plan enforcement
+
+The README has the user-facing overview (setup, env vars, deployment).
 
 ## Testing conventions
 
@@ -66,9 +75,18 @@ See the `AGENTS.md` "Testing conventions" section for the full rationale.
 4. **Don't commit secrets.** `.env.local` and `.env.production` are git-ignored. If you accidentally commit a secret, **rotate it immediately** and open a PR removing it from history (`git filter-repo` or BFG).
 5. **Don't add `eslint-disable` / `@ts-ignore` / `@ts-expect-error` / `any`** without a strong justification in the PR description. The codebase has zero today; the goal is to keep it that way, especially in security-critical code (`lib/auth`, `lib/billing`, `lib/net`, `lib/ratelimit`).
 6. **Don't add `TODO` / `FIXME` / `HACK` comments** without an accompanying issue link. Open the issue first, then reference it: `// TODO(#123): handle X`.
-7. **Update `AGENTS.md`** when you change the project's structure, add a new agent kind, change the auth model, or modify the rate-limit/billing architecture. It's the architecture doc — keep it accurate.
+7. **Update the docs you touched** — architecture changes go to the matching `docs/*.md` file (see the list above); if a change introduced a new trap (an import path, invariant, reserved word, or security rule an agent would otherwise get wrong), add a bullet to `AGENTS.md`'s Gotchas section. Docs describe product behavior, never business strategy — design rationale in engineering terms.
 8. **Add a bullet to `CHANGELOG.md`** under `## [Unreleased]` in the same PR for any notable change (feature, behavior change, fix, security work), using the Keep a Changelog categories. Docs-only and routine chores are skipped. Never edit released sections (`## [x.y.z]`) — they're frozen history.
 9. **Use the PR template** (`.github/PULL_REQUEST_TEMPLATE.md`) as your PR description.
+
+## Changelog discipline
+
+Rule 8 above covers *when* to add an entry; this is *how* to write it. Entries use the Keep a Changelog categories (Added / Changed / Fixed / Security / Environment).
+
+- **Write each bullet for someone deciding whether to upgrade, not for the implementer.** Keep what that reader would act on or observe — the behavior, where it surfaces, migrations, env vars, and user-facing error codes. Cut internals: schema field lists, internal identifiers/column names, refactoring moves, zod rules, and rationale clauses ("since X isn't Y") — if a detail wouldn't change the reader's decision, it doesn't belong in the entry.
+- **Size guide:** ~700 chars is the ceiling; a bullet at double that length is internals leaking.
+- **Never narrate the cycle's own history** ("previously accepted X") — state the final behavior only. If something is introduced and changed within the same unreleased cycle, fold the final state into the feature entry — never log a fix to unreleased work (release-notes readers never saw it).
+- Docs-only and routine chores are skipped (or one-lined under Docs). Released sections (`## [x.y.z]`) are frozen history — never edit them; the next release starts fresh from `[Unreleased]`.
 
 ## Commit messages
 

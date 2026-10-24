@@ -443,7 +443,7 @@ These are documented for transparency and will be addressed in future releases:
 
 ## Contributing
 
-See [AGENTS.md](AGENTS.md) for architecture details, development conventions, and the full project structure. PRs welcome.
+See [AGENTS.md](AGENTS.md) for development conventions and agent-facing rules, and [`docs/`](docs/) for the architecture deep-dives (runtime, agent registry, catalog, auth, security, SaaS mode). PRs welcome.
 
 ## License
 

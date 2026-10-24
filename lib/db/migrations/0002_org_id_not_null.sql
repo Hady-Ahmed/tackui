@@ -9,7 +9,8 @@
 --
 -- Wipe-and-restart: existing NULL rows are DELETED, not backfilled. Re-add
 -- agents via the admin UI after the first user signs up and gets a personal
--- org. See AGENTS.md for the full multi-tenant migration plan.
+-- org. Agents + thread_metadata rows are org-scoped from here on
+-- (see docs/auth-and-orgs.md, "Access control").
 
 DELETE FROM agents WHERE org_id IS NULL;
 

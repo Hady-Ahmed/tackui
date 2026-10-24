@@ -13,7 +13,7 @@ import { getCurrentUser } from "@/lib/auth/context";
  * with outcomes (not limits): the tier names what you get, the catalog
  * usage limits surface where they're actually encountered — the run 402
  * and the rolling-window footnote below (see the usage-limit copy policy
- * in AGENTS.md).
+ * in docs/catalog.md).
  *
  * The dollar amounts shown here are marketing prices that must match the
  * Stripe Prices configured via STRIPE_PRICE_PRO / STRIPE_PRICE_TEAM —

@@ -20,7 +20,8 @@ import {
  * Idempotent: installing an already-installed template RE-SYNCS the
  * stored config from the template (endpoint fixes, secret rotation)
  * onto the existing agent row — agent id preserved, threads intact.
- * That's the "Update" button on the catalog card.
+ * Users never see an update action: live propagation means the card
+ * just shows "✓ Added to workspace" (see docs/catalog.md).
  *
  * Gates, in order:
  *   1. canManageAgents — installing changes the org's agent list, so it

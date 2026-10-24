@@ -323,7 +323,7 @@ export async function checkCatalogRunGates(
   // The plan-upgrade clause is free-tier only — a paid user who
   // exhausted a paid cap gets the countdown; there is no higher tier to
   // point them to. Copy never says "unlimited" (see the usage-limit
-  // copy policy in AGENTS.md), so caps can change without contradicting
+  // copy policy in docs/catalog.md), so caps can change without contradicting
   // anything a customer saw when they subscribed.
   const upgradeClause = plan === "free" ? " Upgrade to Pro for more usage." : "";
   return NextResponse.json(

@@ -285,10 +285,11 @@ describe("PostgresAgentRunner — connect() smart replay", () => {
   // connect() calls getHistoricRuns() — a `WITH RECURSIVE` CTE walking
   // the parent_run_id chain. pg-mem's parser doesn't support
   // `WITH RECURSIVE`, so these can only run against real Postgres (via
-  // testcontainers — planned integration suite, see AGENTS.md). The
+  // testcontainers — planned integration suite, see docs/architecture.md
+  // "Future / extension points"). The
   // connect() smart-replay logic (RUN_ERROR filtering, STATE_*
   // preservation, live-bridging) is exercised end-to-end by the manual
-  // smoke test in AGENTS.md.
+  // smoke test in docs/agent-registry.md.
 
   it.skip("replays events from agent_runs, filtering out RUN_ERROR", async () => {
     const eventsWithErr: BaseEvent[] = [
