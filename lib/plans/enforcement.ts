@@ -328,7 +328,7 @@ export async function checkCatalogRunGates(
   const upgradeClause = plan === "free" ? " Upgrade to Pro for more usage." : "";
   return NextResponse.json(
     {
-      error: `You've reached your daily usage limit for this agent. You can use it again in ${formatCountdown(resetsAt - Date.now())}.${upgradeClause}`,
+      error: `You've reached your usage limit for this agent — you can use it again in ${formatCountdown(resetsAt - Date.now())}.${upgradeClause}`,
       code: "AGENT_QUOTA_EXCEEDED",
       resetsAt,
       quota,

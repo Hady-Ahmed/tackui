@@ -9,6 +9,8 @@ import { HitlHandlers } from "./hitl/approval-card";
 import { ToolRenders } from "./tools/tool-renders";
 import { useAuthConfig } from "@/lib/auth/use-auth-config";
 import { useCanManageAgents } from "@/lib/auth/use-can-manage-agents";
+import { useBilling } from "@/lib/billing/use-billing";
+import { UpgradeDialog } from "./upgrade-dialog";
 import type { PublicAgent } from "@/lib/agents/agents.config";
 
 export function ChatShell() {
@@ -23,7 +25,19 @@ export function ChatShell() {
   );
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
   const [mobileOpen, setMobileOpen] = useState(false);
-  const [runError, setRunError] = useState<string | null>(null);
+  // Run failure banner state. `code` carries the server error code for
+  // 402 paywall gates (quota exhausted / plan-locked) so the banner can
+  // restyle and offer the UpgradeDialog inline — the conversion ask
+  // surfaces exactly where the user hit the limit, not behind the
+  // account menu.
+  const [runError, setRunError] = useState<{
+    msg: string;
+    code: string | null;
+  } | null>(null);
+  const [upgradeOpen, setUpgradeOpen] = useState(false);
+  // null billing = billing not configured (self-host / SaaS-without-Stripe)
+  // — the upgrade affordance only renders when checkout can actually run.
+  const { billing } = useBilling();
 
   // Read the persisted collapsed state AFTER hydration to avoid a
   // server/client mismatch (server has no window/localStorage).
@@ -94,6 +108,21 @@ export function ChatShell() {
   const activeAgentName =
     agents.find((a) => a.id === activeAgent)?.name ?? "Chat";
 
+  // Banner styling + upgrade affordance, derived from the forwarded 402
+  // code. Paywall 402s (quota exhausted / plan-locked) aren't errors —
+  // they get the calm blue info banner on every plan. The Upgrade button
+  // only renders when an upgrade actually helps: a plan-lock always has
+  // a higher purchasable tier, but a quota cap is only raisable from
+  // free — pro and team share one paid quota, so Team wouldn't raise it
+  // (matching the server's free-tier-only upgrade clause in the 402).
+  const runErrorIsPaywall =
+    runError?.code === "AGENT_QUOTA_EXCEEDED" ||
+    runError?.code === "PLAN_AGENT_LOCKED";
+  const showRunUpgrade =
+    runErrorIsPaywall &&
+    !!billing &&
+    (runError?.code === "PLAN_AGENT_LOCKED" || billing.plan === "free");
+
   return (
     <div className="flex h-screen w-full overflow-hidden bg-zinc-50 dark:bg-black">
       <AgentSidebar
@@ -137,16 +166,40 @@ export function ChatShell() {
         {activeAgent ? (
           <>
             {runError && (
-              <div className="mx-4 mt-4 flex items-start justify-between gap-3 rounded-lg border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-700 dark:border-red-900 dark:bg-red-950 dark:text-red-300">
-                <span>{runError}</span>
-                <button
-                  type="button"
-                  onClick={() => setRunError(null)}
-                  aria-label="Dismiss"
-                  className="shrink-0 text-red-500 hover:text-red-700 dark:text-red-400 dark:hover:text-red-200"
-                >
-                  x
-                </button>
+              <div
+                className={`mx-4 mt-4 flex items-start justify-between gap-3 rounded-lg border px-4 py-3 text-sm ${
+                  runErrorIsPaywall
+                    ? // Quota/plan 402 — the paywall moment, not an error:
+                      // calm blue info styling keeps the Upgrade button as
+                      // the single accent instead of fighting it with red.
+                      "border-blue-200 bg-blue-50 text-blue-700 dark:border-blue-900 dark:bg-blue-950 dark:text-blue-300"
+                    : "border-red-200 bg-red-50 text-red-700 dark:border-red-900 dark:bg-red-950 dark:text-red-300"
+                }`}
+              >
+                <span>{runError.msg}</span>
+                <div className="flex shrink-0 items-center gap-2">
+                  {showRunUpgrade && (
+                    <button
+                      type="button"
+                      onClick={() => setUpgradeOpen(true)}
+                      className="rounded-md bg-blue-600 px-2.5 py-1 text-xs font-medium text-white transition-all hover:bg-blue-700 active:scale-[0.98]"
+                    >
+                      Upgrade
+                    </button>
+                  )}
+                  <button
+                    type="button"
+                    onClick={() => setRunError(null)}
+                    aria-label="Dismiss"
+                    className={
+                      runErrorIsPaywall
+                        ? "text-blue-400 hover:text-blue-600 dark:text-blue-400 dark:hover:text-blue-200"
+                        : "text-red-500 hover:text-red-700 dark:text-red-400 dark:hover:text-red-200"
+                    }
+                  >
+                    x
+                  </button>
+                </div>
               </div>
             )}
             <HitlHandlers agentId={activeAgent} />
@@ -154,7 +207,9 @@ export function ChatShell() {
             <AgentChat
               agentId={activeAgent}
               threadId={activeThreadId}
-              onRunError={setRunError}
+              onRunError={(msg, code) =>
+                setRunError(msg ? { msg, code: code ?? null } : null)
+              }
             />
           </>
         ) : hasLoaded ? (
@@ -205,6 +260,7 @@ export function ChatShell() {
           </div>
         )}
       </main>
+      <UpgradeDialog open={upgradeOpen} onClose={() => setUpgradeOpen(false)} />
     </div>
   );
 }
@@ -216,7 +272,7 @@ function AgentChat({
 }: {
   agentId: string;
   threadId: string;
-  onRunError: (msg: string | null) => void;
+  onRunError: (msg: string | null, code?: string) => void;
 }) {
   const { copilotkit } = useCopilotKit();
 
@@ -256,10 +312,20 @@ function AgentChat({
           payload && typeof payload === "object" && "error" in payload
             ? String((payload as { error: unknown }).error)
             : msg;
+        const code =
+          payload && typeof payload === "object" && "code" in payload
+            ? String((payload as { code: unknown }).code)
+            : "";
         // HTTP-backed failures (rate limits, plan/quota gates, removed
-        // agents) carry the server's human-friendly message.
+        // agents) carry the server's human-friendly message. The 402's
+        // error code is forwarded so the parent can decide banner styling
+        // and whether an Upgrade affordance applies (it needs the org's
+        // plan for that, which lives here as billing state in the parent).
         if (status === 429 || status === 402 || status === 410) {
-          onRunError(serverMsg || "Too many requests. Try again shortly.");
+          onRunError(
+            serverMsg || "Too many requests. Try again shortly.",
+            status === 402 ? code : undefined,
+          );
           return;
         }
         // Everything else (backend down, bad template endpoint, protocol

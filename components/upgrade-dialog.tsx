@@ -65,14 +65,24 @@ export function UpgradeDialog({
     {
       id: "pro",
       name: "Pro",
-      price: "Unlimited agents · 3 concurrent runs",
-      features: ["Unlimited agents", "Much higher daily limits on catalog agents", "3 concurrent runs", "Higher rate limits", "Priority support"],
+      price: "$10/mo · 3 agents running at a time",
+      features: [
+        "Much higher usage on every catalog agent",
+        "Unlimited agents",
+        "3 agents running at a time",
+        "Priority support",
+      ],
     },
     {
       id: "team",
       name: "Team",
-      price: "Per seat · 5 concurrent runs",
-      features: ["Everything in Pro", "5 concurrent runs", "Team workspaces + invites", "Per-seat billing"],
+      price: "$15/seat/mo · 5 agents running at a time",
+      features: [
+        "Everything in Pro, for every seat",
+        "5 agents running at a time",
+        "Team workspaces + invites",
+        "Per-seat billing",
+      ],
     },
   ];
 

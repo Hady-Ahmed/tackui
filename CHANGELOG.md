@@ -2,6 +2,13 @@
 
 All notable changes to this project will be documented in this file. The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Changed
+- **Pricing page leads with outcomes** — headline is now "Run real AI agents in your browser." (was "Pricing"), tiers show marketing prices that must match the configured Stripe Prices, Free's agent cap line is explicit that it covers catalog installs and your own agents ("Connect up to 3 agents — from the catalog or your own"), and the usage-limit copy was sharpened: Free lists "Daily usage limits on catalog agents (enough to get a feel)" while Pro mirrors it with "Much higher usage on every catalog agent." The upgrade dialog's tier lists match the new page copy.
+- **Quota 402 banner carries an inline Upgrade button** — chat run failures with 402 `AGENT_QUOTA_EXCEEDED` / `PLAN_AGENT_LOCKED` render as a calm blue info banner (quota exhaustion isn't an error — red stays for genuine failures like rate limits and removed agents) with an "Upgrade" button beside the message that opens the upgrade dialog, so the conversion ask lands at the paywall moment rather than behind the account menu. The button only renders when an upgrade actually helps: free-plan quota exhaustion (Pro raises the cap) and plan-locked agents (a higher tier always exists); paid plans exhausting a shared paid quota get the countdown without a button, since Team shares Pro's allowance.
+- **Quota 402 copy no longer says "daily"** — "You've reached your daily usage limit for this agent." → "You've reached your usage limit for this agent — you can use it again in 5h 12m." (the window is rolling-24h, not calendar-day; the countdown was already accurate).
+
 ## [2.0.0] — 2026-10-17
 
 ### Added

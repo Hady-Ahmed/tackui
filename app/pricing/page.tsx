@@ -9,42 +9,52 @@ import { getCurrentUser } from "@/lib/auth/context";
 /**
  * Pricing page — SaaS mode only. Self-host deployments redirect to `/app`.
  *
- * Lists the Free / Pro / Team tiers with their feature gates. The actual
- * dollar amounts live in Stripe (the plan *structure* is code; the price
- * is Stripe's job). Paid tiers link to /signup (so the user signs up, then
- * upgrades from the account menu's "Manage subscription" → Stripe
- * Customer Portal / Checkout).
+ * Lists the Free / Pro / Team tiers with their feature gates. Copy leads
+ * with outcomes (not limits): the tier names what you get, the catalog
+ * usage limits surface where they're actually encountered — the run 402
+ * and the rolling-window footnote below (see the usage-limit copy policy
+ * in AGENTS.md).
+ *
+ * The dollar amounts shown here are marketing prices that must match the
+ * Stripe Prices configured via STRIPE_PRICE_PRO / STRIPE_PRICE_TEAM —
+ * Stripe is the source of truth at checkout, so update both together.
+ * Paid tiers link to /signup (so the user signs up, then upgrades from
+ * the account menu's "Manage subscription" → Stripe Customer Portal /
+ * Checkout).
  */
-const TIERS: { id: PlanId; tagline: string; features: string[] }[] = [
+const TIERS: { id: PlanId; tagline: string; price: string; features: string[] }[] = [
   {
     id: "free",
-    tagline: "Try it out. Connect up to 3 agents.",
+    tagline: "Try it out. See what agents can actually do.",
+    price: "$0",
     features: [
-      "3 agents",
-      "Catalog agents with daily usage limits",
-      "1 concurrent run",
+      "Run any agent from the catalog",
+      "Daily usage limits on catalog agents (enough to get a feel)",
+      "Connect up to 3 agents — from the catalog or your own",
+      "1 agent running at a time",
       "Standard rate limits",
-      "Community support",
     ],
   },
   {
     id: "pro",
-    tagline: "For individuals with many agents.",
+    tagline: "For when one agent isn't enough.",
+    price: "$10/mo",
     features: [
+      "Much higher usage on every catalog agent",
       "Unlimited agents",
-      "Much higher daily limits on catalog agents",
-      "3 concurrent runs",
+      "3 agents running at a time",
       "Higher rate limits",
       "Priority support",
     ],
   },
   {
     id: "team",
-    tagline: "Collaborate with per-seat workspaces.",
+    tagline: "For teams running agents together.",
+    price: "$15/seat/mo",
     features: [
-      "Everything in Pro",
-      "5 concurrent runs",
-      "Team workspaces + invites",
+      "Everything in Pro, for every seat",
+      "Shared workspace with invites",
+      "5 agents running at a time",
       "Per-seat billing",
     ],
   },
@@ -56,7 +66,7 @@ export const dynamic = "force-dynamic";
 export const metadata: Metadata = {
   title: "Pricing — TackUI",
   description:
-    "Free to start. Upgrade when you need more agents or team seats.",
+    "Run real AI agents in your browser. Free to start — no setup required.",
 };
 
 export default async function PricingPage() {
@@ -68,10 +78,10 @@ export default async function PricingPage() {
     <MarketingLayout>
       <div className="py-16">
         <h1 className="text-center text-3xl font-semibold tracking-tight sm:text-4xl">
-          Pricing
+          Run real AI agents in your browser.
         </h1>
         <p className="mt-2 text-center text-zinc-600 dark:text-zinc-400">
-          Free to start. Upgrade when you need more agents or team seats.
+          Start free — no setup required.
         </p>
 
         <div className="mt-12 grid gap-6 sm:grid-cols-3">
@@ -97,7 +107,12 @@ export default async function PricingPage() {
                     : "border-zinc-200 dark:border-zinc-800"
                 }`}
               >
-                <h2 className="text-lg font-semibold">{limits.label}</h2>
+                <div className="flex items-baseline justify-between gap-2">
+                  <h2 className="text-lg font-semibold">{limits.label}</h2>
+                  <span className="text-sm font-medium text-zinc-700 dark:text-zinc-300">
+                    {tier.price}
+                  </span>
+                </div>
                 <p className="mt-1 text-sm text-zinc-500">{tier.tagline}</p>
                 {tier.id === "pro" && (
                   <span className="mt-2 self-start rounded-full bg-blue-600 px-2 py-0.5 text-xs font-medium text-white">

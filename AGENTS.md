@@ -914,10 +914,16 @@ changes the org's agent list) → `checkTemplateInstall` (plan gate) →
   (a null cap is simply uncapped, never described as infinite); (3)
   **catalog cards never mention usage limits at all** — the card
   describes the agent; the limit surfaces where it's actually
-  encountered: the run 402 ("You've reached your daily usage limit for
-  this agent. You can use it again in 5h 12m." + the free-tier-only
-  "Upgrade to Pro for more usage." clause) and the pricing page (Free
-  tier lists "Catalog agents with daily usage limits"). Plan-gated
+  encountered: the run 402 ("You've reached your usage limit for this
+  agent — you can use it again in 5h 12m." + the free-tier-only
+  "Upgrade to Pro for more usage." clause; the quota 402 banner also
+  carries an inline Upgrade button that opens the upgrade dialog — the
+  conversion ask lands at the paywall moment, not behind the account
+  menu. The button only renders when an upgrade actually helps (free
+  quota exhaustion or a plan-lock; paid plans share one quota cap, so
+  pro users who exhaust it get the countdown without a button) and the
+  pricing page (Free tier lists "Daily usage limits on catalog agents
+  (enough to get a feel)"). Plan-gated
   cards DO state their gate ("Available on the Pro plan") — that's
   installability info, not a usage limit. The disclosure points are
   deliberate: the 402 arrives while the user is actively trying to use
