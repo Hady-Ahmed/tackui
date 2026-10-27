@@ -255,6 +255,11 @@ export function CredentialsPage() {
                 The platform&apos;s key catalog is unavailable right now —
                 reconnect to add keys.
               </p>
+            ) : catalog !== null && Object.keys(catalog).length === 0 ? (
+              <p className="text-sm text-zinc-500 dark:text-zinc-400">
+                The agent platform offers no key providers yet — providers
+                appear when the platform exposes keyed models or tools.
+              </p>
             ) : addRows.length === 0 ? (
               <p className="text-sm text-zinc-500 dark:text-zinc-400">
                 All supported providers have keys saved.

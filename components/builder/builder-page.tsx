@@ -42,6 +42,8 @@ import {
   BUILDER_TOOLS_MAX,
   buildCreatePayload,
   buildUpdatePayload,
+  catalogEmptyCopy,
+  createBlockedByEmptyModels,
   extractErrorMessage,
   findModel,
   groupModelsByProvider,
@@ -228,6 +230,12 @@ export function BuilderPage({
   // — since the definition would be validated against a stale palette.
   const builderDisabled =
     (modelsError !== null && models === null) || (toolsError !== null && tools === null);
+  // An empty model catalog can't produce a valid create (model is
+  // required) — the submit stays disabled and the picker explains why.
+  // Edit mode is unaffected: the model is only sent when it changes.
+  const createDisabled = createBlockedByEmptyModels(mode, models, modelsError);
+  const modelsEmptyCopy = catalogEmptyCopy("models", models, modelsError);
+  const toolsEmptyCopy = catalogEmptyCopy("tools", tools, toolsError);
 
   // The edit-mode baseline: the agent's stored definition (instructions are
   // blank-preserve, so they're not part of the diff).
@@ -508,6 +516,11 @@ export function BuilderPage({
                   </optgroup>
                 ))}
               </select>
+              {modelsEmptyCopy && (
+                <p className="mt-1.5 text-xs text-zinc-500 dark:text-zinc-400">
+                  {modelsEmptyCopy}
+                </p>
+              )}
             </Field>
             <div className="flex items-end">
               <ModelKeyBadge state={modelState} onConnect={() => setKeyProvider(form.model?.provider ?? null)} />
@@ -546,10 +559,8 @@ export function BuilderPage({
                   </label>
                 );
               })}
-              {tools !== null && tools.length === 0 && !toolsError && (
-                <p className="text-xs text-zinc-500 dark:text-zinc-400">
-                  No tools available on the platform yet.
-                </p>
+              {toolsEmptyCopy && (
+                <p className="text-xs text-zinc-500 dark:text-zinc-400">{toolsEmptyCopy}</p>
               )}
             </div>
           </Field>
@@ -609,7 +620,7 @@ export function BuilderPage({
           <div className="flex flex-wrap items-center gap-2 pt-2">
             <button
               type="submit"
-              disabled={saving || builderDisabled}
+              disabled={saving || builderDisabled || createDisabled}
               className="rounded-lg bg-blue-600 px-4 py-2 text-sm font-medium text-white transition-colors hover:bg-blue-700 disabled:opacity-50"
             >
               {saving

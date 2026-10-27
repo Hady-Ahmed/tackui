@@ -464,9 +464,19 @@ The admin UI is the Connectors section on `/agents`
   connector palette. `GET /api/credentials` and `GET /api/connectors`
   feed the badges.
 - **Disabled state:** when `GET /api/models` or `GET /api/tools` fails
-  because the platform is unconfigured/unreachable, the page renders a
-  notice banner and disables the form (submit disabled) — the
-  definition would be validated against a stale palette otherwise.
+  because the platform is unreachable, the page renders a notice banner
+  and disables the form (submit disabled) — the definition would be
+  validated against a stale palette otherwise.
+- **Empty ≠ unreachable:** the platform catalogs are **empty by default**
+  — the AgentOS exposes nothing until its operator sets
+  `PLATFORM_MODELS`/`PLATFORM_TOOLS` (see the platform-os README), so a
+  reachable-but-empty catalog is a *configuration* state with its own
+  copy ("The agent platform exposes no tools yet. The platform operator
+  can add them via PLATFORM_TOOLS…"), never the error banner. Create
+  stays disabled while the model catalog is empty (the model field is
+  required); edit is unaffected — the model is only sent when it
+  changes. Copy always says "the agent platform", never "your" — SaaS
+  end users don't own the platform, and possessives imply they do.
 - **Edit mode:** prefills from the requirements snapshot; instructions
   start blank with "(leave blank to keep current)" semantics. Non-author
   / non-builder agents show a 404-style state (the backend PATCH/DELETE

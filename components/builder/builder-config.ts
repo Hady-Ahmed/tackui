@@ -122,6 +122,41 @@ export function pickDefaultModel(models: PlatformModel[]): PlatformModel | null 
   return models.find((m) => m.platformTier) ?? models[0] ?? null;
 }
 
+/**
+ * Empty-catalog copy for the builder form. The platform catalogs are empty
+ * BY DEFAULT — an operator who hasn't set PLATFORM_MODELS/PLATFORM_TOOLS
+ * gets a builder that offers nothing, which is a configuration state, not
+ * an error. Returns the empty-state copy when the catalog loaded
+ * successfully but is empty; null while loading, when populated, or when
+ * the fetch failed (the unreachable banner covers that case).
+ *
+ * Copy says "the agent platform", never "your agent platform" — SaaS end
+ * users don't own the platform, and possessives imply they do.
+ */
+export function catalogEmptyCopy(
+  kind: "models" | "tools",
+  catalog: unknown[] | null,
+  error: string | null,
+): string | null {
+  if (error !== null || catalog === null || catalog.length > 0) return null;
+  return kind === "models"
+    ? "The agent platform exposes no models yet. The platform operator adds them via PLATFORM_MODELS (see the platform README)."
+    : "The agent platform exposes no tools yet. The platform operator can add them via PLATFORM_TOOLS (see the platform README).";
+}
+
+/**
+ * Whether create must stay disabled because the model catalog is empty —
+ * the model field is required, so an empty catalog can't produce a valid
+ * create. Edit mode is unaffected: the model is only sent when it changes.
+ */
+export function createBlockedByEmptyModels(
+  mode: "create" | "edit",
+  models: PlatformModel[] | null,
+  error: string | null,
+): boolean {
+  return mode === "create" && models !== null && models.length === 0 && error === null;
+}
+
 export function findModel(
   models: PlatformModel[],
   provider: string,

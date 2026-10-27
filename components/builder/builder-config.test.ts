@@ -2,6 +2,8 @@ import { describe, expect, it } from "vitest";
 import {
   buildCreatePayload,
   buildUpdatePayload,
+  catalogEmptyCopy,
+  createBlockedByEmptyModels,
   extractErrorMessage,
   findModel,
   groupModelsByProvider,
@@ -279,5 +281,66 @@ describe("extractErrorMessage", () => {
   it("falls back when the shape is unrecognized", () => {
     expect(extractErrorMessage({}, "fallback")).toBe("fallback");
     expect(extractErrorMessage(null, "fallback")).toBe("fallback");
+  });
+});
+
+describe("catalogEmptyCopy — empty-by-default platform catalogs (turn 7)", () => {
+  it("returns null while loading (catalog still null)", () => {
+    expect(catalogEmptyCopy("models", null, null)).toBeNull();
+    expect(catalogEmptyCopy("tools", null, null)).toBeNull();
+  });
+
+  it("returns null when the catalog is populated", () => {
+    expect(catalogEmptyCopy("models", MODELS, null)).toBeNull();
+    expect(catalogEmptyCopy("tools", TOOLS, null)).toBeNull();
+    // A single entry counts as populated.
+    expect(catalogEmptyCopy("tools", [TOOLS[0]], null)).toBeNull();
+  });
+
+  it("returns null when the fetch failed — the unreachable banner wins", () => {
+    expect(catalogEmptyCopy("models", null, "AgentOS is unreachable")).toBeNull();
+    expect(catalogEmptyCopy("tools", [], "AgentOS is unreachable")).toBeNull();
+  });
+
+  it("returns operator-facing copy for an empty model catalog", () => {
+    const copy = catalogEmptyCopy("models", [], null);
+    expect(copy).toContain("PLATFORM_MODELS");
+    expect(copy).toContain("The agent platform exposes no models yet");
+  });
+
+  it("returns operator-facing copy for an empty tool catalog", () => {
+    const copy = catalogEmptyCopy("tools", [], null);
+    expect(copy).toContain("PLATFORM_TOOLS");
+    expect(copy).toContain("The agent platform exposes no tools yet");
+  });
+
+  it("never addresses the reader as the platform owner", () => {
+    // SaaS end users don't own the platform — "your agent platform"
+    // would imply they do. The possessive must not appear.
+    for (const kind of ["models", "tools"] as const) {
+      const copy = catalogEmptyCopy(kind, [], null) ?? "";
+      expect(copy.toLowerCase()).not.toContain("your agent platform");
+    }
+  });
+});
+
+describe("createBlockedByEmptyModels — empty catalog can't produce a create", () => {
+  it("blocks create with an empty, successfully loaded model catalog", () => {
+    expect(createBlockedByEmptyModels("create", [], null)).toBe(true);
+  });
+
+  it("does not block while loading or on fetch failure (unreachable rule)", () => {
+    expect(createBlockedByEmptyModels("create", null, null)).toBe(false);
+    expect(createBlockedByEmptyModels("create", null, "AgentOS is unreachable")).toBe(false);
+    expect(createBlockedByEmptyModels("create", [], "AgentOS is unreachable")).toBe(false);
+  });
+
+  it("does not block when models exist", () => {
+    expect(createBlockedByEmptyModels("create", MODELS, null)).toBe(false);
+  });
+
+  it("never blocks edit — the model is only sent when it changes", () => {
+    expect(createBlockedByEmptyModels("edit", [], null)).toBe(false);
+    expect(createBlockedByEmptyModels("edit", MODELS, null)).toBe(false);
   });
 });
