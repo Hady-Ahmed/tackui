@@ -26,6 +26,15 @@ export interface PlanLimits {
   concurrentRuns: number;
   /** Max agent run requests per minute per user. */
   runsPerMinute: number;
+  /**
+   * Max platform-key agent runs per user per rolling 24h. `null` =
+   * unlimited. Applies ONLY to runs where tackui does not deliver the
+   * runner's own key — i.e. the platform key (mini-tier model or a
+   * tool's platform fallback) serves the run. BYOK runs are exempt (they
+   * cost the platform ~nothing). Enforced by the builder run gate
+   * (lib/agents/run-gate.ts) via lib/ratelimit's 24h counter.
+   */
+  platformDailyQuota: number | null;
   /** Max org members (seats). `null` = unlimited (self-host multi-user). */
   maxMembers: number | null;
   /** Can the user create additional orgs (team workspaces)? */
@@ -39,6 +48,8 @@ const SELF_HOST_LIMITS: PlanLimits = {
   maxAgents: null,
   concurrentRuns: 3,
   runsPerMinute: 20,
+  // The self-hoster pays the platform key bill themselves — no cap.
+  platformDailyQuota: null,
   maxMembers: null,
   canCreateOrg: true,
   label: "Self-hosted",
@@ -49,6 +60,7 @@ const PLAN_LIMITS: Record<Exclude<PlanId, "self-host">, PlanLimits> = {
     maxAgents: 3,
     concurrentRuns: 1,
     runsPerMinute: 10,
+    platformDailyQuota: 50,
     maxMembers: 1,
     canCreateOrg: false,
     label: "Free",
@@ -57,6 +69,7 @@ const PLAN_LIMITS: Record<Exclude<PlanId, "self-host">, PlanLimits> = {
     maxAgents: null,
     concurrentRuns: 3,
     runsPerMinute: 20,
+    platformDailyQuota: 2000,
     maxMembers: 1,
     canCreateOrg: false,
     label: "Pro",
@@ -65,6 +78,7 @@ const PLAN_LIMITS: Record<Exclude<PlanId, "self-host">, PlanLimits> = {
     maxAgents: null,
     concurrentRuns: 5,
     runsPerMinute: 20,
+    platformDailyQuota: 2000,
     maxMembers: null, // governed by subscription.seats (per-seat billing)
     canCreateOrg: true,
     label: "Team",

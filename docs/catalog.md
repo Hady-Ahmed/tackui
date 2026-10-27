@@ -7,6 +7,13 @@ the agent is running. No endpoints, no config.
 
 ## Model (template vs. installed copy — managed-plugin)
 
+Templates come from platform-admin curation only. Builder-origin agents
+(`origin: "builder"`, created by members via the agent builder — see
+[agent-builder.md](./agent-builder.md)) are org-scoped and **not
+publishable** in Phase 1: making a builder agent installable by other
+orgs is Phase 3. The catalog and the builder are separate surfaces —
+there is no path from a builder agent to a template.
+
 - `agent_templates` — global rows (NOT org-scoped), managed by platform
   admins (`role === "admin"` via the Catalog section on `/admin` or the
   `/api/catalog` REST API). Fields: `slug` (unique, shareable),

@@ -24,6 +24,10 @@ export const LIMITS = {
    *  Generous enough for active use (page refreshes, CopilotKit connect/info
    *  streams, conversation switching) while still blocking flood attacks. */
   globalIp: { max: 300, windowMs: 60_000 },
+  /** PUT/DELETE /api/credentials — BYOK key upserts/removals. */
+  credentialMutate: { max: 20, windowMs: 60_000 },
+  /** PUT/DELETE /api/connectors — org connector upserts/removals. */
+  connectorMutate: { max: 20, windowMs: 60_000 },
 } as const;
 
 export type LimitName = keyof typeof LIMITS;

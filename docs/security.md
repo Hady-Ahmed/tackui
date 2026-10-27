@@ -31,6 +31,63 @@ cloud-metadata endpoints.
 - **Error masking:** probe error messages are masked in the response (raw DNS
   errors can leak internal hostnames); the full error is logged server-side.
 
+## Credentials & connectors stores (builder subsystem)
+
+The agent builder
+([agent-builder.md](./agent-builder.md#the-one-rule)) introduces two
+secret stores whose boundaries are worth stating explicitly:
+
+- **BYOK credentials** (`lib/credentials/credential-store.ts`, migration
+  0013) — per-user keys for LLM providers and keyed tools. **AES-256-GCM
+  at rest** (`enc:v1:<iv>:<ciphertext>:<tag>` via `lib/crypto/encrypt.ts`,
+  encrypted at the write boundary; plaintext fallback when
+  `DB_ENCRYPTION_KEY` is unset, same mechanism as agent JWT secrets).
+  **Write-only surface:** `GET /api/credentials` returns existence
+  booleans only (`hasKey: true`); the plaintext is accepted on PUT and
+  never returned — same boundary discipline as `agents.jwtSecret`. The
+  decrypted key is consumed exclusively by the run path and delivered
+  per-run as an AG-UI context item — never persisted AgentOS-side, never
+  cached agent-side. Rows are scoped `UNIQUE (user_id, provider)`; no FK
+  to the Better Auth runtime table (same convention as `agents.org_id`).
+- **Connectors** (`lib/connectors/connector-store.ts`) — org-scoped MCP
+  server registry. Writes are org-admin gated (`canManageAgents`); reads
+  are member-accessible so the builder's connector palette can render.
+  Tokens are write-only (`hasToken` booleans in GET responses) and
+  encrypted at rest (same AES-256-GCM mechanism). PUT token semantics:
+  omitted → preserve the stored token, `""` → clear it, string →
+  encrypt + store. The name is the reference key in agent definitions
+  (URL/payload-safe pattern, http(s)-only URLs).
+
+## Run-gate 402s (builder agents)
+
+Builder-agent runs are gated at the HTTP level in the copilotkit route
+(`checkBuilderRunGate`, before anything reaches a backend and before a
+concurrent slot is acquired):
+
+- **Unsatisfiable requirements → 402** `AGENT_REQUIREMENTS_MISSING` —
+  one aggregated response listing every blocker: a non-tier model with
+  no runner key, a keyed tool with no runner key and no platform
+  fallback, or a required org connector not configured. Requirement 402s
+  apply in **both** SaaS and self-host modes.
+- **Platform-key daily quota → 402** `PLATFORM_QUOTA_EXCEEDED` —
+  SaaS-only. Runs where tackui does not deliver the runner's own key
+  (the platform key serves the dependency) count against the plan's
+  `platformDailyQuota` (see
+  [saas-mode.md](./saas-mode.md#plan-enforcement-saas-only)); BYOK runs
+  are exempt. Gate-blocked runs never consume quota; quota is consumed
+  at run start, so a run failing mid-flight still counts.
+
+## SSRF guard scope on builder routes
+
+The SSRF guard **intentionally does NOT apply** to the builder routes
+(`POST/PATCH/DELETE /api/agents/builder*`) — there is no user-supplied
+endpoint URL to validate. The outbound AgentOS URL is platform config
+(`AGENTOS_BASE_URL`, `builderEndpoint(remoteAgentId)`), not user input,
+so the guard's threat model (user-controlled URL reaching internal
+services) doesn't apply. The guard still applies to every route where
+the endpoint comes from the user (admin agent create/edit, the
+reachability probe, catalog templates).
+
 ## Security headers
 
 `next.config.ts` — CSP (`'unsafe-inline'` scripts/styles, `'unsafe-eval'`

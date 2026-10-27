@@ -15,6 +15,11 @@ import {
 } from "@/lib/ratelimit/middleware";
 import { wrapStreamWithRelease } from "@/lib/ratelimit/stream-wrap";
 import { getEnforcementLimits, checkCatalogRunGates } from "@/lib/plans/enforcement";
+import {
+  checkBuilderRunGate,
+  emptyBuilderRunResolution,
+} from "@/lib/agents/run-gate";
+import { runWithRunnerContext } from "@/lib/auth/request-context";
 
 /**
  * Extract the agent id from a run request path, e.g.
@@ -77,6 +82,9 @@ async function handler(request: Request): Promise<Response> {
       let planRunsPerMin: number | undefined;
       let planConcurrent: number | undefined;
       let saasPlan: PlanId | undefined;
+      // Resolved per run request; carries the AG-UI dependencies the
+      // registry middleware injects for builder runs (empty otherwise).
+      let builderRun = emptyBuilderRunResolution();
       if (SAAS_MODE) {
         const { plan, limits } = await getEnforcementLimits(user.orgId);
         saasPlan = plan;
@@ -100,6 +108,13 @@ async function handler(request: Request): Promise<Response> {
         if (runAgentId) {
           const gated = await checkCatalogRunGates(user, runAgentId, saasPlan);
           if (gated) return gated;
+          // Builder-agent gate: 402s for unsatisfiable requirements
+          // (model/tool keys, connectors) and the SaaS platform-key
+          // daily quota; resolves the per-run AG-UI dependencies the
+          // registry middleware will inject. Runs before the concurrent
+          // slot is acquired so a gated run never holds one.
+          builderRun = await checkBuilderRunGate(user, runAgentId);
+          if (builderRun.response) return builderRun.response;
         }
       }
 
@@ -118,7 +133,13 @@ async function handler(request: Request): Promise<Response> {
       }
 
       try {
-        const response = await runWithUserAsync(user, () => innerHandler(request));
+        const response = await (builderRun.contextItems.length > 0
+          ? runWithRunnerContext(
+              user,
+              builderRun.contextItems,
+              () => innerHandler(request),
+            )
+          : runWithUserAsync(user, () => innerHandler(request)));
         return releaseConcurrent
           ? wrapStreamWithRelease(response, releaseConcurrent)
           : response;
@@ -135,14 +156,29 @@ async function handler(request: Request): Promise<Response> {
     // applies.
     const syntheticUser = await getSyntheticAdmin();
     userId = syntheticUser.id;
+    let builderRun = emptyBuilderRunResolution();
     if (isRunRequest) {
       const runAgentId = runAgentIdFromPath(url.pathname);
       if (runAgentId) {
         const gated = await checkCatalogRunGates(syntheticUser, runAgentId);
         if (gated) return gated;
+        // Builder gate in self-host: requirement 402s still apply (there
+        // is no platform fallback for connector credentials or non-fallback
+        // tool keys); the platform-key quota is SaaS-only and
+        // short-circuits inside. Dependencies still resolve so BYOK
+        // delivery works for the operator's own keys.
+        builderRun = await checkBuilderRunGate(syntheticUser, runAgentId);
+        if (builderRun.response) return builderRun.response;
       }
     }
-    return runWithUserAsync(syntheticUser, () => innerHandler(request));
+    const runResponse = await (builderRun.contextItems.length > 0
+      ? runWithRunnerContext(
+          syntheticUser,
+          builderRun.contextItems,
+          () => innerHandler(request),
+        )
+      : runWithUserAsync(syntheticUser, () => innerHandler(request)));
+    return runResponse;
   } catch (err) {
     console.error("[copilotkit] handler error", {
       method: request.method,

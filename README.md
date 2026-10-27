@@ -310,6 +310,8 @@ See [`.env.example`](.env.example) for the full list with comments.
 | Variable | Required? | Description |
 | --- | --- | --- |
 | `DATABASE_URL` | Yes | Postgres connection string (e.g. `postgres://user:pass@localhost:5432/dbname`) |
+| `AGENTOS_BASE_URL` | No | Base URL of the AgentOS platform service (e.g. `http://agent-os:8100`) that powers the agent builder (`/app/builder`). Required together with `AGENTOS_JWT_SECRET` for the builder to activate; when unset the builder is disabled (builder routes return 503 and the UI shows a disabled state). No trailing slash. |
+| `AGENTOS_JWT_SECRET` | No | JWT secret shared with the AgentOS dispatcher (HS256). Required whenever `AGENTOS_BASE_URL` is set — without it every builder run fails auth at the dispatcher (a boot warning is logged). |
 | `BETTER_AUTH_SECRET` | Yes (unless `AUTH_DISABLED=true`) | Secret for signing session cookies. Generate with `openssl rand -hex 32`. The app refuses to boot without it when auth is enabled. |
 | `BETTER_AUTH_URL` | Yes (unless `AUTH_DISABLED=true`) | Public base URL of the app (e.g. `http://localhost:3000`) |
 | `AUTH_DISABLED` | No | Set to `true` to skip login (solo mode). **Never use this in any deployment exposed to the internet or shared users.** |
@@ -443,7 +445,7 @@ These are documented for transparency and will be addressed in future releases:
 
 ## Contributing
 
-See [AGENTS.md](AGENTS.md) for development conventions and agent-facing rules, and [`docs/`](docs/) for the architecture deep-dives (runtime, agent registry, catalog, auth, security, SaaS mode). PRs welcome.
+See [AGENTS.md](AGENTS.md) for development conventions and agent-facing rules, and [`docs/`](docs/) for the architecture deep-dives (runtime, agent registry, agent builder, catalog, auth, security, SaaS mode). PRs welcome.
 
 ## License
 

@@ -4,6 +4,7 @@ import { useState, useEffect, useCallback, useRef, Suspense } from "react";
 import { useRouter, useSearchParams } from "next/navigation";
 import type { PublicAgent, AgentAuthMode } from "@/lib/agents/agents.config";
 import { BackToChat } from "@/components/back-to-chat";
+import { ConnectorsAdmin } from "@/components/connectors-admin";
 import { authClient } from "@/lib/auth/auth-client";
 import { useAuthConfig } from "@/lib/auth/use-auth-config";
 import { useCanManageAgents } from "@/lib/auth/use-can-manage-agents";
@@ -612,6 +613,11 @@ function AgentsPageInner() {
             </>
           )}
         </section>
+
+        {/* Org MCP connectors — the builder's connector palette source.
+            Same canManage gate as this page (the page redirects members
+            to /app, so anything rendered here is admin-only). */}
+        <ConnectorsAdmin />
       </div>
     </div>
   );

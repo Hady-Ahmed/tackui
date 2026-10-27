@@ -207,6 +207,17 @@ export function AccountMenu({ collapsed = false }: { collapsed?: boolean } = {})
               Manage members
             </button>
           )}
+          {/* API keys — the runner's BYOK credentials (per-user, available
+              on every plan; the builder's inline connect forms link here). */}
+          <button
+            onClick={() => {
+              router.push("/app/credentials");
+              setOpen(false);
+            }}
+            className="block w-full px-3 py-2 text-left text-sm text-zinc-700 transition-colors hover:bg-zinc-100 dark:text-zinc-300 dark:hover:bg-zinc-800"
+          >
+            API keys
+          </button>
           {/* New workspace — always available on SaaS. Lives here (not in
               the org switcher) so it's reachable even when the user has
               only one org and the switcher is hidden. Free workspaces

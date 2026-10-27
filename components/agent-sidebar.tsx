@@ -445,6 +445,25 @@ function ExpandedContent({
                 <path d="M8.75 12.9556C9.68656 12.3509 10.8023 12 12 12C12.4539 12 12.8959 12.0504 13.321 12.1459C13.6577 12.2215 14 11.9794 14 11.6344V3.63964C14 3.4115 13.8459 3.21064 13.6224 3.16462C13.0985 3.05669 12.5559 3 12 3C10.8428 3 9.74308 3.24568 8.75 3.68772V12.9556Z" />
               </svg>
             </Link>
+            <Link
+              href="/app/builder"
+              title="Create agent"
+              aria-label="Create agent"
+              className="rounded p-1 text-zinc-400 transition-colors hover:bg-zinc-100 hover:text-zinc-600 dark:hover:bg-zinc-800 dark:hover:text-zinc-300"
+            >
+              {/* Wrench glyph — the agent builder (member-accessible;
+                  the backend 503s gracefully when the platform isn't
+                  configured, which the builder page surfaces). */}
+              <svg
+                xmlns="http://www.w3.org/2000/svg"
+                viewBox="0 0 24 24"
+                fill="currentColor"
+                className="h-4 w-4"
+                aria-hidden="true"
+              >
+                <path d="M12 1.5a5.25 5.25 0 0 0-4.058 8.592L2.294 15.75a1.5 1.5 0 0 0 0 2.122l2.034 2.034a1.5 1.5 0 0 0 2.122 0l5.649-5.648A5.25 5.25 0 0 0 20.25 8.25c0-1.102-.277-2.14-.765-3.047l-2.53 2.53a.75.75 0 0 1-1.06 0l-1.638-1.638a.75.75 0 0 1 0-1.06l2.53-2.53A5.25 5.25 0 0 0 12 1.5Z" />
+              </svg>
+            </Link>
             {showManageLink && (
               <Link
                 href="/agents?add=1"
@@ -716,6 +735,23 @@ function CollapsedContent({
       </nav>
 
       <div className="mt-2 flex flex-col items-center gap-1">
+        <Link
+          href="/app/builder"
+          title="Create agent"
+          className="flex h-9 w-9 items-center justify-center rounded-lg text-zinc-500 transition-colors hover:bg-zinc-100 dark:text-zinc-400 dark:hover:bg-zinc-800"
+          aria-label="Create agent"
+        >
+          {/* Wrench glyph — the agent builder (member-accessible). */}
+          <svg
+            xmlns="http://www.w3.org/2000/svg"
+            viewBox="0 0 24 24"
+            fill="currentColor"
+            className="h-4 w-4"
+            aria-hidden="true"
+          >
+            <path d="M12 1.5a5.25 5.25 0 0 0-4.058 8.592L2.294 15.75a1.5 1.5 0 0 0 0 2.122l2.034 2.034a1.5 1.5 0 0 0 2.122 0l5.649-5.648A5.25 5.25 0 0 0 20.25 8.25c0-1.102-.277-2.14-.765-3.047l-2.53 2.53a.75.75 0 0 1-1.06 0l-1.638-1.638a.75.75 0 0 1 0-1.06l2.53-2.53A5.25 5.25 0 0 0 12 1.5Z" />
+          </svg>
+        </Link>
         {showManageLink && (
           <Link
             href="/agents?add=1"

@@ -67,6 +67,16 @@ export function ChatShell() {
       const list: PublicAgent[] = await res.json();
       setAgents(list);
       setHasLoaded(true);
+      // One-shot deep link: /app?agent=<id> selects a specific agent (the
+      // builder's "Save & open in chat"). The param is stripped via
+      // replaceState so a refresh or a focus refetch doesn't re-trigger
+      // the selection.
+      const requested = new URLSearchParams(window.location.search).get("agent");
+      if (requested && list.some((a) => a.id === requested)) {
+        window.history.replaceState(null, "", "/app");
+        setActiveAgent(requested);
+        return;
+      }
       setActiveAgent((prev) => {
         const stillExists = list.some((a) => a.id === prev);
         return stillExists ? prev : list[0]?.id ?? "";

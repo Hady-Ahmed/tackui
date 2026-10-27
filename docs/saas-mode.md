@@ -93,9 +93,24 @@ Routes:
   returns the unlimited sentinel without a DB call.
 - `checkAgentCountLimit(orgId)` — POST `/api/agents` rejects (402) when
   the org is at its plan's agent cap (free ≤ 3). Pro/team unlimited.
+  Builder-agent creates (`POST /api/agents/builder`) count against the
+  same cap.
 - `checkMemberCountLimit(orgId, currentCount)` — invite path rejects
   (402) when at the seat cap. Free/pro = 1 (personal, no invites),
   team = `subscription.seats`.
+- **`platformDailyQuota`** — per-user rolling-24h cap on
+  *platform-key* agent runs: runs where tackui does not deliver the
+  runner's own key (a platform-tier model or a tool's platform fallback
+  serves the dependency). BYOK runs are exempt — they cost the platform
+  ~nothing. Enforced by the builder run gate
+  (`checkBuilderRunGate`, 402 `PLATFORM_QUOTA_EXCEEDED` with a reset
+  countdown) via `lib/ratelimit`'s sliding-window counter. Values:
+  free = 50, pro = 2000, team = 2000, self-host = `null` (unlimited —
+  the operator pays the platform key bill themselves; the check
+  short-circuits entirely). This is the only SaaS-only check in the
+  builder run gate: requirement 402s (missing keys/connectors) apply in
+  both modes. See
+  [agent-builder.md](./agent-builder.md#platform-key-quota--libratelimitplatform-quotats).
 - `checkCanCreateOrg(orgId)` — always returns null (allowed). Workspace
   creation is free and unrestricted (Vercel/GitHub model): a Free
   workspace has 3 agents max, 1 member, no invites — harmless. The Team

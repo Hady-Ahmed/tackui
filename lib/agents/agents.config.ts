@@ -10,6 +10,59 @@ import type { RequiredPlan } from "@/lib/catalog/catalog.config";
 
 export type AgentAuthMode = "none" | "jwt";
 
+/**
+ * Agent provenance:
+ * - "manual"   — added via the admin /agents page (default).
+ * - "template" — legacy label kept for rows created before migration 0013
+ *   (equivalent to "manual" for permissions; catalog installs are
+ *   distinguished by sourceTemplateId, not origin).
+ * - "builder"  — created through the builder (member-accessible). The
+ *   runtime config resolves from platform env at run time (endpoint from
+ *   AGENTOS_BASE_URL + remoteAgentId, JWT secret from AGENTOS_JWT_SECRET,
+ *   scopes ["app:user"]); the row's endpoint/jwtSecret carry nothing.
+ */
+export const AGENT_ORIGINS = ["manual", "template", "builder"] as const;
+export type AgentOrigin = (typeof AGENT_ORIGINS)[number];
+
+/**
+ * What a RUNNER needs to run a builder agent — snapshot written by the
+ * builder create/update path from the definition tackui itself built.
+ * The AgentOS stored config is the source of truth; this snapshot only
+ * powers the pre-run run gate (model tier / tool key checks) without an
+ * AgentOS round-trip.
+ */
+export interface AgentRequirements {
+  model: { provider: string; id: string; platformTier: boolean };
+  /**
+   * Tool requirements snapshot — sourced from the platform tools catalog
+   * at create/update time. `requiresKey` is the AG-UI context dep key the
+   * runner delivers; `provider` is the derived provider slug (the key the
+   * runner saves under); `platformFallback` (true = the platform key
+   * serves a runner without one) drives the run gate's fallback decision.
+   * The run gate reads ONLY this snapshot — never a live catalog — so a
+   * tool unknown to the snapshot fails closed.
+   */
+  tools: {
+    name: string;
+    label?: string;
+    requiresKey?: string | null;
+    provider?: string | null;
+    /**
+     * Always present after the store parses a requirements payload —
+     * old snapshots default to false (fail-closed: the run gate then
+     * requires a runner key). New snapshots carry the platform-derived
+     * value computed at create/update time.
+     */
+    platformFallback: boolean;
+  }[];
+  /**
+   * MCP connector names (org-level, connectors table) this agent wires in.
+   * The run gate checks the runner's org has each connector configured;
+   * their URL + token are delivered per-run via AG-UI context.
+   */
+  connectors: string[];
+}
+
 export interface AgentEntry {
   id: string;
   name: string;
@@ -54,6 +107,28 @@ export interface AgentEntry {
    * deleting a template leaves installed copies working.
    */
   sourceTemplateId?: string;
+  /**
+   * Builder provenance (migration 0013). "builder" agents resolve their
+   * runtime config from platform env at run time (see AgentOrigin docs).
+   * The store defaults absent rows to "manual".
+   */
+  origin?: AgentOrigin;
+  /**
+   * The member who created a builder agent (attribution survives
+   * membership changes). Undefined for manual/template rows.
+   */
+  authorUserId?: string;
+  /**
+   * The AgentOS-side component id for builder agents. Server-side only:
+   * the run/edit machinery uses it; it never leaves the server (the
+   * AgentOS's address is platform config).
+   */
+  remoteAgentId?: string;
+  /**
+   * Runner-requirements snapshot for builder agents (powers the pre-run
+   * gate). Undefined for non-builder agents.
+   */
+  requirements?: AgentRequirements;
   /**
    * Snapshot of the template's updated_at at install/last-sync time.
    * With live propagation the template is the runtime's source of truth;
@@ -100,6 +175,12 @@ export interface PublicAgent {
   hasJwtSecret: boolean;
   jwtScopes?: string[];
   sourceTemplateId?: string;
+  /** Builder provenance (absent = "manual"). */
+  origin?: AgentOrigin;
+  /** Creator attribution for builder agents. */
+  authorUserId?: string;
+  /** Runner-requirements snapshot for builder agents (run-gate display). */
+  requirements?: AgentRequirements;
   installedTemplateUpdatedAt?: string;
   templateRemovedAt?: string;
   /**

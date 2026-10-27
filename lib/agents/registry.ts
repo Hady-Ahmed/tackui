@@ -3,9 +3,16 @@ import type { AbstractAgent, RunAgentInput } from "@ag-ui/client";
 import jwt from "jsonwebtoken";
 import type { AgentEntry } from "./agents.config";
 import { listAgents } from "./agent-store";
+import { AGENTOS_USER_SCOPE } from "./builder";
+import {
+  AGENTOS_ENABLED,
+  AGENTOS_JWT_SECRET,
+  builderEndpoint,
+} from "@/lib/config/agentos";
 import { getTemplatesByIds } from "@/lib/catalog/template-store";
 import { getRequestUser } from "@/lib/auth/context";
 import type { RequestUser } from "@/lib/auth/request-context";
+import { getRunContextItems } from "@/lib/auth/request-context";
 
 export type AgentsMap = Record<string, AbstractAgent>;
 
@@ -50,6 +57,33 @@ export async function getAgents(request?: Request): Promise<AgentsMap> {
           jwtScopes: template.jwtScopes,
         }
       : entry;
+
+    // Builder agents run on the shared AgentOS platform (agent-warehouse):
+    // the endpoint is recomputed from the platform config (so a
+    // AGENTOS_BASE_URL change takes effect without rewriting rows), and
+    // auth is the AGENTOS user token — HS256, sub = the running user,
+    // scopes ["app:user"] (the dispatcher's run-only scope). The stored
+    // row carries no jwtSecret for builder agents: the secret lives in
+    // AGENTOS_JWT_SECRET so a platform secret rotation is transparent.
+    // When the platform is disabled, stale builder agents (a self-hoster
+    // who removed the env) resolve to nothing rather than half-running.
+    if (resolved.origin === "builder") {
+      if (!AGENTOS_ENABLED) continue;
+      const builderUrl = builderEndpoint(resolved.remoteAgentId!);
+      if (!builderUrl) continue;
+      map[entry.id] = createAgent(
+        {
+          ...resolved,
+          endpoint: builderUrl,
+          authMode: "jwt",
+          jwtSecret: AGENTOS_JWT_SECRET,
+          jwtScopes: [AGENTOS_USER_SCOPE],
+        },
+        user,
+      );
+      continue;
+    }
+
     map[entry.id] = createAgent(resolved, user);
   }
   return map;
@@ -93,14 +127,24 @@ function createAgent(entry: AgentEntry, user: RequestUser): AbstractAgent {
   // whichever they prefer. The value is the server-resolved auth
   // principal (Better Auth user UUID, or "local" in solo mode),
   // never trusting client-supplied identity.
-  agent.use((input: RunAgentInput, next) =>
-    next.run({
+  agent.use((input: RunAgentInput, next) => {
+    // Builder runs: inject the per-run dependencies the copilotkit route
+    // resolved and stashed in the request ALS (runner BYOK keys + org
+    // MCP connectors, as AG-UI context items). Read INSIDE the middleware
+    // — at agent-creation time the stash may not exist yet. Non-builder
+    // runs see an empty stash and pass input.context through untouched.
+    const runContextItems = getRunContextItems();
+    return next.run({
       ...input,
+      context:
+        runContextItems.length > 0
+          ? [...(input.context ?? []), ...runContextItems]
+          : input.context,
       forwardedProps: {
         ...input.forwardedProps,
         user_id: user.id,
       },
-    }),
-  );
+    });
+  });
   return agent;
 }

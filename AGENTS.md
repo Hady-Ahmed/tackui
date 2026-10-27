@@ -159,6 +159,9 @@ full how-it-works detail this file deliberately omits:
   extension points
 - **`docs/agent-registry.md`** — agent CRUD + REST API, smoke tests, test connection,
   user identity forwarding, per-agent JWT auth, encryption at rest
+- **`docs/agent-builder.md`** — the agent builder subsystem: AgentOS platform
+  integration, builder create/update flows, run gate + per-run dependency
+  delivery, BYOK credentials, connectors, platform-key quota
 - **`docs/catalog.md`** — templates vs installed copies, install semantics,
   lifecycle/tombstones, run gates, monetization gates + copy policy
 - **`docs/auth-and-orgs.md`** — Better Auth setup, access control, orgs,
