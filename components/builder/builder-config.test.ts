@@ -10,6 +10,7 @@ import {
   modelKeyState,
   pickDefaultModel,
   providerForDepKeyInCatalog,
+  staleModelCopy,
   toolKeyState,
   validateBuilderForm,
   type BuilderFormState,
@@ -83,6 +84,36 @@ describe("findModel", () => {
   it("matches on provider + id and returns null otherwise", () => {
     expect(findModel(MODELS, "openai", "gpt-4o-mini")).toEqual(MODELS[0]);
     expect(findModel(MODELS, "openai", "nope")).toBeNull();
+  });
+});
+
+describe("staleModelCopy — saved model no longer in the catalog", () => {
+  it("returns null when the model is in the catalog", () => {
+    expect(staleModelCopy({ provider: "openai", id: "gpt-4o-mini" }, MODELS, null)).toBeNull();
+  });
+
+  it("returns null when no model is selected (create mode)", () => {
+    expect(staleModelCopy(null, MODELS, null)).toBeNull();
+  });
+
+  it("returns null while loading (models null) — the catalog can't have judged the model stale yet", () => {
+    expect(staleModelCopy({ provider: "openai", id: "gpt-4o-mini" }, null, null)).toBeNull();
+  });
+
+  it("returns null when the fetch failed — the unreachable banner wins", () => {
+    expect(staleModelCopy({ provider: "openai", id: "gone" }, MODELS, "AgentOS is unreachable")).toBeNull();
+  });
+
+  it("returns copy naming the stale identifier for a removed model", () => {
+    const copy = staleModelCopy({ provider: "openai", id: "gpt-4o-2024" }, MODELS, null);
+    expect(copy).toContain("no longer offered");
+    expect(copy).toContain("openai:gpt-4o-2024");
+    expect(copy).toContain("keeps the old model");
+  });
+
+  it("returns copy when the whole provider was removed", () => {
+    const copy = staleModelCopy({ provider: "cohere", id: "command-r" }, MODELS, null);
+    expect(copy).toContain("cohere:command-r");
   });
 });
 
@@ -182,7 +213,7 @@ describe("validateBuilderForm", () => {
     expect(errors.name).toBe("Name is required");
     expect(errors.description).toBe("Description is required");
     expect(errors.instructions).toBe("Instructions are required");
-    expect(errors.model).toBe("Pick a model");
+    expect(errors.model).toBe("Pick a provider and model");
   });
 
   it("enforces the max lengths from the builder schemas", () => {

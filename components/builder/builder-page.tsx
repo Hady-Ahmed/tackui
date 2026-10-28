@@ -51,6 +51,7 @@ import {
   pickDefaultModel,
   providerForDepKeyInCatalog,
   providerMeta,
+  staleModelCopy,
   toolKeyState,
   validateBuilderForm,
   type BuilderFormState,
@@ -218,6 +219,13 @@ export function BuilderPage({
   const selectedModel = form.model
     ? findModel(models ?? [], form.model.provider, form.model.id)
     : null;
+  // The model options for the selected provider — undefined when the
+  // provider itself isn't in the catalog (edit mode, removed provider).
+  const modelProvider = form.model?.provider ?? null;
+  const providerGroup = modelProvider
+    ? groups.find((g) => g.provider === modelProvider)
+    : undefined;
+  const staleCopy = staleModelCopy(form.model, models, modelsError);
   const modelState = modelKeyState(
     form.model
       ? { provider: form.model.provider, platformTier: selectedModel?.platformTier ?? false }
@@ -494,36 +502,89 @@ export function BuilderPage({
             />
           </Field>
 
-          {/* Model picker */}
-          <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
-            <Field label="Model" required error={errors.model}>
-              <select
-                value={form.model ? `${form.model.provider}:${form.model.id}` : ""}
-                onChange={(e) => {
-                  const [provider, id] = e.target.value.split(":");
-                  updateForm({ model: provider && id ? { provider, id } : null });
-                }}
-                className={inputClass()}
-              >
-                <option value="">Select a model…</option>
-                {groups.map((g) => (
-                  <optgroup key={g.provider} label={g.provider}>
-                    {g.models.map((m) => (
-                      <option key={m.id} value={`${m.provider}:${m.id}`}>
-                        {m.id}
-                      </option>
-                    ))}
-                  </optgroup>
-                ))}
-              </select>
-              {modelsEmptyCopy && (
-                <p className="mt-1.5 text-xs text-zinc-500 dark:text-zinc-400">
-                  {modelsEmptyCopy}
-                </p>
-              )}
-            </Field>
-            <div className="flex items-end">
-              <ModelKeyBadge state={modelState} onConnect={() => setKeyProvider(form.model?.provider ?? null)} />
+          {/* Model picker — provider, then model. The provider decides whose
+              API key the run needs, so it's an explicit first choice, and the
+              two selects can never disagree: changing the provider resets the
+              model to that provider's default (first tier-listed entry).
+              The model select holds raw ids — no combined provider:id value,
+              so a model id containing a colon (e.g. OpenRouter's ":free"
+              suffix) round-trips exactly. */}
+          <div className="space-y-3">
+            <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
+              <Field label="Provider" required error={errors.model}>
+                <select
+                  value={form.model?.provider ?? ""}
+                  onChange={(e) => {
+                    const provider = e.target.value;
+                    const group = groups.find((g) => g.provider === provider);
+                    updateForm({
+                      model: group
+                        ? {
+                            provider,
+                            id: (group.models.find((m) => m.platformTier) ?? group.models[0]).id,
+                          }
+                        : null,
+                    });
+                  }}
+                  className={inputClass()}
+                >
+                  {/* A removed provider (edit mode) can't render as an
+                      offered option — show it as an explicit placeholder
+                      row so the collapsed state stays informative. */}
+                  {form.model && models !== null && !providerGroup ? (
+                    <option value="">{form.model.provider} (no longer offered)</option>
+                  ) : (
+                    <option value="">Select a provider…</option>
+                  )}
+                  {groups.map((g) => (
+                    <option key={g.provider} value={g.provider}>
+                      {g.provider}
+                    </option>
+                  ))}
+                </select>
+              </Field>
+              <Field label="Model" required>
+                <select
+                  value={form.model && selectedModel ? form.model.id : ""}
+                  onChange={(e) => {
+                    // The placeholder rows carry an empty value — selecting
+                    // them again must not write an empty model id.
+                    if (e.target.value && form.model)
+                      updateForm({ model: { provider: form.model.provider, id: e.target.value } });
+                  }}
+                  disabled={!providerGroup}
+                  className={inputClass()}
+                >
+                  {/* Stale saved model: not in the catalog anymore, so it
+                      renders as an explicit placeholder row and the notice
+                      below explains the gap. Guarded on models !== null —
+                      while loading, the catalog can't have judged the model
+                      stale yet. */}
+                  {form.model && models !== null && !selectedModel && (
+                    <option value="">{form.model.id} (no longer offered)</option>
+                  )}
+                  {!form.model && <option value="">Pick a provider first…</option>}
+                  {providerGroup?.models.map((m) => (
+                    <option key={m.id} value={m.id}>
+                      {m.id}
+                    </option>
+                  ))}
+                </select>
+                {modelsEmptyCopy && (
+                  <p className="mt-1.5 text-xs text-zinc-500 dark:text-zinc-400">
+                    {modelsEmptyCopy}
+                  </p>
+                )}
+                {staleCopy && (
+                  <p className="mt-1.5 text-xs text-amber-600 dark:text-amber-400">{staleCopy}</p>
+                )}
+              </Field>
+            </div>
+            <div>
+              <ModelKeyBadge
+                state={modelState}
+                onConnect={() => setKeyProvider(form.model?.provider ?? null)}
+              />
             </div>
           </div>
 

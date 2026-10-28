@@ -165,6 +165,25 @@ export function findModel(
   return models.find((m) => m.provider === provider && m.id === id) ?? null;
 }
 
+/**
+ * Notice for the model picker when the agent's saved model is no longer
+ * in the catalog — the operator removed it, or the fail-closed drop
+ * discarded a slug-mismatched entry (the platform keeps only servable
+ * models). The form keeps the stale model — the PATCH only sends the
+ * model when it changes, so the agent keeps its definition until the
+ * user picks a replacement — but the select can't show it as an offered
+ * option, so the picker explains the gap.
+ */
+export function staleModelCopy(
+  model: { provider: string; id: string } | null,
+  models: PlatformModel[] | null,
+  error: string | null,
+): string | null {
+  if (error !== null || models === null || !model) return null;
+  if (findModel(models, model.provider, model.id)) return null;
+  return `The agent's saved model (${model.provider}:${model.id}) is no longer offered by the platform. Pick a different one to replace it — saving other changes keeps the old model.`;
+}
+
 export function providerMeta(
   catalog: CredentialCatalog,
   provider: string,
@@ -266,7 +285,7 @@ export function validateBuilderForm(
   } else if (form.instructions.trim().length > 8000)
     errors.instructions = "Instructions must be 8000 characters or fewer";
   if (!form.model || !form.model.provider || !form.model.id)
-    errors.model = "Pick a model";
+    errors.model = "Pick a provider and model";
   if (form.tools.length > BUILDER_TOOLS_MAX) errors.tools = "Too many tools";
   if (form.connectors.length > BUILDER_CONNECTORS_MAX)
     errors.connectors = "Too many connectors";
