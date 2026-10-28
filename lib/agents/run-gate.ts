@@ -3,25 +3,22 @@
  * resolution for agents created through the builder.
  *
  * Called by the copilotkit route for EVERY run request BEFORE anything
- * reaches a backend. It does three things:
+ * reaches a backend. Split into two phases so refusal can never cost the
+ * user anything they didn't get:
  *
- * 1. **Gate** — refuse the run (one aggregated 402) when a requirement
- *    cannot be satisfied: the agent's model is not platform-tier and the
- *    runner has no key for its provider; a tool needs a key the runner
- *    lacks and the tool has no platform fallback; a required org MCP
- *    connector is not configured. The principle is "never a silent
- *    mid-run failure" — anything checkable is checked before the run.
+ * 1. **`checkBuilderRunGate` (gate phase)** — refuse the run (one
+ *    aggregated 402) when a requirement cannot be satisfied: the agent's
+ *    model is not platform-tier and the runner has no key for its
+ *    provider; a tool needs a key the runner lacks and the tool has no
+ *    platform fallback; a required org MCP connector is not configured.
+ *    The principle is "never a silent mid-run failure" — anything
+ *    checkable is checked before the run. This phase consumes nothing:
+ *    a refused run burns no quota and holds no concurrent slot, so it
+ *    runs BEFORE slot acquisition.
  *
- * 2. **Resolve dependencies** — collect the AG-UI context items the run
- *    needs ({description: depKey, value: secret-or-json}): the runner's
- *    BYOK keys (runner key WINS over any platform fallback) and the org's
- *    MCP connectors (mcp_connectors JSON). The caller stashes them via
- *    `runWithRunnerContext`; the registry middleware injects them into
- *    `RunAgentInput.context` at run time. Platform keys are NEVER injected
- *    — when the runner has no key, the AgentOS deployment's own env
- *    fallback serves the dependency (see docs/agent-registry.md).
- *
- * 3. **Consume quota** — when the run is platform-key (some dependency
+ * 2. **`consumeBuilderRunQuota` (quota phase)** — called AFTER the
+ *    concurrent slot is acquired (a 429 at the cap must not burn a daily
+ *    platform-key run). When the run is platform-key (some dependency
  *    resolves to the platform key), count it against the plan's
  *    `platformDailyQuota` (lib/ratelimit, 24h sliding window). BYOK runs
  *    are exempt. The quota is the only SaaS-only check here: self-host
@@ -55,18 +52,21 @@ export interface BuilderRunResolution {
   response: NextResponse | null;
   /** AG-UI context items to inject (empty for non-builder agents). */
   contextItems: RunContextItem[];
-  /** true when the platform-key daily quota was consumed for this run. */
-  platformKeyUsed: boolean;
+  /** true when the run will use the platform key and its daily quota
+      must be consumed AFTER the concurrent slot is acquired. */
+  platformKeyRun: boolean;
 }
 
 export function emptyBuilderRunResolution(): BuilderRunResolution {
-  return { response: null, contextItems: [], platformKeyUsed: false };
+  return { response: null, contextItems: [], platformKeyRun: false };
 }
 
 /**
- * Gate + resolve one builder run. Only builder agents (origin ===
- * "builder" with a requirements snapshot) are gated; anything else gets
- * the empty resolution.
+ * Gate phase — 402-check the requirements and resolve the per-run
+ * dependencies. Only builder agents (origin === "builder" with a
+ * requirements snapshot) are gated; anything else gets the empty
+ * resolution. Consumes nothing: quota happens in `consumeBuilderRunQuota`
+ * after the concurrent slot is acquired.
  */
 export async function checkBuilderRunGate(
   user: RequestUser,
@@ -148,8 +148,9 @@ export async function checkBuilderRunGate(
     }
   }
 
-  // Aggregated 402 — every resolvable blocker in one response. Blocker
-  // checks come before quota so a refused run never consumes a slot.
+  // Aggregated 402 — every resolvable blocker in one response. This phase
+  // runs before the concurrent slot is acquired, so a refused run holds
+  // nothing and consumes nothing.
   if (blockers.length > 0) {
     return {
       response: NextResponse.json(
@@ -157,37 +158,39 @@ export async function checkBuilderRunGate(
         { status: 402 },
       ),
       contextItems: [],
-      platformKeyUsed: false,
+      platformKeyRun: false,
     };
   }
 
-  // --- Platform-key daily quota (SaaS only). Self-host: the operator
-  // pays the platform key bill — getPlanLimits("self-host").platformDailyQuota
-  // is null anyway, but skip the store round-trip entirely.
-  if (SAAS_MODE && platformKeyRun) {
-    const { plan, limits } = await getEnforcementLimits(user.orgId);
-    if (limits.platformDailyQuota !== null) {
-      const quota = consumePlatformKeyQuota(user.id, limits.platformDailyQuota);
-      if (!quota.allowed) {
-        const resetsAt = quota.resetAt;
-        const upgradeClause =
-          plan === "free" ? " Upgrade to Pro for more usage." : "";
-        return {
-          response: NextResponse.json(
-            {
-              error: `You've reached your daily limit for platform-key runs — you can run again in ${formatCountdown(resetsAt - Date.now())}.${upgradeClause}`,
-              code: "PLATFORM_QUOTA_EXCEEDED",
-              resetsAt,
-            },
-            { status: 402 },
-          ),
-          contextItems: [],
-          platformKeyUsed: false,
-        };
-      }
-      return { response: null, contextItems, platformKeyUsed: true };
-    }
-  }
+  return { response: null, contextItems, platformKeyRun };
+}
 
-  return { response: null, contextItems, platformKeyUsed: false };
+/**
+ * Quota phase — consume the platform-key daily quota when the run will
+ * use the platform key. MUST be called AFTER the concurrent slot is
+ * acquired: a 429 at the cap happens before this, so a run refused at
+ * the cap never burns a daily platform-key run. A run that passes this
+ * and fails mid-stream still legitimately consumed (the platform key was
+ * spent). SaaS-only; self-host short-circuits (the operator pays the
+ * platform key bill, and the self-host sentinel quota is null anyway).
+ */
+export async function consumeBuilderRunQuota(
+  user: RequestUser,
+  platformKeyRun: boolean,
+): Promise<NextResponse | null> {
+  if (!SAAS_MODE || !platformKeyRun) return null;
+  const { plan, limits } = await getEnforcementLimits(user.orgId);
+  if (limits.platformDailyQuota === null) return null;
+  const quota = consumePlatformKeyQuota(user.id, limits.platformDailyQuota);
+  if (quota.allowed) return null;
+  const resetsAt = quota.resetAt;
+  const upgradeClause = plan === "free" ? " Upgrade to Pro for more usage." : "";
+  return NextResponse.json(
+    {
+      error: `You've reached your daily limit for platform-key runs — you can run again in ${formatCountdown(resetsAt - Date.now())}.${upgradeClause}`,
+      code: "PLATFORM_QUOTA_EXCEEDED",
+      resetsAt,
+    },
+    { status: 402 },
+  );
 }

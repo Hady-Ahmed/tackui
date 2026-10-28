@@ -80,6 +80,12 @@ export async function PATCH(
   const patch = parsed.data;
 
   // Guard source for both AgentOS writes — one GET before any writes.
+  // SAFE to reuse one version across both writes: agno's component meta
+  // PATCH (name/description) does NOT bump the version — only config
+  // publishes create versions. If an agno upgrade ever changes that, the
+  // second write 409s and the compensating revert below silently discards
+  // the user's edit — re-fetch the component between the writes in that
+  // case. (Verified against agno's components router at the spike.)
   let component;
   try {
     component = await getAgentosComponent(existing.remoteAgentId);

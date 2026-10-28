@@ -16,11 +16,13 @@
 --                     server-generated; the AgentOS returns its own id on
 --                     create. Run/edit requests to the AgentOS use this id.
 --   requirements      JSON snapshot of what a RUNNER needs to run the agent:
---                     { model: {provider, id, platform_tier},
---                       tools: [{name, requires_key?}] }. Written at
---                     create/update from the definition tackui itself built
---                     (source of truth is the AgentOS config; this snapshot
---                     only powers the pre-run gate so run requests need no
+--                     { model: {provider, id, platformTier},
+--                       tools: [{name, requiresKey?, provider?,
+--                                platformFallback?}],
+--                       connectors: [names] }. Written at create/update
+--                     from the definition tackui itself built (source of
+--                     truth is the AgentOS config; this snapshot only
+--                     powers the pre-run gate so run requests need no
 --                     AgentOS round-trip).
 --
 -- credentials: per-user BYOK keys for LLM + tool providers. Keys are

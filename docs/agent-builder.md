@@ -240,15 +240,16 @@ here.
 for **every** run request, before anything reaches a backend. Only
 builder agents (`origin === "builder"` with a requirements snapshot) are
 gated; anything else gets the empty resolution (catalog agents have
-their own gates in `checkCatalogRunGates`). It does three things:
+their own gates in `checkCatalogRunGates`). The gate runs in **two
+phases** so refusal can never cost the user anything they didn't get:
 
-### 1. Gate — one aggregated 402
+### 1. Gate phase — one aggregated 402
 
 All checkable blockers are collected into a **single** 402
 (`AGENT_REQUIREMENTS_MISSING`, `error` = the joined human explanations)
-so a user sees everything wrong at once, and so a refused run never
-consumes quota or a concurrent slot (the gate runs before quota
-consumption and before `acquireConcurrent`):
+so a user sees everything wrong at once. This phase consumes nothing:
+a refused run burns no quota and holds no concurrent slot (the gate
+runs before `acquireConcurrent`).
 
 - **Model:** the model is not platform-tier and the runner has no key
   for its provider → "add your own {OpenAI|OpenRouter} key to run it."
@@ -260,7 +261,7 @@ consumption and before `acquireConcurrent`):
   credentials in any mode.
 
 Requirement 402s apply in **both** SaaS and self-host modes. Only the
-platform-key quota (next section) is SaaS-only.
+platform-key quota (phase 3) is SaaS-only.
 
 ### 2. Resolve dependencies — per-run AG-UI context
 
@@ -289,19 +290,29 @@ AgentOS-side for tools; platform-tier "mini" models run on the platform
 key, which is what makes them tier-flagged). Dependencies resolve in
 both modes so BYOK delivery works everywhere.
 
-### 3. Consume the platform-key quota (SaaS-only)
+### 3. Quota phase — consume the platform-key quota (SaaS-only)
 
-When the run is platform-key (some dependency resolves to the platform
-key — a mini-tier model or a tool fallback), it counts against the
-org plan's `platformDailyQuota` (see
+This phase runs **after** the copilotkit route has acquired a concurrent
+slot (`acquireConcurrent`), not inside the gate. When the run is
+platform-key (some dependency resolves to the platform key — a mini-tier
+model or a tool fallback), it counts against the org plan's
+`platformDailyQuota` (see
 [saas-mode.md](./saas-mode.md#plan-enforcement-saas-only)). Over quota →
 402 `PLATFORM_QUOTA_EXCEEDED` with the reset countdown (free plans get
-an "Upgrade to Pro for more usage." clause). **BYOK runs are exempt** —
-they cost the platform ~nothing. The quota is consumed only when a
-platform key is actually used: a runner key present for every dependency
-⇒ exempt. On self-host the quota check short-circuits entirely (the
+an "Upgrade to Pro for more usage." clause), and the route releases the
+freshly-acquired slot before returning. **BYOK runs are exempt** — they
+cost the platform ~nothing. The quota is consumed only when a platform
+key is actually used: a runner key present for every dependency ⇒
+exempt. On self-host the quota check short-circuits entirely (the
 operator pays the platform key bill themselves; the self-host sentinel
 is `null` anyway).
+
+The split exists because the two phases have different cost models: a
+requirement 402 must be free (nothing consumed, nothing held), but the
+quota must only burn once a run is actually admitted past the concurrent
+cap — otherwise a user at their cap would 429 *and* lose a daily run.
+Runs that fail mid-stream legitimately consume (the platform key was
+spent).
 
 ## Registry integration — `lib/agents/registry.ts`
 
@@ -349,9 +360,11 @@ single-instance; swap for Redis when multi-instance). Rolling 24h
 window (matches the catalog daily-quota window), stable key
 `platformKeyDaily:{userId}` so it can't collide with a named limit.
 
-- Consumed at run start — a run that fails mid-flight still counts (the
-  platform key was spent); a run blocked by the gate before it starts
-  does not (the gate runs before quota consumption).
+- Consumed after the run is admitted past the concurrent cap — a run
+  that fails mid-flight still counts (the platform key was spent); a run
+  refused by the gate phase or 429'd at the concurrent cap does not
+  (requirement checks run before slot acquisition, quota consumption
+  after it).
 - `max` comes from the plan's `platformDailyQuota` (null/unlimited is
   short-circuited by the caller).
 - `resetAt` = when the oldest run in the window falls out; the 402

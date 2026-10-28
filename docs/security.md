@@ -98,14 +98,33 @@ review that added the connector guard):
 - **Credential namespace is server-authoritative** — the registry
   middleware strips any client-sent context item whose key matches
   `mcp_connectors` or `<provider>_api_key` before merging in the
-  server-resolved stash. A raw `context` item can therefore never inject
-  a connector URL (SSRF) or a BYOK key (credential injection) that
-  bypassed the run gate's org scoping.
+  server-resolved stash (stash wins collisions). A raw `context` item can
+  therefore never inject a connector URL (SSRF) or a BYOK key (credential
+  injection) that bypassed the run gate's org scoping — including under a
+  declared name: the stash is appended last, so the server-resolved value
+  for a declared connector always wins. Today the wire payload's URL/token
+  values are org-store-sourced (tackui resolves them per run), not
+  client-controlled.
 - **Config-declared connectors enforced AgentOS-side** — the builder
   writes the agent's connector names into the stored component config;
   the dispatcher refuses wire `mcp_connectors` keys outside that list
-  (fail-closed, warning + skip). Even a tackui bug reopening the client
-  namespace couldn't reach an undeclared MCP server.
+  (fail-closed, warning + skip). Scope the claim precisely: the
+  dispatcher enforces the *namespace*, not the payload — it checks names,
+  not URL/token values. If tackui's strip (the first wall) ever broke,
+  the name check would not stop a declared-name entry whose URL was
+  overwritten; the values would again be wire-trusted. That's why the
+  first wall is the one that matters, and the dispatcher check is
+  defense in depth.
+
+**Trust model:** org isolation is entirely tackui-side. The AgentOS is an
+explicitly multi-tenant execution service with no org concept — any valid
+`app:user` token can run any stored component. tackui is the policy
+layer: org scoping, connector registration, run gates, and identity
+minting all happen there. The dispatcher's per-run credential ContextVar
+(set/reset per stream) and the session-write check (`assert_session_writable`)
+keep tenants from touching each other's sessions or credentials, but the
+org boundary itself — which agent belongs to whom — is tackui's job
+exclusively.
 
 ## Security headers
 

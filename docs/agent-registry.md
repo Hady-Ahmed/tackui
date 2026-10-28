@@ -204,11 +204,14 @@ created through the agent builder
   server-generated; the AgentOS component id mirrors it. Run/edit
   requests to the AgentOS use this id.
 - `requirements` — a JSON snapshot of what a RUNNER needs to run the
-  agent (`{ model: {provider, id, platform_tier}, tools: [{name,
-  requires_key?}], connectors: [names] }`), written at create/update
-  from the definition tackui itself built. The AgentOS stored config is
-  the source of truth; this snapshot only powers the pre-run run gate so
-  run requests need no AgentOS round-trip.
+  agent (`{ model: {provider, id, platformTier}, tools: [{name,
+  requiresKey?, provider?, platformFallback?}], connectors: [names] }`),
+  written at create/update from the definition tackui itself built. The
+  AgentOS stored config is the source of truth; this snapshot only powers
+  the pre-run run gate so run requests need no AgentOS round-trip.
+  Snapshots that predate the `provider`/`platformFallback` tool fields
+  parse fail-closed (provider re-derived from the dep key, fallback
+  false).
 
 How they differ from manual/template agents at run time:
 

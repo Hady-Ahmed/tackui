@@ -80,7 +80,11 @@ export async function getAgents(request?: Request): Promise<AgentsMap> {
     // who removed the env) resolve to nothing rather than half-running.
     if (resolved.origin === "builder") {
       if (!AGENTOS_ENABLED) continue;
-      const builderUrl = builderEndpoint(resolved.remoteAgentId!);
+      // A corrupt row (origin "builder" with no remoteAgentId — a failed
+      // write) must not half-run: skip it like a disabled platform rather
+      // than mint an endpoint of /agui/undefined.
+      if (!resolved.remoteAgentId) continue;
+      const builderUrl = builderEndpoint(resolved.remoteAgentId);
       if (!builderUrl) continue;
       map[entry.id] = createAgent(
         {

@@ -172,9 +172,22 @@ async function agentosRequest<T>(
   }
   if (!res.ok) {
     const detail = (await res.text().catch(() => "")).slice(0, 300);
+    const status = res.status === 401 || res.status === 403 ? 502 : res.status;
+    // Log the full body server-side; the browser only gets it for 4xx
+    // (validation errors are client-fixable — the user can act on them).
+    // 5xx bodies can carry infra detail (agno internals, DB errors), so
+    // the client gets a generic message — same boundary discipline as the
+    // dispatcher's run-error sanitization (platform-os commit fac65cf).
+    console.error(`[agentos] ${method} ${path} failed (${res.status})${detail ? `: ${detail}` : ""}`);
+    if (status < 500) {
+      throw new AgentosError(
+        status,
+        `AgentOS ${method} ${path} failed (${res.status})${detail ? `: ${detail}` : ""}`,
+      );
+    }
     throw new AgentosError(
-      res.status === 401 || res.status === 403 ? 502 : res.status,
-      `AgentOS ${method} ${path} failed (${res.status})${detail ? `: ${detail}` : ""}`,
+      status,
+      `AgentOS ${method} ${path} failed (${res.status}).`,
     );
   }
   if (res.status === 204) return undefined as T;

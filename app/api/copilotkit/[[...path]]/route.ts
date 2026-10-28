@@ -17,6 +17,7 @@ import { wrapStreamWithRelease } from "@/lib/ratelimit/stream-wrap";
 import { getEnforcementLimits, checkCatalogRunGates } from "@/lib/plans/enforcement";
 import {
   checkBuilderRunGate,
+  consumeBuilderRunQuota,
   emptyBuilderRunResolution,
 } from "@/lib/agents/run-gate";
 import { runWithRunnerContext } from "@/lib/auth/request-context";
@@ -24,11 +25,19 @@ import { runWithRunnerContext } from "@/lib/auth/request-context";
 /**
  * Extract the agent id from a run request path, e.g.
  * `/api/copilotkit/agent/{agentId}/run` → `{agentId}`. Returns null for
- * any other path shape (control requests never reach the caller).
+ * any other path shape (control requests never reach the caller), and
+ * for malformed percent-encoding — a path like `/agent/%%/run/` throws
+ * URIError on decode, which must fail the run path (404-shaped) rather
+ * than surface a 500.
  */
 function runAgentIdFromPath(pathname: string): string | null {
   const match = /\/agent\/([^/]+)\/run\/?$/.exec(pathname);
-  return match ? decodeURIComponent(match[1]) : null;
+  if (!match?.[1]) return null;
+  try {
+    return decodeURIComponent(match[1]);
+  } catch {
+    return null;
+  }
 }
 
 const runtime = new CopilotRuntime({
@@ -109,10 +118,12 @@ async function handler(request: Request): Promise<Response> {
           const gated = await checkCatalogRunGates(user, runAgentId, saasPlan);
           if (gated) return gated;
           // Builder-agent gate: 402s for unsatisfiable requirements
-          // (model/tool keys, connectors) and the SaaS platform-key
-          // daily quota; resolves the per-run AG-UI dependencies the
-          // registry middleware will inject. Runs before the concurrent
-          // slot is acquired so a gated run never holds one.
+          // (model/tool keys, connectors) and resolution of the per-run
+          // AG-UI dependencies the registry middleware will inject.
+          // Gate phase only — runs before the concurrent slot is
+          // acquired so a gated run never holds one; the platform-key
+          // quota is consumed separately AFTER the slot (a 429 at the
+          // cap must not burn a daily platform-key run).
           builderRun = await checkBuilderRunGate(user, runAgentId);
           if (builderRun.response) return builderRun.response;
         }
@@ -130,6 +141,17 @@ async function handler(request: Request): Promise<Response> {
         });
         if (concurrentResult instanceof Response) return concurrentResult;
         releaseConcurrent = concurrentResult;
+        // Quota phase — after the slot: a run refused at the concurrent
+        // cap never burns a daily platform-key run. A quota 402 here
+        // releases the freshly-acquired slot before returning.
+        const quota402 = await consumeBuilderRunQuota(
+          user,
+          builderRun.platformKeyRun,
+        );
+        if (quota402) {
+          releaseConcurrent();
+          return quota402;
+        }
       }
 
       try {

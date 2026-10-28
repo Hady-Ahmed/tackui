@@ -81,6 +81,8 @@ const miniRequirements: NonNullable<AgentEntry["requirements"]> = {
 };
 
 async function loadGate() {
+  delete process.env.SAAS_MODE;
+  vi.resetModules();
   return await import("./run-gate");
 }
 
@@ -131,7 +133,7 @@ describe("lib/agents/run-gate", () => {
     );
     expect(result.response).toBeNull();
     expect(result.contextItems).toEqual([]);
-    expect(result.platformKeyUsed).toBe(false);
+    expect(result.platformKeyRun).toBe(false);
     expect(mockGetCredentialSecrets).not.toHaveBeenCalled();
   });
 
@@ -146,7 +148,7 @@ describe("lib/agents/run-gate", () => {
     expect(result.contextItems).toEqual([]);
   });
 
-  it("allows a platform-tier run with no runner key and consumes quota (SaaS)", async () => {
+  it("flags a platform-tier run for quota but consumes nothing in the gate phase (SaaS)", async () => {
     mockGetAgent.mockResolvedValue(builderAgent(miniRequirements));
     const { checkBuilderRunGate } = await loadSaaSGate();
     const result = await checkBuilderRunGate(
@@ -155,7 +157,19 @@ describe("lib/agents/run-gate", () => {
     );
     expect(result.response).toBeNull();
     expect(result.contextItems).toEqual([]);
-    expect(result.platformKeyUsed).toBe(true);
+    expect(result.platformKeyRun).toBe(true);
+    // Quota phase is separate: the gate (which runs before the concurrent
+    // slot) must never consume — a 429 at the cap would otherwise burn a
+    // daily platform-key run.
+    expect(mockConsumeQuota).not.toHaveBeenCalled();
+    expect(mockGetEnforcementLimits).not.toHaveBeenCalled();
+  });
+
+  it("consumeBuilderRunQuota consumes the platform-key quota (SaaS)", async () => {
+    const { consumeBuilderRunQuota } = await loadSaaSGate();
+    const user = { id: "user-1", role: "member", name: "u", email: null, orgId: "org-1" };
+    const res = await consumeBuilderRunQuota(user, true);
+    expect(res).toBeNull();
     expect(mockConsumeQuota).toHaveBeenCalledWith("user-1", 50);
     expect(mockGetEnforcementLimits).toHaveBeenCalledWith("org-1");
   });
@@ -169,7 +183,7 @@ describe("lib/agents/run-gate", () => {
       "agent-1",
     );
     expect(result.response).toBeNull();
-    expect(result.platformKeyUsed).toBe(false);
+    expect(result.platformKeyRun).toBe(false);
     expect(mockConsumeQuota).not.toHaveBeenCalled();
     expect(result.contextItems).toEqual([
       { description: "openai_api_key", value: "sk-runner" },
@@ -224,7 +238,7 @@ describe("lib/agents/run-gate", () => {
       "agent-1",
     );
     expect(result.response).toBeNull();
-    expect(result.platformKeyUsed).toBe(false);
+    expect(result.platformKeyRun).toBe(false);
     expect(mockConsumeQuota).not.toHaveBeenCalled();
     expect(result.contextItems).toEqual([
       { description: "openai_api_key", value: "sk-runner" },
@@ -254,8 +268,7 @@ describe("lib/agents/run-gate", () => {
     );
     expect(result.response).toBeNull();
     expect(result.contextItems).toEqual([]);
-    expect(result.platformKeyUsed).toBe(true);
-    expect(mockConsumeQuota).toHaveBeenCalledWith("user-1", 50);
+    expect(result.platformKeyRun).toBe(true);
   });
 
   it("402s a keyed tool with no platform fallback when the runner lacks the key", async () => {
@@ -320,25 +333,34 @@ describe("lib/agents/run-gate", () => {
   });
 
   it("402s when the platform-key quota is exhausted", async () => {
-    mockGetAgent.mockResolvedValue(builderAgent(miniRequirements));
     mockConsumeQuota.mockReturnValue({
       allowed: false,
       resetAt: Date.now() + 3_600_000,
       used: 50,
     });
-    const { checkBuilderRunGate } = await loadSaaSGate();
-    const result = await checkBuilderRunGate(
+    const { consumeBuilderRunQuota } = await loadSaaSGate();
+    const result = await consumeBuilderRunQuota(
       { id: "user-1", role: "member", name: "u", email: null, orgId: "org-1" },
-      "agent-1",
+      true,
     );
-    expect(result.response?.status).toBe(402);
-    const body = await result.response!.json();
+    expect(result?.status).toBe(402);
+    const body = await result!.json();
     expect(body.code).toBe("PLATFORM_QUOTA_EXCEEDED");
     expect(body.resetsAt).toBeGreaterThan(Date.now());
     expect(body.error).toContain("daily limit");
     // Free-plan upsell clause, never a run number or "unlimited" promise.
     expect(body.error).toContain("Upgrade to Pro");
-    expect(result.contextItems).toEqual([]);
+  });
+
+  it("consumeBuilderRunQuota is a no-op for BYOK runs and on self-host", async () => {
+    const user = { id: "user-1", role: "member", name: "u", email: null, orgId: "org-1" };
+    const saas = await loadSaaSGate();
+    // BYOK run — exempt.
+    expect(await saas.consumeBuilderRunQuota(user, false)).toBeNull();
+    // Self-host — the operator pays the platform bill themselves.
+    const selfHost = await loadGate();
+    expect(await selfHost.consumeBuilderRunQuota(user, true)).toBeNull();
+    expect(mockConsumeQuota).not.toHaveBeenCalled();
   });
 
   it("skips quota entirely on self-host but still resolves BYOK deps", async () => {
@@ -350,7 +372,9 @@ describe("lib/agents/run-gate", () => {
       "agent-1",
     );
     expect(result.response).toBeNull();
-    expect(result.platformKeyUsed).toBe(false);
+    // The runner's own key satisfies the model dep — a BYOK run, so the
+    // platform-key flag stays off and self-host consumes nothing.
+    expect(result.platformKeyRun).toBe(false);
     expect(mockConsumeQuota).not.toHaveBeenCalled();
     expect(result.contextItems).toEqual([
       { description: "openai_api_key", value: "sk-selfhost" },

@@ -69,6 +69,7 @@ export async function register() {
   const { runMigrations } = await import("@/lib/db/migrate");
   const { ensureAuthTables } = await import("@/lib/auth/migrate");
   const { ensureSoloOrg } = await import("@/lib/auth/solo-org");
+  const { logAgentosWarnings } = await import("@/lib/config/agentos");
 
   const migrationResult = await retryPg("migrate", () => runMigrations());
   if (migrationResult) {
@@ -85,6 +86,11 @@ export async function register() {
   if (process.env.AUTH_DISABLED === "true") {
     await retryPg("solo-org", () => ensureSoloOrg());
   }
+
+  // Platform misconfiguration surface: AGENTOS_BASE_URL without its JWT
+  // secret boots fine but every builder run 401s at the dispatcher — warn
+  // at boot where the operator is looking, not at first-run failure.
+  logAgentosWarnings();
 
   // Encrypt-at-rest backfill: re-encrypt agent JWT secrets stored in
   // plaintext before DB_ENCRYPTION_KEY was configured. Idempotent —
