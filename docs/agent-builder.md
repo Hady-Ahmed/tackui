@@ -273,6 +273,13 @@ Collects the context items the run needs, shape `{description, value}`
 | `tavily_api_key` | the runner's Tavily key (when a keyed tool runs) |
 | `mcp_connectors` | JSON string `{name: {url, token}}` for the org's configured connectors referenced by the agent |
 
+These keys are **server-resolved only** — the registry middleware strips
+any client-sent context item with a reserved dep key before merging the
+stash (see "Credential keys are server-authoritative" below). The
+AgentOS enforces the same boundary from its side: the dispatcher only
+attaches wire `mcp_connectors` whose names the component's stored config
+declares, so the namespace stays closed even if a tackui bug reopens it.
+
 **Key precedence: the runner's stored key WINS.** A runner key is
 delivered as a context item; the platform env key is only the fallback
 when the runner has none (Tavily). Platform keys are NEVER injected as
@@ -322,8 +329,17 @@ via `runWithRunnerContext(user, contextItems, fn)`, a dedicated
 and "what to inject" stay orthogonal). The middleware then reads the
 stash synchronously inside the middleware callback and merges the items
 into `RunAgentInput.context` (plus `forwardedProps.user_id` as for all
-agents). Non-builder runs see an empty stash and pass `input.context`
-through untouched.
+agents).
+
+**Credential keys are server-authoritative.** Before merging, the
+middleware strips any client-sent context item whose `description`
+matches the reserved dep-key namespaces (`mcp_connectors`,
+`<provider>_api_key`) — those keys reach the backend as dependencies the
+dispatcher trusts, so a client-supplied value would bypass the run
+gate's org scoping entirely (SSRF / credential injection). The stash is
+appended last, so server-resolved items win collisions. Arbitrary
+non-reserved client context still flows. This applies to EVERY agent,
+builder or not.
 
 ## Platform-key quota — `lib/ratelimit/platform-quota.ts`
 
@@ -426,13 +442,20 @@ the AgentOS never stores connector config itself.
   orphan the agents referencing the old name, so the name is immutable
   in edit mode (the admin form enforces this). URLs are http(s)-only
   (`file:`/`ftp:`/`data:` have no legitimate use — they're fetched by
-  the AgentOS at run time).
+  the AgentOS at run time) **and** must pass `assertSafeUrl` — private/
+  internal addresses are a 400 (`ALLOW_PRIVATE_ENDPOINTS=true` opts out
+  for self-host; SaaS mode hard-locks the guard on).
 - **Token encrypted at rest** (same AES-256-GCM mechanism); a failed
   decrypt degrades to "no auth" rather than failing the org.
 - **Delete** confirms the builder-agent breakage (the run-gate copy
   agents hit after a connector they use is removed: "an org admin needs
   to add it before it can run" — the gate 402s).
-- Rate-limited via the `connectorMutate` bucket (20/min).
+- Rate-limited: writes via the `connectorMutate` bucket (20/min), reads
+  via `agentRead` (60/min).
+- **AgentOS-side enforcement:** the builder also writes the referenced
+  connector names into the stored component config; the dispatcher
+  refuses wire `mcp_connectors` keys outside that list (fail-closed,
+  warning + skip). Config carries names only — never URLs or tokens.
 
 The admin UI is the Connectors section on `/agents`
 (`components/connectors-admin.tsx`).

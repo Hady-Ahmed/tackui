@@ -281,6 +281,7 @@ export function buildComponentConfig(
     name: string;
     instructions: string;
     tools: Array<{ name: string }>;
+    connectors: string[];
   },
   model: AgentosModel,
   tools: AgentosTool[],
@@ -307,6 +308,11 @@ export function buildComponentConfig(
     // the stored config contract (sessions align via AG-UI session_id).
     add_history_to_context: true,
     num_history_runs: 10,
+    // Connector names the agent references — written to the stored config so
+    // the dispatcher can enforce "wire mcp_connectors ⊆ config-declared" at
+    // run time (defense in depth against client-supplied context bypassing
+    // the run gate). Never a URL or token — those stay run-scoped deps.
+    ...(spec.connectors.length ? { connectors: spec.connectors } : {}),
     ...(resolvedTools.length ? { tools: resolvedTools } : {}),
   };
 }

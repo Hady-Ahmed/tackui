@@ -10,11 +10,17 @@
  * can render. Tokens are write-only: GET responses carry `hasToken`
  * booleans, never plaintext. `token` semantics on PUT: omitted → preserve
  * the stored token, "" → clear it, string → encrypt + store.
+ *
+ * The connector URL is a user-supplied endpoint the AgentOS fetches at run
+ * time with the org's token attached — the SSRF guard applies (docs/security.md):
+ * private/internal addresses are refused unless ALLOW_PRIVATE_ENDPOINTS=true
+ * (hard-locked off in SaaS mode).
  */
 import { NextRequest, NextResponse } from "next/server";
 import { z } from "zod";
 import { getCurrentUser, canManageAgents } from "@/lib/auth/context";
 import { checkUserLimit } from "@/lib/ratelimit/middleware";
+import { assertSafeUrl, UnsafeUrlError } from "@/lib/net/safe-fetch";
 import {
   listConnectors,
   upsertConnector,
@@ -32,6 +38,8 @@ const upsertConnectorBodySchema = z.object({
 export async function GET() {
   const user = await getCurrentUser();
   if (!user) return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
+  const limited = checkUserLimit(user.id, "agentRead");
+  if (limited) return limited;
   const connectors = await listConnectors(user.orgId);
   return NextResponse.json({
     connectors: connectors.map(toPublicConnector),
@@ -56,6 +64,21 @@ export async function PUT(request: NextRequest) {
       { error: "Validation failed", details: parsed.error.flatten() },
       { status: 400 },
     );
+  }
+
+  // The URL is user-supplied and the AgentOS fetches it at run time with the
+  // org's token attached — the SSRF guard applies (same as agent endpoints).
+  // Zod's http(s)-only check governs the scheme; this governs the address.
+  try {
+    await assertSafeUrl(parsed.data.url);
+  } catch (err) {
+    if (err instanceof UnsafeUrlError) {
+      return NextResponse.json(
+        { error: "Connector URLs must not point to a private or internal address." },
+        { status: 400 },
+      );
+    }
+    throw err;
   }
 
   try {

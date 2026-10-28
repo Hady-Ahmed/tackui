@@ -70,6 +70,10 @@ no Docker required, no cleanup between runs (see `vitest.config.ts`).
 
 - **Commits:** Conventional Commits (`feat:`, `fix:`, `docs:`, `test:`,
   `chore:` with optional scope) — see CONTRIBUTING.md.
+- **Issues, branches & PRs:** features get an issue → a `<issue#>-short-slug`
+  branch → a PR that `Closes #N`. The full workflow lives in
+  CONTRIBUTING.md ("Workflow: issue → branch → PR") — point there, don't
+  duplicate it here.
 - **Changelog:** notable changes (features, behavior changes, fixes, security
   work) get a bullet under `## [Unreleased]` in `CHANGELOG.md` in the same
   change that introduces them. Released sections are frozen history. Docs-only

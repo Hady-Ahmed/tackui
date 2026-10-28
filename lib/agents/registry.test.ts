@@ -1,7 +1,7 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
 import jwt from "jsonwebtoken";
 import type { AgentEntry } from "./agents.config";
-import type { RequestUser } from "@/lib/auth/request-context";
+import type { RequestUser, RunContextItem } from "@/lib/auth/request-context";
 
 // vi.mock factories are hoisted above all other code, so any values
 // they close over must be declared via vi.hoisted (also hoisted).
@@ -18,6 +18,15 @@ const { testUser } = vi.hoisted(() => ({
 // Mock getRequestUser so we don't depend on the session/DB layer.
 vi.mock("@/lib/auth/context", () => ({
   getRequestUser: vi.fn().mockResolvedValue(testUser),
+}));
+
+// Mock the run stash so context-injection tests can control what the
+// copilotkit route stashed. Empty by default (no run scope).
+const { getRunContextItems } = vi.hoisted(() => ({
+  getRunContextItems: vi.fn(() => [] as RunContextItem[]),
+}));
+vi.mock("@/lib/auth/request-context", () => ({
+  getRunContextItems: () => getRunContextItems(),
 }));
 
 // Mock listAgents so we don't touch the DB. We control entries per-test
@@ -44,7 +53,38 @@ beforeEach(() => {
   vi.mocked(listAgents).mockReset();
   vi.mocked(getRequestUser).mockReset();
   vi.mocked(getRequestUser).mockResolvedValue(testUser);
+  getRunContextItems.mockReset();
+  getRunContextItems.mockReturnValue([]);
 });
+
+// Drive the injected middleware (the last entry in the agent's private
+// middlewares array) with a stub `next` that captures the input.
+function injectedMiddleware(agent: unknown) {
+  const middlewares = (agent as unknown as {
+    middlewares: {
+      run: (
+        input: unknown,
+        next: { run: (i: unknown) => unknown },
+      ) => unknown;
+    }[];
+  }).middlewares;
+  expect(middlewares.length).toBeGreaterThan(0);
+  return middlewares[middlewares.length - 1];
+}
+
+function runMiddleware(
+  middleware: ReturnType<typeof injectedMiddleware>,
+  input: Record<string, unknown>,
+): Record<string, unknown> {
+  const captured: Record<string, unknown> = {};
+  middleware.run(input, {
+    run: (i: unknown) => {
+      Object.assign(captured, i);
+      return { subscribe: () => {} }; // minimal fake observable
+    },
+  } as never);
+  return captured;
+}
 
 describe("getAgents", () => {
   it("builds a map keyed by agent id for agui entries", async () => {
@@ -244,6 +284,112 @@ describe("getAgents", () => {
         } as never,
       );
       expect(captured.forwardedProps?.user_id).toBe("u-123");
+    });
+  });
+
+  describe("context credential namespace (server-authoritative)", () => {
+    const baseInput = {
+      threadId: "t1",
+      runId: "r1",
+      messages: [],
+      tools: [],
+      state: {},
+      forwardedProps: {},
+    };
+
+    it("strips client-sent reserved dep keys (mcp_connectors, *_api_key) but keeps non-reserved context", async () => {
+      vi.mocked(listAgents).mockResolvedValue([aguiEntry({ id: "ag1" })]);
+      const map = await getAgents(new Request("http://localhost"));
+      const captured = runMiddleware(
+        injectedMiddleware(map["ag1"]),
+        {
+          ...baseInput,
+          context: [
+            { description: "mcp_connectors", value: '{"probe":{"url":"http://169.254.169.254/"}}' },
+            { description: "openai_api_key", value: "sk-forged" },
+            { description: "tavily_api_key", value: "tvly-forged" },
+            { description: "user_notes", value: "arbitrary display context" },
+          ],
+        },
+      );
+      const context = captured.context as Array<{ description: string }>;
+      expect(context.map((c) => c.description)).toEqual(["user_notes"]);
+    });
+
+    it("strips reserved keys even when there is no stash (empty run scope)", async () => {
+      vi.mocked(listAgents).mockResolvedValue([aguiEntry({ id: "ag1" })]);
+      const map = await getAgents(new Request("http://localhost"));
+      const captured = runMiddleware(
+        injectedMiddleware(map["ag1"]),
+        {
+          ...baseInput,
+          context: [
+            { description: "mcp_connectors", value: '{"x":{"url":"http://internal:8080"}}' },
+          ],
+        },
+      );
+      expect(captured.context).toEqual([]);
+    });
+
+    it("appends stashed run dependencies after filtered client context", async () => {
+      getRunContextItems.mockReturnValue([
+        { description: "tavily_api_key", value: "tvly-real" },
+        { description: "mcp_connectors", value: '{"github":{"url":"https://mcp.github.com","token":"t"}}' },
+      ]);
+      vi.mocked(listAgents).mockResolvedValue([aguiEntry({ id: "ag1" })]);
+      const map = await getAgents(new Request("http://localhost"));
+      const captured = runMiddleware(
+        injectedMiddleware(map["ag1"]),
+        {
+          ...baseInput,
+          context: [
+            { description: "user_notes", value: "keep me" },
+            { description: "mcp_connectors", value: '{"attacker":{"url":"http://169.254.169.254"}}' },
+          ],
+        },
+      );
+      const context = captured.context as Array<{ description: string; value: string }>;
+      // Client item stripped; stash items appended (stash wins collisions).
+      expect(context.map((c) => c.description)).toEqual([
+        "user_notes",
+        "tavily_api_key",
+        "mcp_connectors",
+      ]);
+      expect(context[2].value).toBe(
+        '{"github":{"url":"https://mcp.github.com","token":"t"}}',
+      );
+    });
+
+    it("stash wins on a dep-key collision with a client item of a non-reserved shape", async () => {
+      // An unfiltered client item and a stash item share a description:
+      // the server-resolved stash must come last (dispatcher uses last-wins).
+      getRunContextItems.mockReturnValue([
+        { description: "custom_dep", value: "server-resolved" },
+      ]);
+      vi.mocked(listAgents).mockResolvedValue([aguiEntry({ id: "ag1" })]);
+      const map = await getAgents(new Request("http://localhost"));
+      const captured = runMiddleware(
+        injectedMiddleware(map["ag1"]),
+        {
+          ...baseInput,
+          context: [{ description: "custom_dep", value: "client-supplied" }],
+        },
+      );
+      const context = captured.context as Array<{ description: string; value: string }>;
+      expect(context).toEqual([
+        { description: "custom_dep", value: "client-supplied" },
+        { description: "custom_dep", value: "server-resolved" },
+      ]);
+    });
+
+    it("handles a null client context (AG-UI optional field)", async () => {
+      vi.mocked(listAgents).mockResolvedValue([aguiEntry({ id: "ag1" })]);
+      const map = await getAgents(new Request("http://localhost"));
+      const captured = runMiddleware(injectedMiddleware(map["ag1"]), {
+        ...baseInput,
+        context: null,
+      });
+      expect(captured.context).toEqual([]);
     });
   });
 });

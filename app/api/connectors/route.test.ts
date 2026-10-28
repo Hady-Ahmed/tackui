@@ -13,9 +13,27 @@ vi.mock("@/lib/ratelimit/middleware", () => ({
   checkUserLimit: vi.fn().mockReturnValue(null),
 }));
 
+// Mock the SSRF guard like the agents route tests do — the real one
+// performs DNS lookups and reads module-load-time env; the guard call
+// itself (and the 400 path on UnsafeUrlError) is what's under test here.
+vi.mock("@/lib/net/safe-fetch", () => ({
+  assertSafeUrl: vi.fn().mockResolvedValue(undefined),
+  UnsafeUrlError: class UnsafeUrlError extends Error {
+    reason: string;
+    constructor(reason: string) {
+      super(reason);
+      this.reason = reason;
+      this.name = "UnsafeUrlError";
+    }
+  },
+}));
+
 import { GET, PUT } from "./route";
 import { listConnectors, deleteConnector } from "@/lib/connectors/connector-store";
+import { assertSafeUrl, UnsafeUrlError } from "@/lib/net/safe-fetch";
+import { checkUserLimit } from "@/lib/ratelimit/middleware";
 import { runMigrations } from "@/lib/db/migrate";
+import { NextResponse } from "next/server";
 import type { NextRequest } from "next/server";
 
 const ORG = "org-conn";
@@ -154,5 +172,41 @@ describe("PUT /api/connectors", () => {
     expect(res.status).toBe(200);
     const body = await res.json();
     expect(body.hasToken).toBe(false);
+  });
+
+  it("runs the SSRF guard on the submitted url", async () => {
+    const res = await put({ name: "private", url: "https://mcp.example.com/private" });
+    expect(res.status).toBe(200);
+    expect(vi.mocked(assertSafeUrl)).toHaveBeenCalledWith("https://mcp.example.com/private");
+  });
+
+  it("returns 400 and stores nothing when the SSRF guard rejects the url", async () => {
+    vi.mocked(assertSafeUrl).mockRejectedValueOnce(
+      new UnsafeUrlError("hostname resolves to a private address"),
+    );
+    const res = await put({ name: "metadata", url: "http://169.254.169.254/latest/meta-data/" });
+    expect(res.status).toBe(400);
+    const body = await res.json();
+    expect(body.error).toContain("private or internal address");
+    // Nothing was persisted — the org's list is unchanged.
+    const list = await GET();
+    const body2 = await list.json();
+    expect(body2.connectors.map((c: { name: string }) => c.name)).not.toContain("metadata");
+  });
+});
+
+describe("GET /api/connectors rate limit", () => {
+  it("applies the per-user agentRead limit", async () => {
+    const res = await GET();
+    expect(res.status).toBe(200);
+    expect(vi.mocked(checkUserLimit)).toHaveBeenCalledWith("admin-1", "agentRead");
+  });
+
+  it("propagates the 429 from the rate limiter", async () => {
+    vi.mocked(checkUserLimit).mockReturnValueOnce(
+      NextResponse.json({ error: "Rate limit exceeded" }, { status: 429 }),
+    );
+    const res = await GET();
+    expect(res.status).toBe(429);
   });
 });

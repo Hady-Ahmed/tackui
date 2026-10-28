@@ -49,7 +49,7 @@ import {
   groupModelsByProvider,
   modelKeyState,
   pickDefaultModel,
-  providerForDepKey,
+  providerForDepKeyInCatalog,
   providerMeta,
   toolKeyState,
   validateBuilderForm,
@@ -535,7 +535,7 @@ export function BuilderPage({
               {(tools ?? []).map((tool) => {
                 const checked = form.tools.includes(tool.name);
                 const depProvider = tool.requiresKey
-                  ? providerForDepKey(credentials?.catalog ?? {}, tool.requiresKey)
+                  ? providerForDepKeyInCatalog(credentials?.catalog ?? {}, tool.requiresKey)
                   : null;
                 return (
                   <label

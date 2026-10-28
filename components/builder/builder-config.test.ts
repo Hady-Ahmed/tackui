@@ -9,7 +9,7 @@ import {
   groupModelsByProvider,
   modelKeyState,
   pickDefaultModel,
-  providerForDepKey,
+  providerForDepKeyInCatalog,
   toolKeyState,
   validateBuilderForm,
   type BuilderFormState,
@@ -86,14 +86,14 @@ describe("findModel", () => {
   });
 });
 
-describe("providerForDepKey", () => {
+describe("providerForDepKeyInCatalog", () => {
   it("maps a dep key to its provider", () => {
-    expect(providerForDepKey(CATALOG, "tavily_api_key")).toBe("tavily");
-    expect(providerForDepKey(CATALOG, "openai_api_key")).toBe("openai");
+    expect(providerForDepKeyInCatalog(CATALOG, "tavily_api_key")).toBe("tavily");
+    expect(providerForDepKeyInCatalog(CATALOG, "openai_api_key")).toBe("openai");
   });
 
   it("returns null for an unknown dep key", () => {
-    expect(providerForDepKey(CATALOG, "nope")).toBeNull();
+    expect(providerForDepKeyInCatalog(CATALOG, "nope")).toBeNull();
   });
 });
 

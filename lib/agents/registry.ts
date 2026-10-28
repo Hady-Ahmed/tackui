@@ -16,6 +16,17 @@ import { getRunContextItems } from "@/lib/auth/request-context";
 
 export type AgentsMap = Record<string, AbstractAgent>;
 
+/**
+ * Context keys the CLIENT may never set — they are resolved server-side
+ * (run gate → stash) or not at all. `mcp_connectors` carries org MCP
+ * connector configs (url + token); `<provider>_api_key` carries BYOK
+ * secrets. Both reach the backend as dependencies the dispatcher trusts,
+ * so a client-supplied value would bypass the run gate's org scoping
+ * (SSRF / credential injection). Mirrors the dep-key convention the
+ * AgentOS dispatchers consume (see docs/agent-builder.md).
+ */
+const RESERVED_DEP_KEY = /^(mcp_connectors|[a-z0-9_-]+_api_key)$/;
+
 export async function getAgents(request?: Request): Promise<AgentsMap> {
   const user = await getRequestUser(request ?? new Request("http://localhost"));
   if (!user) throw new Error("No agents available — not authenticated.");
@@ -132,14 +143,25 @@ function createAgent(entry: AgentEntry, user: RequestUser): AbstractAgent {
     // resolved and stashed in the request ALS (runner BYOK keys + org
     // MCP connectors, as AG-UI context items). Read INSIDE the middleware
     // — at agent-creation time the stash may not exist yet. Non-builder
-    // runs see an empty stash and pass input.context through untouched.
+    // runs see an empty stash.
     const runContextItems = getRunContextItems();
+
+    // Security: credential-shaped context keys are server-authoritative.
+    // A client could otherwise ride raw run requests with a forged
+    // `mcp_connectors` item (SSRF — the backend connects to an
+    // attacker-chosen URL) or a forged `<provider>_api_key` item (key
+    // injection), bypassing the run gate's org scoping entirely. Strip
+    // any client-sent item matching the reserved dep-key namespaces and
+    // append the server-resolved stash last (stash wins collisions).
+    // Arbitrary non-reserved client context still flows for backends
+    // that consume it. Applies to EVERY agent, builder or not.
+    const clientContext = (input.context ?? []).filter(
+      (item) => !RESERVED_DEP_KEY.test(item.description),
+    );
+
     return next.run({
       ...input,
-      context:
-        runContextItems.length > 0
-          ? [...(input.context ?? []), ...runContextItems]
-          : input.context,
+      context: [...clientContext, ...runContextItems],
       forwardedProps: {
         ...input.forwardedProps,
         user_id: user.id,

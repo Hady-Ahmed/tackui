@@ -172,8 +172,14 @@ export function providerMeta(
   return catalog[provider] ?? null;
 }
 
-/** The credential provider that owns a dep key ("tavily_api_key" → "tavily"). */
-export function providerForDepKey(
+/**
+ * The credential provider that owns a dep key ("tavily_api_key" → "tavily")
+ * — a catalog LOOKUP (a key name not in the catalog → null), unlike the
+ * mechanical slug derivation of the same name in lib/credentials/catalog.
+ * Distinct name: the two are NOT interchangeable (mechanical derivation
+ * never returns null; the catalog lookup can).
+ */
+export function providerForDepKeyInCatalog(
   catalog: CredentialCatalog,
   keyName: string,
 ): string | null {
@@ -227,7 +233,7 @@ export function toolKeyState(
   credentials: CredentialsState | null,
 ): ToolKeyState {
   if (!tool.requiresKey) return { status: "none" };
-  const provider = credentials ? providerForDepKey(credentials.catalog, tool.requiresKey) : null;
+  const provider = credentials ? providerForDepKeyInCatalog(credentials.catalog, tool.requiresKey) : null;
   const meta = credentials && provider ? providerMeta(credentials.catalog, provider) : null;
   const providerLabel = meta?.label ?? tool.requiresKey;
   if (credentials?.hasKey[provider ?? ""]) {

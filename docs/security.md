@@ -51,12 +51,16 @@ secret stores whose boundaries are worth stating explicitly:
   to the Better Auth runtime table (same convention as `agents.org_id`).
 - **Connectors** (`lib/connectors/connector-store.ts`) — org-scoped MCP
   server registry. Writes are org-admin gated (`canManageAgents`); reads
-  are member-accessible so the builder's connector palette can render.
-  Tokens are write-only (`hasToken` booleans in GET responses) and
-  encrypted at rest (same AES-256-GCM mechanism). PUT token semantics:
-  omitted → preserve the stored token, `""` → clear it, string →
-  encrypt + store. The name is the reference key in agent definitions
-  (URL/payload-safe pattern, http(s)-only URLs).
+  are member-accessible (rate-limited via the `agentRead` bucket) so the
+  builder's connector palette can render. Tokens are write-only
+  (`hasToken` booleans in GET responses) and encrypted at rest (same
+  AES-256-GCM mechanism). PUT token semantics: omitted → preserve the
+  stored token, `""` → clear it, string → encrypt + store. The name is
+  the reference key in agent definitions (URL/payload-safe pattern).
+  **The connector URL runs `assertSafeUrl`** — an admin pointing a
+  connector at a private/internal address is a 400 (the AgentOS fetches
+  connector URLs at run time with the org's token attached; http(s)-only
+  alone doesn't stop `https://169.254.169.254/`).
 
 ## Run-gate 402s (builder agents)
 
@@ -86,7 +90,22 @@ endpoint URL to validate. The outbound AgentOS URL is platform config
 so the guard's threat model (user-controlled URL reaching internal
 services) doesn't apply. The guard still applies to every route where
 the endpoint comes from the user (admin agent create/edit, the
-reachability probe, catalog templates).
+reachability probe, catalog templates, **`PUT /api/connectors`**).
+
+Two further lines of defense on the run path (both from the same
+review that added the connector guard):
+
+- **Credential namespace is server-authoritative** — the registry
+  middleware strips any client-sent context item whose key matches
+  `mcp_connectors` or `<provider>_api_key` before merging in the
+  server-resolved stash. A raw `context` item can therefore never inject
+  a connector URL (SSRF) or a BYOK key (credential injection) that
+  bypassed the run gate's org scoping.
+- **Config-declared connectors enforced AgentOS-side** — the builder
+  writes the agent's connector names into the stored component config;
+  the dispatcher refuses wire `mcp_connectors` keys outside that list
+  (fail-closed, warning + skip). Even a tackui bug reopening the client
+  namespace couldn't reach an undeclared MCP server.
 
 ## Security headers
 
