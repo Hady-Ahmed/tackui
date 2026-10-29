@@ -82,8 +82,15 @@ export async function getAgents(request?: Request): Promise<AgentsMap> {
       if (!AGENTOS_ENABLED) continue;
       // A corrupt row (origin "builder" with no remoteAgentId — a failed
       // write) must not half-run: skip it like a disabled platform rather
-      // than mint an endpoint of /agui/undefined.
-      if (!resolved.remoteAgentId) continue;
+      // than mint an endpoint of /agui/undefined. The warn makes the
+      // disappearance observable — otherwise the agent silently vanishes
+      // from the run list with no trace of why.
+      if (!resolved.remoteAgentId) {
+        console.warn(
+          `[registry] skipping builder agent ${entry.id}: corrupt row (origin "builder" with no remoteAgentId)`,
+        );
+        continue;
+      }
       const builderUrl = builderEndpoint(resolved.remoteAgentId);
       if (!builderUrl) continue;
       map[entry.id] = createAgent(
