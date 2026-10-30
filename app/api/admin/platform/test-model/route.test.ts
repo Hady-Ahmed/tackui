@@ -1,10 +1,8 @@
 import { describe, it, expect, beforeEach, vi } from "vitest";
 
 const mockGetCurrentUser = vi.fn();
-const mockCanManageAgents = vi.fn();
 vi.mock("@/lib/auth/context", () => ({
   getCurrentUser: (...a: unknown[]) => mockGetCurrentUser(...a),
-  canManageAgents: (...a: unknown[]) => mockCanManageAgents(...a),
 }));
 
 vi.mock("@/lib/ratelimit/middleware", () => ({
@@ -24,8 +22,8 @@ import { POST } from "./route";
 import { AgentosError } from "@/lib/agents/builder";
 import type { NextRequest } from "next/server";
 
-function user(id: string) {
-  return { id, email: null, name: id, role: "user", orgId: `org-${id}` };
+function user(id: string, role = "user") {
+  return { id, email: null, name: id, role, orgId: `org-${id}` };
 }
 
 function post(body: unknown) {
@@ -40,8 +38,7 @@ function post(body: unknown) {
 
 beforeEach(() => {
   vi.clearAllMocks();
-  mockGetCurrentUser.mockImplementation(async () => user("admin-user"));
-  mockCanManageAgents.mockResolvedValue(true);
+  mockGetCurrentUser.mockImplementation(async () => user("admin-user", "admin"));
   mockTestPlatformModel.mockResolvedValue({ ok: true, reply: "Hi there!" });
 });
 
@@ -68,11 +65,10 @@ describe("POST /api/admin/platform/test-model", () => {
     expect((await res.json()).error).toContain("401");
   });
 
-  it("returns 401 without a user and 403 for a member", async () => {
+  it("returns 401 without a user and 403 for a non-platform-admin", async () => {
     mockGetCurrentUser.mockImplementation(async () => null);
     expect((await post({ entry: "openai:gpt-4o-mini" })).status).toBe(401);
-    mockGetCurrentUser.mockImplementation(async () => user("admin-user"));
-    mockCanManageAgents.mockResolvedValue(false);
+    mockGetCurrentUser.mockImplementation(async () => user("org-admin", "owner"));
     expect((await post({ entry: "openai:gpt-4o-mini" })).status).toBe(403);
     expect(mockTestPlatformModel).not.toHaveBeenCalled();
   });

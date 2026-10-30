@@ -6,21 +6,20 @@ import { PlatformAdmin } from "@/components/platform-admin";
 import { BackToChat } from "@/components/back-to-chat";
 import { authClient } from "@/lib/auth/auth-client";
 import { useAuthConfig } from "@/lib/auth/use-auth-config";
-import { useCanManageAgents } from "@/lib/auth/use-can-manage-agents";
 
 /**
- * Platform admin — the deployment's agent catalog: which model providers
- * and toolkits the builder offers. Gated to agent managers (platform
- * admins + org owners/admins — the same canManageAgents gate the /agents
- * page uses); members are redirected to /app. The AgentOS-side admin API
- * is reachable ONLY through tackui's proxy routes — the platform's JWT
- * secret never reaches the browser.
+ * Models & tools — the deployment's agent catalog: which model providers
+ * and toolkits the builder offers. Gated to platform admins
+ * (role === "admin"), identical to /admin — org owners/admins are NOT
+ * platform admins. The catalog is global (one shared AgentOS), so who may
+ * edit it must be global too; members are redirected to /app. The
+ * AgentOS-side admin API is reachable ONLY through tackui's proxy routes —
+ * the platform's JWT secret never reaches the browser.
  */
 export default function PlatformAdminPage() {
   const router = useRouter();
   const { data: session, isPending } = authClient.useSession();
   const { config } = useAuthConfig();
-  const { canManage, loading: canManageLoading } = useCanManageAgents();
 
   useEffect(() => {
     if (isPending || !config) return;
@@ -30,17 +29,16 @@ export default function PlatformAdminPage() {
       router.push("/login");
       return;
     }
-    if (canManage === false) {
+    if (session.user.role !== "admin") {
       router.push("/app");
     }
-  }, [session, isPending, config, canManage, router]);
+  }, [session, isPending, config, router]);
 
   if (
     isPending ||
     !config ||
-    canManageLoading ||
     (!session && !config.authDisabled) ||
-    (!config.authDisabled && canManage !== true)
+    (!config.authDisabled && session?.user?.role !== "admin")
   ) {
     return (
       <div className="min-h-screen bg-zinc-50 dark:bg-black">
@@ -57,7 +55,7 @@ export default function PlatformAdminPage() {
         <header className="mb-8 flex items-center justify-between gap-3">
           <div>
             <h1 className="text-2xl font-semibold text-zinc-900 dark:text-zinc-50">
-              Platform catalog
+              Models &amp; tools
             </h1>
             <p className="mt-1 text-sm text-zinc-500 dark:text-zinc-400">
               What the agent builder offers. Tick providers and toolkits, list

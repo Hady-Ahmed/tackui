@@ -72,6 +72,11 @@ export function BuilderPage({
   const { config } = useAuthConfig();
   const { canManage } = useCanManageAgents();
   const { billing } = useBilling();
+  // Platform admin (or solo synthetic admin) — gates the "Models & tools"
+  // link next to the picker. Deliberately NOT canManage: that gate spans
+  // org owners/admins, but the catalog is global and only platform admins
+  // may edit it.
+  const isPlatformAdmin = config?.authDisabled || session?.user?.role === "admin";
 
   const [models, setModels] = useState<PlatformModel[] | null>(null);
   const [modelsError, setModelsError] = useState<string | null>(null);
@@ -553,7 +558,7 @@ export function BuilderPage({
                       updateForm({ model: { provider: form.model.provider, id: e.target.value } });
                   }}
                   disabled={!providerGroup}
-                  className={inputClass()}
+                  className={inputClass(!providerGroup)}
                 >
                   {/* Stale saved model: not in the catalog anymore, so it
                       renders as an explicit placeholder row and the notice
@@ -586,6 +591,18 @@ export function BuilderPage({
                 onConnect={() => setKeyProvider(form.model?.provider ?? null)}
               />
             </div>
+            {/* Platform admins manage what this picker offers — the
+                Models & tools page (/admin/platform). Hidden from org
+                admins/members: the catalog is global and they can't edit
+                it. */}
+            {isPlatformAdmin && (
+              <Link
+                href="/admin/platform"
+                className="text-xs text-blue-600 hover:underline dark:text-blue-400"
+              >
+                Models &amp; tools
+              </Link>
+            )}
           </div>
 
           {/* Tool palette — the platform's tool catalog (GET /api/tools,
@@ -982,6 +999,6 @@ function inputClass(disabled = false): string {
   return [
     "w-full rounded-lg border border-zinc-200 bg-white px-3 py-2 text-sm text-zinc-900 outline-none transition-colors",
     "focus:border-blue-500 dark:border-zinc-700 dark:bg-zinc-900 dark:text-zinc-50",
-    disabled ? "opacity-60" : "",
+    disabled ? "cursor-not-allowed opacity-60" : "",
   ].join(" ");
 }

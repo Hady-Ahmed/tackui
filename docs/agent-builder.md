@@ -133,13 +133,15 @@ unreachable/401/403, 503 when the platform is disabled, and AgentOS
 error statuses otherwise (`AgentosError.status` drives the route
 response).
 
-## The platform catalog — the admin page (`/app/admin/platform`)
+## Models & tools — the admin page (`/admin/platform`)
 
 What the agent builder offers is a **deployment decision**, made in one
 place with zero code: the platform admin ticks model providers and
-toolkits on `/app/admin/platform` (`components/platform-admin.tsx`,
-gated by `canManageAgents` — platform admins and org owners/admins).
-Everything else on the page is derived from the AgentOS's discovery
+toolkits on `/admin/platform` (`components/platform-admin.tsx`,
+gated to platform admins only — `role === "admin"`, identical to
+`/admin`; org owners/admins must not set platform-wide policy, and the
+catalog is global so who edits it must be too). Everything else on the
+page is derived from the AgentOS's discovery
 scan and rendered read-only (class names, platform env keys + whether
 they're set, credential contracts, function lists), so nothing editable
 can desynchronize the stack.
@@ -150,11 +152,12 @@ can desynchronize the stack.
   which mint the service token server-side. The AgentOS JWT secret
   never reaches the browser.
 - **Model editing is per-provider textareas** — one model id per line,
-  grammar `model-id[:tier][:key=value …]` (bare ids inside a provider's
-  own block; `:tier` marks platform-key-eligible models, dormant until
-  Phase 3). The AgentOS validates entries against its own model classes
-  (unknown attribute → 400) and tackui passes that 400 through
-  verbatim — the platform owns entry validation.
+  grammar `model-id[:key=value …]` (bare ids inside a provider's own
+  block). The UI no longer advertises the dormant `:tier` segment, but
+  the parser still accepts it for Phase 3 publishing, and stored values
+  round-trip exactly. The AgentOS validates entries against its own
+  model classes (unknown attribute → 400) and tackui passes that 400
+  through verbatim — the platform owns entry validation.
 - **Test button** — one "hi" completion straight to the provider through
   the platform's own env key, answering "does this model id exist and
   does the platform key work?" before the admin enables it. Disabled
@@ -180,8 +183,8 @@ can desynchronize the stack.
 The tools a builder may attach are NOT hardcoded in tackui. They come
 from the AgentOS `GET /platform/tools` catalog — **discovery-driven**:
 the AgentOS scans its installed agno modules at boot and the platform
-admin ticks checkboxes on `/app/admin/platform` (see [the platform
-catalog](#the-platform-catalog—the-admin-page) below). tackui proxies the
+admin ticks checkboxes on `/admin/platform` (see
+[Models & tools](#models--tools--the-admin-page-adminplatform) below). tackui proxies the
 enabled subset to the browser via `GET /api/tools`. Adding a tool = an
 agno import on the AgentOS + one checkbox — zero tackui code, not even
 env.
@@ -592,7 +595,7 @@ The admin UI is the Connectors section on `/agents`
   validated against a stale palette otherwise.
 - **Empty ≠ unreachable:** the platform catalogs are **empty by default**
   — the AgentOS exposes nothing until the platform admin enables
-  providers/toolkits on `/app/admin/platform`, so a reachable-but-empty
+  providers/toolkits on `/admin/platform`, so a reachable-but-empty
   catalog is a *configuration* state with its own copy ("The agent
   platform exposes no tools yet. The platform admin enables them in the
   platform admin page."), never the error banner. Create stays disabled
@@ -615,9 +618,10 @@ The admin UI is the Connectors section on `/agents`
 - The chat sidebar links to `/app/builder` (a wrench-glyph "Create
   agent" button in the Agents header — member-accessible, mirroring the
   "+" admin link).
-- **`/app/admin/platform`** (`app/app/admin/platform/page.tsx` +
-  `components/platform-admin.tsx`) — the platform catalog admin page;
-  see the section below.
+- **`/admin/platform`** (`app/admin/platform/page.tsx` +
+  `components/platform-admin.tsx`) — the platform catalog admin page
+  ("Models & tools"); platform-admin gated, linked from the builder
+  (admin-only) and from `/admin`'s header. See the section below.
 
 ## Not in Phase 1
 

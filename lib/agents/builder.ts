@@ -471,7 +471,7 @@ export async function deleteAgentosComponent(componentId: string): Promise<void>
 }
 
 /* ---------------------------------------------------------------------- */
-/* Platform catalog admin (the /app/admin/platform page's server client)   */
+/* Platform catalog admin (the /admin/platform page's server client)      */
 /* ---------------------------------------------------------------------- */
 
 /**

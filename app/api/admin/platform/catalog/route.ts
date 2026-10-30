@@ -6,15 +6,16 @@
  *
  * This is the ONLY path the admin page gets: the AgentOS JWT secret never
  * reaches the browser (tackui mints the service token server-side). Gated
- * to agent managers (platform admins + org owners/admins — the people who
- * administer a deployment's offering); rate-limited on the agentMutate
+ * to platform admins only (role === "admin") — the catalog is global (one
+ * shared AgentOS), so who may edit it must be global too; org owners/admins
+ * must not set platform-wide policy. Rate-limited on the agentMutate
  * bucket. PUT validates nothing itself — the AgentOS is the source of
  * truth for the entry grammar and rejects bad entries with a 400 that is
  * passed through verbatim.
  */
 import { NextRequest, NextResponse } from "next/server";
 import { z } from "zod";
-import { getCurrentUser, canManageAgents } from "@/lib/auth/context";
+import { getCurrentUser } from "@/lib/auth/context";
 import { checkUserLimit } from "@/lib/ratelimit/middleware";
 import {
   fetchPlatformCatalog,
@@ -50,7 +51,7 @@ const putBodySchema = z
 export async function GET() {
   const user = await getCurrentUser();
   if (!user) return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
-  if (!(await canManageAgents(user))) {
+  if (user.role !== "admin") {
     return NextResponse.json({ error: "Forbidden" }, { status: 403 });
   }
   const limited = checkUserLimit(user.id, "agentRead");
@@ -76,7 +77,7 @@ export async function GET() {
 export async function PUT(request: NextRequest) {
   const user = await getCurrentUser();
   if (!user) return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
-  if (!(await canManageAgents(user))) {
+  if (user.role !== "admin") {
     return NextResponse.json({ error: "Forbidden" }, { status: 403 });
   }
   const limited = checkUserLimit(user.id, "agentMutate");

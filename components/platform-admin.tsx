@@ -12,9 +12,10 @@
  * rebuilds its registry lazily) — no restart, no redeploy.
  *
  * Model grammar (one entry per line, inside a provider's own block):
- *   model-id[:tier][:key=value ...]
- * `:tier` marks platform-key-eligible models (dormant for builder runs —
- * they are 100% BYOK — it wakes at Phase 3 publishing).
+ *   model-id[:key=value ...]
+ * The parser also still accepts a legacy `:tier` segment (dormant since
+ * the tier system sleeps — builder runs are 100% BYOK; it wakes at
+ * Phase 3 publishing) but the UI no longer advertises it.
  *
  * Wire contract (app/api/admin/platform):
  *  - GET  → {providers: [...], tools: [...]} — discovery ∪ durable rows.
@@ -98,7 +99,7 @@ export function PlatformAdmin() {
       setError(
         typeof data.error === "string" && data.error
           ? data.error
-          : `Failed to load the platform catalog (${res.status})`,
+          : `Failed to load models & tools (${res.status})`,
       );
       setLoading(false);
       return;
@@ -222,7 +223,7 @@ export function PlatformAdmin() {
             Models
           </h2>
           <p className="text-xs text-zinc-500 dark:text-zinc-400">
-            one per line: <code className="text-[11px]">model-id[:tier][:key=value]</code>
+            one per line: <code className="text-[11px]">model-id[:key=value]</code>
           </p>
         </div>
         <div className="space-y-2">
@@ -284,7 +285,7 @@ export function PlatformAdmin() {
                         }))
                       }
                       rows={Math.max(2, d.modelsText.split("\n").length)}
-                      placeholder={"gpt-4o-mini\ngpt-4o:tier"}
+                      placeholder={"model-id"}
                       className="w-full rounded-lg border border-zinc-200 bg-white px-3 py-2 font-mono text-xs text-zinc-900 outline-none transition-colors focus:border-blue-500 dark:border-zinc-700 dark:bg-zinc-900 dark:text-zinc-50"
                     />
                     {/* Saved models — test one "hi" through the platform's

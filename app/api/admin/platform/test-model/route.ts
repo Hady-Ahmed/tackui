@@ -8,10 +8,12 @@
  * Body: {entry: "provider:model-id[:tier][:k=v ...]"} — the AgentOS
  * validates the grammar + attributes and answers 400 with its own message
  * when the entry is malformed; 502/503 when the provider or key is broken.
+ * Gated to platform admins only (role === "admin") — same as the catalog
+ * proxy; this endpoint mutates nothing but probes with platform keys.
  */
 import { NextRequest, NextResponse } from "next/server";
 import { z } from "zod";
-import { getCurrentUser, canManageAgents } from "@/lib/auth/context";
+import { getCurrentUser } from "@/lib/auth/context";
 import { checkUserLimit } from "@/lib/ratelimit/middleware";
 import { testPlatformModel, AgentosError } from "@/lib/agents/builder";
 
@@ -22,7 +24,7 @@ const testBodySchema = z.object({
 export async function POST(request: NextRequest) {
   const user = await getCurrentUser();
   if (!user) return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
-  if (!(await canManageAgents(user))) {
+  if (user.role !== "admin") {
     return NextResponse.json({ error: "Forbidden" }, { status: 403 });
   }
   const limited = checkUserLimit(user.id, "agentMutate");

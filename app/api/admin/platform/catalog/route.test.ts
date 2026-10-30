@@ -1,12 +1,10 @@
 import { describe, it, expect, beforeEach, vi } from "vitest";
 
-// Mock the auth context: the gate is canManageAgents (platform admins +
-// org owners/admins), so the tests vary both the user and the verdict.
+// Mock the auth context: the gate is platform-admin-only (role ===
+// "admin"), so the tests vary the user object's role.
 const mockGetCurrentUser = vi.fn();
-const mockCanManageAgents = vi.fn();
 vi.mock("@/lib/auth/context", () => ({
   getCurrentUser: (...a: unknown[]) => mockGetCurrentUser(...a),
-  canManageAgents: (...a: unknown[]) => mockCanManageAgents(...a),
 }));
 
 vi.mock("@/lib/ratelimit/middleware", () => ({
@@ -57,8 +55,8 @@ const CATALOG = {
   ],
 };
 
-function user(id: string) {
-  return { id, email: null, name: id, role: "user", orgId: `org-${id}` };
+function user(id: string, role = "user") {
+  return { id, email: null, name: id, role, orgId: `org-${id}` };
 }
 
 function put(body: unknown) {
@@ -73,8 +71,7 @@ function put(body: unknown) {
 
 beforeEach(() => {
   vi.clearAllMocks();
-  mockGetCurrentUser.mockImplementation(async () => user("admin-user"));
-  mockCanManageAgents.mockResolvedValue(true);
+  mockGetCurrentUser.mockImplementation(async () => user("admin-user", "admin"));
   mockFetchPlatformCatalog.mockResolvedValue(CATALOG);
   mockPutModels.mockResolvedValue({ ok: true, revision: 7, warnings: [] });
   mockPutTools.mockResolvedValue({ ok: true, revision: 8, warnings: [] });
@@ -95,8 +92,8 @@ describe("GET /api/admin/platform/catalog", () => {
     expect(mockFetchPlatformCatalog).not.toHaveBeenCalled();
   });
 
-  it("403s a member (canManageAgents is the gate — org owners/admins pass)", async () => {
-    mockCanManageAgents.mockResolvedValue(false);
+  it("403s non-platform-admins — org admins and members alike (role is the gate)", async () => {
+    mockGetCurrentUser.mockImplementation(async () => user("org-admin", "owner"));
     const res = await GET();
     expect(res.status).toBe(403);
     expect(mockFetchPlatformCatalog).not.toHaveBeenCalled();
@@ -164,11 +161,10 @@ describe("PUT /api/admin/platform/catalog", () => {
     expect((await res.json()).error).toContain("max_tokes");
   });
 
-  it("returns 401 without a user and 403 for a member", async () => {
+  it("returns 401 without a user and 403 for a non-platform-admin", async () => {
     mockGetCurrentUser.mockImplementation(async () => null);
     expect((await put({ tools: [{ slug: "tavily", enabled: true }] })).status).toBe(401);
-    mockGetCurrentUser.mockImplementation(async () => user("admin-user"));
-    mockCanManageAgents.mockResolvedValue(false);
+    mockGetCurrentUser.mockImplementation(async () => user("org-admin", "owner"));
     expect((await put({ tools: [{ slug: "tavily", enabled: true }] })).status).toBe(403);
     expect(mockPutModels).not.toHaveBeenCalled();
     expect(mockPutTools).not.toHaveBeenCalled();

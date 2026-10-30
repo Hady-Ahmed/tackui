@@ -59,10 +59,10 @@ export default function AdminPage() {
               Global agent-catalog templates and user management. The agent
               builder&apos;s offering (models + tools) is configured on the{" "}
               <Link
-                href="/app/admin/platform"
+                href="/admin/platform"
                 className="text-blue-600 hover:underline dark:text-blue-400"
               >
-                Platform catalog
+                Models &amp; tools
               </Link>{" "}
               page; workspace agent backends live on the{" "}
               <Link
