@@ -115,10 +115,9 @@ export function BuilderPage({
     }
     const list = Array.isArray(data.models) ? data.models : [];
     setModels(list);
-    // Create mode: default to a platform-tier model (mini-tier models run
-    // on the platform key — no BYOK needed); non-tier models need a
-    // runner key. Applied here (not an effect) so the default lands as
-    // soon as the catalog arrives.
+    // Create mode: default to the first model (builder runs are 100% BYOK
+    // — there is no platform-key free tier to prefer). Applied here (not an
+    // effect) so the default lands as soon as the catalog arrives.
     if (mode === "create") {
       const def = pickDefaultModel(list);
       if (def)
@@ -228,7 +227,11 @@ export function BuilderPage({
   const staleCopy = staleModelCopy(form.model, models, modelsError);
   const modelState = modelKeyState(
     form.model
-      ? { provider: form.model.provider, platformTier: selectedModel?.platformTier ?? false }
+      ? {
+          provider: form.model.provider,
+          platformTier: selectedModel?.platformTier ?? false,
+          requiresKey: selectedModel?.requiresKey ?? true,
+        }
       : null,
     credentials,
   );
@@ -282,13 +285,13 @@ export function BuilderPage({
     });
   };
 
-  const saveKey = async (provider: string, secret: string) => {
+  const saveKey = async (provider: string, fields: Record<string, string>) => {
     setKeySaving(true);
     try {
       const res = await fetch("/api/credentials", {
         method: "PUT",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ provider, secret }),
+        body: JSON.stringify({ provider, fields }),
       });
       if (!res.ok) {
         const data = await res.json().catch(() => ({}));
@@ -519,10 +522,7 @@ export function BuilderPage({
                     const group = groups.find((g) => g.provider === provider);
                     updateForm({
                       model: group
-                        ? {
-                            provider,
-                            id: (group.models.find((m) => m.platformTier) ?? group.models[0]).id,
-                          }
+                        ? { provider, id: group.models[0].id }
                         : null,
                     });
                   }}
@@ -596,7 +596,8 @@ export function BuilderPage({
               {(tools ?? []).map((tool) => {
                 const checked = form.tools.includes(tool.name);
                 const depProvider = tool.requiresKey
-                  ? providerForDepKeyInCatalog(credentials?.catalog ?? {}, tool.requiresKey)
+                  ? tool.toolkit ||
+                    providerForDepKeyInCatalog(credentials?.catalog ?? {}, tool.requiresKey)
                   : null;
                 return (
                   <label
@@ -712,8 +713,8 @@ export function BuilderPage({
           <KeyForm
             meta={providerMeta(credentials.catalog, keyProvider)}
             saving={keySaving}
-            onSave={async (secret) => {
-              const ok = await saveKey(keyProvider, secret);
+            onSave={async (fields) => {
+              const ok = await saveKey(keyProvider, fields);
               if (ok) setKeyProvider(null);
             }}
             onClose={() => setKeyProvider(null)}
@@ -733,11 +734,11 @@ export function BuilderPage({
 /* ---------------------------------------------------------------------- */
 
 /**
- * The model's key state — "Runs on the platform key" for platform-tier
- * models (mini-tier models run on the platform key; SaaS deployments apply
- * a daily quota to platform-key runs), "Runs on your {label} key" when the
- * runner has the provider key, and a warning when the model needs a key
- * the runner hasn't connected yet (the run gate 402s on that).
+ * The model's key state — "Runs on your {label} key" when the runner has
+ * the provider key, nothing for keyless providers (e.g. ollama), and a
+ * warning when the model needs a key the runner hasn't connected yet (the
+ * run gate 402s on that). (TIER DORMANCY: the old "Runs on the platform
+ * key" badge died with the builder BYOK-only rule — wakes at Phase 3.)
  */
 function ModelKeyBadge({
   state,
@@ -747,13 +748,7 @@ function ModelKeyBadge({
   onConnect: () => void;
 }) {
   if (!state) return null;
-  if (state.status === "platform") {
-    return (
-      <span className="rounded-full bg-green-100 px-2 py-1 text-[11px] font-medium text-green-700 dark:bg-green-950 dark:text-green-300">
-        Runs on the platform key — free-tier daily quota applies
-      </span>
-    );
-  }
+  if (state.status === "none") return null;
   if (state.status === "connected") {
     return (
       <span className="rounded-full bg-green-100 px-2 py-1 text-[11px] font-medium text-green-700 dark:bg-green-950 dark:text-green-300">
@@ -772,17 +767,14 @@ function ModelKeyBadge({
         >
           connect one
         </button>
-      ) : null}{" "}
-      or pick a platform-tier model.
+      ) : null}
     </span>
   );
 }
 
 /**
  * The tool palette's key badge — per tool: no key (free), the runner's own
- * key, the platform fallback (missing key, but the platform carries an env
- * key — the run gate routes it to the platform key + daily quota), or a
- * missing key with no fallback (the run gate 402s).
+ * credentials connected, or missing credentials (the run gate 402s).
  */
 function KeyBadge({
   state,
@@ -796,22 +788,6 @@ function KeyBadge({
     return (
       <span className="ml-auto shrink-0 rounded-full bg-green-100 px-1.5 py-0.5 text-[10px] font-medium text-green-700 dark:bg-green-950 dark:text-green-300">
         {state.providerLabel} key ✓
-      </span>
-    );
-  }
-  if (state.status === "fallback") {
-    return (
-      <span className="ml-auto flex shrink-0 items-center gap-1">
-        <span className="rounded-full bg-amber-100 px-1.5 py-0.5 text-[10px] font-medium text-amber-700 dark:bg-amber-950 dark:text-amber-300">
-          No {state.providerLabel} key — runs on the platform key
-        </span>
-        <button
-          type="button"
-          onClick={onConnect}
-          className="text-[10px] underline"
-        >
-          Connect
-        </button>
       </span>
     );
   }
@@ -834,7 +810,10 @@ function KeyBadge({
 }
 
 /**
- * The inline BYOK key form — the provider's key the runner is missing.
+ * The inline BYOK key form — the provider's credentials the runner is
+ * missing. Renders one input per field of the provider's derived contract
+ * (single-key providers have one; multi-credential toolkits like X have
+ * several — every field is required, a partial contract can't be saved).
  * (The credentials catalog is the source of truth for labels; the
  * plaintext never leaves this form.)
  */
@@ -844,19 +823,28 @@ function KeyForm({
   onSave,
   onClose,
 }: {
-  meta: { kind: string; keyName: string; label: string } | null;
+  meta: {
+    kind: string;
+    keyName: string;
+    label: string;
+    fields: { key: string; label: string }[];
+  } | null;
   saving: boolean;
-  onSave: (secret: string) => void;
+  onSave: (fields: Record<string, string>) => void;
   onClose: () => void;
 }) {
-  const [secret, setSecret] = useState("");
+  const [values, setValues] = useState<Record<string, string>>({});
   if (!meta) return null;
+  const fields = meta.fields.length > 0 ? meta.fields : [{ key: "api_key", label: "Api key" }];
+  const complete = fields.every((f) => (values[f.key] ?? "").trim().length > 0);
+  const setField = (key: string, value: string) =>
+    setValues((prev) => ({ ...prev, [key]: value }));
   return (
     <div className="mt-4 rounded-xl border border-zinc-200 bg-white p-4 dark:border-zinc-800 dark:bg-zinc-950">
       <div className="flex items-start justify-between gap-3">
         <div className="min-w-0">
           <p className="text-sm font-medium text-zinc-900 dark:text-zinc-50">
-            Connect a {meta.label} key
+            Connect {fields.length > 1 ? `${meta.label} credentials` : `a ${meta.label} key`}
           </p>
           <p className="text-xs text-zinc-500 dark:text-zinc-400">
             {meta.kind === "tool"
@@ -880,21 +868,24 @@ function KeyForm({
           ✕
         </button>
       </div>
-      <div className="mt-3 flex gap-2">
-        <input
-          type="password"
-          value={secret}
-          onChange={(e) => setSecret(e.target.value)}
-          placeholder={`${meta.label} API key`}
-          className={inputClass()}
-        />
+      <div className="mt-3 space-y-2">
+        {fields.map((field) => (
+          <input
+            key={field.key}
+            type="password"
+            value={values[field.key] ?? ""}
+            onChange={(e) => setField(field.key, e.target.value)}
+            placeholder={`${meta.label} ${field.label}`}
+            className={inputClass()}
+          />
+        ))}
         <button
           type="button"
-          disabled={saving || !secret}
-          onClick={() => onSave(secret)}
-          className="shrink-0 rounded-lg bg-blue-600 px-4 py-2 text-sm font-medium text-white transition-colors hover:bg-blue-700 disabled:opacity-50"
+          disabled={saving || !complete}
+          onClick={() => onSave(values)}
+          className="w-full rounded-lg bg-blue-600 px-4 py-2 text-sm font-medium text-white transition-colors hover:bg-blue-700 disabled:opacity-50"
         >
-          {saving ? "Saving…" : "Save key"}
+          {saving ? "Saving…" : fields.length > 1 ? "Save credentials" : "Save key"}
         </button>
       </div>
     </div>

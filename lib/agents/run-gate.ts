@@ -8,25 +8,24 @@
  *
  * 1. **`checkBuilderRunGate` (gate phase)** — refuse the run (one
  *    aggregated 402) when a requirement cannot be satisfied: the agent's
- *    model is not platform-tier and the runner has no key for its
- *    provider; a tool needs a key the runner lacks and the tool has no
- *    platform fallback; a required org MCP connector is not configured.
- *    The principle is "never a silent mid-run failure" — anything
- *    checkable is checked before the run. This phase consumes nothing:
- *    a refused run burns no quota and holds no concurrent slot, so it
- *    runs BEFORE slot acquisition.
+ *    model has no runner key for its provider; a tool's credential
+ *    contract cannot be resolved from the runner's saved fields; a
+ *    required org MCP connector is not configured. The principle is
+ *    "never a silent mid-run failure" — anything checkable is checked
+ *    before the run, and every dep of a tool's contract must resolve
+ *    (a partial contract would pass the gate and fail mid-run). This
+ *    phase consumes nothing: a refused run burns no quota and holds no
+ *    concurrent slot, so it runs BEFORE slot acquisition.
  *
  * 2. **`consumeBuilderRunQuota` (quota phase)** — called AFTER the
  *    concurrent slot is acquired (a 429 at the cap must not burn a daily
- *    platform-key run). When the run is platform-key (some dependency
- *    resolves to the platform key), count it against the plan's
- *    `platformDailyQuota` (lib/ratelimit, 24h sliding window). BYOK runs
- *    are exempt. The quota is the only SaaS-only check here: self-host
- *    still gets requirement 402s (there is no fallback for connector
- *    credentials or non-fallback tool keys, and non-tier models are hard
- *    failures regardless of mode) but never consumes quota — the operator
- *    pays the platform key bill themselves. Dependencies are resolved in
- *    both modes so BYOK delivery works everywhere.
+ *    platform-key run). When the run is platform-key, count it against
+ *    the plan's `platformDailyQuota` (lib/ratelimit, 24h sliding window).
+ *    BYOK runs are exempt. DORMANT until Phase 3 publishing: builder runs
+ *    are 100% BYOK today, so `platformKeyRun` is always false and this
+ *    phase never fires — the wiring stays so publishing wakes it with a
+ *    one-line change. SaaS-only: self-host never consumes quota — the
+ *    operator pays the platform key bill themselves.
  *
  * Non-builder agents (manual/template rows) return the empty resolution —
  * catalog agents have their own gates (checkCatalogRunGates).
@@ -36,6 +35,7 @@ import { NextResponse } from "next/server";
 import { getCredentialSecrets } from "@/lib/credentials/credential-store";
 import {
   depKeyForProvider,
+  fieldForDepKey,
   prettifyProviderLabel,
   providerForDepKey,
 } from "@/lib/credentials/catalog";
@@ -78,22 +78,27 @@ export async function checkBuilderRunGate(
   }
   const requirements = agent.requirements;
 
-  const runnerKeys = await getCredentialSecrets(user.id);
+  // The runner's saved credentials: provider → named field map (migration
+  // 0014; single-key providers have exactly one field, "api_key").
+  const runnerFields = await getCredentialSecrets(user.id);
   const contextItems: RunContextItem[] = [];
   const blockers: string[] = [];
-  let platformKeyRun = false;
+  // TIER DORMANCY (wakes at Phase 3 publishing): builder runs are 100% BYOK
+  // — the platform env key serves nothing today, so `platformKeyRun` is
+  // never true (const — not a forgotten write; the mechanism is dormant).
+  // `requirements.model.platformTier` and tool `platformFallback` stay in
+  // the snapshot (and keep flowing through the builder/catalog for the
+  // future), but the gate IGNORES both.
+  const platformKeyRun = false;
 
-  // --- Model: runner's key wins; platform key serves mini-tier models. ---
-  // The model dep key follows the wire contract the AgentOS dispatcher
-  // resolves (<provider>_api_key — see credentials.py).
+  // --- Model: the runner's own key. The model dep key follows the wire ---
+  // contract the AgentOS dispatcher resolves (<provider>_api_key — see
+  // credentials.py); the field is the universal "api_key" constructor arg.
   const modelProvider = requirements.model.provider;
   const modelKeyName = depKeyForProvider(modelProvider);
-  const modelKey = runnerKeys[modelProvider];
+  const modelKey = runnerFields[modelProvider]?.api_key;
   if (modelKey) {
     contextItems.push({ description: modelKeyName, value: modelKey });
-  } else if (requirements.model.platformTier) {
-    // Platform-tier (mini) model — the AgentOS env platform key serves it.
-    platformKeyRun = true;
   } else {
     const providerLabel = prettifyProviderLabel(modelProvider);
     blockers.push(
@@ -101,24 +106,35 @@ export async function checkBuilderRunGate(
     );
   }
 
-  // --- Tools: key-delivered when the runner has one; platform fallback ---
-  // serves otherwise; hard 402 when neither exists. Everything comes from
-  // the requirements snapshot — no live catalog, no hardcode. A snapshot
-  // that predates the provider/platformFallback fields parses with the
-  // provider re-derived from the dep key and fallback=false (fail-closed).
+  // --- Tools: every dep of the credential contract must resolve, or the ---
+  // toolkit is skipped for the run (fail-closed). Multi-credential toolkits
+  // deliver one context item per field. Everything comes from the
+  // requirements snapshot — no live catalog, no hardcode. A snapshot that
+  // predates the credentials/provider fields parses with the provider
+  // re-derived from the dep key and the single dep as the contract.
   for (const tool of requirements.tools) {
     if (!tool.requiresKey) continue;
     const provider = tool.provider ?? providerForDepKey(tool.requiresKey);
-    const key = runnerKeys[provider];
-    if (key) {
-      contextItems.push({ description: tool.requiresKey, value: key });
-    } else if (tool.platformFallback === true) {
-      platformKeyRun = true;
+    const contract = tool.credentials?.length
+      ? tool.credentials
+      : [{ depKey: tool.requiresKey, label: "Api key" }];
+    const fields = runnerFields[provider] ?? {};
+    const missing = contract.filter(
+      (c) => !fields[fieldForDepKey(provider, c.depKey)],
+    );
+    if (missing.length === 0) {
+      for (const cred of contract) {
+        contextItems.push({
+          description: cred.depKey,
+          value: fields[fieldForDepKey(provider, cred.depKey)],
+        });
+      }
     } else {
       const toolLabel = tool.label ?? tool.name;
       const providerLabel = prettifyProviderLabel(provider);
+      const noun = contract.length > 1 ? "credentials" : "key";
       blockers.push(
-        `This agent uses ${toolLabel} — add your own ${providerLabel} key to run it.`,
+        `This agent uses ${toolLabel} — add your own ${providerLabel} ${noun} to run it.`,
       );
     }
   }

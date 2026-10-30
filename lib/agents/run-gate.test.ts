@@ -116,6 +116,8 @@ describe("lib/agents/run-gate", () => {
         label: "Free",
       },
     });
+    // The runner's credentials: provider → named field map (migration 0014;
+    // single-key providers carry exactly one "api_key" field).
     mockGetCredentialSecrets.mockResolvedValue({});
   });
 
@@ -148,35 +150,24 @@ describe("lib/agents/run-gate", () => {
     expect(result.contextItems).toEqual([]);
   });
 
-  it("flags a platform-tier run for quota but consumes nothing in the gate phase (SaaS)", async () => {
+  it("TIER DORMANCY: a platform-tier model without a runner key 402s (the platform key serves nothing until Phase 3)", async () => {
     mockGetAgent.mockResolvedValue(builderAgent(miniRequirements));
     const { checkBuilderRunGate } = await loadSaaSGate();
     const result = await checkBuilderRunGate(
       { id: "user-1", role: "member", name: "u", email: null, orgId: "org-1" },
       "agent-1",
     );
-    expect(result.response).toBeNull();
-    expect(result.contextItems).toEqual([]);
-    expect(result.platformKeyRun).toBe(true);
-    // Quota phase is separate: the gate (which runs before the concurrent
-    // slot) must never consume — a 429 at the cap would otherwise burn a
-    // daily platform-key run.
+    expect(result.response?.status).toBe(402);
+    const body = await result.response!.json();
+    expect(body.error).toContain("gpt-4o-mini");
+    // The dormant flag never flips — the quota phase no-ops.
+    expect(result.platformKeyRun).toBe(false);
     expect(mockConsumeQuota).not.toHaveBeenCalled();
-    expect(mockGetEnforcementLimits).not.toHaveBeenCalled();
   });
 
-  it("consumeBuilderRunQuota consumes the platform-key quota (SaaS)", async () => {
-    const { consumeBuilderRunQuota } = await loadSaaSGate();
-    const user = { id: "user-1", role: "member", name: "u", email: null, orgId: "org-1" };
-    const res = await consumeBuilderRunQuota(user, true);
-    expect(res).toBeNull();
-    expect(mockConsumeQuota).toHaveBeenCalledWith("user-1", 50);
-    expect(mockGetEnforcementLimits).toHaveBeenCalledWith("org-1");
-  });
-
-  it("exempts a BYOK platform-tier run from quota and injects the key", async () => {
+  it("TIER DORMANCY: a platform-tier model WITH a runner key runs BYOK", async () => {
     mockGetAgent.mockResolvedValue(builderAgent(miniRequirements));
-    mockGetCredentialSecrets.mockResolvedValue({ openai: "sk-runner" });
+    mockGetCredentialSecrets.mockResolvedValue({ openai: { api_key: "sk-runner" } });
     const { checkBuilderRunGate } = await loadSaaSGate();
     const result = await checkBuilderRunGate(
       { id: "user-1", role: "member", name: "u", email: null, orgId: "org-1" },
@@ -184,13 +175,12 @@ describe("lib/agents/run-gate", () => {
     );
     expect(result.response).toBeNull();
     expect(result.platformKeyRun).toBe(false);
-    expect(mockConsumeQuota).not.toHaveBeenCalled();
     expect(result.contextItems).toEqual([
       { description: "openai_api_key", value: "sk-runner" },
     ]);
   });
 
-  it("402s a non-platform-tier model when the runner has no provider key", async () => {
+  it("402s a model when the runner has no key for its provider", async () => {
     mockGetAgent.mockResolvedValue(
       builderAgent({
         model: { provider: "openai", id: "gpt-5", platformTier: false },
@@ -203,7 +193,6 @@ describe("lib/agents/run-gate", () => {
       { id: "user-1", role: "member", name: "u", email: null, orgId: "org-1" },
       "agent-1",
     );
-    expect(result.response).not.toBeNull();
     expect(result.response?.status).toBe(402);
     const body = await result.response!.json();
     expect(body.code).toBe("AGENT_REQUIREMENTS_MISSING");
@@ -212,7 +201,27 @@ describe("lib/agents/run-gate", () => {
     expect(mockConsumeQuota).not.toHaveBeenCalled();
   });
 
-  it("injects a BYOK tool key and skips the platform fallback", async () => {
+  it("injects the runner's model key from its field map", async () => {
+    mockGetAgent.mockResolvedValue(
+      builderAgent({
+        model: { provider: "openai", id: "gpt-5", platformTier: false },
+        tools: [],
+        connectors: [],
+      }),
+    );
+    mockGetCredentialSecrets.mockResolvedValue({ openai: { api_key: "sk-runner" } });
+    const { checkBuilderRunGate } = await loadGate();
+    const result = await checkBuilderRunGate(
+      { id: "user-1", role: "member", name: "u", email: null, orgId: "org-1" },
+      "agent-1",
+    );
+    expect(result.response).toBeNull();
+    expect(result.contextItems).toEqual([
+      { description: "openai_api_key", value: "sk-runner" },
+    ]);
+  });
+
+  it("injects a BYOK tool key from the legacy single-dep snapshot (pre-multi-credential shape)", async () => {
     mockGetAgent.mockResolvedValue(
       builderAgent({
         model: { provider: "openai", id: "gpt-5", platformTier: false },
@@ -229,8 +238,9 @@ describe("lib/agents/run-gate", () => {
       }),
     );
     mockGetCredentialSecrets.mockResolvedValue({
-      openai: "sk-runner",
-      tavily: "tvly-runner",
+      openai: { api_key: "sk-runner" },
+      // Migration 0014 backfills single-key providers to {api_key: ...}.
+      tavily: { api_key: "tvly-runner" },
     });
     const { checkBuilderRunGate } = await loadSaaSGate();
     const result = await checkBuilderRunGate(
@@ -246,7 +256,91 @@ describe("lib/agents/run-gate", () => {
     ]);
   });
 
-  it("falls back to the platform key (quota) when a tool key is missing", async () => {
+  it("delivers EVERY dep of a multi-credential toolkit's contract when all fields are saved", async () => {
+    mockGetAgent.mockResolvedValue(
+      builderAgent({
+        model: { provider: "openai", id: "gpt-5", platformTier: false },
+        tools: [
+          {
+            name: "search_x",
+            label: "Search X posts",
+            requiresKey: "x_consumer_key",
+            provider: "x",
+            platformFallback: false,
+            credentials: [
+              { depKey: "x_consumer_key", label: "X consumer key" },
+              { depKey: "x_consumer_secret", label: "X consumer secret" },
+              { depKey: "x_access_token", label: "X access token" },
+              { depKey: "x_access_token_secret", label: "X access token secret" },
+            ],
+          },
+        ],
+        connectors: [],
+      }),
+    );
+    mockGetCredentialSecrets.mockResolvedValue({
+      openai: { api_key: "sk-runner" },
+      x: {
+        consumer_key: "ck",
+        consumer_secret: "cs",
+        access_token: "at",
+        access_token_secret: "ats",
+      },
+    });
+    const { checkBuilderRunGate } = await loadGate();
+    const result = await checkBuilderRunGate(
+      { id: "user-1", role: "member", name: "u", email: null, orgId: "org-1" },
+      "agent-1",
+    );
+    expect(result.response).toBeNull();
+    expect(result.contextItems).toEqual([
+      { description: "openai_api_key", value: "sk-runner" },
+      { description: "x_consumer_key", value: "ck" },
+      { description: "x_consumer_secret", value: "cs" },
+      { description: "x_access_token", value: "at" },
+      { description: "x_access_token_secret", value: "ats" },
+    ]);
+  });
+
+  it("402s a multi-credential toolkit when ANY field of the contract is missing (all-or-nothing)", async () => {
+    mockGetAgent.mockResolvedValue(
+      builderAgent({
+        model: { provider: "openai", id: "gpt-5", platformTier: false },
+        tools: [
+          {
+            name: "search_x",
+            label: "Search X posts",
+            requiresKey: "x_consumer_key",
+            provider: "x",
+            platformFallback: false,
+            credentials: [
+              { depKey: "x_consumer_key", label: "X consumer key" },
+              { depKey: "x_access_token", label: "X access token" },
+            ],
+          },
+        ],
+        connectors: [],
+      }),
+    );
+    mockGetCredentialSecrets.mockResolvedValue({
+      openai: { api_key: "sk-runner" },
+      x: { consumer_key: "ck" }, // access_token missing
+    });
+    const { checkBuilderRunGate } = await loadGate();
+    const result = await checkBuilderRunGate(
+      { id: "user-1", role: "member", name: "u", email: null, orgId: "org-1" },
+      "agent-1",
+    );
+    expect(result.response?.status).toBe(402);
+    const body = await result.response!.json();
+    expect(body.error).toContain("Search X posts");
+    // Multi-field contract → the plural copy.
+    expect(body.error).toContain("X credentials");
+    // A partial contract must not partially deliver.
+    expect(result.contextItems).toEqual([]);
+  });
+
+  it("TIER DORMANCY: a platformFallback tool without a runner key 402s (the fallback is dormant until Phase 3)", async () => {
     mockGetAgent.mockResolvedValue(
       builderAgent({
         ...miniRequirements,
@@ -266,9 +360,10 @@ describe("lib/agents/run-gate", () => {
       { id: "user-1", role: "member", name: "u", email: null, orgId: "org-1" },
       "agent-1",
     );
-    expect(result.response).toBeNull();
-    expect(result.contextItems).toEqual([]);
-    expect(result.platformKeyRun).toBe(true);
+    expect(result.response?.status).toBe(402);
+    const body = await result.response!.json();
+    expect(body.error).toContain("Tavily");
+    expect(result.platformKeyRun).toBe(false);
   });
 
   it("402s a keyed tool with no platform fallback when the runner lacks the key", async () => {
@@ -314,15 +409,16 @@ describe("lib/agents/run-gate", () => {
     mockGetConnectorsByNames.mockResolvedValue(
       new Map([["github", connectorFixture("github", "tok-123")]]),
     );
+    mockGetCredentialSecrets.mockResolvedValue({ openai: { api_key: "sk-runner" } });
     const { checkBuilderRunGate } = await loadSaaSGate();
     const result = await checkBuilderRunGate(
       { id: "user-1", role: "member", name: "u", email: null, orgId: "org-1" },
       "agent-1",
     );
     expect(result.response).toBeNull();
-    expect(result.contextItems).toHaveLength(1);
-    const item = result.contextItems[0];
-    expect(item.description).toBe("mcp_connectors");
+    const items = result.contextItems;
+    expect(items).toHaveLength(2);
+    const item = items.find((i) => i.description === "mcp_connectors")!;
     expect(JSON.parse(item.value)).toEqual({
       github: {
         url: "https://mcp.example.com/github",
@@ -330,6 +426,15 @@ describe("lib/agents/run-gate", () => {
       },
     });
     expect(mockGetConnectorsByNames).toHaveBeenCalledWith("org-1", ["github"]);
+  });
+
+  it("consumeBuilderRunQuota consumes the platform-key quota (SaaS) — the wiring stays for Phase 3", async () => {
+    const { consumeBuilderRunQuota } = await loadSaaSGate();
+    const user = { id: "user-1", role: "member", name: "u", email: null, orgId: "org-1" };
+    const res = await consumeBuilderRunQuota(user, true);
+    expect(res).toBeNull();
+    expect(mockConsumeQuota).toHaveBeenCalledWith("user-1", 50);
+    expect(mockGetEnforcementLimits).toHaveBeenCalledWith("org-1");
   });
 
   it("402s when the platform-key quota is exhausted", async () => {
@@ -363,29 +468,12 @@ describe("lib/agents/run-gate", () => {
     expect(mockConsumeQuota).not.toHaveBeenCalled();
   });
 
-  it("skips quota entirely on self-host but still resolves BYOK deps", async () => {
-    mockGetAgent.mockResolvedValue(builderAgent(miniRequirements));
-    mockGetCredentialSecrets.mockResolvedValue({ openai: "sk-selfhost" });
-    const { checkBuilderRunGate } = await loadGate();
-    const result = await checkBuilderRunGate(
-      { id: "user-1", role: "member", name: "u", email: null, orgId: "org-1" },
-      "agent-1",
-    );
-    expect(result.response).toBeNull();
-    // The runner's own key satisfies the model dep — a BYOK run, so the
-    // platform-key flag stays off and self-host consumes nothing.
-    expect(result.platformKeyRun).toBe(false);
-    expect(mockConsumeQuota).not.toHaveBeenCalled();
-    expect(result.contextItems).toEqual([
-      { description: "openai_api_key", value: "sk-selfhost" },
-    ]);
-  });
-
   it("still blocks a missing connector on self-host (no fallback exists)", async () => {
     mockGetAgent.mockResolvedValue(
       builderAgent({ ...miniRequirements, connectors: ["github"] }),
     );
     mockGetConnectorsByNames.mockResolvedValue(new Map());
+    mockGetCredentialSecrets.mockResolvedValue({ openai: { api_key: "sk-selfhost" } });
     const { checkBuilderRunGate } = await loadGate();
     const result = await checkBuilderRunGate(
       { id: "user-1", role: "member", name: "u", email: null, orgId: "org-1" },

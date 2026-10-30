@@ -26,6 +26,12 @@ const requirementsSchema = z.object({
       label: z.string().min(1).optional(),
       requiresKey: z.string().nullable().optional(),
       provider: z.string().nullable().optional(),
+      // The credential contract (multi-credential toolkits list several).
+      // Absent on pre-0014 snapshots — the run gate then treats the single
+      // requiresKey dep as the contract.
+      credentials: z
+        .array(z.object({ depKey: z.string().min(1), label: z.string().min(1) }))
+        .optional(),
       // Snapshots created before turn 5 lack the flag — default false
       // (fail-closed: the run gate 402s rather than silently using the
       // platform key).

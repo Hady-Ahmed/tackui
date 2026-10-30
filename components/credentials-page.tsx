@@ -11,13 +11,18 @@
  *    back null and the page degrades: saved keys are still listed and
  *    deletable, only NEW keys can't be added (PUT validates against the
  *    live catalog, fail-closed).
- *  - PUT  → {provider, secret} — validated against the live catalog.
+ *  - PUT  → {provider, fields: {name: value}} — the provider's full
+ *    contract, validated field-by-field against the live catalog (every
+ *    declared field required; a partial contract would pass the run gate
+ *    and fail mid-run).
  *  - DELETE /:provider — accepts any saved provider, including ones the
  *    catalog no longer declares (a removed provider must never lock a key
  *    in; the row shows "No longer supported" and stays deletable).
  *
- * The plaintext key never leaves this page except in the PUT body — GET
- * responses carry existence booleans only.
+ * A provider's connect form renders one input per field of its contract —
+ * single-key providers have one ("Api key"); multi-credential toolkits (the
+ * X toolkit) have several. The plaintext never leaves this page except in
+ * the PUT body — GET responses carry field NAMES only.
  */
 
 import { useCallback, useEffect, useState } from "react";
@@ -28,6 +33,8 @@ interface SavedCredential {
   provider: string;
   kind: "llm" | "tool";
   hasKey: boolean;
+  /** Field names saved — values are write-only. */
+  fields: string[];
   updatedAt: string;
 }
 
@@ -36,6 +43,8 @@ interface CredentialMeta {
   kind: "llm" | "tool";
   keyName: string;
   label: string;
+  /** The named fields the connect form renders. */
+  fields: { key: string; label: string }[];
 }
 
 interface CredentialsResponse {
@@ -64,7 +73,7 @@ export function CredentialsPage() {
   const [notice, setNotice] = useState<string | null>(null);
   const [savingProvider, setSavingProvider] = useState<string | null>(null);
   const [deletingProvider, setDeletingProvider] = useState<string | null>(null);
-  const [newSecrets, setNewSecrets] = useState<Record<string, string>>({});
+  const [newFields, setNewFields] = useState<Record<string, Record<string, string>>>({});
 
   const load = useCallback(async () => {
     const res = await fetch("/api/credentials");
@@ -90,9 +99,9 @@ export function CredentialsPage() {
     wrapper();
   }, [load]);
 
-  const onSave = async (provider: string) => {
-    const secret = newSecrets[provider];
-    if (!secret) return;
+  const onSave = async (provider: string, meta: CredentialMeta) => {
+    const fields = newFields[provider] ?? {};
+    if (!meta.fields.every((f) => (fields[f.key] ?? "").trim())) return;
     setSavingProvider(provider);
     setError(null);
     setNotice(null);
@@ -100,7 +109,10 @@ export function CredentialsPage() {
       const res = await fetch("/api/credentials", {
         method: "PUT",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ provider, secret }),
+        body: JSON.stringify({
+          provider,
+          fields: Object.fromEntries(meta.fields.map((f) => [f.key, fields[f.key].trim()])),
+        }),
       });
       const data = await res.json().catch(() => ({}));
       if (!res.ok) {
@@ -112,7 +124,7 @@ export function CredentialsPage() {
         return;
       }
       setNotice(`${providerLabel(provider)} key saved.`);
-      setNewSecrets((prev) => ({ ...prev, [provider]: "" }));
+      setNewFields((prev) => ({ ...prev, [provider]: {} }));
       await load();
     } finally {
       setSavingProvider(null);
@@ -145,10 +157,19 @@ export function CredentialsPage() {
   };
 
   const saved = credentials ?? [];
-  // Add rows: catalog providers the runner hasn't saved a key for.
+  // Add rows: catalog providers the runner hasn't fully connected — either
+  // nothing saved, or a saved set that no longer covers the contract (the
+  // platform added a field; re-connecting upserts the whole map).
+  const coversContract = (provider: string) => {
+    const row = saved.find((c) => c.provider === provider);
+    if (!row) return false;
+    const meta = catalog?.[provider];
+    if (!meta) return true; // not in the live catalog — nothing to complete
+    return meta.fields.every((f) => row.fields.includes(f.key));
+  };
   const addRows = catalog
     ? Object.entries(catalog)
-        .filter(([provider]) => !saved.some((c) => c.provider === provider))
+        .filter(([provider]) => !coversContract(provider))
         .map(([provider, meta]) => ({ provider, meta }))
     : [];
   // Saved rows that the catalog no longer declares.
@@ -217,7 +238,8 @@ export function CredentialsPage() {
                       <div className="min-w-0">
                         <p className="truncate text-sm font-medium">{label}</p>
                         <p className="truncate text-xs text-zinc-500 dark:text-zinc-400">
-                          {c.kind === "llm" ? "Model key" : "Tool key"} · saved{" "}
+                          {c.kind === "llm" ? "Model key" : "Tool key"}
+                          {c.fields.length > 1 ? ` · ${c.fields.length} fields` : ""} · saved{" "}
                           {new Date(c.updatedAt).toLocaleDateString()}
                         </p>
                       </div>
@@ -266,42 +288,60 @@ export function CredentialsPage() {
               </p>
             ) : (
               <ul className="space-y-2">
-                {addRows.map(({ provider, meta }) => (
-                  <li
-                    key={provider}
-                    className="rounded-xl border border-zinc-200 bg-white p-3 dark:border-zinc-800 dark:bg-zinc-950"
-                  >
-                    <div className="flex items-center justify-between gap-3">
-                      <div className="min-w-0">
-                        <p className="truncate text-sm font-medium">{meta.label}</p>
-                        <p className="truncate text-xs text-zinc-500 dark:text-zinc-400">
-                          {meta.kind === "llm"
-                            ? "Model key — the agent runs on it"
-                            : "Tool key — used by the agent's tool calls"}
-                        </p>
+                {addRows.map(({ provider, meta }) => {
+                  const fields =
+                    meta.fields.length > 0 ? meta.fields : [{ key: "api_key", label: "Api key" }];
+                  const values = newFields[provider] ?? {};
+                  const complete = fields.every((f) => (values[f.key] ?? "").trim().length > 0);
+                  const isUpdate = saved.some((c) => c.provider === provider);
+                  return (
+                    <li
+                      key={provider}
+                      className="rounded-xl border border-zinc-200 bg-white p-3 dark:border-zinc-800 dark:bg-zinc-950"
+                    >
+                      <div className="flex items-center justify-between gap-3">
+                        <div className="min-w-0">
+                          <p className="truncate text-sm font-medium">{meta.label}</p>
+                          <p className="truncate text-xs text-zinc-500 dark:text-zinc-400">
+                            {meta.kind === "llm"
+                              ? "Model key — the agent runs on it"
+                              : "Tool key — used by the agent's tool calls"}
+                            {isUpdate ? " · incomplete — add the missing fields" : ""}
+                          </p>
+                        </div>
                       </div>
-                    </div>
-                    <div className="mt-2 flex gap-2">
-                      <input
-                        type="password"
-                        value={newSecrets[provider] ?? ""}
-                        onChange={(e) =>
-                          setNewSecrets((prev) => ({ ...prev, [provider]: e.target.value }))
-                        }
-                        placeholder={`${meta.label} API key`}
-                        className="w-full rounded-lg border border-zinc-200 bg-white px-3 py-2 text-sm text-zinc-900 outline-none transition-colors focus:border-blue-500 dark:border-zinc-700 dark:bg-zinc-900 dark:text-zinc-50"
-                      />
-                      <button
-                        type="button"
-                        disabled={!newSecrets[provider] || savingProvider !== null}
-                        onClick={() => onSave(provider)}
-                        className="shrink-0 rounded-lg bg-blue-600 px-4 py-2 text-sm font-medium text-white transition-colors hover:bg-blue-700 disabled:opacity-50"
-                      >
-                        {savingProvider === provider ? "Saving…" : "Save key"}
-                      </button>
-                    </div>
-                  </li>
-                ))}
+                      <div className="mt-2 space-y-2">
+                        {fields.map((field) => (
+                          <input
+                            key={field.key}
+                            type="password"
+                            value={values[field.key] ?? ""}
+                            onChange={(e) =>
+                              setNewFields((prev) => ({
+                                ...prev,
+                                [provider]: { ...(prev[provider] ?? {}), [field.key]: e.target.value },
+                              }))
+                            }
+                            placeholder={`${meta.label} ${field.label}`}
+                            className="w-full rounded-lg border border-zinc-200 bg-white px-3 py-2 text-sm text-zinc-900 outline-none transition-colors focus:border-blue-500 dark:border-zinc-700 dark:bg-zinc-900 dark:text-zinc-50"
+                          />
+                        ))}
+                        <button
+                          type="button"
+                          disabled={!complete || savingProvider !== null}
+                          onClick={() => onSave(provider, meta)}
+                          className="w-full rounded-lg bg-blue-600 px-4 py-2 text-sm font-medium text-white transition-colors hover:bg-blue-700 disabled:opacity-50"
+                        >
+                          {savingProvider === provider
+                            ? "Saving…"
+                            : fields.length > 1
+                              ? "Save credentials"
+                              : "Save key"}
+                        </button>
+                      </div>
+                    </li>
+                  );
+                })}
               </ul>
             )}
           </>

@@ -1,0 +1,117 @@
+/**
+ * Platform catalog admin — tackui's proxy for the AgentOS admin catalog API.
+ *
+ * GET  /api/admin/platform/catalog  — discovery ∪ durable rows, both catalogs
+ * PUT  /api/admin/platform/catalog  — full-state replace {providers?, tools?}
+ *
+ * This is the ONLY path the admin page gets: the AgentOS JWT secret never
+ * reaches the browser (tackui mints the service token server-side). Gated
+ * to agent managers (platform admins + org owners/admins — the people who
+ * administer a deployment's offering); rate-limited on the agentMutate
+ * bucket. PUT validates nothing itself — the AgentOS is the source of
+ * truth for the entry grammar and rejects bad entries with a 400 that is
+ * passed through verbatim.
+ */
+import { NextRequest, NextResponse } from "next/server";
+import { z } from "zod";
+import { getCurrentUser, canManageAgents } from "@/lib/auth/context";
+import { checkUserLimit } from "@/lib/ratelimit/middleware";
+import {
+  fetchPlatformCatalog,
+  putPlatformCatalogModels,
+  putPlatformCatalogTools,
+  AgentosError,
+} from "@/lib/agents/builder";
+
+const putBodySchema = z
+  .object({
+    providers: z
+      .array(
+        z.object({
+          slug: z.string().trim().min(1).max(64),
+          enabled: z.boolean(),
+          models: z.array(z.string().trim().min(1).max(300)),
+        }),
+      )
+      .optional(),
+    tools: z
+      .array(
+        z.object({
+          slug: z.string().trim().min(1).max(64),
+          enabled: z.boolean(),
+        }),
+      )
+      .optional(),
+  })
+  .refine((body) => body.providers !== undefined || body.tools !== undefined, {
+    message: "Nothing to update — send providers, tools, or both",
+  });
+
+export async function GET() {
+  const user = await getCurrentUser();
+  if (!user) return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
+  if (!(await canManageAgents(user))) {
+    return NextResponse.json({ error: "Forbidden" }, { status: 403 });
+  }
+  const limited = checkUserLimit(user.id, "agentRead");
+  if (limited) return limited;
+
+  try {
+    const catalog = await fetchPlatformCatalog();
+    return NextResponse.json(catalog);
+  } catch (err) {
+    if (err instanceof AgentosError) {
+      return NextResponse.json({ error: err.message }, { status: err.status });
+    }
+    console.error("[admin/platform] catalog fetch failed", {
+      error: err instanceof Error ? err.message : String(err),
+    });
+    return NextResponse.json(
+      { error: "The agent platform is unavailable. Please retry shortly." },
+      { status: 502 },
+    );
+  }
+}
+
+export async function PUT(request: NextRequest) {
+  const user = await getCurrentUser();
+  if (!user) return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
+  if (!(await canManageAgents(user))) {
+    return NextResponse.json({ error: "Forbidden" }, { status: 403 });
+  }
+  const limited = checkUserLimit(user.id, "agentMutate");
+  if (limited) return limited;
+
+  const body = await request.json().catch(() => null);
+  const parsed = putBodySchema.safeParse(body);
+  if (!parsed.success) {
+    return NextResponse.json(
+      { error: "Validation failed", details: parsed.error.flatten() },
+      { status: 400 },
+    );
+  }
+
+  try {
+    // Two independent PUTs; apply both, report the higher revision. An
+    // AgentOS 400 (bad model entry, unknown slug) passes through verbatim
+    // so the admin sees the platform's own validation message.
+    if (parsed.data.providers) {
+      await putPlatformCatalogModels(parsed.data.providers);
+    }
+    if (parsed.data.tools) {
+      await putPlatformCatalogTools(parsed.data.tools);
+    }
+    return NextResponse.json({ ok: true });
+  } catch (err) {
+    if (err instanceof AgentosError) {
+      return NextResponse.json({ error: err.message }, { status: err.status });
+    }
+    console.error("[admin/platform] catalog update failed", {
+      error: err instanceof Error ? err.message : String(err),
+    });
+    return NextResponse.json(
+      { error: "The agent platform is unavailable. Please retry shortly." },
+      { status: 502 },
+    );
+  }
+}

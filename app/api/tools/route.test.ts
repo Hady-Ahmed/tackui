@@ -51,7 +51,7 @@ describe("GET /api/tools", () => {
     expect(res.status).toBe(429);
   });
 
-  it("maps the AgentOS catalog to the client shape (camelCase flags)", async () => {
+  it("maps the AgentOS catalog to the client shape (camelCase flags + credential contract)", async () => {
     mockFetchBuilderTools.mockResolvedValue([
       {
         name: "web_search",
@@ -60,6 +60,8 @@ describe("GET /api/tools", () => {
         requires_key: null,
         fallback_env: null,
         platform_fallback: false,
+        toolkit: "duckduckgo",
+        credentials: [],
       },
       {
         name: "tavily_search",
@@ -68,6 +70,8 @@ describe("GET /api/tools", () => {
         requires_key: "tavily_api_key",
         fallback_env: "TAVILY_API_KEY",
         platform_fallback: true,
+        toolkit: "tavily",
+        credentials: [{ dep_key: "tavily_api_key", label: "Tavily api key" }],
         parameters: { type: "object", properties: { query: { type: "string" } } },
       },
     ]);
@@ -82,6 +86,8 @@ describe("GET /api/tools", () => {
         requiresKey: null,
         fallbackEnv: null,
         platformFallback: false,
+        toolkit: "duckduckgo",
+        credentials: [],
         parameters: null,
       },
       {
@@ -91,6 +97,8 @@ describe("GET /api/tools", () => {
         requiresKey: "tavily_api_key",
         fallbackEnv: "TAVILY_API_KEY",
         platformFallback: true,
+        toolkit: "tavily",
+        credentials: [{ dep_key: "tavily_api_key", label: "Tavily api key" }],
         parameters: { type: "object", properties: { query: { type: "string" } } },
       },
     ]);

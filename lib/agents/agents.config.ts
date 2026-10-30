@@ -54,6 +54,13 @@ export interface AgentRequirements {
      * value computed at create/update time.
      */
     platformFallback: boolean;
+    /**
+     * The full credential contract — multi-credential toolkits (the X
+     * toolkit's four) carry several; single-key tools carry exactly one.
+     * Absent on snapshots written before multi-credential support: the
+     * run gate then treats the single `requiresKey` dep as the contract.
+     */
+    credentials?: { depKey: string; label: string }[];
   }[];
   /**
    * MCP connector names (org-level, connectors table) this agent wires in.

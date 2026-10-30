@@ -54,7 +54,9 @@ import type { AgentEntry } from "@/lib/agents/agents.config";
 import { getSyntheticAdmin } from "@/lib/auth/context";
 import { runMigrations } from "@/lib/db/migrate";
 
-const MODELS = [{ provider: "openai", id: "gpt-4o-mini", platform_tier: true }];
+const MODELS = [
+  { provider: "openai", id: "gpt-4o-mini", platform_tier: true, requires_key: true },
+];
 
 let testOrg: string;
 let authorId: string;
@@ -223,7 +225,7 @@ describe("PATCH /api/agents/builder/[id]", () => {
 
   it("re-derives requirements from the catalog on a model change", async () => {
     mockFetchModels.mockResolvedValue([
-      { provider: "openai", id: "gpt-4o-mini", platform_tier: true },
+      { provider: "openai", id: "gpt-4o-mini", platform_tier: true, requires_key: true },
     ]);
     const res = await patchAgent(agent.id, {
       model: { provider: "openai", id: "gpt-4o-mini" },

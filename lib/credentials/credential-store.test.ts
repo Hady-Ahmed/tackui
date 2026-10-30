@@ -2,7 +2,7 @@ import { describe, it, expect, beforeEach, beforeAll, afterAll, vi } from "vites
 import {
   setCredential,
   listCredentials,
-  getCredentialSecret,
+  getCredentialFields,
   getCredentialSecrets,
   deleteCredential,
 } from "./credential-store";
@@ -36,17 +36,40 @@ beforeEach(async () => {
 });
 
 describe("setCredential", () => {
-  it("stores a key and returns an existence record (no secret)", async () => {
+  it("stores the field map and returns an existence record (no secret)", async () => {
     const stored = await setCredential({
       userId: USER,
       provider: "tavily",
       kind: "tool",
-      secret: "tvly-abc123",
+      fields: { api_key: "tvly-abc123" },
     });
     expect(stored.provider).toBe("tavily");
     expect(stored.kind).toBe("tool");
     expect(stored.userId).toBe(USER);
+    // Field NAMES only — the values are write-only.
+    expect(stored.fields).toEqual(["api_key"]);
     expect(JSON.stringify(stored)).not.toContain("tvly-abc123");
+  });
+
+  it("stores multi-credential toolkits as a named field map", async () => {
+    const stored = await setCredential({
+      userId: USER,
+      provider: "x",
+      kind: "tool",
+      fields: {
+        consumer_key: "ck",
+        consumer_secret: "cs",
+        access_token: "at",
+        access_token_secret: "ats",
+      },
+    });
+    expect(stored.fields.sort()).toEqual([
+      "access_token",
+      "access_token_secret",
+      "consumer_key",
+      "consumer_secret",
+    ]);
+    expect(JSON.stringify(stored)).not.toContain("ck");
   });
 
   it("accepts any catalog-declared provider (the catalog is derived, not enumerated here)", async () => {
@@ -56,51 +79,70 @@ describe("setCredential", () => {
       userId: USER,
       provider: "new-platform-provider",
       kind: "tool",
-      secret: "np-x",
+      fields: { api_key: "np-x" },
     });
     expect(stored.provider).toBe("new-platform-provider");
-    expect(await getCredentialSecret(USER, "new-platform-provider")).toBe("np-x");
+    expect(await getCredentialFields(USER, "new-platform-provider")).toEqual({
+      api_key: "np-x",
+    });
   });
 
-  it("rotates the key on re-set (upsert, no duplicate row)", async () => {
-    await setCredential({ userId: USER, provider: "openai", kind: "llm", secret: "first" });
-    await setCredential({ userId: USER, provider: "openai", kind: "llm", secret: "second" });
-    const rows = await query<{ secret: string }>(
-      `SELECT secret FROM credentials WHERE user_id = $1 AND provider = 'openai'`,
+  it("rotates on re-set (upsert, no duplicate row)", async () => {
+    await setCredential({ userId: USER, provider: "openai", kind: "llm", fields: { api_key: "first" } });
+    await setCredential({ userId: USER, provider: "openai", kind: "llm", fields: { api_key: "second" } });
+    const rows = await query<{ fields: Record<string, string> }>(
+      `SELECT fields FROM credentials WHERE user_id = $1 AND provider = 'openai'`,
       [USER],
     );
     expect(rows.rows).toHaveLength(1);
     // Reads decrypt transparently — the stored value is the rotated one.
-    expect(await getCredentialSecret(USER, "openai")).toBe("second");
+    expect(await getCredentialFields(USER, "openai")).toEqual({ api_key: "second" });
   });
 
   it("keeps users isolated (same provider, different users)", async () => {
-    await setCredential({ userId: USER, provider: "openai", kind: "llm", secret: "u1-key" });
+    await setCredential({ userId: USER, provider: "openai", kind: "llm", fields: { api_key: "u1-key" } });
     await setCredential({
       userId: OTHER_USER,
       provider: "openai",
       kind: "llm",
-      secret: "u2-key",
+      fields: { api_key: "u2-key" },
     });
-    expect(await getCredentialSecret(USER, "openai")).toBe("u1-key");
-    expect(await getCredentialSecret(OTHER_USER, "openai")).toBe("u2-key");
+    expect(await getCredentialFields(USER, "openai")).toEqual({ api_key: "u1-key" });
+    expect(await getCredentialFields(OTHER_USER, "openai")).toEqual({ api_key: "u2-key" });
   });
 
-  it("rejects an empty/whitespace secret", async () => {
+  it("rejects an empty/whitespace field value", async () => {
     await expect(
-      setCredential({ userId: USER, provider: "tavily", kind: "tool", secret: "   " }),
-    ).rejects.toThrow("Credential secret must not be empty");
+      setCredential({ userId: USER, provider: "tavily", kind: "tool", fields: { api_key: "   " } }),
+    ).rejects.toThrow('Credential field "api_key" must not be empty');
+  });
+
+  it("rejects an empty field map", async () => {
+    await expect(
+      setCredential({ userId: USER, provider: "tavily", kind: "tool", fields: {} }),
+    ).rejects.toThrow("Credential must carry at least one field");
+  });
+
+  it("rejects a malformed field name (zod — the wire dep key derives from it)", async () => {
+    await expect(
+      setCredential({
+        userId: USER,
+        provider: "tavily",
+        kind: "tool",
+        fields: { "not a field!": "x" },
+      }),
+    ).rejects.toThrow();
   });
 
   it("rejects a non-slug provider (zod)", async () => {
     await expect(
-      setCredential({ userId: USER, provider: "not a provider!", kind: "tool", secret: "x" }),
+      setCredential({ userId: USER, provider: "not a provider!", kind: "tool", fields: { api_key: "x" } }),
     ).rejects.toThrow();
   });
 
   it("rejects an empty provider (zod)", async () => {
     await expect(
-      setCredential({ userId: USER, provider: "", kind: "tool", secret: "x" }),
+      setCredential({ userId: USER, provider: "", kind: "tool", fields: { api_key: "x" } }),
     ).rejects.toThrow();
   });
 
@@ -110,7 +152,7 @@ describe("setCredential", () => {
         userId: USER,
         provider: "x".repeat(65),
         kind: "tool",
-        secret: "x",
+        fields: { api_key: "x" },
       }),
     ).rejects.toThrow();
   });
@@ -121,7 +163,7 @@ describe("setCredential", () => {
         userId: USER,
         provider: "tavily",
         kind: "db" as "tool",
-        secret: "x",
+        fields: { api_key: "x" },
       }),
     ).rejects.toThrow();
   });
@@ -132,14 +174,21 @@ describe("listCredentials", () => {
     expect(await listCredentials(USER)).toEqual([]);
   });
 
-  it("lists stored providers without leaking secrets", async () => {
-    await setCredential({ userId: USER, provider: "openai", kind: "llm", secret: "sk-1" });
-    await setCredential({ userId: USER, provider: "tavily", kind: "tool", secret: "tvly-2" });
+  it("lists stored providers with field names only (no values)", async () => {
+    await setCredential({ userId: USER, provider: "openai", kind: "llm", fields: { api_key: "sk-1" } });
+    await setCredential({
+      userId: USER,
+      provider: "x",
+      kind: "tool",
+      fields: { consumer_key: "ck", access_token: "at" },
+    });
     const creds = await listCredentials(USER);
     expect(creds).toHaveLength(2);
-    expect(creds.map((c) => c.provider).sort()).toEqual(["openai", "tavily"]);
+    expect(creds.map((c) => c.provider).sort()).toEqual(["openai", "x"]);
+    const xRow = creds.find((c) => c.provider === "x");
+    expect(xRow?.fields.sort()).toEqual(["access_token", "consumer_key"]);
     expect(JSON.stringify(creds)).not.toContain("sk-1");
-    expect(JSON.stringify(creds)).not.toContain("tvly-2");
+    expect(JSON.stringify(creds)).not.toContain("ck");
   });
 
   it("only lists the calling user's credentials", async () => {
@@ -147,7 +196,7 @@ describe("listCredentials", () => {
       userId: OTHER_USER,
       provider: "openai",
       kind: "llm",
-      secret: "x",
+      fields: { api_key: "x" },
     });
     expect(await listCredentials(USER)).toEqual([]);
   });
@@ -156,43 +205,51 @@ describe("listCredentials", () => {
     // A provider removed from the platform catalog: the saved row is
     // still stored, still listed, still decryptable — the store is
     // catalog-agnostic by design.
-    await setCredential({ userId: USER, provider: "removed-provider", kind: "tool", secret: "gone" });
+    await setCredential({ userId: USER, provider: "removed-provider", kind: "tool", fields: { api_key: "gone" } });
     expect(await listCredentials(USER)).toHaveLength(1);
-    expect(await getCredentialSecret(USER, "removed-provider")).toBe("gone");
+    expect(await getCredentialFields(USER, "removed-provider")).toEqual({ api_key: "gone" });
   });
 });
 
-describe("getCredentialSecret / getCredentialSecrets", () => {
+describe("getCredentialFields / getCredentialSecrets", () => {
   it("returns null when no key exists", async () => {
-    expect(await getCredentialSecret(USER, "tavily")).toBeNull();
+    expect(await getCredentialFields(USER, "tavily")).toBeNull();
   });
 
-  it("returns the decrypted key when present", async () => {
+  it("returns the decrypted field map when present", async () => {
     await setCredential({
       userId: USER,
       provider: "tavily",
       kind: "tool",
-      secret: "tvly-live",
+      fields: { api_key: "tvly-live" },
     });
-    expect(await getCredentialSecret(USER, "tavily")).toBe("tvly-live");
+    expect(await getCredentialFields(USER, "tavily")).toEqual({ api_key: "tvly-live" });
   });
 
-  it("getCredentialSecrets batches all keys keyed by provider", async () => {
-    await setCredential({ userId: USER, provider: "openai", kind: "llm", secret: "sk-a" });
-    await setCredential({ userId: USER, provider: "tavily", kind: "tool", secret: "tvly-b" });
+  it("getCredentialSecrets batches all credentials as provider → field map", async () => {
+    await setCredential({ userId: USER, provider: "openai", kind: "llm", fields: { api_key: "sk-a" } });
+    await setCredential({
+      userId: USER,
+      provider: "x",
+      kind: "tool",
+      fields: { consumer_key: "ck", access_token: "at" },
+    });
     const secrets = await getCredentialSecrets(USER);
-    expect(secrets).toEqual({ openai: "sk-a", tavily: "tvly-b" });
+    expect(secrets).toEqual({
+      openai: { api_key: "sk-a" },
+      x: { consumer_key: "ck", access_token: "at" },
+    });
   });
 
   it("getCredentialSecrets skips undecryptable rows instead of throwing", async () => {
     const errSpy = vi.spyOn(console, "error").mockImplementation(() => {});
-    await setCredential({ userId: USER, provider: "openai", kind: "llm", secret: "good" });
-    // Simulate a row ciphertext-encrypted with a different key: it carries
+    await setCredential({ userId: USER, provider: "openai", kind: "llm", fields: { api_key: "good" } });
+    // Simulate a field ciphertext-encrypted with a different key: it carries
     // the `enc:v1:` prefix (so it's NOT legacy plaintext passthrough) but
-    // the auth tag won't verify → decryptSecret throws → the row is
+    // the auth tag won't verify → decryptSecret throws → the field is
     // skipped, not surfaced as a garbage key.
     await query(
-      `UPDATE credentials SET secret = 'enc:v1:AAAAAAAAAAAAAAAA:AAAA:AAAAAAAAAAAAAAAAAAAAAA==' WHERE user_id = $1`,
+      `UPDATE credentials SET fields = '{"api_key": "enc:v1:AAAAAAAAAAAAAAAA:AAAA:AAAAAAAAAAAAAAAAAAAAAA=="}' WHERE user_id = $1`,
       [USER],
     );
     const secrets = await getCredentialSecrets(USER);
@@ -203,9 +260,9 @@ describe("getCredentialSecret / getCredentialSecrets", () => {
 
 describe("deleteCredential", () => {
   it("deletes an existing key and returns true", async () => {
-    await setCredential({ userId: USER, provider: "tavily", kind: "tool", secret: "x" });
+    await setCredential({ userId: USER, provider: "tavily", kind: "tool", fields: { api_key: "x" } });
     expect(await deleteCredential(USER, "tavily")).toBe(true);
-    expect(await getCredentialSecret(USER, "tavily")).toBeNull();
+    expect(await getCredentialFields(USER, "tavily")).toBeNull();
   });
 
   it("deletes a provider that is no longer in the catalog (accepts any saved provider)", async () => {
@@ -213,7 +270,7 @@ describe("deleteCredential", () => {
       userId: USER,
       provider: "removed-provider",
       kind: "tool",
-      secret: "x",
+      fields: { api_key: "x" },
     });
     expect(await deleteCredential(USER, "removed-provider")).toBe(true);
   });
@@ -227,9 +284,9 @@ describe("deleteCredential", () => {
       userId: OTHER_USER,
       provider: "tavily",
       kind: "tool",
-      secret: "x",
+      fields: { api_key: "x" },
     });
     expect(await deleteCredential(USER, "tavily")).toBe(false);
-    expect(await getCredentialSecret(OTHER_USER, "tavily")).toBe("x");
+    expect(await getCredentialFields(OTHER_USER, "tavily")).toEqual({ api_key: "x" });
   });
 });

@@ -90,6 +90,16 @@ export interface AgentosModel {
   provider: string;
   id: string;
   platform_tier: boolean;
+  /** false for keyless providers (e.g. ollama) — no credential demanded. */
+  requires_key: boolean;
+}
+
+/** One credential of a toolkit's delivery contract (scan-derived). */
+export interface AgentosToolCredential {
+  /** The AG-UI context dep key ("<toolkit>_<constructor-arg>"). */
+  dep_key: string;
+  /** Display copy for the connect-form field. */
+  label: string;
 }
 
 /** One tool in the AgentOS platform tool catalog (GET /platform/tools). */
@@ -103,6 +113,10 @@ export interface AgentosTool {
   fallback_env: string | null;
   /** true when the platform key is actually set on this deployment. */
   platform_fallback: boolean;
+  /** The toolkit slug this function belongs to (the credential provider). */
+  toolkit: string;
+  /** The full credential contract — multi-credential toolkits list several. */
+  credentials: AgentosToolCredential[];
   parameters?: Record<string, unknown>;
 }
 
@@ -142,7 +156,7 @@ interface AgentosComponentResponse {
  * should fail the builder request, not hold it open.
  */
 async function agentosRequest<T>(
-  method: "GET" | "POST" | "PATCH" | "DELETE",
+  method: "GET" | "POST" | "PUT" | "PATCH" | "DELETE",
   path: string,
   body?: unknown,
 ): Promise<T> {
@@ -350,8 +364,14 @@ export function buildRequirements(
         name: t.name,
         label: entry.label,
         requiresKey: entry.requires_key,
-        provider: entry.requires_key ? providerForDepKey(entry.requires_key) : null,
+        // The toolkit slug is the credential provider (dep keys derive from
+        // it — multi-credential toolkits keep one provider). Fall back to
+        // the mechanical single-key derivation when the slug is absent.
+        provider: entry.toolkit ?? (entry.requires_key ? providerForDepKey(entry.requires_key) : null),
         platformFallback: entry.platform_fallback,
+        // The full credential contract — multi-credential toolkits carry
+        // several; single-key tools carry exactly one.
+        credentials: entry.credentials.map((c) => ({ depKey: c.dep_key, label: c.label })),
       };
     }),
     connectors: spec.connectors,
@@ -448,4 +468,92 @@ export async function deleteAgentosComponent(componentId: string): Promise<void>
     "DELETE",
     `/components/${encodeURIComponent(componentId)}`,
   );
+}
+
+/* ---------------------------------------------------------------------- */
+/* Platform catalog admin (the /app/admin/platform page's server client)   */
+/* ---------------------------------------------------------------------- */
+
+/**
+ * The admin catalog API mirrors the AgentOS admin routes (admin scope).
+ * Everything derived (class names, env keys, credential contracts) comes
+ * from the platform's discovery scan and is rendered read-only; the
+ * admin's only actions are ticking checkboxes and typing model ids.
+ */
+
+/** One provider row merged from discovery ∪ durable rows. */
+export interface PlatformCatalogProvider {
+  slug: string;
+  available: boolean;
+  enabled: boolean;
+  class_name: string | null;
+  requires_key: boolean;
+  platform_env_key: string | null;
+  env_key_set: boolean;
+  models: Array<{ id: string; attrs: Record<string, unknown>; tier: boolean }>;
+}
+
+/** One toolkit row merged from discovery ∪ durable rows. */
+export interface PlatformCatalogTool {
+  slug: string;
+  available: boolean;
+  enabled: boolean;
+  class_name: string | null;
+  label: string;
+  functions: string[];
+  credentials: Array<{ dep_key: string; env: string; arg: string; label: string }>;
+  /** false = has credential-shaped env vars with no delivery path. */
+  deliverable: boolean;
+}
+
+export interface PlatformCatalog {
+  providers: PlatformCatalogProvider[];
+  tools: PlatformCatalogTool[];
+}
+
+export interface PlatformCatalogUpdate {
+  providers?: Array<{ slug: string; enabled: boolean; models: string[] }>;
+  tools?: Array<{ slug: string; enabled: boolean }>;
+}
+
+export interface PlatformCatalogWriteResult {
+  ok: boolean;
+  revision: number;
+  warnings: string[];
+}
+
+/** GET /platform/catalog/models + /tools, merged — the admin page's one load. */
+export async function fetchPlatformCatalog(): Promise<PlatformCatalog> {
+  const [models, tools] = await Promise.all([
+    agentosRequest<{ providers?: PlatformCatalogProvider[] }>("GET", "/platform/catalog/models"),
+    agentosRequest<{ tools?: PlatformCatalogTool[] }>("GET", "/platform/catalog/tools"),
+  ]);
+  return { providers: models?.providers ?? [], tools: tools?.tools ?? [] };
+}
+
+/** PUT the full provider/model state. Validation errors surface as 400s. */
+export async function putPlatformCatalogModels(
+  providers: NonNullable<PlatformCatalogUpdate["providers"]>,
+): Promise<PlatformCatalogWriteResult> {
+  return agentosRequest<PlatformCatalogWriteResult>("PUT", "/platform/catalog/models", {
+    providers,
+  });
+}
+
+/** PUT the full toolkit enable/disable state. */
+export async function putPlatformCatalogTools(
+  tools: NonNullable<PlatformCatalogUpdate["tools"]>,
+): Promise<PlatformCatalogWriteResult> {
+  return agentosRequest<PlatformCatalogWriteResult>("PUT", "/platform/catalog/tools", {
+    tools,
+  });
+}
+
+/** POST /platform/test/model — one "hi" completion via the platform key. */
+export async function testPlatformModel(
+  entry: string,
+): Promise<{ ok: boolean; reply: string }> {
+  return agentosRequest<{ ok: boolean; reply: string }>("POST", "/platform/test/model", {
+    entry,
+  });
 }

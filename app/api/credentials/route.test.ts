@@ -37,9 +37,36 @@ const ENCRYPTION_TEST_KEY = "cd".repeat(32);
 
 /** The derived catalog shape the route would see from the live platform. */
 const CATALOG = {
-  openai: { kind: "llm", keyName: "openai_api_key", label: "Openai" },
-  openrouter: { kind: "llm", keyName: "openrouter_api_key", label: "Openrouter" },
-  tavily: { kind: "tool", keyName: "tavily_api_key", label: "Tavily" },
+  openai: {
+    kind: "llm",
+    keyName: "openai_api_key",
+    label: "Openai",
+    fields: [{ key: "api_key", label: "Api key" }],
+  },
+  openrouter: {
+    kind: "llm",
+    keyName: "openrouter_api_key",
+    label: "Openrouter",
+    fields: [{ key: "api_key", label: "Api key" }],
+  },
+  tavily: {
+    kind: "tool",
+    keyName: "tavily_api_key",
+    label: "Tavily",
+    fields: [{ key: "api_key", label: "Tavily api key" }],
+  },
+  // Multi-credential toolkit — the X toolkit's four-field contract.
+  x: {
+    kind: "tool",
+    keyName: "x_consumer_key",
+    label: "X",
+    fields: [
+      { key: "consumer_key", label: "X consumer key" },
+      { key: "consumer_secret", label: "X consumer secret" },
+      { key: "access_token", label: "X access token" },
+      { key: "access_token_secret", label: "X access token secret" },
+    ],
+  },
 };
 
 function user(id: string) {
@@ -96,24 +123,34 @@ describe("GET /api/credentials", () => {
     expect(res.status).toBe(200);
     const body = await res.json();
     expect(body.credentials).toEqual([]);
-    // The catalog drives the "connect a key" UI rows.
+    // The catalog drives the "connect a key" UI rows — field lists included.
     expect(body.catalog.openai.kind).toBe("llm");
     expect(body.catalog.tavily.keyName).toBe("tavily_api_key");
+    expect(body.catalog.x.fields).toHaveLength(4);
     expect(body.catalogError).toBeUndefined();
   });
 
-  it("lists stored providers without secrets", async () => {
-    await put({ provider: "openai", secret: "sk-test-123" });
+  it("lists stored providers with field NAMES only (no values)", async () => {
+    await put({
+      provider: "x",
+      fields: { consumer_key: "ck", consumer_secret: "cs", access_token: "at", access_token_secret: "ats" },
+    });
     const res = await GET();
     const body = await res.json();
     expect(body.credentials).toEqual([
-      expect.objectContaining({ provider: "openai", kind: "llm", hasKey: true }),
+      expect.objectContaining({
+        provider: "x",
+        kind: "tool",
+        hasKey: true,
+        fields: expect.arrayContaining(["consumer_key", "consumer_secret", "access_token", "access_token_secret"]),
+      }),
     ]);
-    expect(JSON.stringify(body)).not.toContain("sk-test-123");
+    expect(JSON.stringify(body)).not.toContain("ck");
+    expect(JSON.stringify(body)).not.toContain('"at"');
   });
 
   it("degrades gracefully: saved rows still render when the platform is unreachable (catalog null + catalogError)", async () => {
-    await put({ provider: "openai", secret: "sk-test-123" });
+    await put({ provider: "openai", fields: { api_key: "sk-test-123" } });
     mockFetchCredentialsCatalog.mockResolvedValue({
       catalog: null,
       catalogError:
@@ -139,42 +176,88 @@ describe("GET /api/credentials", () => {
 });
 
 describe("PUT /api/credentials", () => {
-  it("stores a key and returns the existence record", async () => {
-    const res = await put({ provider: "openai", secret: "  sk-test-123  " });
+  it("stores a single-field provider and returns the existence record", async () => {
+    const res = await put({ provider: "openai", fields: { api_key: "  sk-test-123  " } });
     expect(res.status).toBe(200);
     const body = await res.json();
-    expect(body).toMatchObject({ provider: "openai", kind: "llm", hasKey: true });
+    expect(body).toMatchObject({
+      provider: "openai",
+      kind: "llm",
+      hasKey: true,
+      fields: ["api_key"],
+    });
     expect(body).not.toHaveProperty("secret");
   });
 
-  it("upserts: a second PUT for the same provider replaces the key", async () => {
-    await put({ provider: "openai", secret: "sk-first" });
-    await put({ provider: "openai", secret: "sk-second" });
+  it("stores a multi-credential toolkit's full field map", async () => {
+    const res = await put({
+      provider: "x",
+      fields: { consumer_key: "ck", consumer_secret: "cs", access_token: "at", access_token_secret: "ats" },
+    });
+    expect(res.status).toBe(200);
+    const body = await res.json();
+    expect(body.fields.sort()).toEqual([
+      "access_token",
+      "access_token_secret",
+      "consumer_key",
+      "consumer_secret",
+    ]);
+    const stored = await query<{ fields: Record<string, string> }>(
+      `SELECT fields FROM credentials WHERE user_id = $1 AND provider = 'x'`,
+      [USER_ID],
+    );
+    // Encrypted at rest per field.
+    expect(stored.rows[0].fields.consumer_key).toMatch(/^enc:v1:/);
+    expect(JSON.stringify(stored.rows[0])).not.toContain("ck");
+  });
+
+  it("rejects an unknown field name (a typo would silently never deliver)", async () => {
+    const res = await put({ provider: "openai", fields: { api_key: "sk", apy_kye: "x" } });
+    expect(res.status).toBe(400);
+    expect((await res.json()).error).toContain("apy_kye");
+  });
+
+  it("rejects an incomplete contract (a partial map would pass the run gate and fail mid-run)", async () => {
+    const res = await put({ provider: "x", fields: { consumer_key: "ck" } });
+    expect(res.status).toBe(400);
+    expect((await res.json()).error).toContain("all of its fields");
+    const rows = await query(`SELECT provider FROM credentials WHERE user_id = $1`, [USER_ID]);
+    expect(rows.rows).toHaveLength(0);
+  });
+
+  it("upserts: a second PUT for the same provider replaces the fields", async () => {
+    await put({ provider: "openai", fields: { api_key: "sk-first" } });
+    await put({ provider: "openai", fields: { api_key: "sk-second" } });
     const res = await GET();
     const body = await res.json();
     expect(body.credentials).toHaveLength(1);
-    const stored = await query<{ secret: string }>(
-      `SELECT secret FROM credentials WHERE user_id = $1 AND provider = 'openai'`,
+    const stored = await query<{ fields: Record<string, string> }>(
+      `SELECT fields FROM credentials WHERE user_id = $1 AND provider = 'openai'`,
       [USER_ID],
     );
     // Encryption at rest + latest value wins.
-    expect(stored.rows[0].secret).toMatch(/^enc:v1:/);
-    expect(stored.rows[0].secret).not.toContain("sk-first");
-    expect(stored.rows[0].secret).not.toContain("sk-second");
+    expect(stored.rows[0].fields.api_key).toMatch(/^enc:v1:/);
+    expect(stored.rows[0].fields.api_key).not.toContain("sk-first");
+    expect(stored.rows[0].fields.api_key).not.toContain("sk-second");
   });
 
-  it("rejects a missing secret (400)", async () => {
+  it("rejects a missing fields map (400)", async () => {
     const res = await put({ provider: "openai" });
     expect(res.status).toBe(400);
   });
 
-  it("rejects a blank secret (400)", async () => {
-    const res = await put({ provider: "openai", secret: "   " });
+  it("rejects a blank field value (400)", async () => {
+    const res = await put({ provider: "openai", fields: { api_key: "   " } });
+    expect(res.status).toBe(400);
+  });
+
+  it("rejects an empty fields map (400)", async () => {
+    const res = await put({ provider: "openai", fields: {} });
     expect(res.status).toBe(400);
   });
 
   it("rejects a provider the live catalog doesn't declare (400)", async () => {
-    const res = await put({ provider: "not-a-provider", secret: "x" });
+    const res = await put({ provider: "not-a-provider", fields: { api_key: "x" } });
     expect(res.status).toBe(400);
     expect((await res.json()).error).toContain("not-a-provider");
   });
@@ -185,7 +268,7 @@ describe("PUT /api/credentials", () => {
       catalogError:
         "Can't reach the platform — your saved keys are unaffected. New keys can't be added until it's back.",
     });
-    const res = await put({ provider: "openai", secret: "sk-x" });
+    const res = await put({ provider: "openai", fields: { api_key: "sk-x" } });
     expect(res.status).toBe(503);
     expect((await res.json()).error).toMatch(/your saved keys are unaffected/);
     const rows = await query(
@@ -208,7 +291,7 @@ describe("PUT /api/credentials", () => {
 
   it("returns 401 without a user", async () => {
     mockGetCurrentUser.mockImplementation(async () => null);
-    const res = await put({ provider: "openai", secret: "sk-x" });
+    const res = await put({ provider: "openai", fields: { api_key: "sk-x" } });
     expect(res.status).toBe(401);
   });
 
@@ -216,14 +299,14 @@ describe("PUT /api/credentials", () => {
     vi.mocked(checkUserLimit).mockReturnValueOnce(
       new Response("Rate limited", { status: 429 }) as never,
     );
-    const res = await put({ provider: "openai", secret: "sk-x" });
+    const res = await put({ provider: "openai", fields: { api_key: "sk-x" } });
     expect(res.status).toBe(429);
   });
 });
 
 describe("DELETE /api/credentials/[provider]", () => {
   it("deletes an existing key (200) and it stays deleted", async () => {
-    await put({ provider: "openai", secret: "sk-x" });
+    await put({ provider: "openai", fields: { api_key: "sk-x" } });
     const res = await del("openai");
     expect(res.status).toBe(200);
     const body = await res.json();
@@ -240,7 +323,7 @@ describe("DELETE /api/credentials/[provider]", () => {
       userId: USER_ID,
       provider: "removed-provider",
       kind: "tool",
-      secret: "sk-x",
+      fields: { api_key: "sk-x" },
     });
     const res = await del("removed-provider");
     expect(res.status).toBe(200);
@@ -253,7 +336,7 @@ describe("DELETE /api/credentials/[provider]", () => {
   });
 
   it("never touches another user's key", async () => {
-    await putAs(OTHER_USER_ID, { provider: "openai", secret: "sk-theirs" });
+    await putAs(OTHER_USER_ID, { provider: "openai", fields: { api_key: "sk-theirs" } });
     const res = await del("openai", USER_ID);
     expect(res.status).toBe(404);
     const theirs = await query(

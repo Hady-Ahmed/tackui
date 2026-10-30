@@ -71,9 +71,11 @@ is re-derived server-side at create/update time:
 
 - **`platformTier`** is re-derived from the AgentOS models catalog
   (`GET /platform/models`). The client sends `model: {provider, id}`
-  only. This flag drives the run gate's platform-key quota exemption, so
-  a forged `platformTier: true` would let a non-tier model run free on
-  the platform key — it must never come from the wire.
+  only. The flag is **dormant** for builder runs today (they are 100%
+  BYOK — see the run gate), but it stays server-derived so Phase 3
+  publishing (which wakes the platform-key free tier) never inherits a
+  client-trusted input. A forged `platformTier: true` must never come
+  from the wire.
 - **Tool `parameters`** (json-schema) come from the AgentOS tools
   catalog (`GET /platform/tools`); the client sends tool names only,
   validated against the live catalog at create/update time (an unknown
@@ -131,29 +133,78 @@ unreachable/401/403, 503 when the platform is disabled, and AgentOS
 error statuses otherwise (`AgentosError.status` drives the route
 response).
 
+## The platform catalog — the admin page (`/app/admin/platform`)
+
+What the agent builder offers is a **deployment decision**, made in one
+place with zero code: the platform admin ticks model providers and
+toolkits on `/app/admin/platform` (`components/platform-admin.tsx`,
+gated by `canManageAgents` — platform admins and org owners/admins).
+Everything else on the page is derived from the AgentOS's discovery
+scan and rendered read-only (class names, platform env keys + whether
+they're set, credential contracts, function lists), so nothing editable
+can desynchronize the stack.
+
+- ** tackui never talks to the AgentOS admin API from the browser** —
+  the page goes through tackui's proxy routes (`GET/PUT
+  /api/admin/platform/catalog`, `POST /api/admin/platform/test-model`),
+  which mint the service token server-side. The AgentOS JWT secret
+  never reaches the browser.
+- **Model editing is per-provider textareas** — one model id per line,
+  grammar `model-id[:tier][:key=value …]` (bare ids inside a provider's
+  own block; `:tier` marks platform-key-eligible models, dormant until
+  Phase 3). The AgentOS validates entries against its own model classes
+  (unknown attribute → 400) and tackui passes that 400 through
+  verbatim — the platform owns entry validation.
+- **Test button** — one "hi" completion straight to the provider through
+  the platform's own env key, answering "does this model id exist and
+  does the platform key work?" before the admin enables it. Disabled
+  (with a tooltip) when the provider's platform env key isn't set —
+  runner keys are unaffected either way (BYOK runs bring their own).
+- **Full-state replace:** PUT sends every provider/toolkit row; writes
+  bump the AgentOS catalog revision and the registry rebuilds on the
+  next request — changes go live without a restart. Disabling an
+  offering that still has enabled rows clears them; disabling a
+  provider/toolkit the deployment can no longer produce (an agno
+  upgrade dropped it) is accepted as the legit dead-row clear — enabling
+  one is a 400. "No longer available" rows render non-editable.
+- **Tool gating is deliverable-gated:** a toolkit whose credential envs
+  have no delivery path (a cred-shaped env with no matching constructor
+  arg) stays visible but can't be enabled.
+- The underlying AgentOS surface is `GET /platform/available` (the
+  discovery scan) + `GET/PUT /platform/catalog/{models,tools}` +
+  `POST /platform/test/model` — admin-scope only, documented in the
+  platform-os README.
+
 ## The tool palette — the platform tools catalog
 
 The tools a builder may attach are NOT hardcoded in tackui. They come
-from the AgentOS `GET /platform/tools` catalog (env allowlist
-`PLATFORM_TOOLS` merged with the registry function metadata), proxied to
-the browser via `GET /api/tools`. Adding a tool = a registry import +
-one allowlist line on the AgentOS — zero tackui code, not even env.
+from the AgentOS `GET /platform/tools` catalog — **discovery-driven**:
+the AgentOS scans its installed agno modules at boot and the platform
+admin ticks checkboxes on `/app/admin/platform` (see [the platform
+catalog](#the-platform-catalog—the-admin-page) below). tackui proxies the
+enabled subset to the browser via `GET /api/tools`. Adding a tool = an
+agno import on the AgentOS + one checkbox — zero tackui code, not even
+env.
 
 Per tool the catalog carries `name`, `label`, `description`,
-`requiresKey` (the AG-UI context dep key the runner delivers — the
-credentials store's provider id derives from it via the
-`<provider>_api_key` convention), and `platformFallback` — computed
-AgentOS-side: the tool declares a `fallback=ENV` entry AND that env key
-is actually set on the deployment.
+`requiresKey` (the AG-UI context dep key of the FIRST credential — null
+for keyless toolkits), **`toolkit`** (the provider slug the credentials
+are saved under), and **`credentials`** — the full credential contract:
+`[{depKey, label}]`, one per constructor argument the toolkit takes.
+Single-key toolkits (tavily) carry exactly one; multi-credential
+toolkits (the X toolkit: consumer key/secret + access token/secret)
+carry several. The dep keys follow the `<provider>_<field>` convention
+and the credentials catalog (`lib/credentials/catalog.ts`) derives the
+provider's saved-field list from them.
 
-**`platformFallback` semantics:** the AgentOS deployment carries an env
-key for the tool. When the runner has no key, the platform key serves
-the run and the platform-key daily quota applies (SaaS) — or, on
-self-host, the operator's env key serves it silently. `false` means the
-runner MUST bring the key or the run gate 402s (both modes).
+`platformFallback` (the AgentOS deployment carries an env key for the
+tool) is still in the wire but **dormant**: builder runs are 100% BYOK
+until Phase 3 publishing, so the run gate ignores it and a missing
+runner key is a 402 regardless. The snapshot keeps storing what the
+catalog said so the future needs no shape change.
 
-Tackui never re-derives `platformFallback` — the snapshot stores what
-the catalog said at create/update time, and the run gate reads only the
+Tackui never re-derives any of this — the snapshot stores what the
+catalog said at create/update time, and the run gate reads only the
 snapshot (see the run gate section). The builder UI loads the palette
 per request; when the fetch fails the form disables rather than
 validating against a stale palette.
@@ -188,9 +239,12 @@ via the `agentMutate` bucket. Order of checks:
 
 `requirements` is written at create from the definition tackui itself
 built: `{ model: {provider, id, platformTier}, tools: [{name,
-requiresKey}], connectors: [names] }` (`buildRequirements()`). The
-AgentOS stored config is the source of truth; the snapshot only powers
-the pre-run gate so run requests need no AgentOS round-trip.
+requiresKey, provider, platformFallback, credentials}], connectors:
+[names] }` (`buildRequirements()`) — the tool rows carry the full
+credential contract so the run gate can enforce all-or-nothing delivery
+of multi-credential toolkits. The AgentOS stored config is the source of
+truth; the snapshot only powers the pre-run gate so run requests need no
+AgentOS round-trip.
 
 ## Update flow — `PATCH /api/agents/builder/[id]`
 
@@ -210,11 +264,12 @@ all (404, not 403 — no existence oracle for foreign rows).
   returns **409** ("Cannot update the agent without its current
   instructions.") rather than silently wiping the prompt. An AgentOS
   read *failure* surfaces as 502/503 instead.
-- Config changes (instructions/model/tools/connectors) re-derive
-  platformTier + tool parameters (same trust posture as create); model,
-  tools, connectors replace wholesale when present. If the agent's
-  stored model has left the catalog, a config patch can't proceed
-  without re-resolving it (400).
+- Config changes (instructions/model/tools/connectors) re-derive the
+  requirements snapshot — model tier, tool credential contracts +
+  parameters (same trust posture as create); model, tools, connectors
+  replace wholesale when present. If the agent's stored model has left
+  the catalog, a config patch can't proceed without re-resolving it
+  (400).
 - **Two-phase update, local row first, compensating revert** when the
   AgentOS half fails — the local projection never leads the AgentOS.
   Config publishes are guarded with the component's `current_version`
@@ -251,14 +306,26 @@ so a user sees everything wrong at once. This phase consumes nothing:
 a refused run burns no quota and holds no concurrent slot (the gate
 runs before `acquireConcurrent`).
 
-- **Model:** the model is not platform-tier and the runner has no key
-  for its provider → "add your own {OpenAI|OpenRouter} key to run it."
-- **Tool:** a keyed tool with no runner key **and** no platform
-  fallback → "add your own {Tavily} key to run it."
+- **Model:** the runner has no key for the model's provider → "add your
+  own {OpenAI|OpenRouter} key to run it."
+- **Tool:** any field of the tool's **credential contract** is missing
+  from the runner's saved fields → "add your own {Tavily} key / {X}
+  credentials to run it." The contract is **all-or-nothing**: a partial
+  match delivers nothing (a partial contract would pass the gate and
+  fail mid-run). Snapshots written before multi-credential support
+  treat the single `requiresKey` dep as the contract.
 - **Connector:** a required org MCP connector is not configured →
   "an org admin needs to add it before it can run." Missing connectors
   are always blockers — there is no platform fallback for connector
   credentials in any mode.
+
+**TIER DORMANCY (wakes at Phase 3 publishing):** builder runs are 100%
+BYOK. `requirements.model.platformTier` and tool `platformFallback`
+stay in the snapshot but are **ignored** here — the platform env key
+serves nothing today, so a tiered model without a runner key is a
+blocker exactly like any other. The resolution's `platformKeyRun` flag
+stays wired but is `const false`, so the quota phase below never fires
+until publishing wakes it.
 
 Requirement 402s apply in **both** SaaS and self-host modes. Only the
 platform-key quota (phase 3) is SaaS-only.
@@ -266,12 +333,15 @@ platform-key quota (phase 3) is SaaS-only.
 ### 2. Resolve dependencies — per-run AG-UI context
 
 Collects the context items the run needs, shape `{description, value}`
-(both strings — the AG-UI `Context` wire type):
+(both strings — the AG-UI `Context` wire type). One item **per field of
+each credential contract** — a multi-credential toolkit delivers all of
+its dep keys:
 
 | dep key | value |
 | --- | --- |
-| `openai_api_key` / `openrouter_api_key` | the runner's decrypted BYOK key (when the model needs one) |
-| `tavily_api_key` | the runner's Tavily key (when a keyed tool runs) |
+| `openai_api_key` / `openrouter_api_key` | the runner's decrypted `api_key` field (when the model needs one) |
+| `tavily_api_key` | the runner's Tavily `api_key` field (when a keyed tool runs) |
+| `x_consumer_key`, `x_consumer_secret`, `x_access_token`, `x_access_token_secret` | the runner's X toolkit fields (one item each) |
 | `mcp_connectors` | JSON string `{name: {url, token}}` for the org's configured connectors referenced by the agent |
 
 These keys are **server-resolved only** — the registry middleware strips
@@ -281,31 +351,28 @@ AgentOS enforces the same boundary from its side: the dispatcher only
 attaches wire `mcp_connectors` whose names the component's stored config
 declares, so the namespace stays closed even if a tackui bug reopens it.
 
-**Key precedence: the runner's stored key WINS.** A runner key is
-delivered as a context item; the platform env key is only the fallback
-when the runner has none (Tavily). Platform keys are NEVER injected as
-context items — when the runner has no key, the AgentOS deployment's own
-env fallback serves the dependency (e.g. `TAVILY_API_KEY` exists
-AgentOS-side for tools; platform-tier "mini" models run on the platform
-key, which is what makes them tier-flagged). Dependencies resolve in
-both modes so BYOK delivery works everywhere.
+**Keys are the runner's own — never the platform's.** A runner key is
+delivered as a context item; platform env keys are NEVER injected as
+context items. (Before the tier dormancy, platform fallbacks served
+keyless runners; today the gate 402s instead — see phase 1.)
+Dependencies resolve in both modes so BYOK delivery works everywhere.
 
-### 3. Quota phase — consume the platform-key quota (SaaS-only)
+### 3. Quota phase — consume the platform-key quota (DORMANT)
 
 This phase runs **after** the copilotkit route has acquired a concurrent
 slot (`acquireConcurrent`), not inside the gate. When the run is
-platform-key (some dependency resolves to the platform key — a mini-tier
-model or a tool fallback), it counts against the org plan's
-`platformDailyQuota` (see
-[saas-mode.md](./saas-mode.md#plan-enforcement-saas-only)). Over quota →
-402 `PLATFORM_QUOTA_EXCEEDED` with the reset countdown (free plans get
-an "Upgrade to Pro for more usage." clause), and the route releases the
-freshly-acquired slot before returning. **BYOK runs are exempt** — they
-cost the platform ~nothing. The quota is consumed only when a platform
-key is actually used: a runner key present for every dependency ⇒
-exempt. On self-host the quota check short-circuits entirely (the
-operator pays the platform key bill themselves; the self-host sentinel
-is `null` anyway).
+platform-key, it counts against the org plan's `platformDailyQuota`
+(see [saas-mode.md](./saas-mode.md#plan-enforcement-saas-only)). Over
+quota → 402 `PLATFORM_QUOTA_EXCEEDED` with the reset countdown (free
+plans get an "Upgrade to Pro for more usage." clause), and the route
+releases the freshly-acquired slot before returning. On self-host the
+quota check short-circuits entirely (the operator pays the platform key
+bill themselves; the self-host sentinel is `null` anyway).
+
+**The phase is dormant until Phase 3 publishing**: builder runs are
+100% BYOK, `platformKeyRun` is always `false`, and `consumeBuilderRunQuota`
+is a no-op for BYOK runs — so today this never fires. The wiring stays
+so publishing wakes it with a one-line change.
 
 The split exists because the two phases have different cost models: a
 requirement 402 must be free (nothing consumed, nothing held), but the
@@ -379,38 +446,49 @@ requirements; runners keep their keys here.
 - **Catalog — derived, never hardcoded** (`lib/credentials/
   catalog.ts`): the provider list comes from the AgentOS platform at
   request time. LLM providers are the distinct `provider`s in
-  `GET /platform/models`; tool providers derive from the tools catalog's
-  `requiresKey` dep keys (the `<provider>_api_key` convention). Each
-  entry carries `kind` (drives the run gate: llm keys satisfy model
-  requirements, tool keys satisfy tool requirements), `keyName` (the
-  AG-UI context dep key the AgentOS dispatcher reads), and `label`
-  (prettified from the slug — no hardcoded label map). Adding a tool or
-  model provider to the platform automatically adds it here. When the
-  platform is unreachable, `fetchCredentialsCatalog` degrades to
+  `GET /platform/models` (keyless providers like ollama are skipped —
+  nothing to save); tool providers come from the tools catalog's
+  **`toolkit` slug**, with the mechanical `<provider>_api_key` dep-key
+  derivation as the fallback for slug-less shapes. Each entry carries
+  `kind` (drives the run gate: llm keys satisfy model requirements, tool
+  keys satisfy tool requirements), `keyName` (the first credential's
+  AG-UI context dep key — the AgentOS dispatcher reads it), `label`
+  (prettified from the slug — no hardcoded label map), and **`fields`**
+  — the named constructor arguments the connect form renders
+  (`{key, label}[]`; multi-credential toolkits list several, their dep
+  keys follow `<provider>_<field>`). Adding a tool or model provider to
+  the platform automatically adds it here. When the platform is
+  unreachable, `fetchCredentialsCatalog` degrades to
   `{catalog: null, catalogError}` — never throws, so saved rows still
   render.
 - **The store is catalog-agnostic:** it accepts any slug-shaped provider
   (`providerSchema` is a loose slug regex) and a `kind` the route passes
   from the catalog. This is what makes provider removal graceful — see
   the DELETE semantics below.
-- **Write-only surface:** `GET /api/credentials` returns existence
-  booleans only (`hasKey: true` + `updatedAt`) alongside the live
-  derived catalog (`catalog: null` + `catalogError` when the platform
-  is unreachable — saved rows always render from the local DB, only new
-  keys are blocked); the plaintext is accepted on `PUT` and never
-  returned — same boundary discipline as `agents.jwtSecret` and
-  connector tokens. `PUT` is **fail-closed**: the provider must exist in
-  the LIVE catalog (a stale/offline platform → 503, no key saved).
+- **Write-only surface:** `GET /api/credentials` returns field NAMES
+  only (`hasKey: true` + `fields: string[]` + `updatedAt`) alongside the
+  live derived catalog (`catalog: null` + `catalogError` when the
+  platform is unreachable — saved rows always render from the local DB,
+  only new keys are blocked); the plaintext is accepted on `PUT` and
+  never returned — same boundary discipline as `agents.jwtSecret` and
+  connector tokens. `PUT` takes `{provider, fields: {name: value}}` —
+  the provider's FULL contract, **fail-closed** on three counts: the
+  provider must exist in the LIVE catalog (a stale/offline platform →
+  503, no key saved), unknown field names are rejected (a typo would
+  silently never deliver), and missing ones are rejected (a partial
+  contract would pass the run gate and fail mid-run). The save is
+  all-or-nothing per provider.
 - **AES-256-GCM at rest** (`enc:v1:<iv>:<ciphertext>:<tag>` via
   `lib/crypto/encrypt.ts`, encrypted at the write boundary — same
   mechanism as agent JWT secrets; plaintext fallback when
   `DB_ENCRYPTION_KEY` is unset, with a loud warning). A failed decrypt
   (rotated key) logs and treats the key as absent.
-- **Per-run delivery:** the decrypted key is consumed exclusively by the
-  run path (`getCredentialSecrets` batch lookup) and delivered as an
-  AG-UI context item — never persisted AgentOS-side, never cached
-  agent-side. Rotating a key = setting it again; the very next run uses
-  the new value.
+- **Per-run delivery:** the decrypted field maps (`getCredentialSecrets`
+  → `Record<provider, Record<field, secret>>`) are consumed exclusively
+  by the run path and delivered as AG-UI context items (one per contract
+  dep key) — never persisted AgentOS-side, never cached agent-side.
+  Rotating a credential = saving the fields again; the very next run
+  uses the new values.
 - **Per-user scoping:** rows are keyed `UNIQUE (user_id, provider)`;
   no FK to the Better Auth runtime table (same convention as
   `agents.org_id`), deletion cleanup is app-side.
@@ -423,14 +501,18 @@ requirements; runners keep their keys here.
 - Rate-limited via the `credentialMutate` bucket (20/min).
 
 The builder page surfaces the key state as badges (model/tool rows) and
-inline "connect a key" rows — front-loading the run-gate 402s so the
-user knows before the first run. The dedicated **`/app/credentials`
-("API keys") page** (`components/credentials-page.tsx`, linked from the
-account menu) is the management surface: saved rows always render;
-add-rows come from the live catalog per request (no cache); when the
-platform is unreachable a banner explains that saved keys are unaffected
-and only new keys are blocked; a saved provider that left the catalog
-shows "No longer supported" and stays deletable.
+inline connect forms — one password input per field of the provider's
+contract, save gated on every field being filled (a partial contract
+can't be saved). The dedicated **`/app/credentials` ("API keys") page**
+(`components/credentials-page.tsx`, linked from the account menu) is the
+management surface: saved rows always render (multi-field rows show the
+field count); add-rows come from the live catalog per request (no cache)
+and also include providers whose saved fields no longer cover the
+contract (the platform added a field → "incomplete — add the missing
+fields" re-connect path); when the platform is unreachable a banner
+explains that saved keys are unaffected and only new keys are blocked; a
+saved provider that left the catalog shows "No longer supported" and
+stays deletable.
 
 ## Connectors — `lib/connectors/connector-store.ts`
 
@@ -473,7 +555,7 @@ the AgentOS never stores connector config itself.
 The admin UI is the Connectors section on `/agents`
 (`components/connectors-admin.tsx`).
 
-## Database (migration `0013_agent_builder.sql`)
+## Database (migrations `0013_agent_builder.sql` + `0014_credential_fields.sql`)
 
 - `agents` additions: `origin` TEXT NOT NULL DEFAULT `'manual'`
   (`'manual' | 'template' | 'builder'`), `author_user_id` TEXT,
@@ -481,8 +563,13 @@ The admin UI is the Connectors section on `/agents`
   `remote_agent_id` where not null. `author_user_id` is attribution that
   survives membership changes.
 - `credentials` table: `id` PK, `user_id` (no FK — Better Auth runtime
-  table), `provider` (validated app-side by zod), `kind`, `secret`
-  (AES-256-GCM ciphertext), `UNIQUE (user_id, provider)`.
+  table), `provider` (validated app-side by zod), `kind`,
+  `UNIQUE (user_id, provider)`. Migration 0014 replaced the single
+  `secret` column with a `fields` JSONB map (field name → AES-256-GCM
+  ciphertext) — the multi-credential model: one row per provider, each
+  field encrypted individually; the backfill wraps every existing secret
+  as `{"api_key": <secret>}` via `jsonb_build_object` (the injection-safe
+  literal build), then drops the column.
 - `connectors` table: `id` PK, `org_id`, `name`, `url`, `token`
   (ciphertext, empty = no auth), `UNIQUE (org_id, name)`.
 
@@ -494,25 +581,25 @@ The admin UI is the Connectors section on `/agents`
 - The builder page: name/description/instructions + model picker
   (populated from `GET /api/models` — the server-side proxy to the
   AgentOS `/platform/models` catalog, grouped by provider, defaulting to
-  a platform-tier model so the default selection needs no BYOK) + tool
-  palette (loaded from `GET /api/tools` — the server-side proxy to the
-  AgentOS `/platform/tools` catalog — with key-state badges) +
-  connector palette. `GET /api/credentials` and `GET /api/connectors`
-  feed the badges.
+  the first model — builder runs are 100% BYOK, there is no
+  platform-key preference) + tool palette (loaded from `GET /api/tools`
+  — the server-side proxy to the AgentOS `/platform/tools` catalog —
+  with key-state badges) + connector palette. `GET /api/credentials`
+  and `GET /api/connectors` feed the badges.
 - **Disabled state:** when `GET /api/models` or `GET /api/tools` fails
   because the platform is unreachable, the page renders a notice banner
   and disables the form (submit disabled) — the definition would be
   validated against a stale palette otherwise.
 - **Empty ≠ unreachable:** the platform catalogs are **empty by default**
-  — the AgentOS exposes nothing until its operator sets
-  `PLATFORM_MODELS`/`PLATFORM_TOOLS` (see the platform-os README), so a
-  reachable-but-empty catalog is a *configuration* state with its own
-  copy ("The agent platform exposes no tools yet. The platform operator
-  can add them via PLATFORM_TOOLS…"), never the error banner. Create
-  stays disabled while the model catalog is empty (the model field is
-  required); edit is unaffected — the model is only sent when it
-  changes. Copy always says "the agent platform", never "your" — SaaS
-  end users don't own the platform, and possessives imply they do.
+  — the AgentOS exposes nothing until the platform admin enables
+  providers/toolkits on `/app/admin/platform`, so a reachable-but-empty
+  catalog is a *configuration* state with its own copy ("The agent
+  platform exposes no tools yet. The platform admin enables them in the
+  platform admin page."), never the error banner. Create stays disabled
+  while the model catalog is empty (the model field is required); edit
+  is unaffected — the model is only sent when it changes. Copy always
+  says "the agent platform", never "your" — SaaS end users don't own the
+  platform, and possessives imply they do.
 - **Edit mode:** prefills from the requirements snapshot; instructions
   start blank with "(leave blank to keep current)" semantics. Non-author
   / non-builder agents show a 404-style state (the backend PATCH/DELETE
@@ -528,11 +615,19 @@ The admin UI is the Connectors section on `/agents`
 - The chat sidebar links to `/app/builder` (a wrench-glyph "Create
   agent" button in the Agents header — member-accessible, mirroring the
   "+" admin link).
+- **`/app/admin/platform`** (`app/app/admin/platform/page.tsx` +
+  `components/platform-admin.tsx`) — the platform catalog admin page;
+  see the section below.
 
 ## Not in Phase 1
 
 - **Publishing** — builder agents are org-scoped; there is no catalog
   publishing (making a builder agent installable by other orgs is
   Phase 3).
+- **The platform-key free tier** — dormant until publishing: the tier
+  flags, `platformFallback`, and the daily platform-key quota machinery
+  all stay wired (snapshot fields, quota route wiring, plan limits) but
+  builder runs are 100% BYOK today; the run gate ignores the tier
+  fields and the quota phase never fires.
 - **Knowledge** — attaching knowledge/data sources to builder agents is
   Phase 2.

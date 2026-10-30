@@ -25,9 +25,12 @@ export async function GET() {
       models: models.map((m) => ({
         provider: m.provider,
         id: m.id,
-        // platformTier is the canonical server-derived flag — the builder
-        // UI's badges and the run gate's 402s both read it from here.
+        // platformTier is the canonical server-derived flag — dormant for
+        // builder runs (100% BYOK; wakes at Phase 3 publishing) but kept in
+        // the wire so the future needs no shape change.
         platformTier: m.platform_tier,
+        // false for keyless providers (e.g. ollama) — no credential demanded.
+        requiresKey: m.requires_key,
       })),
     });
   } catch (err) {

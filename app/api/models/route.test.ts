@@ -42,17 +42,17 @@ describe("GET /api/models", () => {
     expect(mockFetchAgentosModels).not.toHaveBeenCalled();
   });
 
-  it("maps the AgentOS catalog to the client shape (platformTier)", async () => {
+  it("maps the AgentOS catalog to the client shape (platformTier + requiresKey)", async () => {
     mockFetchAgentosModels.mockResolvedValue([
-      { provider: "openai", id: "gpt-4o-mini", platform_tier: true },
-      { provider: "openai", id: "gpt-5", platform_tier: false },
+      { provider: "openai", id: "gpt-4o-mini", platform_tier: true, requires_key: true },
+      { provider: "ollama", id: "llama3", platform_tier: false, requires_key: false },
     ]);
     const res = await GET();
     expect(res.status).toBe(200);
     const body = await res.json();
     expect(body.models).toEqual([
-      { provider: "openai", id: "gpt-4o-mini", platformTier: true },
-      { provider: "openai", id: "gpt-5", platformTier: false },
+      { provider: "openai", id: "gpt-4o-mini", platformTier: true, requiresKey: true },
+      { provider: "ollama", id: "llama3", platformTier: false, requiresKey: false },
     ]);
   });
 

@@ -1,9 +1,16 @@
 /**
  * The BYOK credential catalog — derived from the AgentOS platform, never
- * hardcoded. LLM providers come from the distinct providers in
- * GET /platform/models; tool providers from the tools catalog's
- * `requiresKey` dep keys. Adding a tool or model provider to the platform
- * automatically adds it here — zero tackui code, not even env.
+ * hardcoded. LLM providers come from the distinct key-requiring providers in
+ * GET /platform/models; tool providers from the tools catalog's credential
+ * contracts. Adding a tool or model provider to the platform automatically
+ * adds it here — zero tackui code, not even env.
+ *
+ * Each provider carries its FIELD LIST — the named constructor arguments the
+ * AgentOS per-run delivery fills. Single-key providers (LLM providers,
+ * single-key toolkits like tavily) have one field, "api_key"; multi-
+ * credential toolkits (the X toolkit) list several. The wire dep key for a
+ * field is `<provider>_<field>` — one convention from the catalog through
+ * the key UI, run-gate 402s, per-run delivery, and the toolkit constructor.
  *
  * The single source of truth is the AgentOS. When it is unreachable, the
  * catalog fetch fails gracefully (`catalog: null` + a caller-safe message)
@@ -20,22 +27,38 @@ import {
 
 export type CredentialKind = "llm" | "tool";
 
+/** One named secret field of a provider's connect form. */
+export interface CredentialField {
+  /** The constructor arg name (e.g. "api_key", "consumer_key"). */
+  key: string;
+  /** Display copy for the form field (e.g. "Api key"). */
+  label: string;
+}
+
 /** One derived provider: what it's for, its dep key, and its display label. */
 export interface CredentialCatalogEntry {
   provider: string;
   kind: CredentialKind;
-  /** The AG-UI context dep key the runner delivers (e.g. "tavily_api_key"). */
+  /** The AG-UI context dep key the runner delivers (e.g. "tavily_api_key").
+   *  For multi-credential providers this is the FIRST credential's dep key —
+   *  `fields` is the full contract. */
   keyName: string;
   /** Display copy derived from the provider slug. */
   label: string;
+  /** The named fields this provider's connect form renders. */
+  fields: CredentialField[];
 }
 
 export type CredentialsCatalog = Record<string, CredentialCatalogEntry>;
 
 /**
- * The dep key → provider slug convention: `<provider>_api_key`. The
- * AgentOS credentials.py wire contract fixes the dep-key naming, so the
- * slug derivation is mechanical — never a provider list.
+ * The dep key → provider slug convention: `<provider>_<field>` (e.g.
+ * `tavily_api_key`, `x_consumer_key`). The AgentOS derives the dep key from
+ * the toolkit slug + constructor arg, so the slug derivation is mechanical —
+ * never a provider list. NOTE: for multi-field providers this cannot recover
+ * the provider from the dep key alone (a field boundary is ambiguous) — the
+ * catalog's `toolkit` slug is the source there; this helper stays for
+ * single-key shapes and back-compat snapshots.
  */
 export function providerForDepKey(keyName: string): string {
   return keyName.endsWith("_api_key") ? keyName.slice(0, -"_api_key".length) : keyName;
@@ -59,6 +82,17 @@ export function prettifyProviderLabel(provider: string): string {
 }
 
 /**
+ * The field name a provider's dep key carries: the dep key is
+ * `<provider>_<field>`, so with the provider known the field is the rest.
+ * "tavily_api_key" + "tavily" → "api_key"; "x_consumer_key" + "x" →
+ * "consumer_key".
+ */
+export function fieldForDepKey(provider: string, depKey: string): string {
+  const prefix = `${provider}_`;
+  return depKey.startsWith(prefix) ? depKey.slice(prefix.length) : depKey;
+}
+
+/**
  * Derive the credentials catalog from the two platform catalogs. A provider
  * that appears in both keeps its first (LLM) entry.
  */
@@ -69,22 +103,43 @@ export function deriveCredentialsCatalog(
   const catalog: CredentialsCatalog = {};
   for (const m of models) {
     if (!m.provider || catalog[m.provider]) continue;
+    if (m.requires_key === false) continue; // keyless provider (e.g. ollama)
     catalog[m.provider] = {
       provider: m.provider,
       kind: "llm",
       keyName: depKeyForProvider(m.provider),
       label: prettifyProviderLabel(m.provider),
+      fields: [{ key: "api_key", label: "Api key" }],
     };
   }
   for (const t of tools) {
-    if (!t.requires_key) continue;
-    const provider = providerForDepKey(t.requires_key);
-    if (catalog[provider]) continue;
+    if (!t.requires_key || t.credentials.length === 0) continue;
+    // The toolkit slug is the provider — dep keys derive from it, so a
+    // multi-credential toolkit's fields all land under one provider. The
+    // mechanical derivation stays as the fallback for slug-less shapes.
+    const provider = t.toolkit || providerForDepKey(t.requires_key);
+    const fields: CredentialField[] = [];
+    for (const cred of t.credentials) {
+      const key = fieldForDepKey(provider, cred.dep_key);
+      if (fields.some((f) => f.key === key)) continue;
+      fields.push({ key, label: cred.label });
+    }
+    if (fields.length === 0) continue;
+    const existing = catalog[provider];
+    if (existing) {
+      // Same provider serving models and tools (e.g. openai): keep the LLM
+      // entry, union any tool fields it doesn't already declare.
+      for (const f of fields) {
+        if (!existing.fields.some((g) => g.key === f.key)) existing.fields.push(f);
+      }
+      continue;
+    }
     catalog[provider] = {
       provider,
       kind: "tool",
       keyName: t.requires_key,
       label: prettifyProviderLabel(provider),
+      fields,
     };
   }
   return catalog;

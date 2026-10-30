@@ -17,7 +17,14 @@
 export interface PlatformModel {
   provider: string;
   id: string;
+  /**
+   * Dormant for builder runs (100% BYOK; wakes at Phase 3 publishing) —
+   * kept in the wire so the future needs no shape change. The badge logic
+   * deliberately ignores it today.
+   */
   platformTier: boolean;
+  /** false for keyless providers (e.g. ollama) — no credential demanded. */
+  requiresKey: boolean;
 }
 
 /**
@@ -25,11 +32,11 @@ export interface PlatformModel {
  * is the single source of truth; there is no hardcoded list here). The
  * wire shape mirrors lib/agents/builder.ts `AgentosTool`, converted to
  * camelCase by the /api/tools route. `requiresKey` is the AG-UI context
- * dep key (e.g. "tavily_api_key"); the credentials catalog (GET
- * /api/credentials) maps dep keys to providers via `keyName`.
- * `platformFallback` = the platform carries an env key for the tool, so
- * a missing runner key is allowed (the run gate routes it to the
- * platform key + daily quota).
+ * dep key of the FIRST credential (null = keyless); `credentials` is the
+ * full contract — multi-credential toolkits (the X toolkit) carry several.
+ * `toolkit` is the provider slug the credentials are saved under.
+ * `platformFallback` is DORMANT (builder runs are 100% BYOK; wakes at
+ * Phase 3 publishing) — the badge logic ignores it today.
  */
 export interface BuilderToolOption {
   name: string;
@@ -37,6 +44,8 @@ export interface BuilderToolOption {
   description?: string | null;
   requiresKey: string | null;
   platformFallback: boolean;
+  toolkit: string;
+  credentials: { depKey: string; label: string }[];
 }
 
 /** Wire caps from the builder create/update schemas. */
@@ -48,6 +57,8 @@ export interface CredentialMeta {
   kind: "llm" | "tool";
   keyName: string;
   label: string;
+  /** The named fields the connect form renders (multi-credential → several). */
+  fields: { key: string; label: string }[];
 }
 
 export type CredentialCatalog = Record<string, CredentialMeta>;
@@ -114,19 +125,19 @@ export function groupModelsByProvider(models: PlatformModel[]): {
 }
 
 /**
- * Default selection: the first platform-tier model (mini-tier models run
- * on the platform key — free for the runner's own quota, no BYOK needed);
- * anything else requires a runner key. Falls back to the first model.
+ * Default selection: the first model. (TIER DORMANCY — the old "prefer a
+ * platform-tier model" default died with the platform-key free tier; builder
+ * runs are 100% BYOK, so every model is equal until Phase 3 publishing.)
  */
 export function pickDefaultModel(models: PlatformModel[]): PlatformModel | null {
-  return models.find((m) => m.platformTier) ?? models[0] ?? null;
+  return models[0] ?? null;
 }
 
 /**
  * Empty-catalog copy for the builder form. The platform catalogs are empty
- * BY DEFAULT — an operator who hasn't set PLATFORM_MODELS/PLATFORM_TOOLS
- * gets a builder that offers nothing, which is a configuration state, not
- * an error. Returns the empty-state copy when the catalog loaded
+ * BY DEFAULT — an admin who hasn't enabled anything in the platform admin
+ * page gets a builder that offers nothing, which is a configuration state,
+ * not an error. Returns the empty-state copy when the catalog loaded
  * successfully but is empty; null while loading, when populated, or when
  * the fetch failed (the unreachable banner covers that case).
  *
@@ -140,8 +151,8 @@ export function catalogEmptyCopy(
 ): string | null {
   if (error !== null || catalog === null || catalog.length > 0) return null;
   return kind === "models"
-    ? "The agent platform exposes no models yet. The platform operator adds them via PLATFORM_MODELS (see the platform README)."
-    : "The agent platform exposes no tools yet. The platform operator can add them via PLATFORM_TOOLS (see the platform README).";
+    ? "The agent platform exposes no models yet. The platform admin enables them in the platform admin page."
+    : "The agent platform exposes no tools yet. The platform admin enables them in the platform admin page.";
 }
 
 /**
@@ -210,21 +221,24 @@ export function providerForDepKeyInCatalog(
 
 /**
  * Model key state — the badge copy under the model picker:
- * - "platform"   : platform-tier model, served by the platform key.
- * - "connected"  : non-tier model, runner has a key for the provider.
- * - "missing"    : non-tier model, runner has no key → the run gate 402s.
+ * - "none"      : keyless provider (e.g. ollama) — nothing to connect.
+ * - "connected" : runner has a key for the provider.
+ * - "missing"   : runner has no key → the run gate 402s.
+ * (TIER DORMANCY: the old "platform" badge — served by the platform key —
+ * died with the builder BYOK-only rule; every keyed model is connected or
+ * missing. Wakes at Phase 3 publishing.)
  */
 export type ModelKeyState =
-  | { status: "platform" }
+  | { status: "none" }
   | { status: "connected"; providerLabel: string }
   | { status: "missing"; providerLabel: string; provider: string | null };
 
 export function modelKeyState(
-  model: { provider: string; platformTier: boolean } | null,
+  model: { provider: string; platformTier: boolean; requiresKey: boolean } | null,
   credentials: CredentialsState | null,
 ): ModelKeyState | null {
   if (!model) return null;
-  if (model.platformTier) return { status: "platform" };
+  if (!model.requiresKey) return { status: "none" };
   const meta = credentials ? providerMeta(credentials.catalog, model.provider) : null;
   const hasKey = credentials?.hasKey[model.provider] ?? false;
   const providerLabel = meta?.label ?? model.provider;
@@ -236,15 +250,14 @@ export function modelKeyState(
 /**
  * Tool key state — the badge on the tool palette row:
  * - "none"      : free tool, no key.
- * - "connected" : the runner's own key satisfies the dep.
- * - "fallback"  : missing key, but the platform fallback serves it
- *                 (platform-key daily quota applies on SaaS).
- * - "missing"   : missing key and no fallback → the run gate 402s.
+ * - "connected" : the runner's own credentials satisfy the contract.
+ * - "missing"   : missing credentials → the run gate 402s.
+ * (TIER DORMANCY: the old "fallback" badge — platform key serves it — is
+ * gone; builder runs are 100% BYOK. Wakes at Phase 3 publishing.)
  */
 export type ToolKeyState =
   | { status: "none" }
   | { status: "connected"; providerLabel: string }
-  | { status: "fallback"; providerLabel: string }
   | { status: "missing"; providerLabel: string; provider: string | null };
 
 export function toolKeyState(
@@ -252,15 +265,17 @@ export function toolKeyState(
   credentials: CredentialsState | null,
 ): ToolKeyState {
   if (!tool.requiresKey) return { status: "none" };
-  const provider = credentials ? providerForDepKeyInCatalog(credentials.catalog, tool.requiresKey) : null;
+  // The toolkit slug is the provider; the keyName catalog lookup stays as
+  // the fallback for shapes without a slug.
+  const provider =
+    tool.toolkit ||
+    (credentials ? providerForDepKeyInCatalog(credentials.catalog, tool.requiresKey) : null);
   const meta = credentials && provider ? providerMeta(credentials.catalog, provider) : null;
   const providerLabel = meta?.label ?? tool.requiresKey;
   if (credentials?.hasKey[provider ?? ""]) {
     return { status: "connected", providerLabel };
   }
-  return tool.platformFallback
-    ? { status: "fallback", providerLabel }
-    : { status: "missing", providerLabel, provider };
+  return { status: "missing", providerLabel, provider };
 }
 
 /**

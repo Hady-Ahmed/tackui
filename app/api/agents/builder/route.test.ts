@@ -71,8 +71,8 @@ import { checkAgentCountLimit } from "@/lib/plans/enforcement";
 import { NextResponse } from "next/server";
 
 const MODELS = [
-  { provider: "openai", id: "gpt-4o-mini", platform_tier: true },
-  { provider: "openai", id: "gpt-5", platform_tier: false },
+  { provider: "openai", id: "gpt-4o-mini", platform_tier: true, requires_key: true },
+  { provider: "openai", id: "gpt-5", platform_tier: false, requires_key: true },
 ];
 const TOOLS = [
   {
@@ -82,6 +82,8 @@ const TOOLS = [
     requires_key: null,
     fallback_env: null,
     platform_fallback: false,
+    toolkit: "duckduckgo",
+    credentials: [],
     parameters: {
       type: "object",
       properties: { query: { type: "string" } },
@@ -94,6 +96,8 @@ const TOOLS = [
     requires_key: "tavily_api_key",
     fallback_env: "TAVILY_API_KEY",
     platform_fallback: true,
+    toolkit: "tavily",
+    credentials: [{ dep_key: "tavily_api_key", label: "Tavily api key" }],
   },
 ];
 
@@ -241,8 +245,11 @@ describe("POST /api/agents/builder", () => {
           name: "web_search",
           label: "Web search (DuckDuckGo)",
           requiresKey: null,
-          provider: null,
+          // The toolkit slug is the provider identity — present even for
+          // keyless tools (multi-credential toolkits need it later).
+          provider: "duckduckgo",
           platformFallback: false,
+          credentials: [],
         },
       ],
       connectors: [],

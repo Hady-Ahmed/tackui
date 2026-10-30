@@ -20,23 +20,81 @@ import {
 } from "./builder-config";
 
 const MODELS: PlatformModel[] = [
-  { provider: "openai", id: "gpt-4o-mini", platformTier: true },
-  { provider: "anthropic", id: "claude-3-5-sonnet", platformTier: false },
-  { provider: "openai", id: "gpt-4o", platformTier: false },
-  { provider: "openrouter", id: "meta-llama/llama-3.1-8b", platformTier: true },
+  { provider: "openai", id: "gpt-4o-mini", platformTier: true, requiresKey: true },
+  { provider: "anthropic", id: "claude-3-5-sonnet", platformTier: false, requiresKey: true },
+  { provider: "openai", id: "gpt-4o", platformTier: false, requiresKey: true },
+  { provider: "openrouter", id: "meta-llama/llama-3.1-8b", platformTier: true, requiresKey: true },
+  { provider: "ollama", id: "llama3", platformTier: false, requiresKey: false },
 ];
 
 const CATALOG: CredentialCatalog = {
-  openai: { kind: "llm", keyName: "openai_api_key", label: "Openai" },
-  openrouter: { kind: "llm", keyName: "openrouter_api_key", label: "Openrouter" },
-  tavily: { kind: "tool", keyName: "tavily_api_key", label: "Tavily" },
+  openai: {
+    kind: "llm",
+    keyName: "openai_api_key",
+    label: "Openai",
+    fields: [{ key: "api_key", label: "Api key" }],
+  },
+  openrouter: {
+    kind: "llm",
+    keyName: "openrouter_api_key",
+    label: "Openrouter",
+    fields: [{ key: "api_key", label: "Api key" }],
+  },
+  tavily: {
+    kind: "tool",
+    keyName: "tavily_api_key",
+    label: "Tavily",
+    fields: [{ key: "api_key", label: "Tavily api key" }],
+  },
+  x: {
+    kind: "tool",
+    keyName: "x_consumer_key",
+    label: "X",
+    fields: [
+      { key: "consumer_key", label: "X consumer key" },
+      { key: "access_token", label: "X access token" },
+    ],
+  },
 };
 
 /** The tool palette as GET /api/tools returns it — the platform catalog. */
 const TOOLS: BuilderToolOption[] = [
-  { name: "web_search", label: "Web search (DuckDuckGo)", requiresKey: null, platformFallback: false },
-  { name: "search_news", label: "News search (DuckDuckGo)", requiresKey: null, platformFallback: false },
-  { name: "tavily_search", label: "Web search (Tavily)", requiresKey: "tavily_api_key", platformFallback: true },
+  {
+    name: "web_search",
+    label: "Web search (DuckDuckGo)",
+    requiresKey: null,
+    platformFallback: false,
+    toolkit: "duckduckgo",
+    credentials: [],
+  },
+  {
+    name: "search_news",
+    label: "News search (DuckDuckGo)",
+    requiresKey: null,
+    platformFallback: false,
+    toolkit: "duckduckgo",
+    credentials: [],
+  },
+  {
+    name: "tavily_search",
+    label: "Web search (Tavily)",
+    requiresKey: "tavily_api_key",
+    platformFallback: true,
+    toolkit: "tavily",
+    credentials: [{ depKey: "tavily_api_key", label: "Tavily api key" }],
+  },
+  {
+    // Multi-credential toolkit — one provider, several fields.
+    name: "search_x",
+    label: "Search X posts",
+    requiresKey: "x_consumer_key",
+    platformFallback: false,
+    toolkit: "x",
+    credentials: [
+      { depKey: "x_consumer_key", label: "X consumer key" },
+      { depKey: "x_access_token", label: "X access token" },
+    ],
+  },
 ];
 
 function credentialsState(has: string[]) {
@@ -57,8 +115,8 @@ const validForm: BuilderFormState = {
 describe("groupModelsByProvider", () => {
   it("groups by provider and sorts providers then model ids", () => {
     const groups = groupModelsByProvider(MODELS);
-    expect(groups.map((g) => g.provider)).toEqual(["anthropic", "openai", "openrouter"]);
-    expect(groups[1].models.map((m) => m.id)).toEqual(["gpt-4o", "gpt-4o-mini"]);
+    expect(groups.map((g) => g.provider)).toEqual(["anthropic", "ollama", "openai", "openrouter"]);
+    expect(groups[2].models.map((m) => m.id)).toEqual(["gpt-4o", "gpt-4o-mini"]);
   });
 
   it("returns an empty array for an empty catalog", () => {
@@ -67,12 +125,8 @@ describe("groupModelsByProvider", () => {
 });
 
 describe("pickDefaultModel", () => {
-  it("prefers the first platform-tier model", () => {
+  it("picks the first model (TIER DORMANCY — no platform-key preference)", () => {
     expect(pickDefaultModel(MODELS)).toEqual(MODELS[0]);
-  });
-
-  it("falls back to the first model when nothing is platform-tier", () => {
-    expect(pickDefaultModel([MODELS[2]])).toEqual(MODELS[2]);
   });
 
   it("returns null for an empty catalog", () => {
@@ -129,29 +183,45 @@ describe("providerForDepKeyInCatalog", () => {
 });
 
 describe("modelKeyState", () => {
-  it("reports platform tier without a key", () => {
-    expect(modelKeyState({ provider: "openai", platformTier: true }, credentialsState([]))).toEqual({
-      status: "platform",
-    });
-  });
-
-  it("reports connected when the runner has the provider key", () => {
-    expect(modelKeyState({ provider: "openai", platformTier: false }, credentialsState(["openai"]))).toEqual({
-      status: "connected",
-      providerLabel: "Openai",
-    });
-  });
-
-  it("reports missing when there is no key", () => {
-    expect(modelKeyState({ provider: "openai", platformTier: false }, credentialsState([]))).toEqual({
+  it("TIER DORMANCY: a platform-tier model without a key reports missing (no platform badge)", () => {
+    expect(
+      modelKeyState({ provider: "openai", platformTier: true, requiresKey: true }, credentialsState([])),
+    ).toEqual({
       status: "missing",
       providerLabel: "Openai",
       provider: "openai",
     });
   });
 
+  it("reports connected when the runner has the provider key", () => {
+    expect(
+      modelKeyState({ provider: "openai", platformTier: false, requiresKey: true }, credentialsState(["openai"])),
+    ).toEqual({
+      status: "connected",
+      providerLabel: "Openai",
+    });
+  });
+
+  it("reports missing when there is no key", () => {
+    expect(
+      modelKeyState({ provider: "openai", platformTier: false, requiresKey: true }, credentialsState([])),
+    ).toEqual({
+      status: "missing",
+      providerLabel: "Openai",
+      provider: "openai",
+    });
+  });
+
+  it("reports none for a keyless provider (e.g. ollama) — nothing to connect", () => {
+    expect(
+      modelKeyState({ provider: "ollama", platformTier: false, requiresKey: false }, credentialsState([])),
+    ).toEqual({ status: "none" });
+  });
+
   it("labels unknown providers with the raw provider id and no connect form", () => {
-    expect(modelKeyState({ provider: "mystery", platformTier: false }, credentialsState([]))).toEqual({
+    expect(
+      modelKeyState({ provider: "mystery", platformTier: false, requiresKey: true }, credentialsState([])),
+    ).toEqual({
       status: "missing",
       providerLabel: "mystery",
       provider: null,
@@ -175,10 +245,18 @@ describe("toolKeyState", () => {
     });
   });
 
-  it("reports fallback when the platform carries a key for the tool", () => {
+  it("TIER DORMANCY: a platformFallback tool without a key reports missing (no fallback badge)", () => {
     expect(toolKeyState(TOOLS[2], credentialsState([]))).toEqual({
-      status: "fallback",
+      status: "missing",
       providerLabel: "Tavily",
+      provider: "tavily",
+    });
+  });
+
+  it("resolves the provider from the toolkit slug (multi-credential toolkits)", () => {
+    expect(toolKeyState(TOOLS[3], credentialsState(["x"]))).toEqual({
+      status: "connected",
+      providerLabel: "X",
     });
   });
 
@@ -192,10 +270,11 @@ describe("toolKeyState", () => {
   });
 
   it("falls back to the raw dep key as the label when the catalog doesn't know the provider", () => {
-    const unknown = { ...TOOLS[2], requiresKey: "mystery_api_key" };
+    const unknown = { ...TOOLS[2], toolkit: "", requiresKey: "mystery_api_key" };
     expect(toolKeyState(unknown, credentialsState(["tavily"]))).toEqual({
-      status: "fallback",
+      status: "missing",
       providerLabel: "mystery_api_key",
+      provider: null,
     });
   });
 });
@@ -335,13 +414,13 @@ describe("catalogEmptyCopy — empty-by-default platform catalogs (turn 7)", () 
 
   it("returns operator-facing copy for an empty model catalog", () => {
     const copy = catalogEmptyCopy("models", [], null);
-    expect(copy).toContain("PLATFORM_MODELS");
+    expect(copy).toContain("platform admin");
     expect(copy).toContain("The agent platform exposes no models yet");
   });
 
   it("returns operator-facing copy for an empty tool catalog", () => {
     const copy = catalogEmptyCopy("tools", [], null);
-    expect(copy).toContain("PLATFORM_TOOLS");
+    expect(copy).toContain("platform admin");
     expect(copy).toContain("The agent platform exposes no tools yet");
   });
 

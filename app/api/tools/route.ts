@@ -30,6 +30,10 @@ export async function GET() {
         requiresKey: t.requires_key,
         fallbackEnv: t.fallback_env,
         platformFallback: t.platform_fallback,
+        // The toolkit slug (the credential provider) + the full credential
+        // contract — multi-credential toolkits list several fields.
+        toolkit: t.toolkit,
+        credentials: t.credentials,
         parameters: t.parameters ?? null,
       })),
     });

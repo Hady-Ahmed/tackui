@@ -5,11 +5,13 @@ import {
   listAppliedMigrations,
 } from "./migrate";
 import { setTestDb, query, closePool, type PgClient } from "./pg";
+import { registerPgMemShims } from "./pg-test-shim";
 
 let db: IMemoryDb;
 
 beforeEach(() => {
   db = newDb();
+  registerPgMemShims(db);
   const { Pool } = db.adapters.createPg();
   const pool = new Pool();
   const client = Object.assign(pool, { release: () => {} }) as unknown as PgClient;
@@ -22,9 +24,9 @@ afterEach(async () => {
 });
 
 describe("runMigrations", () => {
-  it("applies 0001–0013 migrations, creates all expected tables", async () => {
+  it("applies 0001–0014 migrations, creates all expected tables", async () => {
     const result = await runMigrations();
-    expect(result.applied).toEqual(["0001", "0002", "0003", "0004", "0006", "0007", "0008", "0009", "0010", "0011", "0012", "0013"]);
+    expect(result.applied).toEqual(["0001", "0002", "0003", "0004", "0006", "0007", "0008", "0009", "0010", "0011", "0012", "0013", "0014"]);
     expect(result.skipped).toEqual([]);
 
     const tables = await query<{ table_name: string }>(`
@@ -49,7 +51,7 @@ describe("runMigrations", () => {
   it("records each applied migration in schema_migrations", async () => {
     await runMigrations();
     const applied = await listAppliedMigrations();
-    expect(applied).toHaveLength(12);
+    expect(applied).toHaveLength(13);
     expect(applied[0].id).toBe("0001");
     expect(applied[0].filename).toBe("0001_init.sql");
     expect(applied[1].id).toBe("0002");
@@ -74,6 +76,8 @@ describe("runMigrations", () => {
     expect(applied[10].filename).toBe("0012_paid_daily_quota.sql");
     expect(applied[11].id).toBe("0013");
     expect(applied[11].filename).toBe("0013_agent_builder.sql");
+    expect(applied[12].id).toBe("0014");
+    expect(applied[12].filename).toBe("0014_credential_fields.sql");
     // applied_at is returned as a Date by pg-mem and as an ISO string by real
     // pg (depending on driver parsing). Accept both.
     const appliedAt = applied[0].applied_at;
@@ -84,12 +88,12 @@ describe("runMigrations", () => {
   it("is idempotent — second run reports skipped, no new inserts", async () => {
     const first = await runMigrations();
     const second = await runMigrations();
-    expect(first.applied).toEqual(["0001", "0002", "0003", "0004", "0006", "0007", "0008", "0009", "0010", "0011", "0012", "0013"]);
+    expect(first.applied).toEqual(["0001", "0002", "0003", "0004", "0006", "0007", "0008", "0009", "0010", "0011", "0012", "0013", "0014"]);
     expect(second.applied).toEqual([]);
-    expect(second.skipped).toEqual(["0001", "0002", "0003", "0004", "0006", "0007", "0008", "0009", "0010", "0011", "0012", "0013"]);
+    expect(second.skipped).toEqual(["0001", "0002", "0003", "0004", "0006", "0007", "0008", "0009", "0010", "0011", "0012", "0013", "0014"]);
 
     const applied = await listAppliedMigrations();
-    expect(applied).toHaveLength(12);
+    expect(applied).toHaveLength(13);
   });
 
   it("creates the agents table with the documented columns", async () => {
