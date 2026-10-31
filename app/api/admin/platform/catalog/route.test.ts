@@ -150,15 +150,21 @@ describe("PUT /api/admin/platform/catalog", () => {
     expect(res.status).toBe(400);
   });
 
-  it("passes the AgentOS 400 through verbatim (the platform owns entry validation)", async () => {
+  it("maps an AgentOS 400 to the clean message + upstream detail (the platform owns entry validation)", async () => {
     mockPutModels.mockRejectedValue(
-      new AgentosError(400, "'gpt-4o-mini': unknown attribute 'max_tokes'"),
+      new AgentosError(
+        400,
+        "The agent builder couldn't process that request. Refresh and try again.",
+        "'gpt-4o-mini': unknown attribute 'max_tokes'",
+      ),
     );
     const res = await put({
       providers: [{ slug: "openai", enabled: true, models: ["gpt-4o-mini:max_tokes=5"] }],
     });
     expect(res.status).toBe(400);
-    expect((await res.json()).error).toContain("max_tokes");
+    const data = await res.json();
+    expect(data.error).toBe("The agent builder couldn't process that request. Refresh and try again.");
+    expect(data.detail).toContain("max_tokes");
   });
 
   it("returns 401 without a user and 403 for a non-platform-admin", async () => {

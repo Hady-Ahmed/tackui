@@ -99,7 +99,7 @@ export async function PUT(request: NextRequest) {
   const { catalog, catalogError } = await fetchCredentialsCatalog();
   if (!catalog) {
     return NextResponse.json(
-      { error: catalogError ?? "Can't reach the platform — try again shortly." },
+      { error: catalogError ?? "Can't reach the agent builder — try again shortly." },
       { status: 503 },
     );
   }
@@ -154,7 +154,7 @@ export async function PUT(request: NextRequest) {
       error: err instanceof Error ? err.message : String(err),
     });
     return NextResponse.json(
-      { error: "Failed to store credential. Check server logs." },
+      { error: "Couldn't save the credential — please try again." },
       { status: 500 },
     );
   }

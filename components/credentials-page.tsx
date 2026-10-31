@@ -279,7 +279,7 @@ export function CredentialsPage() {
               </p>
             ) : catalog !== null && Object.keys(catalog).length === 0 ? (
               <p className="text-sm text-zinc-500 dark:text-zinc-400">
-                The agent platform offers no key providers yet — providers
+                The agent builder offers no key providers yet — providers
                 appear when the platform exposes keyed models or tools.
               </p>
             ) : addRows.length === 0 ? (

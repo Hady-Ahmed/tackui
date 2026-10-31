@@ -30,6 +30,13 @@ cloud-metadata endpoints.
   even if the env var changes).
 - **Error masking:** probe error messages are masked in the response (raw DNS
   errors can leak internal hostnames); the full error is logged server-side.
+- **AgentOS error sanitization:** `AgentosError` (lib/agents/builder.ts) never
+  carries internal platform names, request framing, or raw response bodies in
+  its `message` — SaaS users see "The agent builder is unavailable right now —
+  please try again shortly." when the service is down, not "AgentOS is unreachable
+  (fetch failed)". The upstream validation text rides in a separate `detail`
+  field that only admin-gated routes (`/api/admin/platform/*`) surface; see
+  docs/agent-builder.md for the contract tests.
 
 ## Credentials & connectors stores (builder subsystem)
 

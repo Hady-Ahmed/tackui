@@ -41,7 +41,7 @@ export async function GET() {
       error: err instanceof Error ? err.message : String(err),
     });
     return NextResponse.json(
-      { error: "The agent platform is unavailable. Please retry shortly." },
+      { error: "The agent builder is unavailable right now — please try again shortly." },
       { status: 502 },
     );
   }

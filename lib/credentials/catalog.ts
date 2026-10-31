@@ -148,7 +148,7 @@ export function deriveCredentialsCatalog(
 /** The banner copy when the platform is unreachable — saved keys are never
  * affected; only adding new ones is blocked. */
 export const CATALOG_UNREACHABLE_MESSAGE =
-  "Can't reach the platform — your saved keys are unaffected. New keys can't be added until it's back.";
+  "Can't reach the agent builder — your saved keys are unaffected. New keys can't be added until it's back.";
 
 export interface CredentialsCatalogFetch {
   /** null when the platform was unreachable — the caller degrades, not fails. */

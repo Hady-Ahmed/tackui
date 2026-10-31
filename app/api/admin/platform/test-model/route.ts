@@ -44,13 +44,18 @@ export async function POST(request: NextRequest) {
     return NextResponse.json(result);
   } catch (err) {
     if (err instanceof AgentosError) {
-      return NextResponse.json({ error: err.message }, { status: err.status });
+      // Admin surface: the clean user message plus the upstream validation
+      // detail (parsed) — operators need the platform's own "why".
+      return NextResponse.json(
+        { error: err.message, ...(err.detail ? { detail: err.detail } : {}) },
+        { status: err.status },
+      );
     }
     console.error("[admin/platform] model test failed", {
       error: err instanceof Error ? err.message : String(err),
     });
     return NextResponse.json(
-      { error: "The agent platform is unavailable. Please retry shortly." },
+      { error: "The agent builder is unavailable right now — please try again shortly." },
       { status: 502 },
     );
   }

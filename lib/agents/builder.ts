@@ -120,12 +120,19 @@ export interface AgentosTool {
   parameters?: Record<string, unknown>;
 }
 
-/** Error thrown when the AgentOS is unreachable or rejects a call. */
+/** Error thrown when the AgentOS is unreachable or rejects a call.
+    `message` is always end-user-safe (no internal names, no raw bodies) —
+    it's what every route may show verbatim. `detail` carries the upstream
+    4xx/5xx validation text, parsed out of the response body when possible;
+    admin-only surfaces opt into showing it, member surfaces never do. */
 export class AgentosError extends Error {
   constructor(
     /** HTTP-ish status the caller route should surface (503 when disabled). */
     readonly status: number,
     message: string,
+    /** Upstream validation detail (e.g. "test failed: … is not a valid model
+        ID") — sanitized of transport framing; admin surfaces only. */
+    readonly detail?: string,
   ) {
     super(message);
     this.name = "AgentosError";
@@ -149,11 +156,40 @@ interface AgentosComponentResponse {
   deleted_at: number | null;
 }
 
+/** Pull the human-readable validation text out of an AgentOS error body.
+    FastAPI answers {"detail": "..."}; accept a plain string too. Returns
+    undefined when nothing usable is present (empty body, non-JSON). */
+function extractDetail(raw: string): string | undefined {
+  if (!raw) return undefined;
+  try {
+    const parsed: unknown = JSON.parse(raw);
+    if (typeof parsed === "string") return parsed.slice(0, 300) || undefined;
+    if (parsed && typeof parsed === "object") {
+      const detail = (parsed as { detail?: unknown }).detail ??
+        (parsed as { message?: unknown }).message;
+      if (typeof detail === "string" && detail.trim()) return detail.slice(0, 300);
+      if (detail != null) return JSON.stringify(detail).slice(0, 300);
+    }
+  } catch {
+    // Not JSON — FastAPI validation errors can arrive as pre-rendered text.
+  }
+  return raw.slice(0, 300) || undefined;
+}
+
 /**
  * The single AgentOS HTTP entry point. Mints a fresh service token per
  * call, throws AgentosError with a caller-safe status on any failure.
  * 10s timeout — the AgentOS is same-host infrastructure; a hung call
  * should fail the builder request, not hold it open.
+ *
+ * Error copy discipline: `message` is end-user-safe (the platform is
+ * called "the agent platform" — never "AgentOS", never method/path/status
+ * framing, never a raw body). The upstream validation text rides in
+ * `detail`, which only admin-gated routes may surface; 5xx bodies can
+ * carry infra detail (agno internals, DB errors) but the same rule holds
+ * — detail goes only where an operator is reading. Same boundary
+ * discipline as the dispatcher's run-error sanitization (platform-os
+ * commit fac65cf).
  */
 async function agentosRequest<T>(
   method: "GET" | "POST" | "PUT" | "PATCH" | "DELETE",
@@ -161,10 +197,7 @@ async function agentosRequest<T>(
   body?: unknown,
 ): Promise<T> {
   if (!AGENTOS_ENABLED) {
-    throw new AgentosError(
-      503,
-      "The agent builder is not enabled on this deployment (AGENTOS_BASE_URL is not set).",
-    );
+    throw new AgentosError(503, "The agent builder isn't enabled on this deployment.");
   }
   let res: Response;
   try {
@@ -178,30 +211,29 @@ async function agentosRequest<T>(
       signal: AbortSignal.timeout(10_000),
       cache: "no-store",
     });
-  } catch (err) {
+  } catch {
     throw new AgentosError(
       502,
-      `AgentOS is unreachable (${err instanceof Error ? err.message : "network error"}).`,
+      "The agent builder is unavailable right now — please try again shortly.",
     );
   }
   if (!res.ok) {
-    const detail = (await res.text().catch(() => "")).slice(0, 300);
+    const detail = extractDetail(await res.text().catch(() => ""));
     const status = res.status === 401 || res.status === 403 ? 502 : res.status;
-    // Log the full body server-side; the browser only gets it for 4xx
-    // (validation errors are client-fixable — the user can act on them).
-    // 5xx bodies can carry infra detail (agno internals, DB errors), so
-    // the client gets a generic message — same boundary discipline as the
-    // dispatcher's run-error sanitization (platform-os commit fac65cf).
+    // Log the full body server-side (it keeps method/path framing — that's
+    // for operators reading logs, not for the browser).
     console.error(`[agentos] ${method} ${path} failed (${res.status})${detail ? `: ${detail}` : ""}`);
     if (status < 500) {
       throw new AgentosError(
         status,
-        `AgentOS ${method} ${path} failed (${res.status})${detail ? `: ${detail}` : ""}`,
+        "The agent builder couldn't process that request. Refresh and try again.",
+        detail,
       );
     }
     throw new AgentosError(
       status,
-      `AgentOS ${method} ${path} failed (${res.status}).`,
+      "The agent builder is unavailable right now — please try again shortly.",
+      detail,
     );
   }
   if (res.status === 204) return undefined as T;

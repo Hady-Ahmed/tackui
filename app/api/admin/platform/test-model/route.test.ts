@@ -56,13 +56,19 @@ describe("POST /api/admin/platform/test-model", () => {
     expect(mockTestPlatformModel).not.toHaveBeenCalled();
   });
 
-  it("passes the AgentOS error through verbatim (a provider 401 means the platform key is broken/missing)", async () => {
+  it("maps an AgentOS error to the clean message + the upstream detail (the platform key reason rides in detail)", async () => {
     mockTestPlatformModel.mockRejectedValue(
-      new AgentosError(502, "provider 'openai' rejected the request (401)"),
+      new AgentosError(
+        502,
+        "The agent builder is unavailable right now — please try again shortly.",
+        "test failed: provider 'openai' rejected the request (401)",
+      ),
     );
     const res = await post({ entry: "openai:gpt-4o-mini" });
     expect(res.status).toBe(502);
-    expect((await res.json()).error).toContain("401");
+    const data = await res.json();
+    expect(data.error).toBe("The agent builder is unavailable right now — please try again shortly.");
+    expect(data.detail).toContain("401");
   });
 
   it("returns 401 without a user and 403 for a non-platform-admin", async () => {

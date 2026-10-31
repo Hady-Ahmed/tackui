@@ -19,7 +19,7 @@ const mockFetchCredentialsCatalog = vi.fn();
 vi.mock("@/lib/credentials/catalog", () => ({
   fetchCredentialsCatalog: (...a: unknown[]) => mockFetchCredentialsCatalog(...a),
   CATALOG_UNREACHABLE_MESSAGE:
-    "Can't reach the platform — your saved keys are unaffected. New keys can't be added until it's back.",
+    "Can't reach the agent builder — your saved keys are unaffected. New keys can't be added until it's back.",
 }));
 
 import { GET, PUT } from "./route";
@@ -154,7 +154,7 @@ describe("GET /api/credentials", () => {
     mockFetchCredentialsCatalog.mockResolvedValue({
       catalog: null,
       catalogError:
-        "Can't reach the platform — your saved keys are unaffected. New keys can't be added until it's back.",
+        "Can't reach the agent builder — your saved keys are unaffected. New keys can't be added until it's back.",
     });
     const res = await GET();
     expect(res.status).toBe(200);
@@ -266,7 +266,7 @@ describe("PUT /api/credentials", () => {
     mockFetchCredentialsCatalog.mockResolvedValue({
       catalog: null,
       catalogError:
-        "Can't reach the platform — your saved keys are unaffected. New keys can't be added until it's back.",
+        "Can't reach the agent builder — your saved keys are unaffected. New keys can't be added until it's back.",
     });
     const res = await put({ provider: "openai", fields: { api_key: "sk-x" } });
     expect(res.status).toBe(503);

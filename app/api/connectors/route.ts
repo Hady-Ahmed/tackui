@@ -104,7 +104,7 @@ export async function PUT(request: NextRequest) {
       error: err instanceof Error ? err.message : String(err),
     });
     return NextResponse.json(
-      { error: "Failed to store connector. Check server logs." },
+      { error: "Couldn't save the connector — please try again." },
       { status: 500 },
     );
   }

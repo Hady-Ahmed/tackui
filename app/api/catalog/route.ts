@@ -81,7 +81,7 @@ export async function POST(request: Request) {
     // only unique constraint that can fire is slug).
     if ((err as { code?: string }).code === "23505") {
       return NextResponse.json(
-        { error: `A template with the slug "${parsed.data.slug}" already exists.` },
+        { error: `A template named "${parsed.data.slug}" already exists.` },
         { status: 409 },
       );
     }
@@ -90,7 +90,7 @@ export async function POST(request: Request) {
       error: err instanceof Error ? err.message : String(err),
     });
     return NextResponse.json(
-      { error: "Failed to create template. Check server logs." },
+      { error: "Couldn't create the template — please try again." },
       { status: 500 },
     );
   }

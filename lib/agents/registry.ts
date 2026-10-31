@@ -33,7 +33,7 @@ export async function getAgents(request?: Request): Promise<AgentsMap> {
   const entries = await listAgents(user.orgId);
   if (entries.length === 0) {
     throw new Error(
-      "No agents configured. Add agents via the /agents admin page.",
+      "No agents are set up in this workspace yet.",
     );
   }
 

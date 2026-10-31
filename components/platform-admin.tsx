@@ -102,6 +102,28 @@ function modelEntryText(row: { id: string; attrs: Record<string, unknown>; tier:
   return parts.join(":");
 }
 
+/** Page-level failure: the route's user-safe message plus, when the
+    upstream platform sent validation text, that detail as a secondary
+    line (admin-only surface — operators need the platform's "why"). */
+interface PageError {
+  message: string;
+  detail?: string;
+}
+
+/** Build the PageError from a proxy response body, falling back when the
+    body isn't the expected shape (proxy down, non-JSON). */
+function pageErrorFrom(
+  data: { error?: unknown; detail?: unknown },
+  fallback: string,
+): PageError {
+  return {
+    message:
+      typeof data.error === "string" && data.error ? data.error : fallback,
+    detail:
+      typeof data.detail === "string" && data.detail ? data.detail : undefined,
+  };
+}
+
 /** Small status pill shared by both sections. */
 function Pill({
   tone,
@@ -135,7 +157,7 @@ export function PlatformAdmin() {
   const [toolFilter, setToolFilter] = useState("");
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
-  const [error, setError] = useState<string | null>(null);
+  const [error, setError] = useState<PageError | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
   // model entry (provider:id[:attrs]) currently being tested → result copy.
   const [testing, setTesting] = useState<string | null>(null);
@@ -143,42 +165,63 @@ export function PlatformAdmin() {
   // Per-entry dismissal timers — a test result disappears after a few
   // seconds; re-testing resets the clock instead of stacking timers.
   const testTimers = useRef<Record<string, ReturnType<typeof setTimeout>>>({});
+  // The saved-catalog notice dismisses on the same clock as test results —
+  // a success banner that lingers forever is just noise.
+  const noticeTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
 
-  useEffect(
-    () => () => {
-      for (const t of Object.values(testTimers.current)) clearTimeout(t);
-    },
-    [],
-  );
+  const scheduleNoticeDismiss = () => {
+    if (noticeTimer.current) clearTimeout(noticeTimer.current);
+    noticeTimer.current = setTimeout(() => setNotice(null), 8000);
+  };
+
+  useEffect(() => {
+    // Copy the refs' current objects — they're mutated in place, so the
+    // identity is stable, but the lint rule wants a local binding.
+    const timers = testTimers.current;
+    const notice = noticeTimer;
+    return () => {
+      for (const t of Object.values(timers)) clearTimeout(t);
+      if (notice.current) clearTimeout(notice.current);
+    };
+  }, []);
 
   const load = useCallback(async () => {
     setError(null);
-    const res = await fetch("/api/admin/platform/catalog");
+    let res: Response;
+    try {
+      res = await fetch("/api/admin/platform/catalog");
+    } catch {
+      // Own-proxy failure (server restart, DNS) — same copy as the 5xx path.
+      setError({ message: "Couldn't load models & tools — please retry shortly." });
+      setLoading(false);
+      return;
+    }
     const data = (await res.json().catch(() => ({}))) as CatalogResponse;
     if (!res.ok) {
-      setError(
-        typeof data.error === "string" && data.error
-          ? data.error
-          : `Failed to load models & tools (${res.status})`,
-      );
+      setError(pageErrorFrom(data, "Couldn't load models & tools — please retry shortly."));
       setLoading(false);
       return;
     }
     setProviders(data.providers ?? []);
     setTools(data.tools ?? []);
     const d: Record<string, ProviderDraft> = {};
-    const exp: Record<string, boolean> = {};
     for (const p of data.providers ?? []) {
       d[p.slug] = {
         enabled: p.enabled,
         models: p.models.map(modelEntryText),
       };
-      // The working set (enabled providers) starts expanded; everything
-      // else stays a one-line row until clicked.
-      exp[p.slug] = p.enabled && p.available;
     }
     setDraft(d);
-    setExpanded(exp);
+    // Expansion survives a reload (post-save refresh included): keep the
+    // rows the admin opened; only first-load rows default to the enabled
+    // working set.
+    setExpanded((prev) => {
+      const next: Record<string, boolean> = {};
+      for (const p of data.providers ?? []) {
+        next[p.slug] = prev[p.slug] ?? (p.enabled && p.available);
+      }
+      return next;
+    });
     const t: Record<string, boolean> = {};
     for (const tool of data.tools ?? []) t[tool.slug] = tool.enabled;
     setToolDraft(t);
@@ -216,17 +259,25 @@ export function PlatformAdmin() {
       });
       const data = await res.json().catch(() => ({}));
       if (!res.ok) {
-        setError(
-          typeof data.error === "string" && data.error
-            ? data.error
-            : `Failed to save the catalog (${res.status})`,
-        );
+        setError(pageErrorFrom(data, "Couldn't save the catalog — please retry shortly."));
         return;
       }
-      setNotice("Catalog saved — live on the next request.");
-      await load();
+      setNotice("Catalog saved.");
+      scheduleNoticeDismiss();
+    } catch {
+      // Own-proxy failure mid-PUT — the draft is intact, the user can retry.
+      setError({ message: "Couldn't save the catalog — please retry shortly." });
+      return;
     } finally {
       setSaving(false);
+    }
+    // The save itself succeeded; only the post-save refresh can fail here.
+    try {
+      await load();
+    } catch {
+      setError({
+        message: "Saved — but the page couldn't refresh. Reload to see the current state.",
+      });
     }
   };
 
@@ -234,6 +285,7 @@ export function PlatformAdmin() {
     const key = `${provider.slug}:${entry}`;
     setTesting(key);
     setError(null);
+    let result: string;
     try {
       const res = await fetch("/api/admin/platform/test-model", {
         method: "POST",
@@ -241,29 +293,37 @@ export function PlatformAdmin() {
         body: JSON.stringify({ entry: `${provider.slug}:${entry}` }),
       });
       const data = await res.json().catch(() => ({}));
-      setTestResults((prev) => ({
-        ...prev,
-        [key]:
-          res.ok && data.ok
-            ? `✓ ${typeof data.reply === "string" ? data.reply.slice(0, 80) : "ok"}`
-            : `✗ ${typeof data.error === "string" && data.error ? data.error : `Failed (${res.status})`}`,
-      }));
-      // Auto-dismiss: reset this entry's clock (a re-test replaces the
-      // old timer rather than stacking a second one). The delete is
-      // guarded — the entry may already be gone via a row edit.
-      clearTimeout(testTimers.current[key]);
-      testTimers.current[key] = setTimeout(() => {
-        delete testTimers.current[key];
-        setTestResults((prev) => {
-          if (!(key in prev)) return prev;
-          const next = { ...prev };
-          delete next[key];
-          return next;
-        });
-      }, 8000);
-    } finally {
-      setTesting(null);
+      result =
+        res.ok && data.ok
+          ? `✓ ${typeof data.reply === "string" ? data.reply.slice(0, 80) : "ok"}`
+          : `✗ ${
+              // Prefer the platform's own validation detail (admin-only
+              // surface — this is the one place the "why" belongs).
+              typeof data.detail === "string" && data.detail
+                ? data.detail
+                : typeof data.error === "string" && data.error
+                  ? data.error
+                  : "Test failed — please retry shortly."
+            }`;
+    } catch {
+      // Own-proxy failure — without this the row would sit silent forever.
+      result = "✗ Couldn't reach the server — try again shortly.";
     }
+    setTestResults((prev) => ({ ...prev, [key]: result }));
+    // Auto-dismiss: reset this entry's clock (a re-test replaces the
+    // old timer rather than stacking a second one). The delete is
+    // guarded — the entry may already be gone via a row edit.
+    clearTimeout(testTimers.current[key]);
+    testTimers.current[key] = setTimeout(() => {
+      delete testTimers.current[key];
+      setTestResults((prev) => {
+        if (!(key in prev)) return prev;
+        const next = { ...prev };
+        delete next[key];
+        return next;
+      });
+    }, 8000);
+    setTesting(null);
   };
 
   // Draft model-row editing — the row list IS the editor (no textarea
@@ -302,10 +362,6 @@ export function PlatformAdmin() {
     updateModels(slug, (m) => [...m.slice(0, i), ...parts, ...m.slice(i + 1)]);
   };
 
-  if (loading) {
-    return <p className="text-sm text-zinc-500 dark:text-zinc-400">Loading…</p>;
-  }
-
   const providerList = providers ?? [];
   const toolList = tools ?? [];
 
@@ -329,6 +385,23 @@ export function PlatformAdmin() {
 
   const enabledProviderCount = providerList.filter((p) => draft[p.slug]?.enabled).length;
   const enabledToolCount = toolList.filter((t) => toolDraft[t.slug]).length;
+
+  // Unsaved-changes guard: a dirty draft must not die silently on tab
+  // close/refresh. (In-app nav isn't intercepted — the save bar keeps the
+  // state visible instead of nagging on every click.)
+  useEffect(() => {
+    if (dirtyCount === 0) return;
+    const handler = (e: BeforeUnloadEvent) => {
+      e.preventDefault();
+      e.returnValue = "";
+    };
+    window.addEventListener("beforeunload", handler);
+    return () => window.removeEventListener("beforeunload", handler);
+  }, [dirtyCount]);
+
+  if (loading) {
+    return <p className="text-sm text-zinc-500 dark:text-zinc-400">Loading…</p>;
+  }
 
   const q = provFilter.trim().toLowerCase();
   const visibleProviders = q
@@ -364,7 +437,24 @@ export function PlatformAdmin() {
     <div>
       {error && (
         <div className="mb-4 rounded-lg border border-red-200 bg-red-50 p-3 text-sm text-red-700 dark:border-red-900 dark:bg-red-950 dark:text-red-300">
-          {error}
+          <p>{error.message}</p>
+          {error.detail && (
+            <p className="mt-1 break-words text-xs text-red-600 dark:text-red-400">
+              {error.detail}
+            </p>
+          )}
+          {providers === null && (
+            <button
+              type="button"
+              onClick={() => {
+                setLoading(true);
+                void load();
+              }}
+              className="mt-2 rounded-md border border-red-300 px-3 py-1 text-xs font-medium text-red-700 transition-colors hover:bg-red-100 dark:border-red-800 dark:text-red-300 dark:hover:bg-red-900"
+            >
+              Retry
+            </button>
+          )}
         </div>
       )}
       {notice && (
@@ -416,6 +506,8 @@ export function PlatformAdmin() {
                 <div
                   role="button"
                   tabIndex={0}
+                  aria-expanded={open}
+                  aria-controls={`provider-panel-${p.slug}`}
                   onClick={() => setExpanded((prev) => ({ ...prev, [p.slug]: !open }))}
                   onKeyDown={(e) => {
                     if (e.key === "Enter" || e.key === " ") {
@@ -429,6 +521,7 @@ export function PlatformAdmin() {
                     type="checkbox"
                     checked={d.enabled}
                     disabled={!p.available}
+                    aria-label={`Enable ${p.slug}`}
                     onClick={(e) => e.stopPropagation()}
                     onChange={(e) =>
                       setDraft((prev) => {
@@ -441,7 +534,9 @@ export function PlatformAdmin() {
                     }
                     className="h-4 w-4 rounded border-zinc-300 text-blue-600 dark:border-zinc-600"
                   />
-                  <span className="font-medium text-zinc-900 dark:text-zinc-50">{p.slug}</span>
+                  <span className="min-w-0 truncate font-medium text-zinc-900 dark:text-zinc-50">
+                    {p.slug}
+                  </span>
                   {!p.available && <Pill tone="amber">No longer available</Pill>}
                   {open ? (
                     <code className="min-w-0 flex-1 truncate text-xs text-zinc-400">{p.class_name}</code>
@@ -463,7 +558,7 @@ export function PlatformAdmin() {
                   </span>
                 </div>
                 {open && p.available && (
-                  <div className="px-3 pb-3">
+                  <div id={`provider-panel-${p.slug}`} className="px-3 pb-3">
                     {/* The row list IS the editor — no textarea mirror:
                         each id is its own input with Test/remove inline,
                         and a multi-line paste splits into rows. Test
@@ -481,6 +576,7 @@ export function PlatformAdmin() {
                               onChange={(e) => setModelRow(p.slug, i, e.target.value, line)}
                               onPaste={(e) => pasteIntoRow(e, p.slug, i)}
                               placeholder="model-id"
+                              aria-label={`Model id ${i + 1} for ${p.slug}`}
                               className="min-w-0 flex-1 rounded-lg border border-zinc-200 bg-white px-3 py-1.5 font-mono text-xs text-zinc-900 outline-none transition-colors focus:border-blue-500 dark:border-zinc-700 dark:bg-zinc-900 dark:text-zinc-50"
                             />
                             <button
@@ -511,6 +607,7 @@ export function PlatformAdmin() {
                             <button
                               type="button"
                               title="Remove this model id"
+                              aria-label={`Remove model id ${i + 1} from ${p.slug}`}
                               onClick={() =>
                                 updateModels(p.slug, (m) => m.filter((_, j) => j !== i))
                               }
@@ -546,7 +643,7 @@ export function PlatformAdmin() {
               </div>
             );
           })}
-          {visibleProviders.length === 0 && (
+          {providers !== null && visibleProviders.length === 0 && (
             <p className="py-4 text-center text-xs text-zinc-400 md:col-span-2">
               No providers match “{provFilter}”.
             </p>
@@ -591,7 +688,7 @@ export function PlatformAdmin() {
               />
             )),
           ])}
-          {visibleTools.length === 0 && (
+          {tools !== null && visibleTools.length === 0 && (
             <p className="py-4 text-center text-xs text-zinc-400 md:col-span-2">
               No toolkits match “{toolFilter}”.
             </p>
@@ -658,6 +755,7 @@ function ToolRow({
           type="checkbox"
           checked={checked}
           disabled={!tool.available || !tool.deliverable}
+          aria-label={`Enable ${tool.label || tool.slug}`}
           onChange={(e) => onChange(e.target.checked)}
           className="h-4 w-4 shrink-0 rounded border-zinc-300 text-blue-600 dark:border-zinc-600"
         />
@@ -665,7 +763,15 @@ function ToolRow({
           {tool.label}
         </span>
         {!tool.available && <Pill tone="amber">No longer available</Pill>}
-        {tool.available && !tool.deliverable && <Pill tone="amber">No key delivery path</Pill>}
+        {tool.available && !tool.deliverable && (
+          <Pill tone="amber">
+            <span
+              title="This toolkit declares credentials the platform can&apos;t deliver at run time, so it can&apos;t be enabled."
+            >
+              Can&apos;t deliver credentials
+            </span>
+          </Pill>
+        )}
         {tool.credentials.length > 0 && (
           <span className="ml-auto flex min-w-0 items-center gap-1 overflow-hidden">
             {tool.credentials.map((c) => (

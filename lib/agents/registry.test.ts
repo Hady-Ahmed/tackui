@@ -96,10 +96,10 @@ describe("getAgents", () => {
     expect(Object.keys(map).sort()).toEqual(["a1", "a2"]);
   });
 
-  it("throws 'No agents configured' when the org has zero agents", async () => {
+  it("throws the no-agents copy when the org has zero agents", async () => {
     vi.mocked(listAgents).mockResolvedValue([]);
     await expect(getAgents(new Request("http://localhost"))).rejects.toThrow(
-      /No agents configured/,
+      /No agents are set up in this workspace yet/,
     );
   });
 

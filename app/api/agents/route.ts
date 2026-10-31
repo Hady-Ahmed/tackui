@@ -100,7 +100,7 @@ export async function POST(request: Request) {
       error: message,
     });
     return NextResponse.json(
-      { error: "Failed to create agent. Check server logs." },
+      { error: "Couldn't create the agent — please try again." },
       { status: 500 },
     );
   }

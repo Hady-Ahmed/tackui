@@ -1,0 +1,109 @@
+/**
+ * agentosRequest error-discipline tests — the boundary that keeps internal
+ * platform framing out of user-facing copy.
+ *
+ * The contract: AgentosError.message is always end-user-safe (no
+ * "AgentOS", no method/path/status framing, no raw bodies — every route
+ * may render it verbatim). The upstream validation text rides in `detail`,
+ * which only admin-gated surfaces opt into. These tests fetch-mock the
+ * transport and pin both halves, because nothing else in the suite mocks
+ * at this layer (route tests mock the exported wrappers, so the message
+ * strings themselves would go unpinned).
+ */
+import { afterEach, describe, expect, it, vi } from "vitest";
+
+vi.mock("@/lib/config/agentos", () => ({
+  AGENTOS_ENABLED: true,
+  AGENTOS_BASE_URL: "http://agent-os.test",
+  AGENTOS_JWT_SECRET: "test-secret",
+  AGENTOS_MISCONFIGURED: false,
+}));
+
+import { AgentosError, fetchAgentosModels, testPlatformModel } from "@/lib/agents/builder";
+
+function jsonResponse(body: unknown, status = 200) {
+  return new Response(JSON.stringify(body), {
+    status,
+    headers: { "Content-Type": "application/json" },
+  });
+}
+
+async function rejection(promise: Promise<unknown>): Promise<AgentosError> {
+  try {
+    await promise;
+    throw new Error("expected the promise to reject");
+  } catch (err) {
+    return err as AgentosError;
+  }
+}
+
+afterEach(() => {
+  vi.unstubAllGlobals();
+});
+
+describe("agentosRequest error discipline", () => {
+  it("network failure → 502, user-safe message, no detail", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () => {
+        throw new TypeError("fetch failed");
+      }),
+    );
+    const err = await rejection(fetchAgentosModels());
+    expect(err).toBeInstanceOf(AgentosError);
+    expect(err.status).toBe(502);
+    expect(err.message).toBe("The agent builder is unavailable right now — please try again shortly.");
+    expect(err.detail).toBeUndefined();
+  });
+
+  it("4xx → clean message + the upstream detail parsed out of the body", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () =>
+        jsonResponse(
+          { detail: "test failed: nope is not a valid model ID" },
+          400,
+        ),
+      ),
+    );
+    const err = await rejection(testPlatformModel("openrouter:nope"));
+    expect(err.status).toBe(400);
+    expect(err.message).toBe("The agent builder couldn't process that request. Refresh and try again.");
+    expect(err.message).not.toContain("AgentOS");
+    expect(err.message).not.toContain("/platform/test/model");
+    expect(err.detail).toBe("test failed: nope is not a valid model ID");
+  });
+
+  it("non-JSON 4xx body → detail falls back to the raw slice, message stays clean", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () => new Response("plain text boom", { status: 422 })),
+    );
+    const err = await rejection(testPlatformModel("openrouter:nope"));
+    expect(err.status).toBe(422);
+    expect(err.detail).toBe("plain text boom");
+    expect(err.message).not.toContain("boom");
+  });
+
+  it("5xx → unavailable message; detail still parsed (admin surfaces only)", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () => jsonResponse({ detail: "db exploded" }, 500)),
+    );
+    const err = await rejection(fetchAgentosModels());
+    expect(err.status).toBe(500);
+    expect(err.message).toBe("The agent builder is unavailable right now — please try again shortly.");
+    expect(err.detail).toBe("db exploded");
+  });
+
+  it("upstream 401/403 (service-token failure) maps to 502 with the unavailable message", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () => jsonResponse({ detail: "bad token" }, 401)),
+    );
+    const err = await rejection(fetchAgentosModels());
+    expect(err.status).toBe(502);
+    expect(err.message).toBe("The agent builder is unavailable right now — please try again shortly.");
+    expect(err.detail).toBe("bad token");
+  });
+});

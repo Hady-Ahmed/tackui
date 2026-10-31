@@ -151,8 +151,8 @@ export function catalogEmptyCopy(
 ): string | null {
   if (error !== null || catalog === null || catalog.length > 0) return null;
   return kind === "models"
-    ? "The agent platform exposes no models yet. The platform admin enables them in the platform admin page."
-    : "The agent platform exposes no tools yet. The platform admin enables them in the platform admin page.";
+    ? "The agent builder has no models yet — a platform admin enables them in Models & tools."
+    : "The agent builder has no tools yet — a platform admin enables them in Models & tools.";
 }
 
 /**

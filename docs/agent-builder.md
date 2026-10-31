@@ -133,6 +133,16 @@ unreachable/401/403, 503 when the platform is disabled, and AgentOS
 error statuses otherwise (`AgentosError.status` drives the route
 response).
 
+**Error copy discipline:** `AgentosError.message` is always
+end-user-safe — the platform is called "the agent builder," never
+"AgentOS," with no method/path/status framing and no raw response
+bodies — so every route may render it verbatim. The upstream
+validation text rides in `AgentosError.detail` (parsed from the
+FastAPI `detail` field), and only admin-gated routes surface it:
+`/api/admin/platform/*` return `{error, detail}`, member routes return
+`error` alone. The full upstream body is always logged server-side for
+operators.
+
 ## Models & tools — the admin page (`/admin/platform`)
 
 What the agent builder offers is a **deployment decision**, made in one
@@ -155,13 +165,17 @@ a per-provider column when the Phase 3 tier/publishing wakes.
   /api/admin/platform/catalog`, `POST /api/admin/platform/test-model`),
   which mint the service token server-side. The AgentOS JWT secret
   never reaches the browser.
-- **Model editing is per-provider textareas** — one model id per line,
-  grammar `model-id[:key=value …]` (bare ids inside a provider's own
+- **Model editing is a per-provider row editor** — each model id is its
+  own input with inline Test/remove, `+ Add model id` appends, and
+  multi-line pastes split into rows; grammar
+  `model-id[:key=value …]` (bare ids inside a provider's own
   block). The UI no longer advertises the dormant `:tier` segment, but
   the parser still accepts it for Phase 3 publishing, and stored values
   round-trip exactly. The AgentOS validates entries against its own
-  model classes (unknown attribute → 400) and tackui passes that 400
-  through verbatim — the platform owns entry validation.
+  model classes (unknown attribute → 400); the platform's validation
+  text reaches the admin through `AgentosError.detail` — rendered as a
+  clean second line, no transport framing — while member surfaces only
+  ever see the sanitized message.
 - **Test button** — one "hi" completion straight to the provider through
   the platform's own env key, answering "does this model id exist and
   does the platform key work?" before the admin enables it. Disabled
@@ -605,8 +619,8 @@ The admin UI is the Connectors section on `/agents`
   platform admin page."), never the error banner. Create stays disabled
   while the model catalog is empty (the model field is required); edit
   is unaffected — the model is only sent when it changes. Copy always
-  says "the agent platform", never "your" — SaaS end users don't own the
-  platform, and possessives imply they do.
+  says "the agent builder", never "your" — SaaS end users don't own the
+  builder infrastructure, and possessives imply they do.
 - **Edit mode:** prefills from the requirements snapshot; instructions
   start blank with "(leave blank to keep current)" semantics. Non-author
   / non-builder agents show a 404-style state (the backend PATCH/DELETE

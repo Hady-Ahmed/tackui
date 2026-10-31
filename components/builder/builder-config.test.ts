@@ -415,13 +415,13 @@ describe("catalogEmptyCopy — empty-by-default platform catalogs (turn 7)", () 
   it("returns operator-facing copy for an empty model catalog", () => {
     const copy = catalogEmptyCopy("models", [], null);
     expect(copy).toContain("platform admin");
-    expect(copy).toContain("The agent platform exposes no models yet");
+    expect(copy).toContain("The agent builder has no models yet");
   });
 
   it("returns operator-facing copy for an empty tool catalog", () => {
     const copy = catalogEmptyCopy("tools", [], null);
     expect(copy).toContain("platform admin");
-    expect(copy).toContain("The agent platform exposes no tools yet");
+    expect(copy).toContain("The agent builder has no tools yet");
   });
 
   it("never addresses the reader as the platform owner", () => {
