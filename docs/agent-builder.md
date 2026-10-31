@@ -188,6 +188,13 @@ a per-provider column when the Phase 3 tier/publishing wakes.
   provider/toolkit the deployment can no longer produce (an agno
   upgrade dropped it) is accepted as the legit dead-row clear — enabling
   one is a 400. "No longer available" rows render non-editable.
+- **Soft warnings on a successful save:** the PUT response can carry a
+  `warnings` array — the platform's soft notes (skipped rows, normalized
+  entries). Hard failures 400 with full detail; warnings are the
+  in-between. The proxy passes them through, and the admin page renders
+  them in an amber "Saved with notes" banner that stays until the admin
+  dismisses it (or the next save) — a soft note the admin never saw
+  would surface later as a member's agent failing to run.
 - **Tool gating is deliverable-gated:** a toolkit whose credential envs
   have no delivery path (a cred-shaped env with no matching constructor
   arg) stays visible but can't be enabled.

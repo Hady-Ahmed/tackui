@@ -101,13 +101,26 @@ export async function PUT(request: NextRequest) {
     // Two independent PUTs; apply both, report the higher revision. An
     // AgentOS 400 (bad model entry, unknown slug) passes through verbatim
     // so the admin sees the platform's own validation message.
+    let revision = 0;
+    const warnings: string[] = [];
     if (parsed.data.providers) {
-      await putPlatformCatalogModels(parsed.data.providers);
+      const result = await putPlatformCatalogModels(parsed.data.providers);
+      revision = Math.max(revision, result.revision);
+      warnings.push(...result.warnings);
     }
     if (parsed.data.tools) {
-      await putPlatformCatalogTools(parsed.data.tools);
+      const result = await putPlatformCatalogTools(parsed.data.tools);
+      revision = Math.max(revision, result.revision);
+      warnings.push(...result.warnings);
     }
-    return NextResponse.json({ ok: true });
+    return NextResponse.json({
+      ok: true,
+      revision,
+      // The platform's soft notes on a successful save (skipped rows,
+      // normalized entries) — the admin never sees them otherwise, since
+      // hard failures already 400 with full detail.
+      ...(warnings.length > 0 ? { warnings } : {}),
+    });
   } catch (err) {
     if (err instanceof AgentosError) {
       // Admin surface: the clean user message plus the upstream validation

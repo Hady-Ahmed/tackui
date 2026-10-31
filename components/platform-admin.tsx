@@ -159,6 +159,11 @@ export function PlatformAdmin() {
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<PageError | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
+  // Soft notes the platform attached to a successful save (skipped rows,
+  // normalized entries). Unlike the green notice these do NOT auto-dismiss —
+  // a warning the admin never saw is the exact failure mode this surface
+  // exists to prevent. Cleared by the ✕ button or the next save.
+  const [saveWarnings, setSaveWarnings] = useState<string[] | null>(null);
   // model entry (provider:id[:attrs]) currently being tested → result copy.
   const [testing, setTesting] = useState<string | null>(null);
   const [testResults, setTestResults] = useState<Record<string, string>>({});
@@ -242,6 +247,7 @@ export function PlatformAdmin() {
     setSaving(true);
     setError(null);
     setNotice(null);
+    setSaveWarnings(null);
     try {
       const res = await fetch("/api/admin/platform/catalog", {
         method: "PUT",
@@ -263,6 +269,14 @@ export function PlatformAdmin() {
         setError(pageErrorFrom(data, "Couldn't save the catalog — please retry shortly."));
         return;
       }
+      // The platform's soft notes — only surface them when non-empty (the
+      // proxy omits the field entirely when there are none).
+      const warnings = Array.isArray(data.warnings)
+        ? (data.warnings as unknown[]).filter(
+            (w): w is string => typeof w === "string" && w.length > 0,
+          )
+        : [];
+      if (warnings.length > 0) setSaveWarnings(warnings);
       setNotice("Catalog saved.");
       scheduleNoticeDismiss();
     } catch {
@@ -467,6 +481,34 @@ export function PlatformAdmin() {
           className="mb-4 rounded-lg border border-green-200 bg-green-50 p-3 text-sm text-green-700 dark:border-green-900 dark:bg-green-950 dark:text-green-300"
         >
           {notice}
+        </div>
+      )}
+      {saveWarnings && (
+        <div
+          role="alert"
+          className="mb-4 rounded-lg border border-amber-200 bg-amber-50 p-3 text-sm text-amber-800 dark:border-amber-900 dark:bg-amber-950 dark:text-amber-200"
+        >
+          <div className="flex items-start justify-between gap-3">
+            <p className="font-medium">
+              Saved with {saveWarnings.length === 1 ? "1 note" : `${saveWarnings.length} notes`}
+              :
+            </p>
+            <button
+              type="button"
+              aria-label="Dismiss the save notes"
+              onClick={() => setSaveWarnings(null)}
+              className="shrink-0 text-amber-700 hover:text-amber-900 dark:text-amber-300 dark:hover:text-amber-100"
+            >
+              ✕
+            </button>
+          </div>
+          <ul className="mt-1.5 list-disc space-y-0.5 pl-5">
+            {saveWarnings.map((w, i) => (
+              <li key={i} className="break-words">
+                {w}
+              </li>
+            ))}
+          </ul>
         </div>
       )}
 

@@ -138,6 +138,47 @@ describe("PUT /api/admin/platform/catalog", () => {
     expect(mockPutTools).toHaveBeenCalledTimes(1);
   });
 
+  it("passes the platforms' warnings through on a successful save", async () => {
+    mockPutModels.mockResolvedValue({
+      ok: true,
+      revision: 7,
+      warnings: ["skipped malformed entry 'openai:'"],
+    });
+    const res = await put({
+      providers: [{ slug: "openai", enabled: true, models: ["gpt-4o-mini"] }],
+    });
+    expect(res.status).toBe(200);
+    const body = await res.json();
+    expect(body.warnings).toEqual(["skipped malformed entry 'openai:'"]);
+  });
+
+  it("merges warnings from BOTH halves and reports the higher revision", async () => {
+    mockPutModels.mockResolvedValue({
+      ok: true,
+      revision: 7,
+      warnings: ["model note"],
+    });
+    mockPutTools.mockResolvedValue({
+      ok: true,
+      revision: 9,
+      warnings: ["tool note"],
+    });
+    const res = await put({
+      providers: [{ slug: "openai", enabled: true, models: ["gpt-4o-mini"] }],
+      tools: [{ slug: "tavily", enabled: true }],
+    });
+    const body = await res.json();
+    expect(body.revision).toBe(9);
+    expect(body.warnings).toEqual(["model note", "tool note"]);
+  });
+
+  it("omits warnings when the platform save is clean", async () => {
+    const res = await put({ tools: [{ slug: "tavily", enabled: true }] });
+    const body = await res.json();
+    expect(body.ok).toBe(true);
+    expect(body.warnings).toBeUndefined();
+  });
+
   it("rejects an empty update (400)", async () => {
     const res = await put({});
     expect(res.status).toBe(400);
