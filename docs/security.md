@@ -49,8 +49,8 @@ secret stores whose boundaries are worth stating explicitly:
   at rest** (`enc:v1:<iv>:<ciphertext>:<tag>` via `lib/crypto/encrypt.ts`,
   encrypted at the write boundary; plaintext fallback when
   `DB_ENCRYPTION_KEY` is unset, same mechanism as agent JWT secrets).
-  **Write-only surface:** `GET /api/credentials` returns existence
-  booleans only (`hasKey: true`); the plaintext is accepted on PUT and
+  **Write-only surface:** `GET /api/credentials` returns field NAMES
+  only (plus a `hasKey` boolean); the plaintext is accepted on PUT and
   never returned — same boundary discipline as `agents.jwtSecret`. The
   decrypted key is consumed exclusively by the run path and delivered
   per-run as an AG-UI context item — never persisted AgentOS-side, never
@@ -76,17 +76,24 @@ Builder-agent runs are gated at the HTTP level in the copilotkit route
 concurrent slot is acquired):
 
 - **Unsatisfiable requirements → 402** `AGENT_REQUIREMENTS_MISSING` —
-  one aggregated response listing every blocker: a non-tier model with
-  no runner key, a keyed tool with no runner key and no platform
-  fallback, or a required org connector not configured. Requirement 402s
-  apply in **both** SaaS and self-host modes.
+  one aggregated response listing every blocker: a keyed model with no
+  runner key (a keyless provider like ollama — the snapshot's
+  `requiresKey: false` — never 402s; the provider is excluded from the
+  credentials catalog, so demanding a key would be unsatisfiable), a
+  keyed tool whose credential contract the runner can't fill, or a
+  required org connector not configured. Requirement 402s apply in
+  **both** SaaS and self-host modes.
 - **Platform-key daily quota → 402** `PLATFORM_QUOTA_EXCEEDED` —
-  SaaS-only. Runs where tackui does not deliver the runner's own key
-  (the platform key serves the dependency) count against the plan's
-  `platformDailyQuota` (see
+  SaaS-only and currently **dormant**: builder runs are 100% BYOK until
+  Phase 3 publishing wakes the tier, so `platformKeyRun` is never true
+  and no quota is consumed. When it wakes: runs where tackui delivers
+  the platform key (instead of the runner's own) count against the
+  plan's `platformDailyQuota` (see
   [saas-mode.md](./saas-mode.md#plan-enforcement-saas-only)); BYOK runs
-  are exempt. Gate-blocked runs never consume quota; quota is consumed
-  at run start, so a run failing mid-flight still counts.
+  are exempt. Gate-blocked runs never consume quota; the quota is
+  consumed only AFTER the concurrent slot is acquired (a run refused at
+  the cap never burns a daily platform-key run; a run failing
+  mid-flight still counts).
 
 ## SSRF guard scope on builder routes
 

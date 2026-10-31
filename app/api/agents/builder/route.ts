@@ -159,7 +159,7 @@ export async function POST(request: Request) {
       error: err instanceof Error ? err.message : String(err),
     });
     return NextResponse.json(
-      { error: "Failed to save the agent. Please retry." },
+      { error: "Couldn't create the agent — please try again." },
       { status: 500 },
     );
   }

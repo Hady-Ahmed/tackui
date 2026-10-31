@@ -266,11 +266,14 @@ via the `agentMutate` bucket. Order of checks:
 5. Success → `201 { PublicAgent }`.
 
 `requirements` is written at create from the definition tackui itself
-built: `{ model: {provider, id, platformTier}, tools: [{name,
+built: `{ model: {provider, id, platformTier, requiresKey}, tools: [{name,
 requiresKey, provider, platformFallback, credentials}], connectors:
 [names] }` (`buildRequirements()`) — the tool rows carry the full
 credential contract so the run gate can enforce all-or-nothing delivery
-of multi-credential toolkits. The AgentOS stored config is the source of
+of multi-credential toolkits, and the model's `requiresKey: false` (a
+keyless provider like ollama) tells the gate to demand no key at all —
+the provider is excluded from the credentials catalog, so a demanded
+key would be unsatisfiable. The AgentOS stored config is the source of
 truth; the snapshot only powers the pre-run gate so run requests need no
 AgentOS round-trip.
 
@@ -627,8 +630,8 @@ The admin UI is the Connectors section on `/agents`
   — the AgentOS exposes nothing until the platform admin enables
   providers/toolkits on `/admin/platform`, so a reachable-but-empty
   catalog is a *configuration* state with its own copy ("The agent
-  platform exposes no tools yet. The platform admin enables them in the
-  platform admin page."), never the error banner. Create stays disabled
+  builder has no tools yet — a platform admin enables them in Models &
+  tools."), never the error banner. Create stays disabled
   while the model catalog is empty (the model field is required); edit
   is unaffected — the model is only sent when it changes. Copy always
   says "the agent builder", never "your" — SaaS end users don't own the

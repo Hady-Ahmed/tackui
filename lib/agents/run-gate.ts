@@ -106,6 +106,10 @@ export async function checkBuilderRunGate(
   // --- Model: the runner's own key. The model dep key follows the wire ---
   // contract the AgentOS dispatcher resolves (<provider>_api_key — see
   // credentials.py); the field is the universal "api_key" constructor arg.
+  // A snapshot that predates the requiresKey field treats every model as
+  // keyed (undefined !== false) — keyless providers (ollama) are excluded
+  // from the credentials catalog, so demanding a key for one would be a
+  // requirement the runner can never satisfy.
   const modelProvider = requirements.model.provider;
   const modelKeyName = depKeyForProvider(modelProvider);
   const modelKey = runnerFields[modelProvider]?.api_key;
@@ -114,7 +118,12 @@ export async function checkBuilderRunGate(
   // a maintained list, which would rot the first time a contract grows a
   // non-_api_key field. mcp_connectors is the only non-contract key.
   const reservedDepKeys = new Set<string>(["mcp_connectors", modelKeyName]);
-  if (modelKey) {
+  if (requirements.model.requiresKey === false) {
+    // Keyless provider (e.g. ollama) — no credential demanded, and the
+    // provider is excluded from the credentials catalog, so demanding a
+    // key would be a requirement the runner can never satisfy. Nothing
+    // delivered for the model.
+  } else if (modelKey) {
     contextItems.push({ description: modelKeyName, value: modelKey });
   } else {
     const providerLabel = prettifyProviderLabel(modelProvider);

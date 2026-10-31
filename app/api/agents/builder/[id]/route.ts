@@ -253,20 +253,16 @@ export async function PATCH(
       );
     }
   } catch (err) {
-    // A 409 means a concurrent edit landed first — the local row already
-    // reflects that edit, so a compensating revert would clobber it with
-    // our stale snapshot. Surface the conflict instead (the local row
-    // mirrors the AgentOS the concurrent editor just wrote).
-    if (err instanceof AgentosError && err.status === 409) {
-      return NextResponse.json(
-        { error: "This agent was just updated by someone else — reload and try again." },
-        { status: 409 },
-      );
-    }
     // Compensating revert — restore ONLY the fields this PATCH actually
     // wrote locally. A wholesale revert to the pre-patch snapshot would
     // also clobber fields this request never touched (e.g. a concurrent
     // meta edit landing between our read and our revert).
+    //
+    // Runs on a 409 too: the AgentOS write was refused, so the local row
+    // currently LEADS the AgentOS — restoring our pre-patch values
+    // re-converges the projection for any concurrent edit to a disjoint
+    // field. A concurrent edit to the SAME field diverges either way
+    // (the retry-after-reload path fixes it); reverting is never worse.
     const revert: UpdateBuilderAgentInput = {};
     if (patch.name !== undefined) revert.name = existing.name;
     if (patch.description !== undefined) revert.description = existing.description;
@@ -279,6 +275,12 @@ export async function PATCH(
           error: revertErr instanceof Error ? revertErr.message : String(revertErr),
         });
       });
+    }
+    if (err instanceof AgentosError && err.status === 409) {
+      return NextResponse.json(
+        { error: "This agent was just updated by someone else — reload and try again." },
+        { status: 409 },
+      );
     }
     return agentosErrorResponse(err);
   }

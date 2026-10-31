@@ -257,6 +257,31 @@ describe("PATCH /api/agents/builder/[id]", () => {
     expect(stored?.name).toBe("Fixture");
   });
 
+  it("reverts the local row AND 409s when the AgentOS publish hits a concurrent-edit guard", async () => {
+    // A 409 means another edit landed first — the AgentOS write was
+    // refused, so the local row must be restored to the pre-patch values
+    // (the local projection must not lead the AgentOS) and the author is
+    // told to reload rather than silently losing their edit.
+    mockUpdateMeta.mockRejectedValue(new AgentosError(409, "version conflict"));
+    const res = await patchAgent(agent.id, { name: "Renamed" });
+    expect(res.status).toBe(409);
+    const body = await res.json();
+    expect(body.error).toContain("just updated by someone else");
+    const stored = await getAgent(agent.id, testOrg);
+    expect(stored?.name).toBe("Fixture");
+  });
+
+  it("does not revert fields the patch never touched", async () => {
+    // A concurrent edit could land between our read and our revert — the
+    // revert must restore only what THIS request wrote.
+    mockUpdateMeta.mockRejectedValue(new AgentosError(503, "agentos down"));
+    const res = await patchAgent(agent.id, { name: "Renamed" });
+    expect(res.status).toBe(503);
+    const stored = await getAgent(agent.id, testOrg);
+    expect(stored?.name).toBe("Fixture"); // reverted
+    expect(stored?.description).toBe("A fixture agent"); // untouched by the revert
+  });
+
   it("maps an AgentOS guard fetch failure to its status", async () => {
     mockGetComponent.mockRejectedValue(new AgentosError(503, "agentos offline"));
     const res = await patchAgent(agent.id, { name: "Renamed" });

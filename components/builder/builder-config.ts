@@ -191,6 +191,11 @@ export function staleModelCopy(
   error: string | null,
 ): string | null {
   if (error !== null || models === null || !model) return null;
+  // An EMPTY catalog is not "removed" — the deployment simply hasn't
+  // enabled any providers yet (the documented first-run state). The
+  // empty-catalog notice owns that copy; a removal claim here would be
+  // false (nothing can be picked to replace it either).
+  if (models.length === 0) return null;
   if (findModel(models, model.provider, model.id)) return null;
   return `The agent's saved model (${model.provider}:${model.id}) is no longer offered by the platform. Pick a different one to replace it — saving other changes keeps the old model.`;
 }

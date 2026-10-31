@@ -150,6 +150,41 @@ describe("lib/agents/run-gate", () => {
     expect(result.contextItems).toEqual([]);
   });
 
+  it("does NOT 402 a keyless-provider model (requiresKey: false — the provider is excluded from the credentials catalog, so the requirement could never be satisfied)", async () => {
+    mockGetAgent.mockResolvedValue(
+      builderAgent({
+        model: { provider: "ollama", id: "llama3:8b", platformTier: false, requiresKey: false },
+        tools: [],
+        connectors: [],
+      }),
+    );
+    mockGetCredentialSecrets.mockResolvedValue({}); // no key saved — and none can be
+    const { checkBuilderRunGate } = await loadGate();
+    const result = await checkBuilderRunGate(
+      { id: "user-1", role: "member", name: "u", email: null, orgId: "org-1" },
+      "agent-1",
+    );
+    expect(result.response).toBeNull();
+    expect(result.contextItems).toEqual([]);
+  });
+
+  it("still 402s a keyed model on a LEGACY snapshot without the requiresKey field (undefined !== false)", async () => {
+    mockGetAgent.mockResolvedValue(
+      builderAgent({
+        model: { provider: "openai", id: "gpt-4o-mini", platformTier: false },
+        tools: [],
+        connectors: [],
+      }),
+    );
+    mockGetCredentialSecrets.mockResolvedValue({});
+    const { checkBuilderRunGate } = await loadGate();
+    const result = await checkBuilderRunGate(
+      { id: "user-1", role: "member", name: "u", email: null, orgId: "org-1" },
+      "agent-1",
+    );
+    expect(result.response?.status).toBe(402);
+  });
+
   it("TIER DORMANCY: a platform-tier model without a runner key 402s (the platform key serves nothing until Phase 3)", async () => {
     mockGetAgent.mockResolvedValue(builderAgent(miniRequirements));
     const { checkBuilderRunGate } = await loadSaaSGate();

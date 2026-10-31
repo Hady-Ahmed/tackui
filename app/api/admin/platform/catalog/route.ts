@@ -97,6 +97,10 @@ export async function PUT(request: NextRequest) {
     );
   }
 
+  // Tracks whether the providers PUT succeeded — visible in the catch so a
+  // partial failure can say "the models half applied" instead of implying
+  // nothing was saved.
+  let providersApplied = false;
   try {
     // Two independent PUTs; apply both, report the higher revision. An
     // AgentOS 400 (bad model entry, unknown slug) passes through verbatim
@@ -105,6 +109,7 @@ export async function PUT(request: NextRequest) {
     const warnings: string[] = [];
     if (parsed.data.providers) {
       const result = await putPlatformCatalogModels(parsed.data.providers);
+      providersApplied = true;
       revision = Math.max(revision, result.revision);
       warnings.push(...result.warnings);
     }
@@ -124,9 +129,19 @@ export async function PUT(request: NextRequest) {
   } catch (err) {
     if (err instanceof AgentosError) {
       // Admin surface: the clean user message plus the upstream validation
-      // detail (parsed) — operators need the platform's own "why".
+      // detail (parsed) — operators need the platform's own "why". When
+      // the providers half already applied, say so: a bare 400 would read
+      // as "nothing saved" when the models half is live.
+      const appliedNote = providersApplied
+        ? "The model providers were saved before this failure. "
+        : "";
       return NextResponse.json(
-        { error: err.message, ...(err.detail ? { detail: err.detail } : {}) },
+        {
+          error: err.message,
+          ...(err.detail || appliedNote
+            ? { detail: `${appliedNote}${err.detail ?? ""}`.trim() || undefined }
+            : {}),
+        },
         { status: err.status },
       );
     }

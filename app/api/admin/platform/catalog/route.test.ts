@@ -179,6 +179,32 @@ describe("PUT /api/admin/platform/catalog", () => {
     expect(body.warnings).toBeUndefined();
   });
 
+  it("says the models half applied when the tools half 400s (partial-success detail)", async () => {
+    mockPutModels.mockResolvedValue({ ok: true, revision: 7, warnings: [] });
+    mockPutTools.mockRejectedValue(
+      new AgentosError(400, "The agent builder couldn't process that request. Refresh and try again.", "toolkit 'ghost' is not available on this deployment"),
+    );
+    const res = await put({
+      providers: [{ slug: "openai", enabled: true, models: ["gpt-4o-mini"] }],
+      tools: [{ slug: "ghost", enabled: true }],
+    });
+    expect(res.status).toBe(400);
+    const body = await res.json();
+    expect(body.detail).toContain("model providers were saved before this failure");
+    expect(body.detail).toContain("toolkit 'ghost'");
+  });
+
+  it("does not claim partial success when the FIRST half fails", async () => {
+    mockPutModels.mockRejectedValue(
+      new AgentosError(400, "The agent builder couldn't process that request. Refresh and try again.", "bad entry"),
+    );
+    const res = await put({
+      providers: [{ slug: "openai", enabled: true, models: ["bad entry"] }],
+    });
+    const body = await res.json();
+    expect(body.detail).not.toContain("model providers were saved");
+  });
+
   it("rejects an empty update (400)", async () => {
     const res = await put({});
     expect(res.status).toBe(400);

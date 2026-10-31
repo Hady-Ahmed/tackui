@@ -32,7 +32,15 @@ export type AgentOrigin = (typeof AGENT_ORIGINS)[number];
  * AgentOS round-trip.
  */
 export interface AgentRequirements {
-  model: { provider: string; id: string; platformTier: boolean };
+  /**
+   * Model requirements snapshot — sourced from the platform models catalog
+   * at create/update time. `requiresKey` mirrors the catalog's wire field:
+   * false for keyless providers (e.g. ollama) where no credential is
+   * demanded and the provider is deliberately excluded from the runner's
+   * credentials catalog — the gate must not 402 a run that can never
+   * satisfy its own requirement.
+   */
+  model: { provider: string; id: string; platformTier: boolean; requiresKey?: boolean };
   /**
    * Tool requirements snapshot — sourced from the platform tools catalog
    * at create/update time. `requiresKey` is the AG-UI context dep key the

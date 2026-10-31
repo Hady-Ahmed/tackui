@@ -4,9 +4,11 @@
  * Server-side proxy to the AgentOS /platform/models catalog (service
  * token — the catalog is admin-only on the AgentOS; tackui re-exposes it
  * to signed-in org members for the builder UI). Every entry carries
- * `platform_tier`: platform-key models run without a runner key, everything
- * else shows the "needs your own key" badge and 402s at run time when the
- * runner hasn't connected the provider key.
+ * `platform_tier` (dormant — builder runs are 100% BYOK until Phase 3
+ * publishing wakes the platform-key tier) and `requires_key` (false for
+ * keyless providers like ollama); keyed models show the "needs your own
+ * key" badge and 402 at run time when the runner hasn't connected the
+ * provider key.
  */
 import { NextResponse } from "next/server";
 import { getCurrentUser } from "@/lib/auth/context";

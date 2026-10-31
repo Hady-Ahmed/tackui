@@ -207,7 +207,7 @@ export function ChatShell() {
                         : "text-red-500 hover:text-red-700 dark:text-red-400 dark:hover:text-red-200"
                     }
                   >
-                    x
+                    ✕
                   </button>
                 </div>
               </div>
@@ -332,8 +332,16 @@ function AgentChat({
         // and whether an Upgrade affordance applies (it needs the org's
         // plan for that, which lives here as billing state in the parent).
         if (status === 429 || status === 402 || status === 410) {
+          // Status-specific fallbacks — a bare 402 isn't "too many
+          // requests" and a 410 isn't a rate limit. (The server's own
+          // message usually wins; these cover a missing payload.)
           onRunError(
-            serverMsg || "Too many requests. Try again shortly.",
+            serverMsg ||
+              (status === 410
+                ? "This agent is no longer available."
+                : status === 402
+                  ? "This agent can't run right now."
+                  : "Too many requests. Try again shortly."),
             status === 402 ? code : undefined,
           );
           return;

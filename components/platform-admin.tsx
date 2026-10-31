@@ -267,6 +267,7 @@ export function PlatformAdmin() {
       const data = await res.json().catch(() => ({}));
       if (!res.ok) {
         setError(pageErrorFrom(data, "Couldn't save the catalog — please retry shortly."));
+        setSaving(false);
         return;
       }
       // The platform's soft notes — only surface them when non-empty (the
@@ -282,17 +283,20 @@ export function PlatformAdmin() {
     } catch {
       // Own-proxy failure mid-PUT — the draft is intact, the user can retry.
       setError({ message: "Couldn't save the catalog — please retry shortly." });
-      return;
-    } finally {
       setSaving(false);
+      return;
     }
     // The save itself succeeded; only the post-save refresh can fail here
-    // (load() sets its own error banner on failure).
+    // (load() sets its own error banner on failure). `saving` stays true
+    // through the refresh: the refresh replaces the whole draft, so any
+    // keystroke landing mid-flight would be silently reverted — the
+    // inputs are disabled until the refreshed state lands.
     if (!(await load())) {
       setError({
         message: "Saved — but the page couldn't refresh. Reload to see the current state.",
       });
     }
+    setSaving(false);
   };
 
   const testModel = async (provider: CatalogProvider, entry: string) => {
@@ -579,18 +583,32 @@ export function PlatformAdmin() {
                   <input
                     type="checkbox"
                     checked={d.enabled}
-                    disabled={!p.available}
+                    // An unavailable provider can't be ENABLED (the
+                    // platform can't produce it), but one that is still
+                    // enabled must stay untickable — the backend's
+                    // dead-row clear path (an agno upgrade dropped it)
+                    // only fires when the save says enabled:false.
+                    // Disabling the checkbox outright would trap an
+                    // enabled dead row in a permanent 400 loop.
+                    disabled={saving || (!p.available && !d.enabled)}
                     aria-label={`Enable ${p.slug}`}
-                    onClick={(e) => e.stopPropagation()}
-                    onChange={(e) =>
-                      setDraft((prev) => {
-                        const enabled = e.target.checked;
-                        // Enabling expands the row (the editor is the
-                        // next required action); disabling collapses it.
-                        setExpanded((x) => ({ ...x, [p.slug]: enabled && p.available }));
-                        return { ...prev, [p.slug]: { ...d, enabled } };
-                      })
+                    title={
+                      !p.available
+                        ? d.enabled
+                          ? `No longer available — untick to clear this row`
+                          : `No longer available`
+                        : undefined
                     }
+                    onClick={(e) => e.stopPropagation()}
+                    onChange={(e) => {
+                      const enabled = e.target.checked;
+                      // Enabling expands the row (the editor is the
+                      // next required action); disabling collapses it.
+                      // Outside the setDraft updater — updaters must be
+                      // pure (React may invoke them twice).
+                      setExpanded((x) => ({ ...x, [p.slug]: enabled && p.available }));
+                      setDraft((prev) => ({ ...prev, [p.slug]: { ...d, enabled } }));
+                    }}
                     className="h-4 w-4 rounded border-zinc-300 text-blue-600 dark:border-zinc-600"
                   />
                   <span className="min-w-0 truncate font-medium text-zinc-900 dark:text-zinc-50">
@@ -634,13 +652,17 @@ export function PlatformAdmin() {
                               value={line}
                               onChange={(e) => setModelRow(p.slug, i, e.target.value, line)}
                               onPaste={(e) => pasteIntoRow(e, p.slug, i)}
+                              disabled={saving}
                               placeholder="model-id"
                               aria-label={`Model id ${i + 1} for ${p.slug}`}
                               className="min-w-0 flex-1 rounded-lg border border-zinc-200 bg-white px-3 py-1.5 font-mono text-xs text-zinc-900 outline-none transition-colors focus:border-blue-500 dark:border-zinc-700 dark:bg-zinc-900 dark:text-zinc-50"
                             />
                             <button
                               type="button"
-                              disabled={!p.env_key_set || testing !== null || !line.trim()}
+                              aria-label={`Test model id ${line.trim()} on ${p.slug}`}
+                              disabled={
+                                saving || !p.env_key_set || testing !== null || !line.trim()
+                              }
                               title={
                                 p.env_key_set
                                   ? !line.trim()
@@ -667,6 +689,7 @@ export function PlatformAdmin() {
                             )}
                             <button
                               type="button"
+                              disabled={saving}
                               title="Remove this model id"
                               aria-label={`Remove model id ${i + 1} from ${p.slug}`}
                               onClick={() =>
@@ -682,6 +705,7 @@ export function PlatformAdmin() {
                     </div>
                     <button
                       type="button"
+                      disabled={saving}
                       onClick={() => updateModels(p.slug, (m) => [...m, ""])}
                       className="mt-2 text-xs font-medium text-blue-600 hover:underline dark:text-blue-400"
                     >
@@ -745,6 +769,7 @@ export function PlatformAdmin() {
                 key={t.slug}
                 tool={t}
                 checked={toolDraft[t.slug] ?? false}
+                saving={saving}
                 onChange={(checked) => setToolDraft((prev) => ({ ...prev, [t.slug]: checked }))}
               />
             )),
@@ -774,7 +799,13 @@ export function PlatformAdmin() {
         <button
           type="button"
           onClick={save}
-          disabled={saving || providers === null || invalidProviders.length > 0}
+          // Disabled when there's nothing to save AND nothing to repair —
+          // a no-op save that pops "Catalog saved." is just noise.
+          disabled={
+            saving ||
+            providers === null ||
+            (invalidProviders.length === 0 && dirtyCount === 0)
+          }
           title={
             invalidProviders.length > 0
               ? "Add at least one model id to every enabled provider first"
@@ -794,10 +825,12 @@ export function PlatformAdmin() {
 function ToolRow({
   tool,
   checked,
+  saving,
   onChange,
 }: {
   tool: CatalogTool;
   checked: boolean;
+  saving: boolean;
   onChange: (checked: boolean) => void;
 }) {
   const [open, setOpen] = useState(false);
@@ -815,7 +848,22 @@ function ToolRow({
         <input
           type="checkbox"
           checked={checked}
-          disabled={!tool.available || !tool.deliverable}
+          // Same as the provider checkbox: an unavailable/undeliverable
+          // toolkit can't be ENABLED, but one that is still enabled must
+          // stay untickable — the backend's dead-row clear path only
+          // fires when the save says enabled:false.
+          disabled={saving || (!checked && (!tool.available || !tool.deliverable))}
+          title={
+            !tool.available
+              ? checked
+                ? "No longer available — untick to clear this row"
+                : "No longer available"
+              : !tool.deliverable
+                ? checked
+                  ? "Can't deliver credentials — untick to clear this row"
+                  : undefined
+                : undefined
+          }
           aria-label={`Enable ${tool.label || tool.slug}`}
           onChange={(e) => onChange(e.target.checked)}
           className="h-4 w-4 shrink-0 rounded border-zinc-300 text-blue-600 dark:border-zinc-600"

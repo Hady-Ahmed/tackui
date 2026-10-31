@@ -150,7 +150,7 @@ export function agentosErrorResponse(err: unknown): NextResponse {
   if (err instanceof AgentosError) {
     return NextResponse.json({ error: err.message }, { status: err.status });
   }
-  console.error("[builder] unexpected AgentOS error", {
+  console.error("[builder] unexpected error (not an AgentosError)", {
     error: err instanceof Error ? err.message : String(err),
   });
   return NextResponse.json(
@@ -420,7 +420,12 @@ export function buildRequirements(
 ): AgentRequirements {
   const toolByName = new Map(tools.map((t) => [t.name, t]));
   return {
-    model: { provider: model.provider, id: model.id, platformTier: model.platform_tier },
+    model: {
+      provider: model.provider,
+      id: model.id,
+      platformTier: model.platform_tier,
+      requiresKey: model.requires_key,
+    },
     tools: spec.tools.map((t) => {
       const entry = toolByName.get(t.name);
       if (!entry) {
@@ -439,7 +444,10 @@ export function buildRequirements(
         platformFallback: entry.platform_fallback,
         // The full credential contract — multi-credential toolkits carry
         // several; single-key tools carry exactly one.
-        credentials: entry.credentials.map((c) => ({ depKey: c.dep_key, label: c.label })),
+        // Fail closed: a platform catalog entry missing its contract
+        // fields (upstream bug) yields a tool with no key requirement
+        // rather than a raw TypeError → 500.
+        credentials: (entry.credentials ?? []).map((c) => ({ depKey: c.dep_key, label: c.label })),
       };
     }),
     connectors: spec.connectors,

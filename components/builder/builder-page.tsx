@@ -477,7 +477,23 @@ export function BuilderPage({
 
         {builderDisabled && (
           <div className="mb-6 rounded-lg border border-zinc-200 bg-white px-4 py-3 text-sm text-zinc-500 dark:border-zinc-800 dark:bg-zinc-950 dark:text-zinc-400">
-            {modelsError ?? toolsError}
+            <div className="flex items-center justify-between gap-3">
+              <span>{modelsError ?? toolsError}</span>
+              {/* Same recovery affordance as the admin page's Retry —
+                  without it the only path out is a full browser reload. */}
+              <button
+                type="button"
+                onClick={() => {
+                  setModelsError(null);
+                  setToolsError(null);
+                  void loadModels();
+                  void loadTools();
+                }}
+                className="shrink-0 rounded-md border border-zinc-300 px-3 py-1 text-xs font-medium text-zinc-700 transition-colors hover:bg-zinc-50 dark:border-zinc-700 dark:text-zinc-200 dark:hover:bg-zinc-900"
+              >
+                Retry
+              </button>
+            </div>
           </div>
         )}
 
@@ -580,8 +596,13 @@ export function BuilderPage({
                       row so the collapsed state stays informative. The
                       option value IS the stale provider, so the controlled
                       select matches it (a value="" placeholder never
-                      matches and renders blank). */}
-                  {form.model && models !== null && !providerGroup ? (
+                      matches and renders blank). Guarded on a non-empty
+                      catalog: an EMPTY catalog is the first-run state, not
+                      a removal — the plain placeholder applies. */}
+                  {form.model &&
+                  models !== null &&
+                  models.length > 0 &&
+                  !providerGroup ? (
                     <option value={form.model.provider}>
                       {form.model.provider} (no longer offered)
                     </option>
@@ -611,11 +632,15 @@ export function BuilderPage({
                       renders as an explicit placeholder row and the notice
                       below explains the gap. Guarded on models !== null —
                       while loading, the catalog can't have judged the model
-                      stale yet. */}
-                  {form.model && models !== null && !selectedModel && (
+                      stale yet — and on a NON-empty catalog: an empty one
+                      is the first-run state, not a removal. */}
+                  {form.model && models !== null && models.length > 0 && !selectedModel && (
                     <option value="">{form.model.id} (no longer offered)</option>
                   )}
                   {!form.model && <option value="">Pick a provider first…</option>}
+                  {form.model && models !== null && models.length === 0 && (
+                    <option value="">No models are enabled yet</option>
+                  )}
                   {providerGroup?.models.map((m) => (
                     <option key={m.id} value={m.id}>
                       {m.id}
@@ -674,7 +699,9 @@ export function BuilderPage({
                       onChange={() => toggleTool(tool.name)}
                       className="h-4 w-4 rounded border-zinc-300 text-blue-600 dark:border-zinc-600"
                     />
-                    <span className="font-medium text-zinc-900 dark:text-zinc-50">{tool.label}</span>
+                    <span className="min-w-0 truncate font-medium text-zinc-900 dark:text-zinc-50">
+                      {tool.label}
+                    </span>
                     {tool.description ? (
                       <span className="truncate text-xs text-zinc-400">{tool.description}</span>
                     ) : null}
@@ -944,6 +971,7 @@ function KeyForm({
             value={values[field.key] ?? ""}
             onChange={(e) => setField(field.key, e.target.value)}
             placeholder={`${meta.label} ${field.label}`}
+            aria-label={`${meta.label} ${field.label}`}
             className={inputClass()}
           />
         ))}
@@ -969,15 +997,23 @@ function YourAgents({ userId }: { userId: string | null }) {
   useEffect(() => {
     let cancelled = false;
     (async () => {
-      const res = await fetch("/api/agents");
-      if (cancelled || !res.ok) {
-        setAgents([]);
-        return;
+      try {
+        const res = await fetch("/api/agents");
+        if (cancelled || !res.ok) {
+          setAgents([]);
+          return;
+        }
+        const list: PublicAgent[] = await res.json();
+        if (cancelled) return;
+        setAgents(
+          list.filter((a) => a.origin === "builder" && a.authorUserId === userId),
+        );
+      } catch {
+        // Same degradation as the other loaders: the discovery list just
+        // stays hidden on a network failure (it's a convenience surface,
+        // not a form dependency).
+        if (!cancelled) setAgents([]);
       }
-      const list: PublicAgent[] = await res.json();
-      setAgents(
-        list.filter((a) => a.origin === "builder" && a.authorUserId === userId),
-      );
     })();
     return () => {
       cancelled = true;
