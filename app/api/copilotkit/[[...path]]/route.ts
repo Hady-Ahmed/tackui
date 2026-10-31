@@ -143,11 +143,23 @@ async function handler(request: Request): Promise<Response> {
         releaseConcurrent = concurrentResult;
         // Quota phase — after the slot: a run refused at the concurrent
         // cap never burns a daily platform-key run. A quota 402 here
-        // releases the freshly-acquired slot before returning.
-        const quota402 = await consumeBuilderRunQuota(
-          user,
-          builderRun.platformKeyRun,
-        );
+        // releases the freshly-acquired slot before returning. The await
+        // itself lives inside the guarded section below via the same
+        // release-on-throw contract: consumeBuilderRunQuota does a DB
+        // round-trip (getEnforcementLimits), and a throw between slot
+        // acquisition and the try block would leak the slot to the
+        // watchdog (a raw 500 for the user AND a stuck concurrent count).
+        // So the call is wrapped here — any throw releases and rethrows.
+        let quota402: Response | null = null;
+        try {
+          quota402 = await consumeBuilderRunQuota(
+            user,
+            builderRun.platformKeyRun,
+          );
+        } catch (err) {
+          releaseConcurrent();
+          throw err;
+        }
         if (quota402) {
           releaseConcurrent();
           return quota402;
@@ -155,7 +167,13 @@ async function handler(request: Request): Promise<Response> {
       }
 
       try {
-        const response = await (builderRun.contextItems.length > 0
+        // Keyed on reservedDepKeys, NOT contextItems: a gated builder run
+        // with an empty stash (keyless model, no keyed tools) must still
+        // go through the runner context so the registry's exact-set strip
+        // applies — the regex layer alone covers today's key shapes, but
+        // the structural guarantee shouldn't depend on that coincidence.
+        // Non-builder runs (empty resolution) keep the plain path.
+        const response = await (builderRun.reservedDepKeys.length > 0
           ? runWithRunnerContext(
               user,
               builderRun.contextItems,
@@ -194,7 +212,9 @@ async function handler(request: Request): Promise<Response> {
         if (builderRun.response) return builderRun.response;
       }
     }
-    const runResponse = await (builderRun.contextItems.length > 0
+    // Same reservedDepKeys keying as the SaaS branch above: a gated
+    // builder run with an empty stash still gets the exact-set strip.
+    const runResponse = await (builderRun.reservedDepKeys.length > 0
       ? runWithRunnerContext(
           syntheticUser,
           builderRun.contextItems,

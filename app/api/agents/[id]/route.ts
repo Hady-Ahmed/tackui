@@ -66,6 +66,22 @@ export async function PATCH(
       { status: 400 },
     );
   }
+  // Builder-origin rows are projection-only on this route: their runtime
+  // config lives in the AgentOS component (versioned, edited via
+  // /api/agents/builder), so PATCHing endpoint/authMode/jwtSecret here
+  // would write fields the registry ignores while desyncing the local
+  // name/description from the AgentOS component with no sync path. The
+  // builder route owns every edit for these rows (author or org admin).
+  if (existing.origin === "builder") {
+    return NextResponse.json(
+      {
+        error:
+          "This agent was built with the agent builder and is edited there — not through this page.",
+        code: "AGENT_BUILDER_MANAGED",
+      },
+      { status: 400 },
+    );
+  }
   let body: unknown;
   try {
     body = await request.json();

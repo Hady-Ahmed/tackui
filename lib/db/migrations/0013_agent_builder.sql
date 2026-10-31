@@ -16,7 +16,7 @@
 --                     server-generated; the AgentOS returns its own id on
 --                     create. Run/edit requests to the AgentOS use this id.
 --   requirements      JSON snapshot of what a RUNNER needs to run the agent:
---                     { model: {provider, id, platformTier},
+--                     { model: {provider, id, platformTier, requiresKey?},
 --                       tools: [{name, requiresKey?, provider?,
 --                                platformFallback?}],
 --                       connectors: [names] }. Written at create/update

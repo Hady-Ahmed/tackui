@@ -82,6 +82,9 @@ export function BuilderPage({
   const [modelsError, setModelsError] = useState<string | null>(null);
   const [tools, setTools] = useState<BuilderToolOption[] | null>(null);
   const [toolsError, setToolsError] = useState<string | null>(null);
+  // The catalog-failure Retry button's in-flight flag — without it the
+  // click gives no feedback and a double-click fires duplicate fetches.
+  const [retryingCatalog, setRetryingCatalog] = useState(false);
   const [credentials, setCredentials] = useState<{
     hasKey: Record<string, boolean>;
     catalog: CredentialCatalog;
@@ -486,12 +489,15 @@ export function BuilderPage({
                 onClick={() => {
                   setModelsError(null);
                   setToolsError(null);
-                  void loadModels();
-                  void loadTools();
+                  setRetryingCatalog(true);
+                  void Promise.all([loadModels(), loadTools()]).finally(() =>
+                    setRetryingCatalog(false),
+                  );
                 }}
-                className="shrink-0 rounded-md border border-zinc-300 px-3 py-1 text-xs font-medium text-zinc-700 transition-colors hover:bg-zinc-50 dark:border-zinc-700 dark:text-zinc-200 dark:hover:bg-zinc-900"
+                disabled={retryingCatalog}
+                className="shrink-0 rounded-md border border-zinc-300 px-3 py-1 text-xs font-medium text-zinc-700 transition-colors hover:bg-zinc-50 disabled:opacity-50 dark:border-zinc-700 dark:text-zinc-200 dark:hover:bg-zinc-900"
               >
-                Retry
+                {retryingCatalog ? "Retrying…" : "Retry"}
               </button>
             </div>
           </div>
@@ -596,15 +602,23 @@ export function BuilderPage({
                       row so the collapsed state stays informative. The
                       option value IS the stale provider, so the controlled
                       select matches it (a value="" placeholder never
-                      matches and renders blank). Guarded on a non-empty
-                      catalog: an EMPTY catalog is the first-run state, not
-                      a removal — the plain placeholder applies. */}
+                      matches and renders blank). An EMPTY catalog gets the
+                      same treatment with honest copy — it's the first-run
+                      state, not a removal, so "no longer offered" would be
+                      a claim we can't back; but a value="" placeholder
+                      here would render the select BLANK (the saved
+                      provider matches no option), which is worse than a
+                      neutral label. */}
                   {form.model &&
                   models !== null &&
                   models.length > 0 &&
                   !providerGroup ? (
                     <option value={form.model.provider}>
                       {form.model.provider} (no longer offered)
+                    </option>
+                  ) : form.model && models !== null && models.length === 0 ? (
+                    <option value={form.model.provider}>
+                      {form.model.provider} (no models are enabled yet)
                     </option>
                   ) : (
                     <option value="">Select a provider…</option>
@@ -616,7 +630,7 @@ export function BuilderPage({
                   ))}
                 </select>
               </Field>
-              <Field label="Model" required>
+              <Field label="Model" required error={errors.model}>
                 <select
                   value={form.model && selectedModel ? form.model.id : ""}
                   onChange={(e) => {
@@ -792,7 +806,11 @@ export function BuilderPage({
               <button
                 type="button"
                 onClick={handleDelete}
-                className="ml-auto rounded-lg border border-red-200 px-4 py-2 text-sm font-medium text-red-600 transition-colors hover:bg-red-50 dark:border-red-900 dark:text-red-300 dark:hover:bg-red-950"
+                // A delete firing mid-PATCH would race the save's own
+                // compensations — same mutual exclusion as save/delete on
+                // the credentials page.
+                disabled={saving}
+                className="ml-auto rounded-lg border border-red-200 px-4 py-2 text-sm font-medium text-red-600 transition-colors hover:bg-red-50 disabled:opacity-50 dark:border-red-900 dark:text-red-300 dark:hover:bg-red-950"
               >
                 Delete agent
               </button>

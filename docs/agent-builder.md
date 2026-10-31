@@ -273,7 +273,29 @@ credential contract so the run gate can enforce all-or-nothing delivery
 of multi-credential toolkits, and the model's `requiresKey: false` (a
 keyless provider like ollama) tells the gate to demand no key at all —
 the provider is excluded from the credentials catalog, so a demanded
-key would be unsatisfiable. The AgentOS stored config is the source of
+key would be unsatisfiable. **The snapshot must survive the store's zod
+round-trip** — `requirementsSchema` declares `model.requiresKey`
+(optional, NOT defaulted: absent must stay absent so the gate's
+"undefined = legacy = keyed" contract holds), and the store round-trip
+test pins both directions. An undeclared key would be silently stripped
+by zod on every write *and* read, turning the keyless fix into dead
+code while every test stays green.
+
+Generic `/api/agents/[id]` PATCH **rejects builder-origin rows**
+(`AGENT_BUILDER_MANAGED`) — their runtime config lives in the AgentOS
+component, so editing endpoint/authMode/jwtSecret here would write
+fields the registry ignores while desyncing the local name/description
+from the AgentOS component with no sync path. The builder route owns
+every edit for these rows (author or org admin). DELETE on the generic
+route still works (it soft-deletes the remote component).
+
+The run request routes through `runWithRunnerContext` whenever the gate
+resolved a builder run (keyed on `reservedDepKeys`, not on whether any
+items were delivered) — so even a keyless-model agent with an empty
+stash gets the registry's exact-set strip of client-supplied reserved
+dep keys, not just the mechanical regex layer.
+
+The AgentOS stored config is the source of
 truth; the snapshot only powers the pre-run gate so run requests need no
 AgentOS round-trip.
 

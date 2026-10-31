@@ -239,7 +239,11 @@ describe("POST /api/agents/builder", () => {
     expect(body.endpoint).toBeUndefined();
     expect(body.remoteAgentId).toBeUndefined();
     expect(body.requirements).toEqual({
-      model: { provider: "openai", id: "gpt-4o-mini", platformTier: true },
+      // requiresKey round-trips from the catalog's requires_key — this
+      // assertion is load-bearing: a zod schema that strips the field
+      // (the undeclared-key default) would satisfy this toEqual and hide
+      // the strip from every downstream reader.
+      model: { provider: "openai", id: "gpt-4o-mini", platformTier: true, requiresKey: true },
       tools: [
         {
           name: "web_search",

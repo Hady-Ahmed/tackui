@@ -19,6 +19,10 @@ export function ChatShell() {
   const { canManage } = useCanManageAgents();
   const [agents, setAgents] = useState<PublicAgent[]>([]);
   const [hasLoaded, setHasLoaded] = useState(false);
+  // The agent list failed to load (network error / non-401 failure) —
+  // distinct from the empty state so a failure is retryable instead of
+  // reading as "no agents configured".
+  const [loadError, setLoadError] = useState(false);
   const [activeAgent, setActiveAgent] = useState("");
   const [activeThreadId, setActiveThreadId] = useState(() =>
     crypto.randomUUID(),
@@ -53,20 +57,27 @@ export function ChatShell() {
   // Show the empty-state CTA to org owners/admins OR in solo mode.
   const canManageAgents_ = canManage === true || (config?.authDisabled ?? false);
 
-  useEffect(() => {
-    let cancelled = false;
-    const load = async () => {
+  // The agent-list fetch, shared by mount, window-focus refetches, and the
+  // error pane's Retry button. On failure it surfaces a retryable error
+  // instead of sitting on "Loading agents..." forever.
+  const loadAgents = useCallback(async () => {
+    try {
       const res = await fetch("/api/agents");
-      if (cancelled) return;
       if (res.status === 401) {
         // Solo mode never 401s, so this only fires when auth is enabled.
+        // Stays on the loading pane — navigation takes over from here.
         router.push("/login");
         return;
       }
-      if (!res.ok) return;
+      if (!res.ok) {
+        setLoadError(true);
+        setHasLoaded(true);
+        return;
+      }
       const list: PublicAgent[] = await res.json();
       setAgents(list);
       setHasLoaded(true);
+      setLoadError(false);
       // One-shot deep link: /app?agent=<id> selects a specific agent (the
       // builder's "Save & open in chat"). The param is stripped via
       // replaceState so a refresh or a focus refetch doesn't re-trigger
@@ -81,15 +92,26 @@ export function ChatShell() {
         const stillExists = list.some((a) => a.id === prev);
         return stillExists ? prev : list[0]?.id ?? "";
       });
-    };
-    load();
-    const onFocus = () => load();
+    } catch {
+      // Network failure (offline, tab hidden mid-flight).
+      setLoadError(true);
+      setHasLoaded(true);
+    }
+  }, [router]);
+
+  // Ref indirection satisfies react-hooks/set-state-in-effect (the same
+  // pattern applyStoredCollapsed uses below): the effect calls through the
+  // ref, and the ref is refreshed whenever the callback changes.
+  const loadAgentsRef = useRef<(() => Promise<void>) | null>(null);
+  useEffect(() => {
+    loadAgentsRef.current = loadAgents;
+    void loadAgentsRef.current();
+    const onFocus = () => void loadAgentsRef.current?.();
     window.addEventListener("focus", onFocus);
     return () => {
-      cancelled = true;
       window.removeEventListener("focus", onFocus);
     };
-  }, [router]);
+  }, [loadAgents]);
 
   const handleSelectAgent = useCallback((id: string) => {
     setActiveAgent(id);
@@ -222,6 +244,23 @@ export function ChatShell() {
               }
             />
           </>
+        ) : hasLoaded && loadError ? (
+          <div className="flex flex-1 flex-col items-center justify-center gap-3 text-center">
+            <p className="text-sm text-zinc-400">
+              Couldn&apos;t load your agents — check your connection and try again.
+            </p>
+            <button
+              type="button"
+              onClick={() => {
+                setLoadError(false);
+                setHasLoaded(false);
+                void loadAgents();
+              }}
+              className="rounded-lg border border-zinc-300 px-4 py-1.5 text-sm font-medium text-zinc-700 transition-colors hover:bg-zinc-50 dark:border-zinc-700 dark:text-zinc-200 dark:hover:bg-zinc-900"
+            >
+              Retry
+            </button>
+          </div>
         ) : hasLoaded ? (
           <div className="flex flex-1 flex-col items-center justify-center gap-4 text-center">
             {canManageAgents_ ? (

@@ -323,6 +323,45 @@ describe("managed agents (catalog installs) — fully locked", () => {
     expect(stored?.endpoint).toBe("http://localhost:8000/agent");
   });
 
+  it("PATCH is rejected with AGENT_BUILDER_MANAGED (builder rows are projection-only here)", async () => {
+    // An org admin PATCHing a builder-origin row would write fields the
+    // registry ignores (endpoint/authMode/jwtSecret) while desyncing the
+    // local name/description from the AgentOS component — the builder
+    // route owns every edit for these rows.
+    const { createAgent, getAgent } = await import("@/lib/agents/agent-store");
+    const builderAgent = await createAgent(
+      {
+        name: "Built",
+        description: "A builder agent",
+        endpoint: "http://localhost:8000/agent",
+        authMode: "none",
+        origin: "builder",
+        authorUserId: "someone-else",
+        remoteAgentId: "remote-1",
+        requirements: {
+          model: { provider: "openai", id: "gpt-4o-mini", platformTier: false, requiresKey: true },
+          tools: [],
+          connectors: [],
+        },
+      },
+      testOrg,
+    );
+    const res = await PATCH(
+      new Request(`http://localhost/api/agents/${builderAgent.id}`, {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ name: "Renamed", endpoint: "http://evil.example/agent" }),
+      }),
+      makeParams(builderAgent.id),
+    );
+    expect(res.status).toBe(400);
+    const data = await res.json();
+    expect(data.code).toBe("AGENT_BUILDER_MANAGED");
+    const stored = await getAgent(builderAgent.id, testOrg);
+    expect(stored?.name).toBe("Built");
+    expect(stored?.endpoint).toBe("http://localhost:8000/agent");
+  });
+
   it("DELETE (Remove from workspace) works on managed agents", async () => {
     const res = await DELETE(
       new Request(`http://localhost/api/agents/${managedId}`, {

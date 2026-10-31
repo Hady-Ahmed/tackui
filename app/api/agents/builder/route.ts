@@ -173,7 +173,17 @@ export async function POST(request: Request) {
       config,
     });
   } catch (err) {
-    // Compensating delete — never leave a half-created agent.
+    // Compensating delete — never leave a half-created agent. If the
+    // AgentOS POST actually succeeded server-side but the RESPONSE timed
+    // out (agentosRequest's fetch-catch logs nothing contextual), the
+    // component now exists platform-side with zero tackui-side trace —
+    // this log line is the only record an operator can clean it up from.
+    console.error("[builder] AgentOS component create failed — compensating local delete", {
+      agentId: created.id,
+      remoteAgentId,
+      orgId: user.orgId,
+      error: err instanceof Error ? err.message : String(err),
+    });
     await deleteAgent(created.id, user.orgId).catch((delErr) => {
       console.error("[builder] compensating local delete failed", {
         agentId: created.id,

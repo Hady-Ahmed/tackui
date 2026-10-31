@@ -11,43 +11,15 @@ import { AccountMenu } from "./account-menu";
 import { ThemeToggle } from "./theme-toggle";
 import { useAuthConfig } from "@/lib/auth/use-auth-config";
 import { useCanManageAgents } from "@/lib/auth/use-can-manage-agents";
+import {
+  testEndpoint,
+  TEST_HELP,
+  type TestResult,
+  type TestStatus,
+} from "./test-connection";
 
 function planLabel(required: RequiredPlan): string {
   return required === "pro" ? "Pro" : "Team";
-}
-
-type TestStatus = "idle" | "loading" | "ok" | "fail";
-type TestResult = { status: TestStatus; message?: string };
-
-const TEST_HELP =
-  "A dot only reflects whether the server answered a request — it does " +
-  "not mean the agent actually works. A red dot usually means the URL " +
-  "is wrong or the server is down.";
-
-async function testEndpoint(endpoint: string): Promise<TestResult> {
-  try {
-    const res = await fetch("/api/agents/reachability-probe", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ endpoint }),
-    });
-    const data = await res.json().catch(() => ({}));
-    if (!res.ok) {
-      return {
-        status: "fail",
-        message:
-          (typeof data === "object" && data && "error" in data
-            ? String((data as { error: unknown }).error)
-            : "Couldn't check the connection — please retry."),
-      };
-    }
-    return {
-      status: data.ok ? "ok" : "fail",
-      message: data.message as string,
-    };
-  } catch {
-    return { status: "fail", message: "Couldn't check the connection — try again shortly." };
-  }
 }
 
 function dotClass(status: TestStatus): string {

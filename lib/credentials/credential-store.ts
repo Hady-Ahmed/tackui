@@ -140,23 +140,6 @@ export async function listCredentials(
 }
 
 /**
- * The decrypted field map for a provider — only consumed by the run path.
- * Returns null when the runner has no key for the provider.
- */
-export async function getCredentialFields(
-  userId: string,
-  provider: string,
-): Promise<Record<string, string> | null> {
-  const result = await query<{ fields: Record<string, string> | null }>(
-    `SELECT fields FROM credentials WHERE user_id = $1 AND provider = $2`,
-    [userId, provider],
-  );
-  const row = result.rows[0];
-  if (!row?.fields) return null;
-  return decryptFields(row.fields, provider);
-}
-
-/**
  * Batch lookup for the run path: all of a runner's credentials, decrypted.
  * One query instead of one per provider. Shape: provider → field map.
  */

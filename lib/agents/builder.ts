@@ -440,13 +440,19 @@ export function buildRequirements(
         // The toolkit slug is the credential provider (dep keys derive from
         // it — multi-credential toolkits keep one provider). Fall back to
         // the mechanical single-key derivation when the slug is absent.
-        provider: entry.toolkit ?? (entry.requires_key ? providerForDepKey(entry.requires_key) : null),
+        // `||` not `??`: an empty-string toolkit (bad upstream row) must
+        // fall through to the dep-key derivation too, matching
+        // lib/credentials/catalog.ts — otherwise the snapshot stores
+        // provider "" and the gate 402s with an empty provider label.
+        provider: entry.toolkit || (entry.requires_key ? providerForDepKey(entry.requires_key) : null),
         platformFallback: entry.platform_fallback,
         // The full credential contract — multi-credential toolkits carry
         // several; single-key tools carry exactly one.
         // Fail closed: a platform catalog entry missing its contract
-        // fields (upstream bug) yields a tool with no key requirement
-        // rather than a raw TypeError → 500.
+        // fields (upstream bug) yields a tool with no credential contract
+        // rather than a raw TypeError → 500. (The gate's legacy
+        // single-dep fallback still demands the requiresKey dep when the
+        // contract is absent — the snapshot is merely less precise.)
         credentials: (entry.credentials ?? []).map((c) => ({ depKey: c.dep_key, label: c.label })),
       };
     }),

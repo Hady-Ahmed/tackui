@@ -378,6 +378,22 @@ export function PlatformAdmin() {
       .split("\n")
       .map((s) => s.trim())
       .filter((s) => s.length > 0);
+    // Replacing a row invalidates its test timer/result exactly like
+    // setModelRow does — a lingering timer would fire against a row that
+    // no longer contains the tested id.
+    const replaced = (draft[slug]?.models ?? [])[i]?.trim();
+    if (replaced) {
+      const oldKey = `${slug}:${replaced}`;
+      clearTimeout(testTimers.current[oldKey]);
+      delete testTimers.current[oldKey];
+      if (testResults[oldKey]) {
+        setTestResults((prev) => {
+          const next = { ...prev };
+          delete next[oldKey];
+          return next;
+        });
+      }
+    }
     updateModels(slug, (m) => [...m.slice(0, i), ...parts, ...m.slice(i + 1)]);
   };
 

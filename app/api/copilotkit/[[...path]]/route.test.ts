@@ -23,7 +23,12 @@ vi.mock("@/lib/auth/context", () => ({
 }));
 vi.mock("@/lib/auth/request-context", () => ({
   runWithUserAsync: vi.fn(async (_u: unknown, fn: () => Promise<Response>) => fn()),
-  runWithRunnerContext: vi.fn(async (_u: unknown, _c: unknown, fn: () => Promise<Response>) => fn()),
+  // Signature matches the route's call: (user, contextItems, reservedDepKeys, fn).
+  // The reservedDepKeys param MUST stay in the list — the first test that
+  // passes context items would otherwise invoke the array as a function.
+  runWithRunnerContext: vi.fn(
+    async (_u: unknown, _c: unknown, _k: unknown, fn: () => Promise<Response>) => fn(),
+  ),
 }));
 vi.mock("@/lib/ratelimit/stream-wrap", () => ({
   wrapStreamWithRelease: vi.fn((res: Response) => res),
@@ -46,16 +51,26 @@ vi.mock("@/lib/plans/enforcement", () => ({
 
 // The builder gate is the subject under test here — configured per test.
 vi.mock("@/lib/agents/run-gate", () => ({
-  emptyBuilderRunResolution: vi.fn(() => ({ response: null, contextItems: [], platformKeyRun: false })),
+  emptyBuilderRunResolution: vi.fn(() => ({
+    response: null,
+    contextItems: [],
+    platformKeyRun: false,
+    reservedDepKeys: [],
+  })),
   checkBuilderRunGate: vi.fn(),
   consumeBuilderRunQuota: vi.fn(),
 }));
 
 import { POST } from "./route";
 import { NextResponse } from "next/server";
-import { getRequestUser } from "@/lib/auth/context";
+import { getRequestUser, getSyntheticAdmin } from "@/lib/auth/context";
+import { isAuthDisabled } from "@/lib/auth/auth";
 import { acquireConcurrent } from "@/lib/ratelimit/middleware";
 import { checkBuilderRunGate, consumeBuilderRunQuota } from "@/lib/agents/run-gate";
+import {
+  runWithRunnerContext,
+  runWithUserAsync,
+} from "@/lib/auth/request-context";
 import type { BuilderRunResolution } from "@/lib/agents/run-gate";
 
 const USER = {
@@ -130,5 +145,88 @@ describe("copilotkit route — builder run gate wiring", () => {
 
     expect(res.status).toBe(200);
     expect(release).not.toHaveBeenCalled();
+  });
+
+  it("releases the slot when the quota check itself throws", async () => {
+    // consumeBuilderRunQuota does a DB round-trip AFTER the slot was
+    // acquired — a throw there must not leak the slot to the watchdog.
+    const release = vi.fn();
+    vi.mocked(acquireConcurrent).mockReturnValue(release);
+    vi.mocked(checkBuilderRunGate).mockResolvedValue(resolution({ platformKeyRun: true }));
+    vi.mocked(consumeBuilderRunQuota).mockRejectedValue(new Error("db down"));
+
+    await expect(POST(new Request(RUN_URL, { method: "POST" }))).rejects.toThrow(
+      "db down",
+    );
+    expect(release).toHaveBeenCalledTimes(1);
+  });
+
+  it("routes a gated builder run with an EMPTY stash through the runner context (exact-set strip applies even with nothing delivered)", async () => {
+    // Keyless model, no keyed tools → no contextItems, but the run is
+    // still gated: the registry must strip any client-supplied reserved
+    // dep keys (e.g. a forged ollama_api_key), which only the
+    // runner-context path guarantees. Keying this selection on
+    // contextItems.length would silently drop the strip.
+    vi.mocked(checkBuilderRunGate).mockResolvedValue(
+      resolution({ contextItems: [], reservedDepKeys: ["mcp_connectors", "ollama_api_key"] }),
+    );
+
+    await POST(new Request(RUN_URL, { method: "POST" }));
+
+    expect(runWithRunnerContext).toHaveBeenCalledTimes(1);
+    expect(runWithUserAsync).not.toHaveBeenCalled();
+  });
+
+  it("routes a non-builder run through the plain user context", async () => {
+    // emptyBuilderRunResolution (no reservedDepKeys) — no gate, no stash,
+    // no strip needed.
+    vi.mocked(checkBuilderRunGate).mockResolvedValue(
+      resolution({ reservedDepKeys: [] }),
+    );
+
+    await POST(new Request(RUN_URL, { method: "POST" }));
+
+    expect(runWithUserAsync).toHaveBeenCalledTimes(1);
+    expect(runWithRunnerContext).not.toHaveBeenCalled();
+  });
+});
+
+describe("copilotkit route — solo mode (self-host)", () => {
+  it("applies the builder gate and delivers deps WITHOUT any rate limiting or slot acquisition", async () => {
+    vi.mocked(isAuthDisabled).mockReturnValue(true);
+    const synthetic = { ...USER, id: "synthetic-admin", orgId: "solo-org" };
+    vi.mocked(getSyntheticAdmin).mockResolvedValue(synthetic);
+    vi.mocked(checkBuilderRunGate).mockResolvedValue(
+      resolution({
+        contextItems: [{ description: "openai_api_key", value: "sk-test" }],
+        reservedDepKeys: ["mcp_connectors", "openai_api_key"],
+      }),
+    );
+
+    const res = await POST(new Request(RUN_URL, { method: "POST" }));
+
+    expect(res.status).toBe(200);
+    // The member path is skipped entirely — no auth lookup, no limits.
+    expect(getRequestUser).not.toHaveBeenCalled();
+    expect(acquireConcurrent).not.toHaveBeenCalled();
+    // But the builder gate and dependency delivery still run, keyed on
+    // the synthetic user.
+    expect(checkBuilderRunGate).toHaveBeenCalledWith(synthetic, "test-agent");
+    expect(runWithRunnerContext).toHaveBeenCalledTimes(1);
+  });
+
+  it("returns a gate refusal for a tombstoned catalog agent", async () => {
+    vi.mocked(isAuthDisabled).mockReturnValue(true);
+    const synthetic = { ...USER, id: "synthetic-admin", orgId: "solo-org" };
+    vi.mocked(getSyntheticAdmin).mockResolvedValue(synthetic);
+    const { checkCatalogRunGates } = await import("@/lib/plans/enforcement");
+    vi.mocked(checkCatalogRunGates).mockResolvedValue(
+      NextResponse.json({ error: "gated" }, { status: 410 }),
+    );
+
+    const res = await POST(new Request(RUN_URL, { method: "POST" }));
+
+    expect(res.status).toBe(410);
+    expect(checkBuilderRunGate).not.toHaveBeenCalled();
   });
 });

@@ -174,6 +174,51 @@ describe("createAgent", () => {
     expect(created.orgId).toBe(TEST_ORG);
   });
 
+  it("round-trips the requirements snapshot through the store — including model.requiresKey (zod must not strip undeclared keys)", async () => {
+    // This is the test that pins the c44983f class of bug: a zod schema
+    // that fails to declare model.requiresKey strips it on BOTH the write
+    // (agentRowSchema.parse) and the read (parseRequirements), and every
+    // downstream consumer — the run gate's keyless check — sees a legacy
+    // snapshot. Assert the full shape survives a write + read.
+    const requirements = {
+      model: { provider: "ollama", id: "llama3:8b", platformTier: false, requiresKey: false },
+      tools: [
+        {
+          name: "web_search",
+          requiresKey: null,
+          provider: "duckduckgo",
+          platformFallback: false,
+          credentials: [],
+        },
+      ],
+      connectors: [],
+    };
+    const created = await createAgent(
+      { ...validInput, origin: "builder", requirements },
+      TEST_ORG,
+    );
+    const loaded = await getAgent(created.id, TEST_ORG);
+    expect(loaded?.requirements).toEqual(requirements);
+  });
+
+  it("keeps a legacy requirements snapshot legacy on read (no requiresKey default injected)", async () => {
+    const requirements = {
+      model: { provider: "openai", id: "gpt-4o-mini", platformTier: true },
+      tools: [],
+      connectors: [],
+    };
+    const created = await createAgent(
+      { ...validInput, origin: "builder", requirements },
+      TEST_ORG,
+    );
+    const loaded = await getAgent(created.id, TEST_ORG);
+    // `in` + undefined: a default(true/false) in the schema would make
+    // requiresKey PRESENT on the parsed output; the gate's undefined-means-
+    // legacy contract requires it to be absent.
+    expect(loaded?.requirements).toEqual(requirements);
+    expect("requiresKey" in (loaded?.requirements?.model ?? {})).toBe(false);
+  });
+
   it("stores authMode and jwtSecret", async () => {
     const created = await createAgent({
       ...validInput,

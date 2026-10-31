@@ -263,7 +263,9 @@ export function CredentialsPage() {
                         )}
                         <button
                           onClick={() => onDelete(c.provider)}
-                          disabled={deletingProvider !== null}
+                          // Save and delete disable each other — see the
+                          // add-row Save button below.
+                          disabled={deletingProvider !== null || savingProvider !== null}
                           className="rounded-lg border border-red-300 px-3 py-1.5 text-xs font-medium text-red-600 transition-colors hover:bg-red-50 disabled:opacity-50 dark:border-red-800 dark:text-red-400 dark:hover:bg-red-950"
                         >
                           {deletingProvider === c.provider ? "Deleting…" : "Delete"}
@@ -286,7 +288,7 @@ export function CredentialsPage() {
                 The platform&apos;s key catalog is unavailable right now —
                 reconnect to add keys.
               </p>
-            ) : catalog !== null && Object.keys(catalog).length === 0 ? (
+            ) : catalog && Object.keys(catalog).length === 0 ? (
               <p className="text-sm text-zinc-500 dark:text-zinc-400">
                 The agent builder offers no key providers yet — providers
                 appear when the platform exposes keyed models or tools.
@@ -332,12 +334,17 @@ export function CredentialsPage() {
                               }))
                             }
                             placeholder={`${meta.label} ${field.label}`}
+                            aria-label={`${meta.label} ${field.label}`}
                             className="w-full rounded-lg border border-zinc-200 bg-white px-3 py-2 text-sm text-zinc-900 outline-none transition-colors focus:border-blue-500 dark:border-zinc-700 dark:bg-zinc-900 dark:text-zinc-50"
                           />
                         ))}
                         <button
                           type="button"
-                          disabled={!complete || savingProvider !== null}
+                          // Save and delete disable each other: both mutate
+                          // the same store, and overlapping in-flight
+                          // mutations (save provider X while deleting X's
+                          // saved row) would race the list refresh.
+                          disabled={!complete || savingProvider !== null || deletingProvider !== null}
                           onClick={() => onSave(provider, meta)}
                           className="w-full rounded-lg bg-blue-600 px-4 py-2 text-sm font-medium text-white transition-colors hover:bg-blue-700 disabled:opacity-50"
                         >

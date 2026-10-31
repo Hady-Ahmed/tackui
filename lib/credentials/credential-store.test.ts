@@ -2,7 +2,6 @@ import { describe, it, expect, beforeEach, beforeAll, afterAll, vi } from "vites
 import {
   setCredential,
   listCredentials,
-  getCredentialFields,
   getCredentialSecrets,
   deleteCredential,
 } from "./credential-store";
@@ -11,6 +10,13 @@ import { query } from "@/lib/db/pg";
 
 const USER = "cred-user-1";
 const OTHER_USER = "cred-user-2";
+
+/** Read primitive for assertions — over the run path's batch lookup
+ * (getCredentialFields was production-dead and was removed; tests read
+ * through the same batch API production uses). */
+async function storedFields(user: string, provider: string) {
+  return (await getCredentialSecrets(user))[provider] ?? null;
+}
 
 // Deterministic 32-byte hex key — store round-trips run with encryption
 // enabled (reads decrypt transparently).
@@ -82,7 +88,7 @@ describe("setCredential", () => {
       fields: { api_key: "np-x" },
     });
     expect(stored.provider).toBe("new-platform-provider");
-    expect(await getCredentialFields(USER, "new-platform-provider")).toEqual({
+    expect(await storedFields(USER, "new-platform-provider")).toEqual({
       api_key: "np-x",
     });
   });
@@ -96,7 +102,7 @@ describe("setCredential", () => {
     );
     expect(rows.rows).toHaveLength(1);
     // Reads decrypt transparently — the stored value is the rotated one.
-    expect(await getCredentialFields(USER, "openai")).toEqual({ api_key: "second" });
+    expect(await storedFields(USER, "openai")).toEqual({ api_key: "second" });
   });
 
   it("keeps users isolated (same provider, different users)", async () => {
@@ -107,8 +113,8 @@ describe("setCredential", () => {
       kind: "llm",
       fields: { api_key: "u2-key" },
     });
-    expect(await getCredentialFields(USER, "openai")).toEqual({ api_key: "u1-key" });
-    expect(await getCredentialFields(OTHER_USER, "openai")).toEqual({ api_key: "u2-key" });
+    expect(await storedFields(USER, "openai")).toEqual({ api_key: "u1-key" });
+    expect(await storedFields(OTHER_USER, "openai")).toEqual({ api_key: "u2-key" });
   });
 
   it("rejects an empty/whitespace field value", async () => {
@@ -207,13 +213,13 @@ describe("listCredentials", () => {
     // catalog-agnostic by design.
     await setCredential({ userId: USER, provider: "removed-provider", kind: "tool", fields: { api_key: "gone" } });
     expect(await listCredentials(USER)).toHaveLength(1);
-    expect(await getCredentialFields(USER, "removed-provider")).toEqual({ api_key: "gone" });
+    expect(await storedFields(USER, "removed-provider")).toEqual({ api_key: "gone" });
   });
 });
 
-describe("getCredentialFields / getCredentialSecrets", () => {
+describe("getCredentialSecrets", () => {
   it("returns null when no key exists", async () => {
-    expect(await getCredentialFields(USER, "tavily")).toBeNull();
+    expect(await storedFields(USER, "tavily")).toBeNull();
   });
 
   it("returns the decrypted field map when present", async () => {
@@ -223,7 +229,7 @@ describe("getCredentialFields / getCredentialSecrets", () => {
       kind: "tool",
       fields: { api_key: "tvly-live" },
     });
-    expect(await getCredentialFields(USER, "tavily")).toEqual({ api_key: "tvly-live" });
+    expect(await storedFields(USER, "tavily")).toEqual({ api_key: "tvly-live" });
   });
 
   it("getCredentialSecrets batches all credentials as provider → field map", async () => {
@@ -262,7 +268,7 @@ describe("deleteCredential", () => {
   it("deletes an existing key and returns true", async () => {
     await setCredential({ userId: USER, provider: "tavily", kind: "tool", fields: { api_key: "x" } });
     expect(await deleteCredential(USER, "tavily")).toBe(true);
-    expect(await getCredentialFields(USER, "tavily")).toBeNull();
+    expect(await storedFields(USER, "tavily")).toBeNull();
   });
 
   it("deletes a provider that is no longer in the catalog (accepts any saved provider)", async () => {
@@ -287,6 +293,6 @@ describe("deleteCredential", () => {
       fields: { api_key: "x" },
     });
     expect(await deleteCredential(USER, "tavily")).toBe(false);
-    expect(await getCredentialFields(OTHER_USER, "tavily")).toEqual({ api_key: "x" });
+    expect(await storedFields(OTHER_USER, "tavily")).toEqual({ api_key: "x" });
   });
 });

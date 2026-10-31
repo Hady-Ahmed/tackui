@@ -19,6 +19,14 @@ const requirementsSchema = z.object({
     provider: z.string().min(1),
     id: z.string().min(1),
     platformTier: z.boolean(),
+    // Keyless providers (e.g. ollama) — false tells the run gate to demand
+    // no key at all (the provider is excluded from the credentials catalog,
+    // so a demanded key would be unsatisfiable). Optional, not defaulted:
+    // snapshots written before the field must stay "legacy" (undefined),
+    // which the gate treats as keyed — defaulting to true would be
+    // indistinguishable from an explicit true and silently re-shape old
+    // rows on read.
+    requiresKey: z.boolean().optional(),
   }),
   tools: z.array(
     z.object({
