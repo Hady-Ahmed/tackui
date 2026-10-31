@@ -55,10 +55,22 @@ export interface BuilderRunResolution {
   /** true when the run will use the platform key and its daily quota
       must be consumed AFTER the concurrent slot is acquired. */
   platformKeyRun: boolean;
+  /** Every dep key the gate owns — model key, every credential-contract
+      field, mcp_connectors. The registry middleware strips any client-sent
+      context item matching one of these so the client can never forge a
+      server-resolved dependency (multi-field contracts like x_consumer_key
+      are NOT covered by the mechanical `_api_key` family regex — they must
+      come from here, exactly as delivered). */
+  reservedDepKeys: string[];
 }
 
 export function emptyBuilderRunResolution(): BuilderRunResolution {
-  return { response: null, contextItems: [], platformKeyRun: false };
+  return {
+    response: null,
+    contextItems: [],
+    platformKeyRun: false,
+    reservedDepKeys: [],
+  };
 }
 
 /**
@@ -97,6 +109,11 @@ export async function checkBuilderRunGate(
   const modelProvider = requirements.model.provider;
   const modelKeyName = depKeyForProvider(modelProvider);
   const modelKey = runnerFields[modelProvider]?.api_key;
+  // The exact dep-key set this gate owns. Derived from what the gate
+  // actually delivers (model key + every tool contract field) — not from
+  // a maintained list, which would rot the first time a contract grows a
+  // non-_api_key field. mcp_connectors is the only non-contract key.
+  const reservedDepKeys = new Set<string>(["mcp_connectors", modelKeyName]);
   if (modelKey) {
     contextItems.push({ description: modelKeyName, value: modelKey });
   } else {
@@ -118,6 +135,7 @@ export async function checkBuilderRunGate(
     const contract = tool.credentials?.length
       ? tool.credentials
       : [{ depKey: tool.requiresKey, label: "Api key" }];
+    for (const cred of contract) reservedDepKeys.add(cred.depKey);
     const fields = runnerFields[provider] ?? {};
     const missing = contract.filter(
       (c) => !fields[fieldForDepKey(provider, c.depKey)],
@@ -175,10 +193,16 @@ export async function checkBuilderRunGate(
       ),
       contextItems: [],
       platformKeyRun: false,
+      reservedDepKeys: [...reservedDepKeys],
     };
   }
 
-  return { response: null, contextItems, platformKeyRun };
+  return {
+    response: null,
+    contextItems,
+    platformKeyRun,
+    reservedDepKeys: [...reservedDepKeys],
+  };
 }
 
 /**

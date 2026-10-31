@@ -367,8 +367,11 @@ its dep keys:
 
 These keys are **server-resolved only** — the registry middleware strips
 any client-sent context item with a reserved dep key before merging the
-stash (see "Credential keys are server-authoritative" below). The
-AgentOS enforces the same boundary from its side: the dispatcher only
+stash (see "Credential keys are server-authoritative" below). The gate
+also returns the exact set of dep keys it delivered (`reservedDepKeys`);
+the registry strips client items against that set on top of the
+mechanical regex, so multi-field contract deps can't be forged either.
+The AgentOS enforces the same boundary from its side: the dispatcher only
 attaches wire `mcp_connectors` whose names the component's stored config
 declares, so the namespace stays closed even if a tackui bug reopens it.
 
@@ -432,13 +435,15 @@ agents).
 
 **Credential keys are server-authoritative.** Before merging, the
 middleware strips any client-sent context item whose `description`
-matches the reserved dep-key namespaces (`mcp_connectors`,
-`<provider>_api_key`) — those keys reach the backend as dependencies the
-dispatcher trusts, so a client-supplied value would bypass the run
-gate's org scoping entirely (SSRF / credential injection). The stash is
-appended last, so server-resolved items win collisions. Arbitrary
-non-reserved client context still flows. This applies to EVERY agent,
-builder or not.
+matches a reserved dep key — the mechanical namespaces (`mcp_connectors`,
+`<provider>_api_key`) plus, inside a builder-run scope, the run gate's
+exact delivered set (`getReservedDepKeys()`, which covers multi-field
+contract deps like `x_consumer_key`). Those keys reach the backend as
+dependencies the dispatcher trusts, so a client-supplied value would
+bypass the run gate's org scoping entirely (SSRF / credential
+injection). The stash is appended last, so server-resolved items win
+collisions. Arbitrary non-reserved client context still flows. This
+applies to EVERY agent, builder or not.
 
 ## Platform-key quota — `lib/ratelimit/platform-quota.ts`
 

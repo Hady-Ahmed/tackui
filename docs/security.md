@@ -103,15 +103,19 @@ Two further lines of defense on the run path (both from the same
 review that added the connector guard):
 
 - **Credential namespace is server-authoritative** — the registry
-  middleware strips any client-sent context item whose key matches
-  `mcp_connectors` or `<provider>_api_key` before merging in the
-  server-resolved stash (stash wins collisions). A raw `context` item can
-  therefore never inject a connector URL (SSRF) or a BYOK key (credential
-  injection) that bypassed the run gate's org scoping — including under a
-  declared name: the stash is appended last, so the server-resolved value
-  for a declared connector always wins. Today the wire payload's URL/token
-  values are org-store-sourced (tackui resolves them per run), not
-  client-controlled.
+  middleware strips any client-sent context item whose key matches a
+  reserved dep key before merging in the server-resolved stash (stash
+  wins collisions). Two layers: the mechanical `mcp_connectors` /
+  `<provider>_api_key` namespaces (case-insensitive), plus — inside a
+  gated builder run — the run gate's exact delivered dep-key set, which
+  covers multi-field credential contract fields (`x_consumer_key`,
+  `x_access_token`, …) the regex can't know about. A raw `context` item
+  can therefore never inject a connector URL (SSRF) or a BYOK key
+  (credential injection) that bypassed the run gate's org scoping —
+  including under a declared name: the stash is appended last, so the
+  server-resolved value for a declared connector always wins. Today the
+  wire payload's URL/token values are org-store-sourced (tackui resolves
+  them per run), not client-controlled.
 - **Config-declared connectors enforced AgentOS-side** — the builder
   writes the agent's connector names into the stored component config;
   the dispatcher refuses wire `mcp_connectors` keys outside that list

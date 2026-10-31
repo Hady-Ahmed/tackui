@@ -112,80 +112,107 @@ export function BuilderPage({
   /* -------------------------------------------------------------------- */
 
   const loadModels = useCallback(async () => {
-    const res = await fetch("/api/models");
-    const data = await res.json().catch(() => ({}));
-    if (!res.ok) {
-      setModelsError(extractErrorMessage(data, `Failed to load models (${res.status})`));
-      return;
-    }
-    const list = Array.isArray(data.models) ? data.models : [];
-    setModels(list);
-    // Create mode: default to the first model (builder runs are 100% BYOK
-    // — there is no platform-key free tier to prefer). Applied here (not an
-    // effect) so the default lands as soon as the catalog arrives.
-    if (mode === "create") {
-      const def = pickDefaultModel(list);
-      if (def)
-        setForm((prev) =>
-          prev.model ? prev : { ...prev, model: { provider: def.provider, id: def.id } },
-        );
+    try {
+      const res = await fetch("/api/models");
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) {
+        setModelsError(extractErrorMessage(data, `Failed to load models (${res.status})`));
+        return;
+      }
+      const list = Array.isArray(data.models) ? data.models : [];
+      setModels(list);
+      // Create mode: default to the first model (builder runs are 100% BYOK
+      // — there is no platform-key free tier to prefer). Applied here (not an
+      // effect) so the default lands as soon as the catalog arrives.
+      if (mode === "create") {
+        const def = pickDefaultModel(list);
+        if (def)
+          setForm((prev) =>
+            prev.model ? prev : { ...prev, model: { provider: def.provider, id: def.id } },
+          );
+      }
+    } catch {
+      // Own-proxy failure — without this the dropdowns sit empty forever.
+      setModelsError("Couldn't reach the server — try again shortly.");
     }
   }, [mode]);
 
   const loadCredentials = useCallback(async () => {
-    const res = await fetch("/api/credentials");
-    if (!res.ok) return;
-    const data = await res.json().catch(() => ({}));
-    const hasKey: Record<string, boolean> = {};
-    for (const c of Array.isArray(data.credentials) ? data.credentials : []) {
-      hasKey[c.provider] = true;
+    try {
+      const res = await fetch("/api/credentials");
+      if (!res.ok) return;
+      const data = await res.json().catch(() => ({}));
+      const hasKey: Record<string, boolean> = {};
+      for (const c of Array.isArray(data.credentials) ? data.credentials : []) {
+        hasKey[c.provider] = true;
+      }
+      setCredentials({ hasKey, catalog: data.catalog ?? {} });
+    } catch {
+      // Deliberate degradation: on a network failure the key badges read
+      // "not saved" instead of stranding the page — the runner can retry
+      // from the key form, which has its own error path.
     }
-    setCredentials({ hasKey, catalog: data.catalog ?? {} });
   }, []);
 
   const loadTools = useCallback(async () => {
-    const res = await fetch("/api/tools");
-    const data = await res.json().catch(() => ({}));
-    if (!res.ok) {
-      setToolsError(extractErrorMessage(data, `Failed to load tools (${res.status})`));
-      return;
+    try {
+      const res = await fetch("/api/tools");
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) {
+        setToolsError(extractErrorMessage(data, `Failed to load tools (${res.status})`));
+        return;
+      }
+      setTools(Array.isArray(data.tools) ? data.tools : []);
+    } catch {
+      // Own-proxy failure — without this the toolkit list sits empty forever.
+      setToolsError("Couldn't reach the server — try again shortly.");
     }
-    setTools(Array.isArray(data.tools) ? data.tools : []);
   }, []);
 
   const loadConnectors = useCallback(async () => {
-    const res = await fetch("/api/connectors");
-    if (!res.ok) {
+    try {
+      const res = await fetch("/api/connectors");
+      if (!res.ok) {
+        setConnectors([]);
+        return;
+      }
+      const data = await res.json().catch(() => ({}));
+      setConnectors(Array.isArray(data.connectors) ? data.connectors : []);
+    } catch {
+      // Same degradation as loadCredentials: the connector checkboxes just
+      // show an empty (not an error) state on a network failure.
       setConnectors([]);
-      return;
     }
-    const data = await res.json().catch(() => ({}));
-    setConnectors(Array.isArray(data.connectors) ? data.connectors : []);
   }, []);
 
   const loadAgent = useCallback(async () => {
     if (!agentId) return;
-    const res = await fetch(`/api/agents/${agentId}`);
-    const data = await res.json().catch(() => ({}));
-    if (!res.ok) {
-      setAgentError(extractErrorMessage(data, "Agent not found"));
-      return;
+    try {
+      const res = await fetch(`/api/agents/${agentId}`);
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) {
+        setAgentError(extractErrorMessage(data, "Agent not found"));
+        return;
+      }
+      setAgent(data);
+      // Prefill the edit form from the agent's requirements snapshot. The
+      // instructions are NOT in the local GET response — they live in the
+      // AgentOS component config, so the field starts blank with the
+      // "(leave blank to keep current)" semantics (same pattern as the
+      // admin form's write-only jwtSecret).
+      const req = (data as PublicAgent | undefined)?.requirements;
+      setForm({
+        name: (data as PublicAgent).name,
+        description: (data as PublicAgent).description,
+        instructions: "",
+        model: req ? { provider: req.model.provider, id: req.model.id } : null,
+        tools: req?.tools.map((t) => t.name) ?? [],
+        connectors: req?.connectors ?? [],
+      });
+    } catch {
+      // Without this, edit mode strands on the full-page "Loading…" forever.
+      setAgentError("Couldn't reach the server — try again shortly.");
     }
-    setAgent(data);
-    // Prefill the edit form from the agent's requirements snapshot. The
-    // instructions are NOT in the local GET response — they live in the
-    // AgentOS component config, so the field starts blank with the
-    // "(leave blank to keep current)" semantics (same pattern as the
-    // admin form's write-only jwtSecret).
-    const req = (data as PublicAgent | undefined)?.requirements;
-    setForm({
-      name: (data as PublicAgent).name,
-      description: (data as PublicAgent).description,
-      instructions: "",
-      model: req ? { provider: req.model.provider, id: req.model.id } : null,
-      tools: req?.tools.map((t) => t.name) ?? [],
-      connectors: req?.connectors ?? [],
-    });
   }, [agentId]);
 
   useEffect(() => {
@@ -305,6 +332,9 @@ export function BuilderPage({
       }
       await loadCredentials();
       return true;
+    } catch {
+      setError("Couldn't reach the server — please try again.");
+      return false;
     } finally {
       setKeySaving(false);
     }
@@ -355,6 +385,10 @@ export function BuilderPage({
       }
       const saved = data as PublicAgent;
       router.push(`/app?agent=${saved.id}`);
+    } catch {
+      // Own-proxy failure — without this the Save button silently does
+      // nothing on a network error.
+      setError("Couldn't reach the server — please try again.");
     } finally {
       setSaving(false);
     }
@@ -363,13 +397,17 @@ export function BuilderPage({
   const handleDelete = async () => {
     if (!agentId) return;
     if (!confirm(`Delete agent "${agent?.name ?? agentId}"? This cannot be undone.`)) return;
-    const res = await fetch(`/api/agents/builder/${agentId}`, { method: "DELETE" });
-    if (!res.ok) {
-      const data = await res.json().catch(() => ({}));
-      setError(extractErrorMessage(data, "Delete failed"));
-      return;
+    try {
+      const res = await fetch(`/api/agents/builder/${agentId}`, { method: "DELETE" });
+      if (!res.ok) {
+        const data = await res.json().catch(() => ({}));
+        setError(extractErrorMessage(data, "Delete failed"));
+        return;
+      }
+      router.push("/app/builder");
+    } catch {
+      setError("Couldn't reach the server — please try again.");
     }
-    router.push("/app/builder");
   };
 
   /* -------------------------------------------------------------------- */
@@ -525,6 +563,10 @@ export function BuilderPage({
                   onChange={(e) => {
                     const provider = e.target.value;
                     const group = groups.find((g) => g.provider === provider);
+                    // Re-selecting the stale placeholder must keep the
+                    // model — it's the row that keeps the collapsed state
+                    // informative; clearing it would blank the form.
+                    if (form.model && provider === form.model.provider) return;
                     updateForm({
                       model: group
                         ? { provider, id: group.models[0].id }
@@ -535,9 +577,14 @@ export function BuilderPage({
                 >
                   {/* A removed provider (edit mode) can't render as an
                       offered option — show it as an explicit placeholder
-                      row so the collapsed state stays informative. */}
+                      row so the collapsed state stays informative. The
+                      option value IS the stale provider, so the controlled
+                      select matches it (a value="" placeholder never
+                      matches and renders blank). */}
                   {form.model && models !== null && !providerGroup ? (
-                    <option value="">{form.model.provider} (no longer offered)</option>
+                    <option value={form.model.provider}>
+                      {form.model.provider} (no longer offered)
+                    </option>
                   ) : (
                     <option value="">Select a provider…</option>
                   )}
@@ -728,6 +775,10 @@ export function BuilderPage({
 
         {keyProvider && credentials && (
           <KeyForm
+            // Remount per provider: the form's field state must not bleed
+            // from one provider's contract into the next (different field
+            // keys, different required sets).
+            key={keyProvider}
             meta={providerMeta(credentials.catalog, keyProvider)}
             saving={keySaving}
             onSave={async (fields) => {

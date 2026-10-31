@@ -300,6 +300,20 @@ describe("lib/agents/run-gate", () => {
       { description: "x_access_token", value: "at" },
       { description: "x_access_token_secret", value: "ats" },
     ]);
+    // The gate's reserved set is exactly what it delivered (plus the
+    // mcp_connectors namespace, reserved regardless of connectors here) —
+    // the registry strips client context against this set, so it must
+    // include every multi-field contract dep (not just `_api_key`).
+    expect([...result.reservedDepKeys].sort()).toEqual(
+      [
+        "mcp_connectors",
+        "openai_api_key",
+        "x_consumer_key",
+        "x_consumer_secret",
+        "x_access_token",
+        "x_access_token_secret",
+      ].sort(),
+    );
   });
 
   it("402s a multi-credential toolkit when ANY field of the contract is missing (all-or-nothing)", async () => {
@@ -425,6 +439,7 @@ describe("lib/agents/run-gate", () => {
         token: "tok-123",
       },
     });
+    expect(result.reservedDepKeys).toContain("mcp_connectors");
     expect(mockGetConnectorsByNames).toHaveBeenCalledWith("org-1", ["github"]);
   });
 

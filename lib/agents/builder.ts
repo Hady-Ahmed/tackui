@@ -41,6 +41,7 @@
 
 import jwt from "jsonwebtoken";
 import { z } from "zod";
+import { NextResponse } from "next/server";
 import { AGENTOS_BASE_URL, AGENTOS_ENABLED, AGENTOS_JWT_SECRET } from "@/lib/config/agentos";
 import { providerForDepKey } from "@/lib/credentials/catalog";
 import type { AgentRequirements } from "./agents.config";
@@ -137,6 +138,25 @@ export class AgentosError extends Error {
     super(message);
     this.name = "AgentosError";
   }
+}
+
+/**
+ * Map a service-layer error to the route response — the single place the
+ * `message`-only (member surfaces) vs `detail` (admin-only surfaces)
+ * boundary is enforced for AgentOS failures. Lives here (not in a route
+ * file) so no route imports a route.
+ */
+export function agentosErrorResponse(err: unknown): NextResponse {
+  if (err instanceof AgentosError) {
+    return NextResponse.json({ error: err.message }, { status: err.status });
+  }
+  console.error("[builder] unexpected AgentOS error", {
+    error: err instanceof Error ? err.message : String(err),
+  });
+  return NextResponse.json(
+    { error: "The agent builder is unavailable right now — please try again shortly." },
+    { status: 502 },
+  );
 }
 
 /** Error thrown when builder input references something that doesn't exist. */
@@ -239,7 +259,17 @@ async function agentosRequest<T>(
   if (res.status === 204) return undefined as T;
   const text = await res.text();
   if (!text) return undefined as T;
-  return JSON.parse(text) as T;
+  // A 2xx with a non-JSON body is an upstream bug — map it to the same
+  // end-user-safe failure as any other transport error (an uncaught
+  // SyntaxError here would surface as a raw 500).
+  try {
+    return JSON.parse(text) as T;
+  } catch {
+    throw new AgentosError(
+      502,
+      "The agent builder is unavailable right now — please try again shortly.",
+    );
+  }
 }
 
 /** GET /platform/models — the model catalog the builder's picker renders. */
@@ -276,11 +306,17 @@ const builderCreateFields = {
   /** System prompt — stored as the config's single instructions entry. */
   instructions: z.string().trim().min(1).max(8000),
   /** provider+id only — platformTier is re-derived server-side. */
-  model: z.object({ provider: z.string().min(1), id: z.string().min(1) }),
+  model: z.object({
+    provider: z.string().trim().min(1).max(120),
+    id: z.string().trim().min(1).max(200),
+  }),
   /** Tool names only — parameters come from the registry server-side. */
-  tools: z.array(z.object({ name: z.string().min(1) })).max(10).default([]),
+  tools: z
+    .array(z.object({ name: z.string().trim().min(1).max(200) }))
+    .max(10)
+    .default([]),
   /** Org connector names (lib/connectors store). */
-  connectors: z.array(z.string().min(1)).max(10).default([]),
+  connectors: z.array(z.string().trim().min(1).max(120)).max(10).default([]),
 };
 
 export const builderCreateBodySchema = z.object(builderCreateFields);

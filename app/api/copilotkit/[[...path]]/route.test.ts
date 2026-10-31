@@ -68,7 +68,13 @@ const USER = {
 const RUN_URL = "http://localhost:3000/api/copilotkit/agent/test-agent/run";
 
 function resolution(overrides: Partial<BuilderRunResolution> = {}): BuilderRunResolution {
-  return { response: null, contextItems: [], platformKeyRun: false, ...overrides };
+  return {
+    response: null,
+    contextItems: [],
+    platformKeyRun: false,
+    reservedDepKeys: [],
+    ...overrides,
+  };
 }
 
 beforeEach(() => {

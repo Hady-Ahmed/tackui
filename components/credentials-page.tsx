@@ -76,19 +76,24 @@ export function CredentialsPage() {
   const [newFields, setNewFields] = useState<Record<string, Record<string, string>>>({});
 
   const load = useCallback(async () => {
-    const res = await fetch("/api/credentials");
-    const data = (await res.json().catch(() => ({}))) as CredentialsResponse;
-    if (!res.ok) {
-      setError(
-        typeof data.error === "string" && data.error
-          ? data.error
-          : `Failed to load your API keys (${res.status})`,
-      );
-      return;
+    try {
+      const res = await fetch("/api/credentials");
+      const data = (await res.json().catch(() => ({}))) as CredentialsResponse;
+      if (!res.ok) {
+        setError(
+          typeof data.error === "string" && data.error
+            ? data.error
+            : `Failed to load your API keys (${res.status})`,
+        );
+        return;
+      }
+      setCredentials(data.credentials ?? []);
+      setCatalog(data.catalog ?? null);
+      setCatalogError(data.catalogError ?? null);
+    } catch {
+      // Own-proxy failure — without this the page strands on "Loading…".
+      setError("Couldn't reach the server — try again shortly.");
     }
-    setCredentials(data.credentials ?? []);
-    setCatalog(data.catalog ?? null);
-    setCatalogError(data.catalogError ?? null);
   }, []);
 
   useEffect(() => {
@@ -126,6 +131,8 @@ export function CredentialsPage() {
       setNotice(`${providerLabel(provider)} key saved.`);
       setNewFields((prev) => ({ ...prev, [provider]: {} }));
       await load();
+    } catch {
+      setError("Couldn't reach the server — please try again.");
     } finally {
       setSavingProvider(null);
     }
@@ -151,6 +158,8 @@ export function CredentialsPage() {
       }
       setNotice(`${providerLabel(provider)} key deleted.`);
       await load();
+    } catch {
+      setError("Couldn't reach the server — please try again.");
     } finally {
       setDeletingProvider(null);
     }

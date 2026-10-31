@@ -28,6 +28,7 @@ const requestUserStorage = new AsyncLocalStorage<RequestUser>();
  * concerns (who is running vs. what to inject) stay orthogonal.
  */
 const runContextStorage = new AsyncLocalStorage<RunContextItem[]>();
+const reservedDepKeysStorage = new AsyncLocalStorage<string[]>();
 
 export function runWithUser<T>(user: RequestUser, fn: () => T): T {
   return requestUserStorage.run(user, fn);
@@ -48,14 +49,19 @@ export async function runWithUserAsync<T>(
  * reads them back synchronously at run time to inject into
  * `RunAgentInput.context`. Registry middleware is synchronous, so the
  * resolution cannot happen inside it — hence this pre-resolved stash.
+ *
+ * `reservedDepKeys` is the gate's exact dep-key set for this run; the
+ * registry middleware strips any client-sent context item matching one
+ * of these (so the client cannot forge a server-owned dependency).
  */
 export async function runWithRunnerContext<T>(
   user: RequestUser,
   contextItems: RunContextItem[],
+  reservedDepKeys: string[],
   fn: () => Promise<T>,
 ): Promise<T> {
   return runContextStorage.run(contextItems, () =>
-    runWithUserAsync(user, fn),
+    reservedDepKeysStorage.run(reservedDepKeys, () => runWithUserAsync(user, fn)),
   );
 }
 
@@ -66,6 +72,15 @@ export async function runWithRunnerContext<T>(
  */
 export function getRunContextItems(): RunContextItem[] {
   return runContextStorage.getStore() ?? [];
+}
+
+/**
+ * The reserved dep-key set stashed for the current run scope (see
+ * `runWithRunnerContext`). Empty outside a run scope — the registry
+ * middleware then falls back to the mechanical `_api_key` family regex.
+ */
+export function getReservedDepKeys(): string[] {
+  return reservedDepKeysStorage.getStore() ?? [];
 }
 
 export function getRunnerUser(): RequestUser | null {

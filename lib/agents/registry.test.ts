@@ -22,11 +22,13 @@ vi.mock("@/lib/auth/context", () => ({
 
 // Mock the run stash so context-injection tests can control what the
 // copilotkit route stashed. Empty by default (no run scope).
-const { getRunContextItems } = vi.hoisted(() => ({
+const { getRunContextItems, getReservedDepKeys } = vi.hoisted(() => ({
   getRunContextItems: vi.fn(() => [] as RunContextItem[]),
+  getReservedDepKeys: vi.fn(() => [] as string[]),
 }));
 vi.mock("@/lib/auth/request-context", () => ({
   getRunContextItems: () => getRunContextItems(),
+  getReservedDepKeys: () => getReservedDepKeys(),
 }));
 
 // Mock listAgents so we don't touch the DB. We control entries per-test
@@ -55,6 +57,8 @@ beforeEach(() => {
   vi.mocked(getRequestUser).mockResolvedValue(testUser);
   getRunContextItems.mockReset();
   getRunContextItems.mockReturnValue([]);
+  getReservedDepKeys.mockReset();
+  getReservedDepKeys.mockReturnValue([]);
 });
 
 // Drive the injected middleware (the last entry in the agent's private
@@ -379,6 +383,46 @@ describe("getAgents", () => {
       expect(context).toEqual([
         { description: "custom_dep", value: "client-supplied" },
         { description: "custom_dep", value: "server-resolved" },
+      ]);
+    });
+
+    it("strips multi-field contract dep keys from the gate's reserved set (stash-scoped)", async () => {
+      // Multi-field credential contracts (x_consumer_key, x_access_token…)
+      // don't match the mechanical `_api_key` regex — inside a builder-run
+      // scope the registry must strip exactly what the gate reserved, so a
+      // client can't forge a server-owned dependency.
+      getReservedDepKeys.mockReturnValue(["x_consumer_key", "x_access_token"]);
+      vi.mocked(listAgents).mockResolvedValue([aguiEntry({ id: "ag1" })]);
+      const map = await getAgents(new Request("http://localhost"));
+      const captured = runMiddleware(
+        injectedMiddleware(map["ag1"]),
+        {
+          ...baseInput,
+          context: [
+            { description: "x_consumer_key", value: "forged" },
+            { description: "X_ACCESS_TOKEN", value: "forged" },
+            { description: "user_notes", value: "keep me" },
+          ],
+        },
+      );
+      const context = captured.context as Array<{ description: string }>;
+      expect(context.map((c) => c.description)).toEqual(["user_notes"]);
+    });
+
+    it("does NOT strip multi-field contract dep keys outside a run scope (regex-only)", async () => {
+      // Outside a gated run there is no reserved set — only the mechanical
+      // `_api_key` regex applies, and arbitrary context still flows.
+      vi.mocked(listAgents).mockResolvedValue([aguiEntry({ id: "ag1" })]);
+      const map = await getAgents(new Request("http://localhost"));
+      const captured = runMiddleware(
+        injectedMiddleware(map["ag1"]),
+        {
+          ...baseInput,
+          context: [{ description: "x_consumer_key", value: "client-supplied" }],
+        },
+      );
+      expect(captured.context).toEqual([
+        { description: "x_consumer_key", value: "client-supplied" },
       ]);
     });
 

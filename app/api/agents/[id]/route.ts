@@ -11,6 +11,7 @@ import { getCurrentUser, canManageAgents } from "@/lib/auth/context";
 import { assertSafeUrl, UnsafeUrlError } from "@/lib/net/safe-fetch";
 import { checkUserLimit } from "@/lib/ratelimit/middleware";
 import { SSRF_REJECTION_MESSAGE } from "@/lib/config/saas";
+import { deleteAgentosComponent, AgentosError } from "@/lib/agents/builder";
 
 export async function GET(
   _request: Request,
@@ -118,6 +119,28 @@ export async function DELETE(
   if (limited) return limited;
 
   const { id } = await params;
+  const agent = await getAgent(id, user.orgId);
+
+  // Builder-origin rows carry a remote AgentOS component — removing the
+  // local row alone would orphan it (a live component with no projection).
+  // Best-effort soft-delete mirrors the builder route: a failure doesn't
+  // block the local removal (the registry stops resolving the row → no
+  // more runs; the orphan is logged for platform-side cleanup). A 404
+  // (already deleted) is fine.
+  if (agent?.origin === "builder" && agent.remoteAgentId) {
+    try {
+      await deleteAgentosComponent(agent.remoteAgentId);
+    } catch (err) {
+      if (!(err instanceof AgentosError) || err.status !== 404) {
+        console.error("[agents] builder component delete failed (local row still removed)", {
+          agentId: id,
+          remoteAgentId: agent.remoteAgentId,
+          error: err instanceof Error ? err.message : String(err),
+        });
+      }
+    }
+  }
+
   const ok = await deleteAgent(id, user.orgId);
   if (!ok) {
     return NextResponse.json({ error: "Agent not found" }, { status: 404 });

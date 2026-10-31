@@ -19,7 +19,7 @@
  *
  * UX shape (the catalogs are long — 36 providers, 56 toolkits):
  *  - Provider rows are accordions: collapsed shows toggle + badges +
- *    model count; the textarea lives inside the expanded row. Enabled
+ *    model count; the model-id rows live inside the expanded row. Enabled
  *    providers start expanded (the working set), everything else stays
  *    collapsed. Both sections have a substring filter.
  *  - Toolkits group under free alphabetical bands derived at render time —
@@ -28,7 +28,7 @@
  *    lists truncate to a few names with a native <details> expander.
  *  - An enabled provider with no model ids is blocked client-side (inline
  *    error + disabled save) AND server-side (the AgentOS PUT answers 400)
- *    — the tick-the-box-forget-the-textarea state must not be saveable.
+ *    — the tick-the-box-forget-the-rows state must not be saveable.
  *
  * Wire contract (app/api/admin/platform):
  *  - GET  → {providers: [...], tools: [...]} — discovery ∪ durable rows.
@@ -80,8 +80,8 @@ interface CatalogResponse {
 }
 
 /** The editable draft: provider slug → enabled + the model-id rows. Each
-    row is one grammar entry (id[:key=value ...]) — the list replaces the
-    old textarea so there's exactly one list: edit, test, remove in place. */
+    row is one grammar entry (id[:key=value ...]) — edit, test, remove in
+    place, exactly one list. */
 interface ProviderDraft {
   enabled: boolean;
   models: string[];
@@ -185,7 +185,7 @@ export function PlatformAdmin() {
     };
   }, []);
 
-  const load = useCallback(async () => {
+  const load = useCallback(async (): Promise<boolean> => {
     setError(null);
     let res: Response;
     try {
@@ -194,13 +194,13 @@ export function PlatformAdmin() {
       // Own-proxy failure (server restart, DNS) — same copy as the 5xx path.
       setError({ message: "Couldn't load models & tools — please retry shortly." });
       setLoading(false);
-      return;
+      return false;
     }
     const data = (await res.json().catch(() => ({}))) as CatalogResponse;
     if (!res.ok) {
       setError(pageErrorFrom(data, "Couldn't load models & tools — please retry shortly."));
       setLoading(false);
-      return;
+      return false;
     }
     setProviders(data.providers ?? []);
     setTools(data.tools ?? []);
@@ -226,6 +226,7 @@ export function PlatformAdmin() {
     for (const tool of data.tools ?? []) t[tool.slug] = tool.enabled;
     setToolDraft(t);
     setLoading(false);
+    return true;
   }, []);
 
   useEffect(() => {
@@ -271,10 +272,9 @@ export function PlatformAdmin() {
     } finally {
       setSaving(false);
     }
-    // The save itself succeeded; only the post-save refresh can fail here.
-    try {
-      await load();
-    } catch {
+    // The save itself succeeded; only the post-save refresh can fail here
+    // (load() sets its own error banner on failure).
+    if (!(await load())) {
       setError({
         message: "Saved — but the page couldn't refresh. Reload to see the current state.",
       });
@@ -284,7 +284,8 @@ export function PlatformAdmin() {
   const testModel = async (provider: CatalogProvider, entry: string) => {
     const key = `${provider.slug}:${entry}`;
     setTesting(key);
-    setError(null);
+    // No setError(null) here: the test result is row-scoped and must not
+    // wipe an unrelated page error (e.g. the load banner) mid-flight.
     let result: string;
     try {
       const res = await fetch("/api/admin/platform/test-model", {
@@ -436,7 +437,10 @@ export function PlatformAdmin() {
   return (
     <div>
       {error && (
-        <div className="mb-4 rounded-lg border border-red-200 bg-red-50 p-3 text-sm text-red-700 dark:border-red-900 dark:bg-red-950 dark:text-red-300">
+        <div
+          role="alert"
+          className="mb-4 rounded-lg border border-red-200 bg-red-50 p-3 text-sm text-red-700 dark:border-red-900 dark:bg-red-950 dark:text-red-300"
+        >
           <p>{error.message}</p>
           {error.detail && (
             <p className="mt-1 break-words text-xs text-red-600 dark:text-red-400">
@@ -458,7 +462,10 @@ export function PlatformAdmin() {
         </div>
       )}
       {notice && (
-        <div className="mb-4 rounded-lg border border-green-200 bg-green-50 p-3 text-sm text-green-700 dark:border-green-900 dark:bg-green-950 dark:text-green-300">
+        <div
+          role="status"
+          className="mb-4 rounded-lg border border-green-200 bg-green-50 p-3 text-sm text-green-700 dark:border-green-900 dark:bg-green-950 dark:text-green-300"
+        >
           {notice}
         </div>
       )}
@@ -482,7 +489,7 @@ export function PlatformAdmin() {
           />
         </div>
         {/* Two-column flow at md+; expanded/invalid rows span the full row
-            so the textarea + test list keep their roomy width. */}
+            so the row list + test result keep their roomy width. */}
         <div className="grid grid-cols-1 gap-x-3 gap-y-1.5 md:grid-cols-2">
           {visibleProviders.map((p) => {
             const d = draft[p.slug] ?? { enabled: p.enabled, models: [] };
@@ -507,9 +514,19 @@ export function PlatformAdmin() {
                   role="button"
                   tabIndex={0}
                   aria-expanded={open}
-                  aria-controls={`provider-panel-${p.slug}`}
+                  // aria-controls points at the panel element, which only
+                  // exists when open && available — emit the reference just
+                  // then so it never dangles.
+                  {...(open && p.available
+                    ? { "aria-controls": `provider-panel-${p.slug}` }
+                    : {})}
                   onClick={() => setExpanded((prev) => ({ ...prev, [p.slug]: !open }))}
                   onKeyDown={(e) => {
+                    // Only the header itself toggles — a keydown from the
+                    // nested checkbox (Space on a focused checkbox bubbles
+                    // here) must not also toggle the accordion, or keyboard
+                    // users can't check the box without collapsing the row.
+                    if (e.target !== e.currentTarget) return;
                     if (e.key === "Enter" || e.key === " ") {
                       e.preventDefault();
                       setExpanded((prev) => ({ ...prev, [p.slug]: !open }));
@@ -584,7 +601,9 @@ export function PlatformAdmin() {
                               disabled={!p.env_key_set || testing !== null || !line.trim()}
                               title={
                                 p.env_key_set
-                                  ? undefined
+                                  ? !line.trim()
+                                    ? "Enter a model id first"
+                                    : undefined
                                   : `Set ${p.platform_env_key} on the platform to test this model`
                               }
                               onClick={() => testModel(p, line.trim())}

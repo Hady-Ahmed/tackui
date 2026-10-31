@@ -58,6 +58,11 @@ export async function GET() {
   const user = await getCurrentUser();
   if (!user) return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
 
+  // Same limit as the models/tools reads: the GET also probes the live
+  // catalog on the platform side, so it's not a free local-only read.
+  const limited = checkUserLimit(user.id, "agentRead");
+  if (limited) return limited;
+
   // Saved rows and the catalog are independent: a catalog failure must not
   // blank the saved list (the store is local DB — always available).
   const [creds, catalogResult] = await Promise.all([

@@ -37,7 +37,8 @@ import {
 import { getCurrentUser } from "@/lib/auth/context";
 import { checkUserLimit } from "@/lib/ratelimit/middleware";
 import { getConnectorsByNames } from "@/lib/connectors/connector-store";
-import { agentosErrorResponse } from "../route";
+import type { UpdateBuilderAgentInput } from "@/lib/agents/agent-store";
+import { agentosErrorResponse } from "@/lib/agents/builder";
 
 export async function PATCH(
   request: Request,
@@ -164,12 +165,19 @@ export async function PATCH(
     // patch can't proceed without re-resolving it.
     let model: AgentosModel;
     try {
-      model = patch.model
-        ? resolveBuilderModel(patch.model, models)
-        : resolveBuilderModel(
-            { provider: existing.requirements?.model.provider ?? "", id: existing.requirements?.model.id ?? "" },
-            models,
-          );
+      if (patch.model) {
+        model = resolveBuilderModel(patch.model, models);
+      } else if (existing.requirements) {
+        model = resolveBuilderModel(existing.requirements.model, models);
+      } else {
+        // No snapshot to re-resolve from — the config can't be rebuilt.
+        // The row predates the snapshot column; ask the author to re-save
+        // the model with the patch.
+        return NextResponse.json(
+          { error: "This agent's saved model could not be resolved — pick a model in this update and try again." },
+          { status: 409 },
+        );
+      }
     } catch (err) {
       if (err instanceof BuilderValidationError) {
         return NextResponse.json({ error: err.message }, { status: 400 });
@@ -200,13 +208,15 @@ export async function PATCH(
     };
     try {
       nextConfig = buildComponentConfig(existing.remoteAgentId, spec, model, platformTools);
+      // Same tool validation as buildComponentConfig — guarded too so a
+      // stale tool name can never escape as a raw 500.
+      nextRequirements = buildRequirements(spec, model, platformTools);
     } catch (err) {
       if (err instanceof BuilderValidationError) {
         return NextResponse.json({ error: err.message }, { status: 400 });
       }
       throw err;
     }
-    nextRequirements = buildRequirements(spec, model, platformTools);
   }
 
   // 1) Local row first, with a compensating revert below if the AgentOS
@@ -243,22 +253,33 @@ export async function PATCH(
       );
     }
   } catch (err) {
-    // Compensating revert — restore the pre-patch local row.
-    await updateAgent(
-      id,
-      {
-        name: existing.name,
-        description: existing.description,
-        ...(existing.requirements ? { requirements: existing.requirements } : {}),
-      },
-      user.orgId,
-    ).catch((revertErr) => {
-      console.error("[builder] compensating local revert failed", {
-        agentId: id,
-        orgId: user.orgId,
-        error: revertErr instanceof Error ? revertErr.message : String(revertErr),
+    // A 409 means a concurrent edit landed first — the local row already
+    // reflects that edit, so a compensating revert would clobber it with
+    // our stale snapshot. Surface the conflict instead (the local row
+    // mirrors the AgentOS the concurrent editor just wrote).
+    if (err instanceof AgentosError && err.status === 409) {
+      return NextResponse.json(
+        { error: "This agent was just updated by someone else — reload and try again." },
+        { status: 409 },
+      );
+    }
+    // Compensating revert — restore ONLY the fields this PATCH actually
+    // wrote locally. A wholesale revert to the pre-patch snapshot would
+    // also clobber fields this request never touched (e.g. a concurrent
+    // meta edit landing between our read and our revert).
+    const revert: UpdateBuilderAgentInput = {};
+    if (patch.name !== undefined) revert.name = existing.name;
+    if (patch.description !== undefined) revert.description = existing.description;
+    if (configChanged && existing.requirements) revert.requirements = existing.requirements;
+    if (Object.keys(revert).length > 0) {
+      await updateAgent(id, revert, user.orgId).catch((revertErr) => {
+        console.error("[builder] compensating local revert failed", {
+          agentId: id,
+          orgId: user.orgId,
+          error: revertErr instanceof Error ? revertErr.message : String(revertErr),
+        });
       });
-    });
+    }
     return agentosErrorResponse(err);
   }
 
@@ -311,12 +332,3 @@ export async function DELETE(
   }
   return NextResponse.json({ ok: true });
 }
-
-/**
- * GET /components/{id}/configs/current — the current config version's
- * stored config (the instructions source for partial patches). Returns
- * undefined when the AgentOS doesn't have one (unexpected for builder
- * agents — the PATCH path surfaces a 409 in that case).
- */
-
-/** Map a service-layer error to the route response. */

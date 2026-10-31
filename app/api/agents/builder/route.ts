@@ -24,6 +24,7 @@ import {
   toPublicAgent,
 } from "@/lib/agents/agent-store";
 import {
+  agentosErrorResponse,
   builderCreateBodySchema,
   buildComponentConfig,
   buildRequirements,
@@ -31,7 +32,6 @@ import {
   fetchAgentosModels,
   fetchBuilderTools,
   resolveBuilderModel,
-  AgentosError,
   BuilderValidationError,
   AGENTOS_USER_SCOPE,
 } from "@/lib/agents/builder";
@@ -111,15 +111,18 @@ export async function POST(request: Request) {
   // Tool names are validated against the curated palette + registry here —
   // a stale/typo'd palette entry is client input, so a 400 (not a 500).
   let config: Record<string, unknown>;
+  let requirements;
   try {
     config = buildComponentConfig(remoteAgentId, spec, model, platformTools);
+    // Same tool validation as buildComponentConfig — guarded too so a
+    // stale tool name can never escape as a raw 500.
+    requirements = buildRequirements(spec, model, platformTools);
   } catch (err) {
     if (err instanceof BuilderValidationError) {
       return NextResponse.json({ error: err.message }, { status: 400 });
     }
     throw err;
   }
-  const requirements = buildRequirements(spec, model, platformTools);
   const endpoint = builderEndpoint(remoteAgentId);
   if (!endpoint) {
     // Unreachable in practice (AGENTOS_ENABLED was checked by the fetches
@@ -182,18 +185,4 @@ export async function POST(request: Request) {
   }
 
   return NextResponse.json(toPublicAgent(created), { status: 201 });
-}
-
-/** Map a service-layer error to the route response. */
-export function agentosErrorResponse(err: unknown): NextResponse {
-  if (err instanceof AgentosError) {
-    return NextResponse.json({ error: err.message }, { status: err.status });
-  }
-  console.error("[builder] unexpected AgentOS error", {
-    error: err instanceof Error ? err.message : String(err),
-  });
-  return NextResponse.json(
-    { error: "The agent builder is unavailable right now — please try again shortly." },
-    { status: 502 },
-  );
 }

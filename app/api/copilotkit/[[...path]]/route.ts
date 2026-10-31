@@ -159,6 +159,7 @@ async function handler(request: Request): Promise<Response> {
           ? runWithRunnerContext(
               user,
               builderRun.contextItems,
+              builderRun.reservedDepKeys,
               () => innerHandler(request),
             )
           : runWithUserAsync(user, () => innerHandler(request)));
@@ -197,6 +198,7 @@ async function handler(request: Request): Promise<Response> {
       ? runWithRunnerContext(
           syntheticUser,
           builderRun.contextItems,
+          builderRun.reservedDepKeys,
           () => innerHandler(request),
         )
       : runWithUserAsync(syntheticUser, () => innerHandler(request)));
