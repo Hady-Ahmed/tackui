@@ -1,21 +1,34 @@
 "use client";
 
 /**
- * The platform admin page's body — the deployment's agent catalog: which
+ * The Models & tools page's body — the deployment's agent catalog: which
  * model providers/models and which toolkits tackui's builder offers.
  *
- * The admin's only actions are ticking checkboxes and typing model ids —
- * everything else (class names, env keys, credential contracts, function
- * lists) is derived from the platform's discovery scan and rendered
- * read-only, so nothing editable here can desynchronize the stack. A save
+ * The admin's only actions are toggling rows and typing model ids —
+ * everything else (class names, credential contracts, function lists) is
+ * derived from the platform's discovery scan and rendered read-only, so
+ * nothing editable here can desynchronize the stack. A save
  * is a full-state replace that goes live on the next request (the platform
  * rebuilds its registry lazily) — no restart, no redeploy.
  *
- * Model grammar (one entry per line, inside a provider's own block):
+ * Model grammar (one entry per model row, inside a provider's own block):
  *   model-id[:key=value ...]
  * The parser also still accepts a legacy `:tier` segment (dormant since
  * the tier system sleeps — builder runs are 100% BYOK; it wakes at
  * Phase 3 publishing) but the UI no longer advertises it.
+ *
+ * UX shape (the catalogs are long — 36 providers, 56 toolkits):
+ *  - Provider rows are accordions: collapsed shows toggle + badges +
+ *    model count; the textarea lives inside the expanded row. Enabled
+ *    providers start expanded (the working set), everything else stays
+ *    collapsed. Both sections have a substring filter.
+ *  - Toolkits group under free alphabetical bands derived at render time —
+ *    no maintained category list anywhere (agno has none, and curated
+ *    categories would mean a code change per re-organization). Function
+ *    lists truncate to a few names with a native <details> expander.
+ *  - An enabled provider with no model ids is blocked client-side (inline
+ *    error + disabled save) AND server-side (the AgentOS PUT answers 400)
+ *    — the tick-the-box-forget-the-textarea state must not be saveable.
  *
  * Wire contract (app/api/admin/platform):
  *  - GET  → {providers: [...], tools: [...]} — discovery ∪ durable rows.
@@ -24,13 +37,17 @@
  *           its message, surfaced verbatim.
  *  - POST /test-model {entry} — one "hi" completion through the platform's
  *    own env key; disabled here when the provider's platform key isn't set.
+ *    That gate is the ONLY place key state surfaces in this UI: builder
+ *    runs are 100% BYOK, so a row-level "key set?" display would be noise
+ *    (it returns as a per-provider column when the Phase 3 tier wakes).
  *
  * Disabling a provider/toolkit does not just hide it from the picker —
  * existing agents referencing it stop running it (the operator withdrew
  * the offering). The UI says so where it matters.
  */
 
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
+import type { ClipboardEvent as ReactClipboardEvent, ReactNode } from "react";
 
 /** One provider row of GET /api/admin/platform/catalog. */
 interface CatalogProvider {
@@ -62,13 +79,20 @@ interface CatalogResponse {
   error?: string;
 }
 
-/** The editable draft: provider slug → enabled + the textarea contents. */
+/** The editable draft: provider slug → enabled + the model-id rows. Each
+    row is one grammar entry (id[:key=value ...]) — the list replaces the
+    old textarea so there's exactly one list: edit, test, remove in place. */
 interface ProviderDraft {
   enabled: boolean;
-  modelsText: string;
+  models: string[];
 }
 
-/** Serialize a saved model row back to its grammar entry (textarea prefill). */
+/** Non-empty, trimmed model entries — what save() sends and what counts. */
+function savedEntries(models: string[]): string[] {
+  return models.map((m) => m.trim()).filter((m) => m.length > 0);
+}
+
+/** Serialize a saved model row back to its grammar entry (row prefill). */
 function modelEntryText(row: { id: string; attrs: Record<string, unknown>; tier: boolean }): string {
   const parts = [row.id];
   if (row.tier) parts.push("tier");
@@ -78,11 +102,37 @@ function modelEntryText(row: { id: string; attrs: Record<string, unknown>; tier:
   return parts.join(":");
 }
 
+/** Small status pill shared by both sections. */
+function Pill({
+  tone,
+  children,
+}: {
+  tone: "green" | "amber" | "gray";
+  children: ReactNode;
+}) {
+  const cls =
+    tone === "green"
+      ? "bg-green-100 text-green-700 dark:bg-green-950 dark:text-green-300"
+      : tone === "amber"
+        ? "bg-amber-100 text-amber-700 dark:bg-amber-950 dark:text-amber-300"
+        : "bg-zinc-100 text-zinc-500 dark:bg-zinc-900 dark:text-zinc-400";
+  return (
+    <span
+      className={`shrink-0 whitespace-nowrap rounded-full px-2 py-0.5 text-[10px] font-medium ${cls}`}
+    >
+      {children}
+    </span>
+  );
+}
+
 export function PlatformAdmin() {
   const [providers, setProviders] = useState<CatalogProvider[] | null>(null);
   const [tools, setTools] = useState<CatalogTool[] | null>(null);
   const [draft, setDraft] = useState<Record<string, ProviderDraft>>({});
   const [toolDraft, setToolDraft] = useState<Record<string, boolean>>({});
+  const [expanded, setExpanded] = useState<Record<string, boolean>>({});
+  const [provFilter, setProvFilter] = useState("");
+  const [toolFilter, setToolFilter] = useState("");
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -90,6 +140,16 @@ export function PlatformAdmin() {
   // model entry (provider:id[:attrs]) currently being tested → result copy.
   const [testing, setTesting] = useState<string | null>(null);
   const [testResults, setTestResults] = useState<Record<string, string>>({});
+  // Per-entry dismissal timers — a test result disappears after a few
+  // seconds; re-testing resets the clock instead of stacking timers.
+  const testTimers = useRef<Record<string, ReturnType<typeof setTimeout>>>({});
+
+  useEffect(
+    () => () => {
+      for (const t of Object.values(testTimers.current)) clearTimeout(t);
+    },
+    [],
+  );
 
   const load = useCallback(async () => {
     setError(null);
@@ -107,13 +167,18 @@ export function PlatformAdmin() {
     setProviders(data.providers ?? []);
     setTools(data.tools ?? []);
     const d: Record<string, ProviderDraft> = {};
+    const exp: Record<string, boolean> = {};
     for (const p of data.providers ?? []) {
       d[p.slug] = {
         enabled: p.enabled,
-        modelsText: p.models.map(modelEntryText).join("\n"),
+        models: p.models.map(modelEntryText),
       };
+      // The working set (enabled providers) starts expanded; everything
+      // else stays a one-line row until clicked.
+      exp[p.slug] = p.enabled && p.available;
     }
     setDraft(d);
+    setExpanded(exp);
     const t: Record<string, boolean> = {};
     for (const tool of data.tools ?? []) t[tool.slug] = tool.enabled;
     setToolDraft(t);
@@ -141,10 +206,7 @@ export function PlatformAdmin() {
           providers: providers.map((p) => ({
             slug: p.slug,
             enabled: draft[p.slug]?.enabled ?? false,
-            models: (draft[p.slug]?.modelsText ?? "")
-              .split("\n")
-              .map((line) => line.trim())
-              .filter((line) => line.length > 0),
+            models: savedEntries(draft[p.slug]?.models ?? []),
           })),
           tools: tools.map((t) => ({
             slug: t.slug,
@@ -186,22 +248,117 @@ export function PlatformAdmin() {
             ? `✓ ${typeof data.reply === "string" ? data.reply.slice(0, 80) : "ok"}`
             : `✗ ${typeof data.error === "string" && data.error ? data.error : `Failed (${res.status})`}`,
       }));
+      // Auto-dismiss: reset this entry's clock (a re-test replaces the
+      // old timer rather than stacking a second one). The delete is
+      // guarded — the entry may already be gone via a row edit.
+      clearTimeout(testTimers.current[key]);
+      testTimers.current[key] = setTimeout(() => {
+        delete testTimers.current[key];
+        setTestResults((prev) => {
+          if (!(key in prev)) return prev;
+          const next = { ...prev };
+          delete next[key];
+          return next;
+        });
+      }, 8000);
     } finally {
       setTesting(null);
     }
+  };
+
+  // Draft model-row editing — the row list IS the editor (no textarea
+  // mirror): edit, test, remove per row; a multi-line paste splits into
+  // rows so bulk-pasting a list still works.
+  const updateModels = (slug: string, fn: (models: string[]) => string[]) =>
+    setDraft((prev) => {
+      const cur = prev[slug] ?? { enabled: false, models: [] };
+      return { ...prev, [slug]: { ...cur, models: fn(cur.models) } };
+    });
+
+  const setModelRow = (slug: string, i: number, value: string, previous: string) => {
+    updateModels(slug, (m) => m.map((v, j) => (j === i ? value : v)));
+    // Editing a row invalidates its test result — a stale ✓/✗ beside a
+    // different id would lie.
+    const oldKey = `${slug}:${previous.trim()}`;
+    clearTimeout(testTimers.current[oldKey]);
+    delete testTimers.current[oldKey];
+    if (testResults[oldKey]) {
+      setTestResults((prev) => {
+        const next = { ...prev };
+        delete next[oldKey];
+        return next;
+      });
+    }
+  };
+
+  const pasteIntoRow = (e: ReactClipboardEvent<HTMLInputElement>, slug: string, i: number) => {
+    const text = e.clipboardData.getData("text");
+    if (!text.includes("\n")) return; // single value — default paste
+    e.preventDefault();
+    const parts = text
+      .split("\n")
+      .map((s) => s.trim())
+      .filter((s) => s.length > 0);
+    updateModels(slug, (m) => [...m.slice(0, i), ...parts, ...m.slice(i + 1)]);
   };
 
   if (loading) {
     return <p className="text-sm text-zinc-500 dark:text-zinc-400">Loading…</p>;
   }
 
-  const dirty =
-    providers?.some(
+  const providerList = providers ?? [];
+  const toolList = tools ?? [];
+
+  // Enabled-but-empty providers: invalid, and save is blocked while any
+  // exist. The row itself shows the inline error; this count drives the
+  // save bar.
+  const invalidProviders = providerList.filter((p) => {
+    const d = draft[p.slug];
+    return (d?.enabled ?? false) && p.available && savedEntries(d?.models ?? []).length === 0;
+  });
+  const invalidSlugs = new Set(invalidProviders.map((p) => p.slug));
+
+  const dirtyCount =
+    providerList.filter(
       (p) =>
         (draft[p.slug]?.enabled ?? false) !== p.enabled ||
-        (draft[p.slug]?.modelsText ?? "") !== p.models.map(modelEntryText).join("\n"),
-    ) ||
-    tools?.some((t) => (toolDraft[t.slug] ?? false) !== t.enabled);
+        JSON.stringify(savedEntries(draft[p.slug]?.models ?? [])) !==
+          JSON.stringify(p.models.map(modelEntryText)),
+    ).length +
+    toolList.filter((t) => (toolDraft[t.slug] ?? false) !== t.enabled).length;
+
+  const enabledProviderCount = providerList.filter((p) => draft[p.slug]?.enabled).length;
+  const enabledToolCount = toolList.filter((t) => toolDraft[t.slug]).length;
+
+  const q = provFilter.trim().toLowerCase();
+  const visibleProviders = q
+    ? providerList.filter(
+        (p) => p.slug.toLowerCase().includes(q) || (p.class_name ?? "").toLowerCase().includes(q),
+      )
+    : providerList;
+
+  const tq = toolFilter.trim().toLowerCase();
+  const visibleTools = tq
+    ? toolList.filter(
+        (t) =>
+          t.label.toLowerCase().includes(tq) ||
+          t.slug.toLowerCase().includes(tq) ||
+          (t.class_name ?? "").toLowerCase().includes(tq) ||
+          t.functions.some((f) => f.toLowerCase().includes(tq)),
+      )
+    : toolList;
+
+  // Free alphabetical bands from the visible set — derived at render time,
+  // nothing maintained. A filter that empties a band just drops the band.
+  // Sorted: the API orders rows by slug, but bands key off the label.
+  const toolBands = new Map<string, CatalogTool[]>();
+  for (const t of visibleTools) {
+    const band = (t.label || t.slug).charAt(0).toUpperCase();
+    const bucket = toolBands.get(band);
+    if (bucket) bucket.push(t);
+    else toolBands.set(band, [t]);
+  }
+  const bandEntries = [...toolBands.entries()].sort(([a], [b]) => a.localeCompare(b));
 
   return (
     <div>
@@ -216,200 +373,347 @@ export function PlatformAdmin() {
         </div>
       )}
 
-      {/* Models */}
+      {/* Model providers — the sections count PROVIDERS/toolkits (the rows
+          the admin toggles), not the models/functions inside them. */}
       <section>
-        <div className="mb-2 flex items-baseline justify-between gap-3">
+        <div className="mb-2 flex flex-wrap items-baseline justify-between gap-2">
           <h2 className="text-sm font-semibold uppercase tracking-wide text-zinc-500 dark:text-zinc-400">
-            Models
+            Model providers{" "}
+            <span className="font-normal normal-case tracking-normal text-zinc-400">
+              · {enabledProviderCount} of {providerList.length} enabled
+            </span>
           </h2>
-          <p className="text-xs text-zinc-500 dark:text-zinc-400">
-            one per line: <code className="text-[11px]">model-id[:key=value]</code>
-          </p>
+          <input
+            type="search"
+            value={provFilter}
+            onChange={(e) => setProvFilter(e.target.value)}
+            placeholder="Filter providers…"
+            className="w-48 rounded-lg border border-zinc-200 bg-white px-2.5 py-1.5 text-xs text-zinc-900 outline-none transition-colors focus:border-blue-500 dark:border-zinc-700 dark:bg-zinc-900 dark:text-zinc-50"
+          />
         </div>
-        <div className="space-y-2">
-          {(providers ?? []).map((p) => {
-            const d = draft[p.slug] ?? { enabled: p.enabled, modelsText: "" };
+        {/* Two-column flow at md+; expanded/invalid rows span the full row
+            so the textarea + test list keep their roomy width. */}
+        <div className="grid grid-cols-1 gap-x-3 gap-y-1.5 md:grid-cols-2">
+          {visibleProviders.map((p) => {
+            const d = draft[p.slug] ?? { enabled: p.enabled, models: [] };
+            const open = expanded[p.slug] ?? false;
+            const modelCount = savedEntries(d.models).length;
+            const invalid = invalidSlugs.has(p.slug);
+            const wide = (open && p.available) || invalid;
             return (
               <div
                 key={p.slug}
-                className="rounded-xl border border-zinc-200 bg-white p-3 dark:border-zinc-800 dark:bg-zinc-950"
+                className={`min-w-0 rounded-xl border bg-white dark:bg-zinc-950 ${
+                  wide ? "md:col-span-full " : ""
+                }${
+                  invalid
+                    ? "border-red-300 dark:border-red-900"
+                    : "border-zinc-200 dark:border-zinc-800"
+                }`}
               >
-                <div className="flex items-center gap-3">
+                {/* Collapsed header — the whole row toggles expansion
+                    except the controls themselves. */}
+                <div
+                  role="button"
+                  tabIndex={0}
+                  onClick={() => setExpanded((prev) => ({ ...prev, [p.slug]: !open }))}
+                  onKeyDown={(e) => {
+                    if (e.key === "Enter" || e.key === " ") {
+                      e.preventDefault();
+                      setExpanded((prev) => ({ ...prev, [p.slug]: !open }));
+                    }
+                  }}
+                  className="flex cursor-pointer select-none items-center gap-3 p-3"
+                >
                   <input
                     type="checkbox"
                     checked={d.enabled}
                     disabled={!p.available}
+                    onClick={(e) => e.stopPropagation()}
                     onChange={(e) =>
-                      setDraft((prev) => ({
-                        ...prev,
-                        [p.slug]: { ...d, enabled: e.target.checked },
-                      }))
+                      setDraft((prev) => {
+                        const enabled = e.target.checked;
+                        // Enabling expands the row (the editor is the
+                        // next required action); disabling collapses it.
+                        setExpanded((x) => ({ ...x, [p.slug]: enabled && p.available }));
+                        return { ...prev, [p.slug]: { ...d, enabled } };
+                      })
                     }
                     className="h-4 w-4 rounded border-zinc-300 text-blue-600 dark:border-zinc-600"
                   />
                   <span className="font-medium text-zinc-900 dark:text-zinc-50">{p.slug}</span>
-                  {!p.available && (
-                    <span className="rounded-full bg-amber-100 px-2 py-0.5 text-[10px] font-medium text-amber-700 dark:bg-amber-950 dark:text-amber-300">
-                      No longer available
+                  {!p.available && <Pill tone="amber">No longer available</Pill>}
+                  {open ? (
+                    <code className="min-w-0 flex-1 truncate text-xs text-zinc-400">{p.class_name}</code>
+                  ) : (
+                    d.enabled &&
+                    p.available && (
+                      <Pill tone={modelCount > 0 ? "gray" : "amber"}>
+                        {modelCount} {modelCount === 1 ? "model" : "models"}
+                      </Pill>
+                    )
+                  )}
+                  <span className="ml-auto flex shrink-0 items-center gap-2.5">
+                    <span
+                      className={`shrink-0 pr-0.5 text-xs text-zinc-400 transition-transform ${open ? "rotate-90" : ""}`}
+                      aria-hidden
+                    >
+                      ▸
                     </span>
-                  )}
-                  {p.available && (
-                    <span className="truncate text-xs text-zinc-400">{p.class_name}</span>
-                  )}
-                  <span className="ml-auto shrink-0 text-xs text-zinc-500 dark:text-zinc-400">
-                    {p.platform_env_key ? (
-                      p.env_key_set ? (
-                        <span className="rounded-full bg-green-100 px-2 py-0.5 text-[10px] font-medium text-green-700 dark:bg-green-950 dark:text-green-300">
-                          {p.platform_env_key} set
-                        </span>
-                      ) : (
-                        <span className="rounded-full bg-zinc-100 px-2 py-0.5 text-[10px] font-medium text-zinc-500 dark:bg-zinc-900 dark:text-zinc-400">
-                          {p.platform_env_key} not set
-                        </span>
-                      )
-                    ) : (
-                      <span className="rounded-full bg-zinc-100 px-2 py-0.5 text-[10px] font-medium text-zinc-500 dark:bg-zinc-900 dark:text-zinc-400">
-                        no key needed
-                      </span>
-                    )}
                   </span>
                 </div>
-                {d.enabled && p.available && (
-                  <div className="mt-2">
-                    <textarea
-                      value={d.modelsText}
-                      onChange={(e) =>
-                        setDraft((prev) => ({
-                          ...prev,
-                          [p.slug]: { ...d, modelsText: e.target.value },
-                        }))
-                      }
-                      rows={Math.max(2, d.modelsText.split("\n").length)}
-                      placeholder={"model-id"}
-                      className="w-full rounded-lg border border-zinc-200 bg-white px-3 py-2 font-mono text-xs text-zinc-900 outline-none transition-colors focus:border-blue-500 dark:border-zinc-700 dark:bg-zinc-900 dark:text-zinc-50"
-                    />
-                    {/* Saved models — test one "hi" through the platform's
-                        own key (needs the key; the model object only). */}
-                    {p.models.length > 0 && (
-                      <div className="mt-2 space-y-1">
-                        {p.models.map((row) => {
-                          const entry = modelEntryText(row);
-                          const key = `${p.slug}:${entry}`;
-                          return (
-                            <div key={key} className="flex items-center gap-2 text-xs">
-                              <code className="truncate text-zinc-500 dark:text-zinc-400">
-                                {entry}
-                              </code>
-                              <button
-                                type="button"
-                                disabled={!p.env_key_set || testing !== null}
-                                title={
-                                  p.env_key_set
-                                    ? undefined
-                                    : `No ${p.platform_env_key} on this deployment — set it to test`
-                                }
-                                onClick={() => testModel(p, entry)}
-                                className="shrink-0 rounded border border-zinc-300 px-2 py-0.5 text-[10px] text-zinc-600 transition-colors hover:bg-zinc-50 disabled:opacity-40 dark:border-zinc-700 dark:text-zinc-300 dark:hover:bg-zinc-900"
+                {open && p.available && (
+                  <div className="px-3 pb-3">
+                    {/* The row list IS the editor — no textarea mirror:
+                        each id is its own input with Test/remove inline,
+                        and a multi-line paste splits into rows. Test
+                        composes `slug:trimmed-row` and persists nothing;
+                        buttons sit disabled with a tooltip when the
+                        platform key is missing — the one place key state
+                        surfaces in this UI. */}
+                    <div className="space-y-1.5">
+                      {d.models.map((line, i) => {
+                        const resultKey = `${p.slug}:${line.trim()}`;
+                        return (
+                          <div key={i} className="flex items-center gap-2">
+                            <input
+                              value={line}
+                              onChange={(e) => setModelRow(p.slug, i, e.target.value, line)}
+                              onPaste={(e) => pasteIntoRow(e, p.slug, i)}
+                              placeholder="model-id"
+                              className="min-w-0 flex-1 rounded-lg border border-zinc-200 bg-white px-3 py-1.5 font-mono text-xs text-zinc-900 outline-none transition-colors focus:border-blue-500 dark:border-zinc-700 dark:bg-zinc-900 dark:text-zinc-50"
+                            />
+                            <button
+                              type="button"
+                              disabled={!p.env_key_set || testing !== null || !line.trim()}
+                              title={
+                                p.env_key_set
+                                  ? undefined
+                                  : `Set ${p.platform_env_key} on the platform to test this model`
+                              }
+                              onClick={() => testModel(p, line.trim())}
+                              className="shrink-0 rounded border border-zinc-300 px-2 py-1 text-[10px] text-zinc-600 transition-colors hover:bg-zinc-50 disabled:opacity-40 dark:border-zinc-700 dark:text-zinc-300 dark:hover:bg-zinc-900"
+                            >
+                              {testing === resultKey ? "Testing…" : "Test"}
+                            </button>
+                            {testResults[resultKey] && (
+                              <span
+                                title={testResults[resultKey]}
+                                className={`max-w-64 shrink truncate ${
+                                  testResults[resultKey].startsWith("✓")
+                                    ? "text-green-600 dark:text-green-400"
+                                    : "text-red-600 dark:text-red-400"
+                                }`}
                               >
-                                {testing === key ? "Testing…" : "Test"}
-                              </button>
-                              {testResults[key] && (
-                                <span
-                                  className={
-                                    testResults[key].startsWith("✓")
-                                      ? "truncate text-green-600 dark:text-green-400"
-                                      : "truncate text-red-600 dark:text-red-400"
-                                  }
-                                >
-                                  {testResults[key]}
-                                </span>
-                              )}
-                            </div>
-                          );
-                        })}
-                      </div>
+                                {testResults[resultKey]}
+                              </span>
+                            )}
+                            <button
+                              type="button"
+                              title="Remove this model id"
+                              onClick={() =>
+                                updateModels(p.slug, (m) => m.filter((_, j) => j !== i))
+                              }
+                              className="shrink-0 rounded px-1 text-sm text-zinc-400 transition-colors hover:text-red-600 dark:text-zinc-500 dark:hover:text-red-400"
+                            >
+                              ✕
+                            </button>
+                          </div>
+                        );
+                      })}
+                    </div>
+                    <button
+                      type="button"
+                      onClick={() => updateModels(p.slug, (m) => [...m, ""])}
+                      className="mt-2 text-xs font-medium text-blue-600 hover:underline dark:text-blue-400"
+                    >
+                      + Add model id
+                    </button>
+                    {/* Grammar hint — attributes ride on the id after a
+                        colon; "one per line" is meaningless in a list. */}
+                    <p className="mt-1 text-[11px] text-zinc-400 dark:text-zinc-500">
+                      attributes as <code>key=value</code> after a colon, e.g.{" "}
+                      <code>model-id:max_tokens=8192</code>
+                    </p>
+                    {invalid && (
+                      <p className="mt-1 text-xs font-medium text-red-600 dark:text-red-400">
+                        Add at least one model id — an enabled provider with no models
+                        shows nothing in the picker.
+                      </p>
                     )}
                   </div>
                 )}
               </div>
             );
           })}
+          {visibleProviders.length === 0 && (
+            <p className="py-4 text-center text-xs text-zinc-400 md:col-span-2">
+              No providers match “{provFilter}”.
+            </p>
+          )}
         </div>
       </section>
 
-      {/* Tools */}
+      {/* Toolkits — alphabetical bands derived at render time; a maintained
+          category list would mean a code change per re-organization. */}
       <section className="mt-8">
-        <h2 className="mb-2 text-sm font-semibold uppercase tracking-wide text-zinc-500 dark:text-zinc-400">
-          Tools
-        </h2>
-        <div className="space-y-2">
-          {(tools ?? []).map((t) => {
-            const checked = toolDraft[t.slug] ?? false;
-            return (
-              <div
+        <div className="mb-2 flex flex-wrap items-baseline justify-between gap-2">
+          <h2 className="text-sm font-semibold uppercase tracking-wide text-zinc-500 dark:text-zinc-400">
+            Toolkits{" "}
+            <span className="font-normal normal-case tracking-normal text-zinc-400">
+              · {enabledToolCount} of {toolList.length} enabled
+            </span>
+          </h2>
+          <input
+            type="search"
+            value={toolFilter}
+            onChange={(e) => setToolFilter(e.target.value)}
+            placeholder="Filter toolkits…"
+            className="w-48 rounded-lg border border-zinc-200 bg-white px-2.5 py-1.5 text-xs text-zinc-900 outline-none transition-colors focus:border-blue-500 dark:border-zinc-700 dark:bg-zinc-900 dark:text-zinc-50"
+          />
+        </div>
+        <div className="grid grid-cols-1 gap-x-3 gap-y-1.5 md:grid-cols-2">
+          {/* Cards are the grid children; band headers span the full row
+              and their group's cards flow two-per-row beneath them. */}
+          {bandEntries.flatMap(([band, group]) => [
+            <p
+              key={`band-${band}`}
+              className="col-span-full mb-1 mt-3 text-[11px] font-semibold uppercase tracking-wider text-zinc-400 first:mt-0 dark:text-zinc-500"
+            >
+              {band}
+            </p>,
+            ...group.map((t) => (
+              <ToolRow
                 key={t.slug}
-                className="rounded-xl border border-zinc-200 bg-white p-3 dark:border-zinc-800 dark:bg-zinc-950"
-              >
-                <div className="flex items-center gap-3">
-                  <input
-                    type="checkbox"
-                    checked={checked}
-                    disabled={!t.available || !t.deliverable}
-                    onChange={(e) =>
-                      setToolDraft((prev) => ({ ...prev, [t.slug]: e.target.checked }))
-                    }
-                    className="h-4 w-4 rounded border-zinc-300 text-blue-600 dark:border-zinc-600"
-                  />
-                  <span className="font-medium text-zinc-900 dark:text-zinc-50">{t.label}</span>
-                  {!t.available && (
-                    <span className="rounded-full bg-amber-100 px-2 py-0.5 text-[10px] font-medium text-amber-700 dark:bg-amber-950 dark:text-amber-300">
-                      No longer available
-                    </span>
-                  )}
-                  {t.available && !t.deliverable && (
-                    <span className="rounded-full bg-amber-100 px-2 py-0.5 text-[10px] font-medium text-amber-700 dark:bg-amber-950 dark:text-amber-300">
-                      No key delivery path
-                    </span>
-                  )}
-                  <span className="ml-auto truncate text-xs text-zinc-400">{t.class_name}</span>
-                </div>
-                <p className="mt-1 text-xs text-zinc-500 dark:text-zinc-400">
-                  {t.functions.length > 0 ? t.functions.join(", ") : "No functions discovered."}
-                </p>
-                {t.credentials.length > 0 && (
-                  <p className="mt-0.5 text-xs text-zinc-500 dark:text-zinc-400">
-                    Needs:{" "}
-                    {t.credentials.map((c) => (
-                      <span key={c.dep_key} className="mr-2 whitespace-nowrap">
-                        <code className="text-[11px]">{c.dep_key}</code>
-                        {c.env ? ` (env ${c.env})` : ""}
-                      </span>
-                    ))}
-                  </p>
-                )}
-                {checked && (
-                  <p className="mt-1 text-[11px] text-amber-600 dark:text-amber-400">
-                    Disabling this toolkit stops agents that use it.
-                  </p>
-                )}
-              </div>
-            );
-          })}
+                tool={t}
+                checked={toolDraft[t.slug] ?? false}
+                onChange={(checked) => setToolDraft((prev) => ({ ...prev, [t.slug]: checked }))}
+              />
+            )),
+          ])}
+          {visibleTools.length === 0 && (
+            <p className="py-4 text-center text-xs text-zinc-400 md:col-span-2">
+              No toolkits match “{toolFilter}”.
+            </p>
+          )}
         </div>
       </section>
 
       {/* Save — a full-state replace; the platform rebuilds on the next
-          request, so changes go live without restart. */}
-      <div className="sticky bottom-4 mt-6 flex justify-end">
+          request, so changes go live without restart. Blocked while any
+          enabled provider has no model ids (the AgentOS would 400 anyway). */}
+      <div className="sticky bottom-4 mt-6 flex items-center justify-end gap-3 rounded-xl border border-zinc-200 bg-white/90 p-3 backdrop-blur dark:border-zinc-800 dark:bg-zinc-950/90">
+        {invalidProviders.length > 0 && (
+          <span className="mr-auto text-xs font-medium text-red-600 dark:text-red-400">
+            {invalidProviders.length} enabled {invalidProviders.length === 1 ? "provider needs" : "providers need"} model ids
+          </span>
+        )}
+        {invalidProviders.length === 0 && dirtyCount > 0 && (
+          <span className="mr-auto text-xs text-zinc-500 dark:text-zinc-400">
+            {dirtyCount} unsaved {dirtyCount === 1 ? "change" : "changes"}
+          </span>
+        )}
         <button
           type="button"
           onClick={save}
-          disabled={saving || providers === null}
+          disabled={saving || providers === null || invalidProviders.length > 0}
+          title={
+            invalidProviders.length > 0
+              ? "Add at least one model id to every enabled provider first"
+              : undefined
+          }
           className="rounded-lg bg-blue-600 px-4 py-2 text-sm font-medium text-white transition-colors hover:bg-blue-700 disabled:opacity-50"
         >
-          {saving ? "Saving…" : dirty ? "Save changes" : "Save"}
+          {saving ? "Saving…" : dirtyCount > 0 ? `Save ${dirtyCount} ${dirtyCount === 1 ? "change" : "changes"}` : "Save"}
         </button>
       </div>
+    </div>
+  );
+}
+
+/** One compact toolkit row — toggle + label + credential chips, with the
+    function dump and class name tucked into a native <details>. */
+function ToolRow({
+  tool,
+  checked,
+  onChange,
+}: {
+  tool: CatalogTool;
+  checked: boolean;
+  onChange: (checked: boolean) => void;
+}) {
+  const [open, setOpen] = useState(false);
+  const shown = tool.functions.slice(0, 3);
+  const rest = tool.functions.length - shown.length;
+  return (
+    <div
+      className={`min-w-0 rounded-xl border bg-white p-3 dark:bg-zinc-950 ${
+        checked
+          ? "border-blue-200 dark:border-blue-900"
+          : "border-zinc-200 dark:border-zinc-800"
+      }`}
+    >
+      <div className="flex items-center gap-3">
+        <input
+          type="checkbox"
+          checked={checked}
+          disabled={!tool.available || !tool.deliverable}
+          onChange={(e) => onChange(e.target.checked)}
+          className="h-4 w-4 shrink-0 rounded border-zinc-300 text-blue-600 dark:border-zinc-600"
+        />
+        <span className="min-w-0 truncate font-medium text-zinc-900 dark:text-zinc-50">
+          {tool.label}
+        </span>
+        {!tool.available && <Pill tone="amber">No longer available</Pill>}
+        {tool.available && !tool.deliverable && <Pill tone="amber">No key delivery path</Pill>}
+        {tool.credentials.length > 0 && (
+          <span className="ml-auto flex min-w-0 items-center gap-1 overflow-hidden">
+            {tool.credentials.map((c) => (
+              <code
+                key={c.dep_key}
+                title={`${c.dep_key}${c.env ? ` (env ${c.env})` : ""}`}
+                className="truncate rounded bg-zinc-100 px-1.5 py-0.5 text-[10px] text-zinc-600 dark:bg-zinc-900 dark:text-zinc-400"
+              >
+                {c.arg}
+              </code>
+            ))}
+          </span>
+        )}
+      </div>
+      {/* Function list — the bulk of the old card. Truncate to the first
+          few; the native <details> holds the rest + the class name. */}
+      <details
+        open={open}
+        onToggle={(e) => setOpen((e.target as HTMLDetailsElement).open)}
+        className="mt-1 text-xs text-zinc-500 dark:text-zinc-400"
+      >
+        <summary className="flex min-w-0 cursor-pointer list-none items-baseline gap-1 marker:hidden">
+          {tool.functions.length > 0 ? (
+            <>
+              <span className="min-w-0 truncate">{shown.join(", ")}</span>
+              {rest > 0 && (
+                <span className="shrink-0 whitespace-nowrap text-[11px] text-blue-600 hover:underline dark:text-blue-400">
+                  {" "}
+                  +{rest} more
+                </span>
+              )}
+            </>
+          ) : (
+            <span>No functions discovered.</span>
+          )}
+        </summary>
+        <p className="mt-1 break-words">{tool.functions.join(", ") || "—"}</p>
+        {tool.class_name && (
+          <p className="mt-0.5">
+            <code className="text-[10px]">{tool.class_name}</code>
+          </p>
+        )}
+      </details>
+      {checked && (
+        <p className="mt-1 text-[11px] text-amber-600 dark:text-amber-400">
+          Disabling this toolkit stops agents that use it.
+        </p>
+      )}
     </div>
   );
 }

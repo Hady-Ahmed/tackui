@@ -142,9 +142,13 @@ gated to platform admins only — `role === "admin"`, identical to
 `/admin`; org owners/admins must not set platform-wide policy, and the
 catalog is global so who edits it must be too). Everything else on the
 page is derived from the AgentOS's discovery
-scan and rendered read-only (class names, platform env keys + whether
-they're set, credential contracts, function lists), so nothing editable
-can desynchronize the stack.
+scan and rendered read-only (class names, credential contracts, function
+lists), so nothing editable
+can desynchronize the stack. Platform env-key state is **not** displayed
+row-wise — builder runs are 100% BYOK, so "is `OPENAI_API_KEY` set?"
+answers nothing an enabler cares about; it surfaces only at the Test
+button (below), the one place the platform key does work. It returns as
+a per-provider column when the Phase 3 tier/publishing wakes.
 
 - ** tackui never talks to the AgentOS admin API from the browser** —
   the page goes through tackui's proxy routes (`GET/PUT
