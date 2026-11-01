@@ -56,6 +56,31 @@ describe("GET /api/models", () => {
     ]);
   });
 
+  it("passes dep_key/name through for platforms that declare them (door support)", async () => {
+    mockFetchAgentosModels.mockResolvedValue([
+      {
+        provider: "openai-responses",
+        id: "gpt-4o-mini",
+        platform_tier: false,
+        requires_key: true,
+        dep_key: "openai_api_key",
+        name: "OpenAIResponses",
+      },
+    ]);
+    const res = await GET();
+    const body = await res.json();
+    expect(body.models).toEqual([
+      {
+        provider: "openai-responses",
+        id: "gpt-4o-mini",
+        platformTier: false,
+        requiresKey: true,
+        depKey: "openai_api_key",
+        name: "OpenAIResponses",
+      },
+    ]);
+  });
+
   it("passes through AgentOS service errors with their status", async () => {
     mockFetchAgentosModels.mockRejectedValue(
       new AgentosError(503, "agentos down"),

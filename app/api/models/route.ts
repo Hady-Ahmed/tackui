@@ -33,6 +33,12 @@ export async function GET() {
         platformTier: m.platform_tier,
         // false for keyless providers (e.g. ollama) — no credential demanded.
         requiresKey: m.requires_key,
+        // The vendor's declared dep key (null for keyless providers — both
+        // openai doors share "openai_api_key") and the agno registry binding
+        // name. buildRequirements persists both into the requirements
+        // snapshot; the builder badge routes keys through the dep key.
+        depKey: m.dep_key,
+        name: m.name,
       })),
     });
   } catch (err) {

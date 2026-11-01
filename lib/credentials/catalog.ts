@@ -128,13 +128,21 @@ export function deriveCredentialsCatalog(
 ): CredentialsCatalog {
   const catalog: CredentialsCatalog = {};
   for (const m of models) {
-    if (!m.provider || catalog[m.provider]) continue;
     if (m.requires_key === false) continue; // keyless provider (e.g. ollama)
-    catalog[m.provider] = {
-      provider: m.provider,
+    // The credential provider is the VENDOR, not the catalog slug: one
+    // vendor's API doors (openai-chat + openai-responses) share the
+    // vendor's single key, declared in the platform's dep_key — so both
+    // doors collapse into one "OpenAI" entry instead of a second form the
+    // runner could never fill. dep_key is declared on every keyed model;
+    // keyless models returned above.
+    if (!m.dep_key) continue;
+    const provider = providerForDepKey(m.dep_key);
+    if (!provider || catalog[provider]) continue;
+    catalog[provider] = {
+      provider,
       kind: "llm",
-      keyName: depKeyForProvider(m.provider),
-      label: prettifyProviderLabel(m.provider),
+      keyName: m.dep_key, // declared, not derived
+      label: prettifyProviderLabel(provider),
       fields: [{ key: "api_key", label: "API key" }],
     };
   }

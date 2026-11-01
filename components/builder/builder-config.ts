@@ -25,6 +25,12 @@ export interface PlatformModel {
   platformTier: boolean;
   /** false for keyless providers (e.g. ollama) — no credential demanded. */
   requiresKey: boolean;
+  /**
+   * The vendor's declared dep key (e.g. "openai_api_key") — both of one
+   * vendor's API doors share the vendor's single credential. Null for
+   * keyless providers.
+   */
+  depKey: string | null;
 }
 
 /**
@@ -240,17 +246,33 @@ export type ModelKeyState =
   | { status: "missing"; providerLabel: string; provider: string | null };
 
 export function modelKeyState(
-  model: { provider: string; platformTier: boolean; requiresKey: boolean } | null,
+  model: {
+    provider: string;
+    platformTier: boolean;
+    requiresKey: boolean;
+    depKey: string | null;
+  } | null,
   credentials: CredentialsState | null,
 ): ModelKeyState | null {
   if (!model) return null;
   if (!model.requiresKey) return { status: "none" };
-  const meta = credentials ? providerMeta(credentials.catalog, model.provider) : null;
-  const hasKey = credentials?.hasKey[model.provider] ?? false;
+  // The credential lives under the VENDOR, not the door slug: one vendor's
+  // API doors (openai-chat + openai-responses) collapse into the vendor's
+  // single catalog entry, so resolve the credential provider from the
+  // declared dep key ("<dep>_api_key" → vendor). A keyed model always
+  // carries a dep key (the platform catalog guarantees it; null = keyless,
+  // returned above).
+  const credentialProvider = model.depKey
+    ? model.depKey.replace(/_api_key$/, "")
+    : model.provider;
+  const meta = credentials
+    ? providerMeta(credentials.catalog, credentialProvider)
+    : null;
+  const hasKey = credentials?.hasKey[credentialProvider] ?? false;
   const providerLabel = meta?.label ?? model.provider;
   return hasKey
     ? { status: "connected", providerLabel }
-    : { status: "missing", providerLabel, provider: meta ? model.provider : null };
+    : { status: "missing", providerLabel, provider: meta ? credentialProvider : null };
 }
 
 /**

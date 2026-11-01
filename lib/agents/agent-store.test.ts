@@ -181,7 +181,14 @@ describe("createAgent", () => {
     // downstream consumer — the run gate's keyless check — sees a legacy
     // snapshot. Assert the full shape survives a write + read.
     const requirements = {
-      model: { provider: "ollama", id: "llama3:8b", platformTier: false, requiresKey: false },
+      model: {
+        provider: "ollama",
+        id: "llama3:8b",
+        platformTier: false,
+        requiresKey: false,
+        depKey: null,
+        name: "Ollama",
+      },
       tools: [
         {
           name: "web_search",
@@ -201,9 +208,20 @@ describe("createAgent", () => {
     expect(loaded?.requirements).toEqual(requirements);
   });
 
-  it("keeps a legacy requirements snapshot legacy on read (no requiresKey default injected)", async () => {
+  it("keeps requiresKey absent on read when omitted (no default injected)", async () => {
+    // `in` + undefined: a default(true/false) in the schema would make
+    // requiresKey PRESENT on the parsed output; the gate's undefined-means-
+    // keyed contract requires it to be absent. depKey and name, by
+    // contrast, are REQUIRED now — a snapshot without them fails to parse
+    // (stale-snapshot fail-closed), it is never silently reshaped.
     const requirements = {
-      model: { provider: "openai", id: "gpt-4o-mini", platformTier: true },
+      model: {
+        provider: "openai",
+        id: "gpt-4o-mini",
+        platformTier: true,
+        depKey: "openai_api_key",
+        name: "OpenAIChat",
+      },
       tools: [],
       connectors: [],
     };

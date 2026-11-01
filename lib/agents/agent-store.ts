@@ -35,6 +35,19 @@ export const requirementsSchema = z.object({
     // indistinguishable from an explicit true and silently re-shape old
     // rows on read.
     requiresKey: z.boolean().optional(),
+    // The platform's DECLARED dep key (e.g. "openai_api_key") — the run
+    // gate consumes it instead of deriving `<slug>_api_key` from the slug,
+    // which would miss for door slugs (openai-responses shares
+    // openai_api_key). REQUIRED on keyed models (null = keyless): a
+    // snapshot without one is stale — the gate refuses to guess a dep key,
+    // because slug math is exactly what breaks for doors. Old snapshots
+    // (written before this field) fail this schema and must be re-saved.
+    depKey: z.string().min(1).nullable(),
+    // The registry binding name (e.g. "OpenAIResponses") — sent back with
+    // the component config so same-id doors bind exactly. Required for the
+    // same reason: an id-only config first-matches the registry on id,
+    // which silently runs the wrong door once a same-id door exists.
+    name: z.string().min(1),
   }),
   tools: z.array(
     z.object({
@@ -157,10 +170,12 @@ function parseRequirements(raw: unknown): AgentRequirements | undefined {
   if (raw == null) return undefined;
   const parsed = requirementsSchema.safeParse(raw);
   if (!parsed.success) {
-    // Fail closed (the agent runs ungated and the dispatcher rejects the
-    // run) but make the corruption OBSERVABLE — a silent undefined here
-    // looks identical to "snapshot-less row" and hides the cause.
-    console.warn("[agent-store] unparseable requirements blob — agent runs ungated", {
+    // Fail closed — but make the corruption OBSERVABLE. Dropping the blob
+    // silently would look identical to "snapshot-less row". The run gate
+    // blocks builder agents whose requirements came back undefined (a
+    // builder row always carries a snapshot; undefined ⇔ stale), so this
+    // never runs ungated — the warn is for the operator's logs.
+    console.warn("[agent-store] unparseable requirements blob — agent runs gated as stale", {
       error: parsed.error.message,
     });
     return undefined;

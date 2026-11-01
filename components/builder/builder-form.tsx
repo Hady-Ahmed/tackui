@@ -278,6 +278,7 @@ export function BuilderForm({
           provider: form.model.provider,
           platformTier: selectedModel?.platformTier ?? false,
           requiresKey: selectedModel?.requiresKey ?? true,
+          depKey: selectedModel?.depKey ?? null,
         }
       : null,
     credentials,

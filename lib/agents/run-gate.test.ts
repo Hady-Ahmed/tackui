@@ -75,7 +75,7 @@ function builderAgent(
 }
 
 const miniRequirements: NonNullable<AgentEntry["requirements"]> = {
-  model: { provider: "openai", id: "gpt-4o-mini", platformTier: true },
+  model: { provider: "openai", id: "gpt-4o-mini", platformTier: true, depKey: "openai_api_key", name: "OpenAIChat" },
   tools: [],
   connectors: [],
 };
@@ -139,6 +139,28 @@ describe("lib/agents/run-gate", () => {
     expect(mockGetCredentialSecrets).not.toHaveBeenCalled();
   });
 
+  it("BLOCKS a builder agent whose requirements are absent (stale/unparseable snapshot — never runs ungated on the platform's env-key fallback)", async () => {
+    // The fail-open regression this pins: a snapshot that fails the schema
+    // comes back undefined from the store. The gate used to treat that as
+    // "no requirements → nothing to check", the run proceeded with NO key
+    // delivered, and the platform's env-key fallback spent the PLATFORM's
+    // credential on a member run. Builder rows always carry requirements,
+    // so undefined ⇔ stale — fail closed with the re-save instruction.
+    mockGetAgent.mockResolvedValue(builderAgent(undefined));
+    const { checkBuilderRunGate } = await loadGate();
+    const result = await checkBuilderRunGate(
+      { id: "user-1", role: "member", name: "u", email: null, orgId: "org-1" },
+      "agent-1",
+    );
+    expect(result.response).not.toBeNull();
+    expect(result.response!.status).toBe(402);
+    const body = await result.response!.json();
+    expect(body.error).toMatch(/out of date/);
+    expect(body.code).toBe("AGENT_REQUIREMENTS_MISSING");
+    expect(result.contextItems).toEqual([]);
+    expect(mockGetCredentialSecrets).not.toHaveBeenCalled();
+  });
+
   it("returns the empty resolution when the agent does not exist", async () => {
     mockGetAgent.mockResolvedValue(null);
     const { checkBuilderRunGate } = await loadGate();
@@ -153,7 +175,7 @@ describe("lib/agents/run-gate", () => {
   it("does NOT 402 a keyless-provider model (requiresKey: false — the provider is excluded from the credentials catalog, so the requirement could never be satisfied)", async () => {
     mockGetAgent.mockResolvedValue(
       builderAgent({
-        model: { provider: "ollama", id: "llama3:8b", platformTier: false, requiresKey: false },
+        model: { provider: "ollama", id: "llama3:8b", platformTier: false, requiresKey: false, depKey: null, name: "Ollama" },
         tools: [],
         connectors: [],
       }),
@@ -168,10 +190,10 @@ describe("lib/agents/run-gate", () => {
     expect(result.contextItems).toEqual([]);
   });
 
-  it("still 402s a keyed model on a LEGACY snapshot without the requiresKey field (undefined !== false)", async () => {
+  it("still 402s a keyed model when requiresKey is absent (undefined !== false)", async () => {
     mockGetAgent.mockResolvedValue(
       builderAgent({
-        model: { provider: "openai", id: "gpt-4o-mini", platformTier: false },
+        model: { provider: "openai", id: "gpt-4o-mini", platformTier: false, depKey: "openai_api_key", name: "OpenAIChat" },
         tools: [],
         connectors: [],
       }),
@@ -218,7 +240,7 @@ describe("lib/agents/run-gate", () => {
   it("402s a model when the runner has no key for its provider", async () => {
     mockGetAgent.mockResolvedValue(
       builderAgent({
-        model: { provider: "openai", id: "gpt-5", platformTier: false },
+        model: { provider: "openai", id: "gpt-5", platformTier: false, depKey: "openai_api_key", name: "OpenAIChat" },
         tools: [],
         connectors: [],
       }),
@@ -239,7 +261,7 @@ describe("lib/agents/run-gate", () => {
   it("injects the runner's model key from its field map", async () => {
     mockGetAgent.mockResolvedValue(
       builderAgent({
-        model: { provider: "openai", id: "gpt-5", platformTier: false },
+        model: { provider: "openai", id: "gpt-5", platformTier: false, depKey: "openai_api_key", name: "OpenAIChat" },
         tools: [],
         connectors: [],
       }),
@@ -256,10 +278,68 @@ describe("lib/agents/run-gate", () => {
     ]);
   });
 
+  it("resolves a door-slug model's key through the declared dep key (openai-responses shares the openai credential)", async () => {
+    // A responses-door agent's snapshot names the door slug; the key lives
+    // under the VENDOR. The declared depKey routes the lookup — slug math
+    // ("openai-responses_api_key") would demand a key nothing can provide.
+    mockGetAgent.mockResolvedValue(
+      builderAgent({
+        model: {
+          provider: "openai-responses",
+          id: "gpt-5.6-luna",
+          platformTier: false,
+          depKey: "openai_api_key",
+          name: "OpenAIResponses",
+        },
+        tools: [],
+        connectors: [],
+      }),
+    );
+    mockGetCredentialSecrets.mockResolvedValue({ openai: { api_key: "sk-runner" } });
+    const { checkBuilderRunGate } = await loadGate();
+    const result = await checkBuilderRunGate(
+      { id: "user-1", role: "member", name: "u", email: null, orgId: "org-1" },
+      "agent-1",
+    );
+    expect(result.response).toBeNull();
+    expect(result.contextItems).toEqual([
+      { description: "openai_api_key", value: "sk-runner" },
+    ]);
+  });
+
+  it("402s a door-slug model with the VENDOR label when the shared key is missing", async () => {
+    // The banner names the vendor the key is saved under ("OpenAI"), not
+    // the door slug — the member's fix is the same key either way.
+    mockGetAgent.mockResolvedValue(
+      builderAgent({
+        model: {
+          provider: "openai-responses",
+          id: "gpt-5.6-luna",
+          platformTier: false,
+          depKey: "openai_api_key",
+          name: "OpenAIResponses",
+        },
+        tools: [],
+        connectors: [],
+      }),
+    );
+    mockGetCredentialSecrets.mockResolvedValue({});
+    const { checkBuilderRunGate } = await loadGate();
+    const result = await checkBuilderRunGate(
+      { id: "user-1", role: "member", name: "u", email: null, orgId: "org-1" },
+      "agent-1",
+    );
+    expect(result.response).not.toBeNull();
+    expect(result.response!.status).toBe(402);
+    const body = await result.response!.json();
+    expect(body.error).toContain("OpenAI key");
+    expect(body.error).not.toContain("Openai Responses");
+  });
+
   it("injects a BYOK tool key from the legacy single-dep snapshot (pre-multi-credential shape)", async () => {
     mockGetAgent.mockResolvedValue(
       builderAgent({
-        model: { provider: "openai", id: "gpt-5", platformTier: false },
+        model: { provider: "openai", id: "gpt-5", platformTier: false, depKey: "openai_api_key", name: "OpenAIChat" },
         tools: [
           {
             name: "tavily_search",
@@ -294,7 +374,7 @@ describe("lib/agents/run-gate", () => {
   it("delivers EVERY dep of a multi-credential toolkit's contract when all fields are saved", async () => {
     mockGetAgent.mockResolvedValue(
       builderAgent({
-        model: { provider: "openai", id: "gpt-5", platformTier: false },
+        model: { provider: "openai", id: "gpt-5", platformTier: false, depKey: "openai_api_key", name: "OpenAIChat" },
         tools: [
           {
             name: "search_x",
@@ -354,7 +434,7 @@ describe("lib/agents/run-gate", () => {
   it("402s a multi-credential toolkit when ANY field of the contract is missing (all-or-nothing)", async () => {
     mockGetAgent.mockResolvedValue(
       builderAgent({
-        model: { provider: "openai", id: "gpt-5", platformTier: false },
+        model: { provider: "openai", id: "gpt-5", platformTier: false, depKey: "openai_api_key", name: "OpenAIChat" },
         tools: [
           {
             name: "search_x",
@@ -537,7 +617,7 @@ describe("lib/agents/run-gate", () => {
   it("aggregates every blocker into one 402", async () => {
     mockGetAgent.mockResolvedValue(
       builderAgent({
-        model: { provider: "openai", id: "gpt-5", platformTier: false },
+        model: { provider: "openai", id: "gpt-5", platformTier: false, depKey: "openai_api_key", name: "OpenAIChat" },
         tools: [{ name: "unknown_tool", requiresKey: "tavily_api_key", platformFallback: false }],
         connectors: ["github", "linear"],
       }),
@@ -588,7 +668,7 @@ describe("lib/agents/run-gate — contract present despite null requiresKey", ()
   it("402s with the contract's copy when requiresKey is null but credentials exist", async () => {
     mockGetAgent.mockResolvedValue(
       builderAgent({
-        model: { provider: "openai", id: "gpt-5", platformTier: false },
+        model: { provider: "openai", id: "gpt-5", platformTier: false, depKey: "openai_api_key", name: "OpenAIChat" },
         tools: [
           {
             name: "search_x",
@@ -616,7 +696,7 @@ describe("lib/agents/run-gate — contract present despite null requiresKey", ()
   it("delivers the contract when the runner saved its fields", async () => {
     mockGetAgent.mockResolvedValue(
       builderAgent({
-        model: { provider: "openai", id: "gpt-5", platformTier: false },
+        model: { provider: "openai", id: "gpt-5", platformTier: false, depKey: "openai_api_key", name: "OpenAIChat" },
         tools: [
           {
             name: "search_x",

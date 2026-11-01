@@ -94,6 +94,19 @@ export interface AgentosModel {
   platform_tier: boolean;
   /** false for keyless providers (e.g. ollama) — no credential demanded. */
   requires_key: boolean;
+  /**
+   * The vendor's DECLARED dependency key (e.g. "openai_api_key") — never
+   * derived from the slug, which would miss for door slugs
+   * ("openai-responses" shares the chat door's key). Null for keyless
+   * providers.
+   */
+  dep_key: string | null;
+  /**
+   * The agno registry binding name (e.g. "OpenAIResponses") — component
+   * configs carry `model: { id, name }` so same-id doors bind exactly
+   * instead of first-matching on id.
+   */
+  name: string;
 }
 
 /** One credential of a toolkit's delivery contract (scan-derived). */
@@ -399,7 +412,11 @@ export function buildComponentConfig(
   return {
     id: componentId,
     name: spec.name,
-    model: { id: model.id },
+    // Binding name rides along so the registry binds this component to the
+    // exact model instance — agno's resolve_model matches (id, name), which
+    // disambiguates same-id API doors (openai-chat vs openai-responses).
+    // Without it, a same-id second door would first-match on id alone.
+    model: { id: model.id, name: model.name },
     instructions: [spec.instructions],
     // History lives Agno-side for builder agents — these flags are part of
     // the stored config contract (sessions align via AG-UI session_id).
@@ -427,6 +444,14 @@ export function buildRequirements(
       id: model.id,
       platformTier: model.platform_tier,
       requiresKey: model.requires_key,
+      // The platform's declared dep key — the run gate consumes this instead
+      // of deriving `<slug>_api_key` from the provider slug, which would
+      // miss for door slugs (openai-responses shares openai_api_key). Null
+      // for keyless providers.
+      depKey: model.dep_key,
+      // The registry binding name — buildComponentConfig sends it back with
+      // the config so same-id doors bind exactly.
+      name: model.name,
     },
     tools: spec.tools.map((t) => {
       const entry = toolByName.get(t.name);

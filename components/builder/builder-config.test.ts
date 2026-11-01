@@ -22,11 +22,11 @@ import {
 } from "./builder-config";
 
 const MODELS: PlatformModel[] = [
-  { provider: "openai", id: "gpt-4o-mini", platformTier: true, requiresKey: true },
-  { provider: "anthropic", id: "claude-3-5-sonnet", platformTier: false, requiresKey: true },
-  { provider: "openai", id: "gpt-4o", platformTier: false, requiresKey: true },
-  { provider: "openrouter", id: "meta-llama/llama-3.1-8b", platformTier: true, requiresKey: true },
-  { provider: "ollama", id: "llama3", platformTier: false, requiresKey: false },
+  { provider: "openai", id: "gpt-4o-mini", platformTier: true, requiresKey: true, depKey: "openai_api_key" },
+  { provider: "anthropic", id: "claude-3-5-sonnet", platformTier: false, requiresKey: true, depKey: "anthropic_api_key" },
+  { provider: "openai", id: "gpt-4o", platformTier: false, requiresKey: true, depKey: "openai_api_key" },
+  { provider: "openrouter", id: "meta-llama/llama-3.1-8b", platformTier: true, requiresKey: true, depKey: "openrouter_api_key" },
+  { provider: "ollama", id: "llama3", platformTier: false, requiresKey: false, depKey: null },
 ];
 
 const CATALOG: CredentialCatalog = {
@@ -187,7 +187,7 @@ describe("providerForDepKeyInCatalog", () => {
 describe("modelKeyState", () => {
   it("TIER DORMANCY: a platform-tier model without a key reports missing (no platform badge)", () => {
     expect(
-      modelKeyState({ provider: "openai", platformTier: true, requiresKey: true }, credentialsState([])),
+      modelKeyState({ provider: "openai", platformTier: true, requiresKey: true, depKey: "openai_api_key" }, credentialsState([])),
     ).toEqual({
       status: "missing",
       providerLabel: "Openai",
@@ -197,7 +197,7 @@ describe("modelKeyState", () => {
 
   it("reports connected when the runner has the provider key", () => {
     expect(
-      modelKeyState({ provider: "openai", platformTier: false, requiresKey: true }, credentialsState(["openai"])),
+      modelKeyState({ provider: "openai", platformTier: false, requiresKey: true, depKey: "openai_api_key" }, credentialsState(["openai"])),
     ).toEqual({
       status: "connected",
       providerLabel: "Openai",
@@ -206,7 +206,7 @@ describe("modelKeyState", () => {
 
   it("reports missing when there is no key", () => {
     expect(
-      modelKeyState({ provider: "openai", platformTier: false, requiresKey: true }, credentialsState([])),
+      modelKeyState({ provider: "openai", platformTier: false, requiresKey: true, depKey: "openai_api_key" }, credentialsState([])),
     ).toEqual({
       status: "missing",
       providerLabel: "Openai",
@@ -216,13 +216,13 @@ describe("modelKeyState", () => {
 
   it("reports none for a keyless provider (e.g. ollama) — nothing to connect", () => {
     expect(
-      modelKeyState({ provider: "ollama", platformTier: false, requiresKey: false }, credentialsState([])),
+      modelKeyState({ provider: "ollama", platformTier: false, requiresKey: false, depKey: null }, credentialsState([])),
     ).toEqual({ status: "none" });
   });
 
   it("labels unknown providers with the raw provider id and no connect form", () => {
     expect(
-      modelKeyState({ provider: "mystery", platformTier: false, requiresKey: true }, credentialsState([])),
+      modelKeyState({ provider: "mystery", platformTier: false, requiresKey: true, depKey: "mystery_api_key" }, credentialsState([])),
     ).toEqual({
       status: "missing",
       providerLabel: "mystery",
@@ -232,6 +232,59 @@ describe("modelKeyState", () => {
 
   it("returns null when no model is selected", () => {
     expect(modelKeyState(null, credentialsState([]))).toBeNull();
+  });
+
+  it("resolves a door slug through the declared dep key — vendor label, vendor hasKey", () => {
+    // A responses-door model's credential is the VENDOR's (the catalog has
+    // no "openai-responses" entry — doors collapse into "openai"). The
+    // badge must say "Openai" (the vendor entry's label) and report
+    // connected from the vendor's saved key.
+    expect(
+      modelKeyState(
+        {
+          provider: "openai-responses",
+          platformTier: false,
+          requiresKey: true,
+          depKey: "openai_api_key",
+        },
+        credentialsState(["openai"]),
+      ),
+    ).toEqual({ status: "connected", providerLabel: "Openai" });
+  });
+
+  it("a missing door key points the connect CTA at the vendor entry", () => {
+    expect(
+      modelKeyState(
+        {
+          provider: "openai-responses",
+          platformTier: false,
+          requiresKey: true,
+          depKey: "openai_api_key",
+        },
+        credentialsState([]),
+      ),
+    ).toEqual({
+      status: "missing",
+      providerLabel: "Openai",
+      provider: "openai",
+    });
+  });
+
+  it("falls back to the raw slug label when the catalog is unavailable", () => {
+    // No credentials state → no label and no hasKey; the vendor resolution
+    // itself is pure dep-key math, so the CTA provider stays correct.
+    const state = modelKeyState(
+      {
+        provider: "openai-responses",
+        platformTier: false,
+        requiresKey: true,
+        depKey: "openai_api_key",
+      },
+      null,
+    );
+    if (!state || state.status !== "missing") throw new Error("expected a missing state");
+    expect(state.providerLabel).toBe("openai-responses"); // no catalog → no label; raw slug fallback
+    expect(state.provider).toBeNull(); // no catalog → no connect form to point at
   });
 });
 

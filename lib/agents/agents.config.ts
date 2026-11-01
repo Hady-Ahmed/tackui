@@ -40,7 +40,23 @@ export interface AgentRequirements {
    * credentials catalog — the gate must not 402 a run that can never
    * satisfy its own requirement.
    */
-  model: { provider: string; id: string; platformTier: boolean; requiresKey?: boolean };
+  model: {
+    provider: string;
+    id: string;
+    platformTier: boolean;
+    requiresKey?: boolean;
+    /**
+     * The platform's declared dep key (e.g. "openai_api_key") — the run
+     * gate consumes it instead of deriving from the slug. Null for keyless
+     * providers; the snapshot schema rejects a KEYED model without one.
+     */
+    depKey: string | null;
+    /**
+     * The agno registry binding name (e.g. "OpenAIResponses") — sent back
+     * with the component config so same-id doors bind exactly.
+     */
+    name: string;
+  };
   /**
    * Tool requirements snapshot — sourced from the platform tools catalog
    * at create/update time. `requiresKey` is the AG-UI context dep key the

@@ -17,12 +17,13 @@ stores. For the general registry mechanics see
 credentials — at run time, never stored in the definition.**
 
 A builder agent's definition carries only *what it needs*: a model
-(provider + id + platform tier), tool names with their credential
-requirements, and connector names. Keys and tokens are never written
-into the definition. At run time the runner's own BYOK keys (per-user
-`credentials` table) and the org's connector config (`connectors`
-table) are resolved fresh and delivered per-run as AG-UI context items.
-Nothing is cached agent-side, and nothing is persisted on the AgentOS.
+(provider + id + platform tier + declared dep key + registry binding
+name), tool names with their credential requirements, and connector
+names. Keys and tokens are never written into the definition. At run
+time the runner's own BYOK keys (per-user `credentials` table) and the
+org's connector config (`connectors` table) are resolved fresh and
+delivered per-run as AG-UI context items. Nothing is cached agent-side,
+and nothing is persisted on the AgentOS.
 
 ## Where an agent lives (two places, two repos)
 
@@ -76,6 +77,19 @@ is re-derived server-side at create/update time:
   publishing (which wakes the platform-key free tier) never inherits a
   client-trusted input. A forged `platformTier: true` must never come
   from the wire.
+- **Model `dep_key` and binding `name`** also come from the same catalog
+  (server-side; the wire the client sends stays `model: {provider, id}`).
+  A vendor may offer several API *doors* — agno's `openai` module ships
+  the chat-completions class (`openai`) and the Responses class
+  (`openai-responses`), each under its own slug. Both doors share the
+  vendor's single key (`dep_key` derives from the agno module, never the
+  slug — slug math would demand an `openai-responses_api_key` nobody can
+  save), and the same model id may exist under both doors: the stored
+  component config carries `model: {id, name}` and agno's registry
+  disambiguates same-id doors by the class name. Snapshots written
+  before these fields simply omit them; the run gate then falls back to
+  the mechanical slug derivation, which is correct for every pre-door
+  provider (one class per vendor there).
 - **Tool `parameters`** (json-schema) come from the AgentOS tools
   catalog (`GET /platform/tools`); the client sends tool names only,
   validated against the live catalog at create/update time (an unknown

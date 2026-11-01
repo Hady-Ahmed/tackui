@@ -55,7 +55,7 @@ import { getSyntheticAdmin } from "@/lib/auth/context";
 import { runMigrations } from "@/lib/db/migrate";
 
 const MODELS = [
-  { provider: "openai", id: "gpt-4o-mini", platform_tier: true, requires_key: true },
+  { provider: "openai", id: "gpt-4o-mini", platform_tier: true, requires_key: true, dep_key: "openai_api_key", name: "OpenAIChat" },
 ];
 
 let testOrg: string;
@@ -88,7 +88,7 @@ async function createFixture(
       authorUserId: authorId,
       remoteAgentId: "comp-1",
       requirements: {
-        model: { provider: "openai", id: "gpt-4o-mini", platformTier: true },
+        model: { provider: "openai", id: "gpt-4o-mini", platformTier: true, depKey: "openai_api_key", name: "OpenAIChat" },
         tools: [],
         connectors: [],
       },
@@ -225,7 +225,7 @@ describe("PATCH /api/agents/builder/[id]", () => {
 
   it("re-derives requirements from the catalog on a model change", async () => {
     mockFetchModels.mockResolvedValue([
-      { provider: "openai", id: "gpt-4o-mini", platform_tier: true, requires_key: true },
+      { provider: "openai", id: "gpt-4o-mini", platform_tier: true, requires_key: true, dep_key: "openai_api_key", name: "OpenAIChat" },
     ]);
     const res = await patchAgent(agent.id, {
       model: { provider: "openai", id: "gpt-4o-mini" },

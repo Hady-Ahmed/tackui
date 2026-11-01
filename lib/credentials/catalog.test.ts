@@ -10,9 +10,9 @@ import {
 } from "./catalog";
 
 const MODELS: AgentosModel[] = [
-  { provider: "openai", id: "gpt-4o-mini", platform_tier: true, requires_key: true },
-  { provider: "openrouter", id: "z-ai/glm-5.3-flash", platform_tier: false, requires_key: true },
-  { provider: "ollama", id: "llama3", platform_tier: false, requires_key: false },
+  { provider: "openai", id: "gpt-4o-mini", platform_tier: true, requires_key: true, dep_key: "openai_api_key", name: "OpenAIChat" },
+  { provider: "openrouter", id: "z-ai/glm-5.3-flash", platform_tier: false, requires_key: true, dep_key: "openrouter_api_key", name: "OpenRouter" },
+  { provider: "ollama", id: "llama3", platform_tier: false, requires_key: false, dep_key: null, name: "Ollama" },
 ];
 
 const TOOLS: AgentosTool[] = [
@@ -71,6 +71,38 @@ describe("deriveCredentialsCatalog", () => {
   it("skips keyless model providers (requires_key false — e.g. ollama)", () => {
     const catalog = deriveCredentialsCatalog(MODELS, []);
     expect(catalog.ollama).toBeUndefined();
+  });
+
+  it("collapses API doors of one vendor into a single credential (declared dep_key wins over slug)", () => {
+    // One vendor's API doors (openai chat + openai-responses) share the
+    // vendor's key — the platform declares "openai_api_key" for both, so
+    // the credentials page shows ONE "OpenAI" entry, not a second form the
+    // runner can never fill.
+    const doors: AgentosModel[] = [
+      { provider: "openai", id: "gpt-5.6-luna", platform_tier: false, requires_key: true, dep_key: "openai_api_key", name: "OpenAIChat" },
+      { provider: "openai-responses", id: "gpt-5.6-luna", platform_tier: false, requires_key: true, dep_key: "openai_api_key", name: "OpenAIResponses" },
+      { provider: "azure-openai-responses", id: "gpt-4o", platform_tier: false, requires_key: true, dep_key: "azure_api_key", name: "AzureOpenAIResponses" },
+    ];
+    const catalog = deriveCredentialsCatalog(doors, []);
+    expect(Object.keys(catalog).sort()).toEqual(["azure", "openai"]);
+    expect(catalog.openai).toMatchObject({
+      kind: "llm",
+      keyName: "openai_api_key",
+      label: "OpenAI",
+    });
+    expect(catalog.azure.label).toBe("Azure");
+  });
+
+  it("skips a keyed model that lacks a declared dep_key (fail-closed, never slug-guessed)", () => {
+    // dep_key is declared on every keyed model in practice; the type allows
+    // null on a keyed model (TS can't express the dependency), so the guard
+    // exists: such a model must NOT be slug-guessed into the catalog —
+    // slug math is exactly what breaks for door providers.
+    const broken: AgentosModel[] = [
+      { provider: "openai", id: "gpt-4o-mini", platform_tier: false, requires_key: true, dep_key: null, name: "OpenAIChat" },
+    ];
+    const catalog = deriveCredentialsCatalog(broken, []);
+    expect(catalog).toEqual({});
   });
 
   it("derives tool providers from the toolkit slug with the full field contract", () => {

@@ -71,8 +71,8 @@ import { checkAgentCountLimit } from "@/lib/plans/enforcement";
 import { NextResponse } from "next/server";
 
 const MODELS = [
-  { provider: "openai", id: "gpt-4o-mini", platform_tier: true, requires_key: true },
-  { provider: "openai", id: "gpt-5", platform_tier: false, requires_key: true },
+  { provider: "openai", id: "gpt-4o-mini", platform_tier: true, requires_key: true, dep_key: "openai_api_key", name: "OpenAIChat" },
+  { provider: "openai", id: "gpt-5", platform_tier: false, requires_key: true, dep_key: "openai_api_key", name: "OpenAIChat" },
 ];
 const TOOLS = [
   {
@@ -243,7 +243,16 @@ describe("POST /api/agents/builder", () => {
       // assertion is load-bearing: a zod schema that strips the field
       // (the undeclared-key default) would satisfy this toEqual and hide
       // the strip from every downstream reader.
-      model: { provider: "openai", id: "gpt-4o-mini", platformTier: true, requiresKey: true },
+      model: {
+        provider: "openai",
+        id: "gpt-4o-mini",
+        platformTier: true,
+        requiresKey: true,
+        // The declared dep key + registry binding name round-trip from the
+        // catalog — load-bearing the same way requiresKey is.
+        depKey: "openai_api_key",
+        name: "OpenAIChat",
+      },
       tools: [
         {
           name: "web_search",
@@ -268,7 +277,9 @@ describe("POST /api/agents/builder", () => {
         description: "A helper agent",
         config: expect.objectContaining({
           id: expect.any(String),
-          model: { id: "gpt-4o-mini" },
+          // The binding name rides along — agno's registry matches (id,
+          // name), which disambiguates same-id API doors.
+          model: { id: "gpt-4o-mini", name: "OpenAIChat" },
           instructions: ["Be helpful."],
           tools: [
             {

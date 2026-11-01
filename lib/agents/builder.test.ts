@@ -115,6 +115,8 @@ describe("buildRequirements write-boundary validation", () => {
     id: "gpt-5",
     platform_tier: true,
     requires_key: true,
+    dep_key: "openai_api_key",
+    name: "OpenAIChat",
   };
   const tool = (over: Partial<AgentosTool> = {}): AgentosTool => ({
     name: "tavily_search",
@@ -151,4 +153,28 @@ describe("buildRequirements write-boundary validation", () => {
     const req = buildRequirements(spec, model, [tool()]);
     expect(requirementsSchema.safeParse(req).success).toBe(true);
   });
+
+  it("persists the declared dep key and binding name for door providers", () => {
+    // A responses-door model carries the platform's declared dep_key and
+    // the agno registry binding name into the snapshot — the run gate uses
+    // the dep key (vendor-shared credential), and the component config
+    // sends the name so same-id doors bind exactly.
+    const doorModel: AgentosModel = {
+      provider: "openai-responses",
+      id: "gpt-5.6-luna",
+      platform_tier: false,
+      requires_key: true,
+      dep_key: "openai_api_key",
+      name: "OpenAIResponses",
+    };
+    const req = buildRequirements(spec, doorModel, [tool()]);
+    expect(req.model).toMatchObject({
+      provider: "openai-responses",
+      depKey: "openai_api_key",
+      name: "OpenAIResponses",
+    });
+    // And the snapshot still parses with the read schema.
+    expect(requirementsSchema.safeParse(req).success).toBe(true);
+  });
+
 });

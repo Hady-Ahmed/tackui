@@ -34,7 +34,6 @@
 import { NextResponse } from "next/server";
 import { getCredentialSecrets } from "@/lib/credentials/credential-store";
 import {
-  depKeyForProvider,
   fieldForDepKey,
   prettifyProviderLabel,
   providerForDepKey,
@@ -85,8 +84,31 @@ export async function checkBuilderRunGate(
   agentId: string,
 ): Promise<BuilderRunResolution> {
   const agent: AgentEntry | null = await getAgent(agentId, user.orgId);
-  if (!agent || agent.origin !== "builder" || !agent.requirements) {
+  if (!agent || agent.origin !== "builder") {
     return emptyBuilderRunResolution();
+  }
+  if (!agent.requirements) {
+    // Builder rows ALWAYS carry a requirements snapshot — the builder
+    // writes it at create and every config update. `undefined` here means
+    // the stored blob FAILED the schema (parseRequirements logs and drops
+    // it), i.e. a stale snapshot written before the current required
+    // fields. Returning the empty resolution would skip every check AND
+    // deliver no key — and the platform's env-key fallback would then run
+    // the agent on the PLATFORM's credential, the exact leak this gate
+    // exists to prevent. Fail closed with the re-save instruction.
+    return {
+      response: NextResponse.json(
+        {
+          error:
+            "This agent's saved requirements are out of date — open it in the agent builder and save it again to run it.",
+          code: "AGENT_REQUIREMENTS_MISSING",
+        },
+        { status: 402 },
+      ),
+      contextItems: [],
+      platformKeyRun: false,
+      reservedDepKeys: [],
+    };
   }
   const requirements = agent.requirements;
 
@@ -103,30 +125,47 @@ export async function checkBuilderRunGate(
   // future), but the gate IGNORES both.
   const platformKeyRun = false;
 
-  // --- Model: the runner's own key. The model dep key follows the wire ---
-  // contract the AgentOS dispatcher resolves (<provider>_api_key — see
-  // credentials.py); the field is the universal "api_key" constructor arg.
-  // A snapshot that predates the requiresKey field treats every model as
-  // keyed (undefined !== false) — keyless providers (ollama) are excluded
-  // from the credentials catalog, so demanding a key for one would be a
-  // requirement the runner can never satisfy.
-  const modelProvider = requirements.model.provider;
-  const modelKeyName = depKeyForProvider(modelProvider);
-  const modelKey = runnerFields[modelProvider]?.api_key;
+  // --- Model: the runner's own key. The dep key is DECLARED, not guessed ---
+  // The requirements snapshot carries the platform's declared dep_key
+  // (written at build time from the live catalog) — critical for door
+  // slugs: openai-responses shares openai_api_key with the chat door, and
+  // slug math would demand a key nothing can provide. The credential
+  // itself is looked up under the VENDOR (providerForDepKey of the dep
+  // key), not the door slug. A keyed model whose snapshot lacks a dep key
+  // is a stale snapshot (the schema rejects it at read time) — fail
+  // closed with a re-save instruction; never guess a dep key.
+  const modelKeyName = requirements.model.depKey;
+  const modelKey =
+    modelKeyName ? runnerFields[providerForDepKey(modelKeyName)]?.api_key : undefined;
   // The exact dep-key set this gate owns. Derived from what the gate
   // actually delivers (model key + every tool contract field) — not from
   // a maintained list, which would rot the first time a contract grows a
-  // non-_api_key field. mcp_connectors is the only non-contract key.
-  const reservedDepKeys = new Set<string>(["mcp_connectors", modelKeyName]);
+  // non-_api_key field. mcp_connectors is the only non-contract key. A
+  // stale snapshot (no declared dep key on a keyed model) reserves nothing
+  // model-side — the blocker below stops the run before delivery anyway.
+  const reservedDepKeys = new Set<string>([
+    "mcp_connectors",
+    ...(modelKeyName ? [modelKeyName] : []),
+  ]);
   if (requirements.model.requiresKey === false) {
     // Keyless provider (e.g. ollama) — no credential demanded, and the
     // provider is excluded from the credentials catalog, so demanding a
     // key would be a requirement the runner can never satisfy. Nothing
     // delivered for the model.
+  } else if (!modelKeyName) {
+    // Stale snapshot: written before the declared dep key existed. The
+    // schema rejects it at read time; this branch guards in-memory
+    // callers. Guessing `<slug>_api_key` here would silently demand a
+    // key nobody can save for door-slug providers — refuse instead.
+    blockers.push(
+      "This agent's saved requirements are out of date — open it in the agent builder and save it again to run it.",
+    );
   } else if (modelKey) {
     contextItems.push({ description: modelKeyName, value: modelKey });
   } else {
-    const providerLabel = prettifyProviderLabel(modelProvider);
+    // The banner names the VENDOR the key is saved under ("OpenAI"), not
+    // the door slug — the member's fix is the same key either way.
+    const providerLabel = prettifyProviderLabel(providerForDepKey(modelKeyName));
     blockers.push(
       `This agent runs on ${requirements.model.id} — add your own ${providerLabel} key to run it.`,
     );

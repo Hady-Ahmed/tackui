@@ -415,7 +415,7 @@ describe("managed agents (catalog installs) — fully locked", () => {
         authorUserId: "someone-else",
         remoteAgentId: "remote-1",
         requirements: {
-          model: { provider: "openai", id: "gpt-4o-mini", platformTier: false, requiresKey: true },
+          model: { provider: "openai", id: "gpt-4o-mini", platformTier: false, requiresKey: true, depKey: "openai_api_key", name: "OpenAIChat" },
           tools: [],
           connectors: [],
         },
