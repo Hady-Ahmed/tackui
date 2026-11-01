@@ -270,6 +270,26 @@ describe("modelKeyState", () => {
     });
   });
 
+  it("shows keyed-without-depKey as missing with no connect form (never slug-guessed)", () => {
+    // A keyed model whose platform row carries no dep key is a version-skew
+    // or broken-catalog case — the live platform always declares one. The
+    // honest badge is "missing" with NO connect target: guessing the vendor
+    // from the slug is exactly the wrong-shape the doors work removed, and
+    // the run gate 402s the run regardless.
+    const state = modelKeyState(
+      {
+        provider: "openai-responses",
+        platformTier: false,
+        requiresKey: true,
+        depKey: null,
+      },
+      credentialsState([]),
+    );
+    if (!state || state.status !== "missing") throw new Error("expected a missing state");
+    expect(state.providerLabel).toBe("openai-responses");
+    expect(state.provider).toBeNull();
+  });
+
   it("falls back to the raw slug label when the catalog is unavailable", () => {
     // No credentials state → no label and no hasKey; the vendor resolution
     // itself is pure dep-key math, so the CTA provider stays correct.

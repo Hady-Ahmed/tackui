@@ -17,8 +17,10 @@ const agentOriginSchema = z.enum(AGENT_ORIGINS);
 /**
  * The shape of the per-agent requirements snapshot stored with the row.
  * One schema, two consumers: `parseRequirements` gates every READ (fail
- * closed — an unparseable blob drops the requirements and the agent runs
- * ungated, loudly logged), and `buildRequirements` validates every WRITE
+ * closed — an unparseable blob drops the requirements and parseRequirements
+ * logs loudly; the run gate then BLOCKS builder agents whose requirements
+ * came back undefined, because a builder row always carries a snapshot —
+ * undefined ⇔ stale), and `buildRequirements` validates every WRITE
  * so a malformed platform-catalog row surfaces as a 4xx at save time
  * instead of silently ungateing the agent later.
  */

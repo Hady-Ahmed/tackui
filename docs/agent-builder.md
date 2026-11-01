@@ -80,16 +80,21 @@ is re-derived server-side at create/update time:
 - **Model `dep_key` and binding `name`** also come from the same catalog
   (server-side; the wire the client sends stays `model: {provider, id}`).
   A vendor may offer several API *doors* — agno's `openai` module ships
-  the chat-completions class (`openai`) and the Responses class
+  the chat-completions class (`openai-chat`) and the Responses class
   (`openai-responses`), each under its own slug. Both doors share the
   vendor's single key (`dep_key` derives from the agno module, never the
   slug — slug math would demand an `openai-responses_api_key` nobody can
   save), and the same model id may exist under both doors: the stored
   component config carries `model: {id, name}` and agno's registry
-  disambiguates same-id doors by the class name. Snapshots written
-  before these fields simply omit them; the run gate then falls back to
-  the mechanical slug derivation, which is correct for every pre-door
-  provider (one class per vendor there).
+  disambiguates same-id doors by the class name. Both fields are
+  REQUIRED on the snapshot: a keyed model without a declared dep key is
+  a stale snapshot — the schema rejects it at read time and the run gate
+  refuses the run with a 402 telling the member to re-save the agent in
+  the agent builder. The gate never guesses a dep key: slug math is
+  exactly what breaks for door slugs, and a guess would demand a key
+  nobody can save — or, worse, skip the demand entirely and let the
+  platform's env-key fallback spend the platform's credential on a
+  member run.
 - **Tool `parameters`** (json-schema) come from the AgentOS tools
   catalog (`GET /platform/tools`); the client sends tool names only,
   validated against the live catalog at create/update time (an unknown

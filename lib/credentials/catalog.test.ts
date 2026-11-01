@@ -1,8 +1,7 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import type { AgentosModel, AgentosTool } from "@/lib/agents/builder";
 import {
   deriveCredentialsCatalog,
-  depKeyForProvider,
   fieldForDepKey,
   prettifyProviderLabel,
   prettifyFieldLabel,
@@ -93,16 +92,22 @@ describe("deriveCredentialsCatalog", () => {
     expect(catalog.azure.label).toBe("Azure");
   });
 
-  it("skips a keyed model that lacks a declared dep_key (fail-closed, never slug-guessed)", () => {
+  it("skips a keyed model that lacks a declared dep_key (fail-closed, never slug-guessed) and warns", () => {
     // dep_key is declared on every keyed model in practice; the type allows
     // null on a keyed model (TS can't express the dependency), so the guard
     // exists: such a model must NOT be slug-guessed into the catalog —
-    // slug math is exactly what breaks for door providers.
+    // slug math is exactly what breaks for door providers. The skip is
+    // loud: the page would otherwise offer no entry for that vendor with
+    // zero explanation.
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
     const broken: AgentosModel[] = [
       { provider: "openai", id: "gpt-4o-mini", platform_tier: false, requires_key: true, dep_key: null, name: "OpenAIChat" },
     ];
     const catalog = deriveCredentialsCatalog(broken, []);
     expect(catalog).toEqual({});
+    expect(warn).toHaveBeenCalledTimes(1);
+    expect(String(warn.mock.calls[0][0])).toMatch(/openai:gpt-4o-mini.*no dep_key/);
+    warn.mockRestore();
   });
 
   it("derives tool providers from the toolkit slug with the full field contract", () => {
@@ -158,10 +163,9 @@ describe("deriveCredentialsCatalog", () => {
   });
 });
 
-describe("dep-key ↔ provider slug convention", () => {
-  it("maps both directions", () => {
+describe("dep-key → provider slug convention", () => {
+  it("strips the vendor from a conforming dep key", () => {
     expect(providerForDepKey("tavily_api_key")).toBe("tavily");
-    expect(depKeyForProvider("tavily")).toBe("tavily_api_key");
   });
 
   it("passes through non-conforming keys unchanged", () => {

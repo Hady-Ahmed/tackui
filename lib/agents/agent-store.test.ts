@@ -230,11 +230,32 @@ describe("createAgent", () => {
       TEST_ORG,
     );
     const loaded = await getAgent(created.id, TEST_ORG);
-    // `in` + undefined: a default(true/false) in the schema would make
-    // requiresKey PRESENT on the parsed output; the gate's undefined-means-
-    // legacy contract requires it to be absent.
     expect(loaded?.requirements).toEqual(requirements);
     expect("requiresKey" in (loaded?.requirements?.model ?? {})).toBe(false);
+  });
+
+  it("fails closed on a pre-door snapshot: the blob fails the schema and reads back as undefined", async () => {
+    // THE load-bearing rejection, pinned at the store level: a snapshot
+    // written before depKey/name were required (exactly what an upgrade
+    // leaves behind) must FAIL to parse — never be silently reshaped into
+    // something runnable. The run gate blocks builder agents whose
+    // requirements read back undefined, so this test guards the first link
+    // of the fail-closed chain; if someone later makes depKey/name
+    // optional (or adds a default), this is the test that fails.
+    const created = await createAgent({ ...validInput, origin: "builder" }, TEST_ORG);
+    await query(
+      `UPDATE agents SET requirements = $1 WHERE id = $2`,
+      [
+        JSON.stringify({
+          model: { provider: "openai", id: "gpt-4o-mini", platformTier: true },
+          tools: [],
+          connectors: [],
+        }),
+        created.id,
+      ],
+    );
+    const loaded = await getAgent(created.id, TEST_ORG);
+    expect(loaded?.requirements).toBeUndefined();
   });
 
   it("stores authMode and jwtSecret", async () => {

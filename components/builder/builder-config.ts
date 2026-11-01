@@ -256,15 +256,18 @@ export function modelKeyState(
 ): ModelKeyState | null {
   if (!model) return null;
   if (!model.requiresKey) return { status: "none" };
+  if (!model.depKey) {
+    // A keyed model without a declared dep key is a version-skew or
+    // broken-platform-row case (the live catalog always declares one).
+    // Never slug-guess the vendor — the honest UI is "can't run": show
+    // missing with no connect form (the run gate 402s the run anyway).
+    return { status: "missing", providerLabel: model.provider, provider: null };
+  }
   // The credential lives under the VENDOR, not the door slug: one vendor's
   // API doors (openai-chat + openai-responses) collapse into the vendor's
   // single catalog entry, so resolve the credential provider from the
-  // declared dep key ("<dep>_api_key" → vendor). A keyed model always
-  // carries a dep key (the platform catalog guarantees it; null = keyless,
-  // returned above).
-  const credentialProvider = model.depKey
-    ? model.depKey.replace(/_api_key$/, "")
-    : model.provider;
+  // declared dep key ("<dep>_api_key" → vendor).
+  const credentialProvider = model.depKey.replace(/_api_key$/, "");
   const meta = credentials
     ? providerMeta(credentials.catalog, credentialProvider)
     : null;

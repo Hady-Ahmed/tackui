@@ -64,11 +64,6 @@ export function providerForDepKey(keyName: string): string {
   return keyName.endsWith("_api_key") ? keyName.slice(0, -"_api_key".length) : keyName;
 }
 
-/** The model dep key for a provider slug (mirror of providerForDepKey). */
-export function depKeyForProvider(provider: string): string {
-  return `${provider}_api_key`;
-}
-
 /**
  * Display label derived from a provider slug — cosmetic only (the picker
  * already shows raw slugs for models). Title-case on word boundaries,
@@ -135,7 +130,17 @@ export function deriveCredentialsCatalog(
     // doors collapse into one "OpenAI" entry instead of a second form the
     // runner could never fill. dep_key is declared on every keyed model;
     // keyless models returned above.
-    if (!m.dep_key) continue;
+    if (!m.dep_key) {
+      // A keyed model without a declared dep key is a broken platform row
+      // (the catalog guarantees one). Fail closed — never slug-guess the
+      // vendor — but make the degradation observable: the credentials page
+      // would otherwise silently offer no entry for that model's vendor.
+      console.warn(
+        `[credentials] platform model '${m.provider}:${m.id}' is keyed but declares no dep_key — ` +
+          `no credential entry offered for it`,
+      );
+      continue;
+    }
     const provider = providerForDepKey(m.dep_key);
     if (!provider || catalog[provider]) continue;
     catalog[provider] = {

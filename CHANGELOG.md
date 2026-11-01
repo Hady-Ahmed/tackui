@@ -4,6 +4,16 @@ All notable changes to this project will be documented in this file. The format 
 
 ## [Unreleased]
 
+- **Review-pass hardening for the doors feature.** The run gate's stale-snapshot
+  refusal (keyed model without a declared `depKey`) is now pinned at the store
+  level too — a pre-door blob must FAIL the schema and read back `undefined`
+  (the gate blocks on that), so re-optionalizing the fields reopens a visible
+  test failure, not a silent fail-open. The builder badge treats a keyed model
+  with no `depKey` as missing with no connect form (never slug-guessed), the
+  credentials catalog warns when it skips such a model, and the dead
+  `depKeyForProvider` helper is gone. `docs/agent-builder.md` now describes
+  the fail-closed 402 instead of the removed mechanical fallback.
+
 ### Added
 - **The agent builder offers every model class a vendor ships — API doors included** — the platform's model discovery now registers every concrete model class each agno module defines instead of picking one canonical class per module: OpenAI's chat-completions and Responses API doors appear side by side (`openai-chat`, `openai-responses`), as do the generic adapters a self-hoster can point at their own server (`openai-like`, `openai-open-responses`), and the Responses doors of OpenRouter/xAI/Azure. Slugs are a pure function of where agno defines each class — the module's own file keeps the bare module slug (`openrouter`, `xai`), any other file gets `<module>-<file>` — never hand-picked, so nothing can flip out from under a saved row. One vendor's doors share the vendor's single key — the catalog now declares each provider's `dep_key` (deriving it from the slug would demand an `openai-responses_api_key` nobody can save) — and the same model id may exist under two doors: the registry binds component configs by `(id, class name)` instead of id alone, and the model catalog's global duplicate-id rule is now per-provider. tackui follows: the requirements snapshot REQUIRES the declared `depKey` and binding `name` (a keyed model without them is a stale snapshot — the run gate refuses it with a re-save instruction instead of guessing), the run gate resolves door-slug models' keys through the declared dep key and 402s with the vendor's label, the credentials page collapses a vendor's doors into one entry, and the builder's key-state badge routes "connect a key" at the vendor entry. `npx tsc --noEmit` clean; 850 tests green.
 
