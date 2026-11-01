@@ -20,7 +20,7 @@
  *    in; the row shows "No longer supported" and stays deletable).
  *
  * A provider's connect form renders one input per field of its contract —
- * single-key providers have one ("Api key"); multi-credential toolkits (the
+ * single-key providers have one ("API key"); multi-credential toolkits (the
  * X toolkit) have several. The plaintext never leaves this page except in
  * the PUT body — GET responses carry field NAMES only.
  */
@@ -319,7 +319,7 @@ export function CredentialsPage() {
               <ul className="space-y-2">
                 {addRows.map(({ provider, meta }) => {
                   const fields =
-                    meta.fields.length > 0 ? meta.fields : [{ key: "api_key", label: "Api key" }];
+                    meta.fields.length > 0 ? meta.fields : [{ key: "api_key", label: "API key" }];
                   const values = newFields[provider] ?? {};
                   const complete = fields.every((f) => (values[f.key] ?? "").trim().length > 0);
                   const isUpdate = saved.some((c) => c.provider === provider);

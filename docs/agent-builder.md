@@ -633,10 +633,27 @@ The admin UI is the Connectors section on `/agents`
 
 ## UI surface
 
-- `/app/builder` (create) and `/app/builder/[id]` (edit) —
-  member-accessible pages (`app/app/builder/*`), both rendering
-  `components/builder/builder-page.tsx` with `mode: "create" | "edit"`.
-- The builder page: name/description/instructions + model picker
+- **One management page: `/agents`** (`app/agents/page.tsx`). Three agent
+  kinds, one surface, the correct form per kind:
+  - **Builder agents** — created and edited via the embedded builder form
+    (`components/builder/builder-form.tsx`, extracted from the old
+    standalone page; the `/app/builder` routes were removed). The add
+    panel defaults to "Create a new agent"; org admins can flip the panel
+    to "Connect an existing agent" (custom endpoints). Members always get
+    the builder form — building is member-accessible.
+  - **Custom endpoint agents** — the endpoint/JWT inline form, org-admin
+    gated (the backend `canManageAgents` on POST/PATCH/DELETE enforces
+    the same line).
+  - **Catalog installs** — curator-managed; no local edits ("Managed by
+    catalog" in the Endpoint column). Builder rows show "Built with the
+    agent builder" there; builder rows carry no Test button (no
+    client-visible endpoint to probe).
+- **Access model:** every signed-in member can open `/agents`, see the
+  workspace's agents, and edit/delete **their own** builder agents
+  (author-only — the backend PATCH/DELETE 403 anyone else; org admins
+  get no override). Custom agents, connector management, and deletes are
+  org-admin gated.
+- The builder form: name/description/instructions + model picker
   (populated from `GET /api/models` — the server-side proxy to the
   AgentOS `/platform/models` catalog, grouped by provider, defaulting to
   the first model — builder runs are 100% BYOK, there is no
@@ -645,9 +662,9 @@ The admin UI is the Connectors section on `/agents`
   with key-state badges) + connector palette. `GET /api/credentials`
   and `GET /api/connectors` feed the badges.
 - **Disabled state:** when `GET /api/models` or `GET /api/tools` fails
-  because the platform is unreachable, the page renders a notice banner
-  and disables the form (submit disabled) — the definition would be
-  validated against a stale palette otherwise.
+  because the platform is unreachable, the form renders a notice banner
+  and disables submit — the definition would be validated against a
+  stale palette otherwise.
 - **Empty ≠ unreachable:** the platform catalogs are **empty by default**
   — the AgentOS exposes nothing until the platform admin enables
   providers/toolkits on `/admin/platform`, so a reachable-but-empty
@@ -658,21 +675,24 @@ The admin UI is the Connectors section on `/agents`
   is unaffected — the model is only sent when it changes. Copy always
   says "the agent builder", never "your" — SaaS end users don't own the
   builder infrastructure, and possessives imply they do.
-- **Edit mode:** prefills from the requirements snapshot; instructions
-  start blank with "(leave blank to keep current)" semantics. Non-author
-  / non-builder agents show a 404-style state (the backend PATCH/DELETE
-  403/404s the same).
-- The create page also lists the signed-in member's own builder agents
-  ("Your agents", filtered to `origin === "builder" &&
-  authorUserId === currentUserId`) with Edit links to `/app/builder/[id]`.
+- **Edit mode:** prefills from the requirements snapshot, including the
+  **current instructions** — the instructions are never stored locally;
+  GET /api/agents/[id] reads them back from the AgentOS component config
+  for builder agents (best-effort: an unreachable platform omits the
+  field, and the blank-preserve PATCH contract keeps the stored value).
+  Instructions are not a secret — the owner sees and tweaks them like
+  every other field. Non-author/non-builder agents can't reach the edit
+  form (the /agents table only renders Edit for the author; the backend
+  403s the same).
 - **Plan-cap 402:** the create route's `PLAN_AGENT_LIMIT` 402 opens the
   upgrade dialog for admins (checkout is org-admin gated) and shows the
   error + a pointer to their org admin for members.
-- A successful save redirects to `/app?agent={id}` — the agent is
-  immediately runnable in chat (subject to the run gate).
-- The chat sidebar links to `/app/builder` (a wrench-glyph "Create
-  agent" button in the Agents header — member-accessible, mirroring the
-  "+" admin link).
+- A successful save navigates to `/app?agent={id}` — the agent is
+  immediately runnable in chat (subject to the run gate). Delete stays
+  on the page and refreshes the table.
+- The chat sidebar has one agent entry point: a plus-glyph "Add agent"
+  icon (member-visible) linking to `/agents?add=1` — the add panel open,
+  builder form by default.
 - **`/admin/platform`** (`app/admin/platform/page.tsx` +
   `components/platform-admin.tsx`) — the platform catalog admin page
   ("Models & tools"); platform-admin gated, linked from the builder

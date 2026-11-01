@@ -31,7 +31,7 @@ export type CredentialKind = "llm" | "tool";
 export interface CredentialField {
   /** The constructor arg name (e.g. "api_key", "consumer_key"). */
   key: string;
-  /** Display copy for the form field (e.g. "Api key"). */
+  /** Display copy for the form field (e.g. "API key"). */
   label: string;
 }
 
@@ -71,13 +71,25 @@ export function depKeyForProvider(provider: string): string {
 
 /**
  * Display label derived from a provider slug — cosmetic only (the picker
- * already shows raw slugs for models). Title-case on word boundaries:
- * "openai" → "Openai", "tavily" → "Tavily", "z-ai" → "Z Ai".
+ * already shows raw slugs for models). Title-case on word boundaries,
+ * with a small acronym map so member-visible copy reads correctly:
+ * "openai" → "OpenAI", "tavily" → "Tavily", "azure_openai" →
+ * "Azure OpenAI", "z-ai" → "Z AI".
  */
+const LABEL_ACRONYMS: Record<string, string> = {
+  ai: "AI",
+  api: "API",
+  id: "ID",
+  llm: "LLM",
+  mcp: "MCP",
+  openai: "OpenAI",
+  url: "URL",
+};
+
 export function prettifyProviderLabel(provider: string): string {
   return provider
     .split(/[-_]/)
-    .map((word) => word.charAt(0).toUpperCase() + word.slice(1))
+    .map((word) => LABEL_ACRONYMS[word] ?? word.charAt(0).toUpperCase() + word.slice(1))
     .join(" ");
 }
 
@@ -109,7 +121,7 @@ export function deriveCredentialsCatalog(
       kind: "llm",
       keyName: depKeyForProvider(m.provider),
       label: prettifyProviderLabel(m.provider),
-      fields: [{ key: "api_key", label: "Api key" }],
+      fields: [{ key: "api_key", label: "API key" }],
     };
   }
   for (const t of tools) {

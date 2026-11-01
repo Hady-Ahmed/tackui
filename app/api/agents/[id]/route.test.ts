@@ -17,6 +17,17 @@ vi.mock("@/lib/ratelimit/middleware", () => ({
   checkUserLimit: vi.fn().mockReturnValue(null),
 }));
 
+// Mock only the AgentOS config read used by the GET instructions prefill;
+// everything else in the builder module stays real (DELETE's component
+// cleanup, error classes, etc.).
+vi.mock("@/lib/agents/builder", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("@/lib/agents/builder")>();
+  return {
+    ...actual,
+    getAgentosCurrentConfig: vi.fn(),
+  };
+});
+
 import { GET, PATCH, DELETE } from "./route";
 import { listAgents, createAgent, deleteAgent } from "@/lib/agents/agent-store";
 import type { CreateAgentInput } from "@/lib/agents/agent-store";
@@ -87,6 +98,71 @@ describe("GET /api/agents/[id]", () => {
       makeParams(agentId),
     );
     expect(res.status).toBe(429);
+  });
+
+  it("returns the AgentOS instructions for builder agents (edit-form prefill)", async () => {
+    const { createAgent } = await import("@/lib/agents/agent-store");
+    const { getAgentosCurrentConfig } = await import("@/lib/agents/builder");
+    vi.mocked(getAgentosCurrentConfig).mockResolvedValue({
+      instructions: ["Line one", "Line two"],
+    });
+    const builderAgent = await createAgent(
+      {
+        name: "Built",
+        description: "A builder agent",
+        endpoint: "http://localhost:8000/agent",
+        authMode: "none",
+        origin: "builder",
+        authorUserId: "user-1",
+        remoteAgentId: "remote-instr-1",
+      },
+      testOrg,
+    );
+    const res = await GET(
+      new Request(`http://localhost/api/agents/${builderAgent.id}`),
+      makeParams(builderAgent.id),
+    );
+    expect(res.status).toBe(200);
+    const data = await res.json();
+    // Joined back into one prompt string — the config stores an array.
+    expect(data.instructions).toBe("Line one\nLine two");
+    expect(getAgentosCurrentConfig).toHaveBeenCalledWith("remote-instr-1");
+  });
+
+  it("omits instructions when the platform config is unreachable (degradation)", async () => {
+    const { createAgent } = await import("@/lib/agents/agent-store");
+    const { getAgentosCurrentConfig } = await import("@/lib/agents/builder");
+    vi.mocked(getAgentosCurrentConfig).mockRejectedValue(new Error("platform down"));
+    const builderAgent = await createAgent(
+      {
+        name: "Built",
+        description: "A builder agent",
+        endpoint: "http://localhost:8000/agent",
+        authMode: "none",
+        origin: "builder",
+        authorUserId: "user-1",
+        remoteAgentId: "remote-instr-2",
+      },
+      testOrg,
+    );
+    const res = await GET(
+      new Request(`http://localhost/api/agents/${builderAgent.id}`),
+      makeParams(builderAgent.id),
+    );
+    expect(res.status).toBe(200);
+    const data = await res.json();
+    expect(data.instructions).toBeUndefined();
+  });
+
+  it("never reads the AgentOS config for non-builder agents", async () => {
+    const { getAgentosCurrentConfig } = await import("@/lib/agents/builder");
+    vi.mocked(getAgentosCurrentConfig).mockClear();
+    const res = await GET(
+      new Request(`http://localhost/api/agents/${agentId}`),
+      makeParams(agentId),
+    );
+    expect(res.status).toBe(200);
+    expect(getAgentosCurrentConfig).not.toHaveBeenCalled();
   });
 });
 

@@ -11,7 +11,7 @@ import { getCurrentUser, canManageAgents } from "@/lib/auth/context";
 import { assertSafeUrl, UnsafeUrlError } from "@/lib/net/safe-fetch";
 import { checkUserLimit } from "@/lib/ratelimit/middleware";
 import { SSRF_REJECTION_MESSAGE } from "@/lib/config/saas";
-import { deleteAgentosComponent, AgentosError } from "@/lib/agents/builder";
+import { deleteAgentosComponent, getAgentosCurrentConfig, AgentosError } from "@/lib/agents/builder";
 
 export async function GET(
   _request: Request,
@@ -28,8 +28,26 @@ export async function GET(
   }
   const limited = checkUserLimit(user.id, "agentRead");
   if (limited) return limited;
+  // Builder agents' instructions live in the AgentOS component config —
+  // read them back so the edit form can prefill (they're the owner's
+  // tweakable system prompt, not a secret). Best-effort: an unreachable
+  // platform omits the field and the form falls back to blank-preserve
+  // (the same PATCH contract), so nothing breaks.
+  let instructions: string | undefined;
+  if (agent.origin === "builder" && agent.remoteAgentId) {
+    try {
+      const config = await getAgentosCurrentConfig(agent.remoteAgentId);
+      const entries = config?.instructions;
+      if (Array.isArray(entries) && entries.length > 0) {
+        instructions = entries.join("\n");
+      }
+    } catch {
+      // Degrade silently — the catalog-error banner in the edit form
+      // covers the unreachable-platform case for the whole form anyway.
+    }
+  }
   const [annotated] = await annotateAgentTemplateState([agent]);
-  return NextResponse.json(annotated);
+  return NextResponse.json({ ...annotated, instructions });
 }
 
 export async function PATCH(

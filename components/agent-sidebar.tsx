@@ -9,8 +9,6 @@ import { planSatisfies, type PlanId } from "@/lib/billing/plans";
 import { useBilling } from "@/lib/billing/use-billing";
 import { AccountMenu } from "./account-menu";
 import { ThemeToggle } from "./theme-toggle";
-import { useAuthConfig } from "@/lib/auth/use-auth-config";
-import { useCanManageAgents } from "@/lib/auth/use-can-manage-agents";
 
 function planLabel(required: RequiredPlan): string {
   return required === "pro" ? "Pro" : "Team";
@@ -107,18 +105,11 @@ export function AgentSidebar({
   mobileOpen,
   onCloseMobile,
 }: AgentSidebarProps) {
-  const { config } = useAuthConfig();
-  const { canManage } = useCanManageAgents();
   // The viewer's org plan (null when billing isn't configured —
   // self-host, or SaaS without Stripe). Cached module-level and already
   // fetched by the AccountMenu in this sidebar, so no extra request.
   const { billing } = useBilling();
   const plan = billing?.plan ?? null;
-  // Show the add-agent (+) icon to org owners/admins (canManage from
-  // /api/auth/can-manage-agents) OR in solo mode (synthetic admin). It
-  // links to /agents?add=1 — the workspace agent-management page with
-  // the add form already open. The catalog book icon is for everyone.
-  const showManageLink = canManage === true || (config?.authDisabled ?? false);
 
   const selectAgentAndClose = useCallback(
     (id: string) => {
@@ -155,7 +146,6 @@ export function AgentSidebar({
             onSelectAgent={onSelectAgent}
             onNewChat={onNewChat}
             onToggleCollapse={onToggleCollapse}
-            showManageLink={showManageLink}
           />
         ) : (
           <ExpandedContent
@@ -167,7 +157,6 @@ export function AgentSidebar({
             onNewChat={onNewChat}
             onSelectThread={onSelectThread}
             onToggleCollapse={onToggleCollapse}
-            showManageLink={showManageLink}
           />
         )}
       </aside>
@@ -197,7 +186,6 @@ export function AgentSidebar({
             onNewChat={newChatAndClose}
             onSelectThread={selectThreadAndClose}
             onToggleCollapse={onCloseMobile}
-            showManageLink={showManageLink}
             isMobile
           />
         </aside>
@@ -215,7 +203,6 @@ function ExpandedContent({
   onNewChat,
   onSelectThread,
   onToggleCollapse,
-  showManageLink,
   isMobile = false,
 }: {
   agents: PublicAgent[];
@@ -227,7 +214,6 @@ function ExpandedContent({
   onNewChat: () => void;
   onSelectThread: (threadId: string) => void;
   onToggleCollapse: () => void;
-  showManageLink: boolean;
   isMobile?: boolean;
 }) {
   return (
@@ -311,14 +297,16 @@ function ExpandedContent({
               </svg>
             </Link>
             <Link
-              href="/app/builder"
-              title="Create agent"
-              aria-label="Create agent"
+              href="/agents?add=1"
+              title="Add agent"
+              aria-label="Add agent"
               className="rounded p-1 text-zinc-400 transition-colors hover:bg-zinc-100 hover:text-zinc-600 dark:hover:bg-zinc-800 dark:hover:text-zinc-300"
             >
-              {/* Wrench glyph — the agent builder (member-accessible;
-                  the backend 503s gracefully when the platform isn't
-                  configured, which the builder page surfaces). */}
+              {/* Plus glyph — the one agent entry point: opens /agents with
+                  the add panel open (builder form by default; org admins
+                  can flip to the connect-your-own-backend form). Members
+                  build agents here too — the builder is
+                  member-accessible. */}
               <svg
                 xmlns="http://www.w3.org/2000/svg"
                 viewBox="0 0 24 24"
@@ -326,28 +314,9 @@ function ExpandedContent({
                 className="h-4 w-4"
                 aria-hidden="true"
               >
-                <path d="M12 1.5a5.25 5.25 0 0 0-4.058 8.592L2.294 15.75a1.5 1.5 0 0 0 0 2.122l2.034 2.034a1.5 1.5 0 0 0 2.122 0l5.649-5.648A5.25 5.25 0 0 0 20.25 8.25c0-1.102-.277-2.14-.765-3.047l-2.53 2.53a.75.75 0 0 1-1.06 0l-1.638-1.638a.75.75 0 0 1 0-1.06l2.53-2.53A5.25 5.25 0 0 0 12 1.5Z" />
+                <path d="M12 5.25a.75.75 0 0 1 .75.75v5.25H18a.75.75 0 0 1 0 1.5h-5.25V18a.75.75 0 0 1-1.5 0v-5.25H6a.75.75 0 0 1 0-1.5h5.25V6a.75.75 0 0 1 .75-.75Z" />
               </svg>
             </Link>
-            {showManageLink && (
-              <Link
-                href="/agents?add=1"
-                title="Add agent"
-                aria-label="Add agent"
-                className="rounded p-1 text-zinc-400 transition-colors hover:bg-zinc-100 hover:text-zinc-600 dark:hover:bg-zinc-800 dark:hover:text-zinc-300"
-              >
-                {/* Plus glyph — opens /agents with the add-agent form open. */}
-                <svg
-                  xmlns="http://www.w3.org/2000/svg"
-                  viewBox="0 0 16 16"
-                  fill="currentColor"
-                  className="h-4 w-4"
-                  aria-hidden="true"
-                >
-                  <path d="M8.75 3.75a.75.75 0 0 0-1.5 0v3.5h-3.5a.75.75 0 0 0 0 1.5h3.5v3.5a.75.75 0 0 0 1.5 0v-3.5h3.5a.75.75 0 0 0 0-1.5h-3.5v-3.5Z" />
-                </svg>
-              </Link>
-            )}
           </div>
         </div>
         <ul className="space-y-0.5">
@@ -487,7 +456,6 @@ function CollapsedContent({
   onSelectAgent,
   onNewChat,
   onToggleCollapse,
-  showManageLink,
 }: {
   agents: PublicAgent[];
   activeAgent: string;
@@ -496,7 +464,6 @@ function CollapsedContent({
   onSelectAgent: (id: string) => void;
   onNewChat: () => void;
   onToggleCollapse: () => void;
-  showManageLink: boolean;
 }) {
   return (
     <>
@@ -599,12 +566,15 @@ function CollapsedContent({
 
       <div className="mt-2 flex flex-col items-center gap-1">
         <Link
-          href="/app/builder"
-          title="Create agent"
+          href="/agents?add=1"
+          title="Add agent"
           className="flex h-9 w-9 items-center justify-center rounded-lg text-zinc-500 transition-colors hover:bg-zinc-100 dark:text-zinc-400 dark:hover:bg-zinc-800"
-          aria-label="Create agent"
+          aria-label="Add agent"
         >
-          {/* Wrench glyph — the agent builder (member-accessible). */}
+          {/* Plus glyph — the one agent entry point: opens /agents with the
+              add panel open (builder form by default; org admins can flip
+              to the connect-your-own-backend form). Members build agents
+              here too — the builder is member-accessible. */}
           <svg
             xmlns="http://www.w3.org/2000/svg"
             viewBox="0 0 24 24"
@@ -612,28 +582,9 @@ function CollapsedContent({
             className="h-4 w-4"
             aria-hidden="true"
           >
-            <path d="M12 1.5a5.25 5.25 0 0 0-4.058 8.592L2.294 15.75a1.5 1.5 0 0 0 0 2.122l2.034 2.034a1.5 1.5 0 0 0 2.122 0l5.649-5.648A5.25 5.25 0 0 0 20.25 8.25c0-1.102-.277-2.14-.765-3.047l-2.53 2.53a.75.75 0 0 1-1.06 0l-1.638-1.638a.75.75 0 0 1 0-1.06l2.53-2.53A5.25 5.25 0 0 0 12 1.5Z" />
+            <path d="M12 5.25a.75.75 0 0 1 .75.75v5.25H18a.75.75 0 0 1 0 1.5h-5.25V18a.75.75 0 0 1-1.5 0v-5.25H6a.75.75 0 0 1 0-1.5h5.25V6a.75.75 0 0 1 .75-.75Z" />
           </svg>
         </Link>
-        {showManageLink && (
-          <Link
-            href="/agents?add=1"
-            title="Add agent"
-            className="flex h-9 w-9 items-center justify-center rounded-lg text-zinc-500 transition-colors hover:bg-zinc-100 dark:text-zinc-400 dark:hover:bg-zinc-800"
-            aria-label="Add agent"
-          >
-            {/* Plus glyph — opens /agents with the add-agent form open. */}
-            <svg
-              xmlns="http://www.w3.org/2000/svg"
-              viewBox="0 0 16 16"
-              fill="currentColor"
-              className="h-4 w-4"
-              aria-hidden="true"
-            >
-              <path d="M8.75 3.75a.75.75 0 0 0-1.5 0v3.5h-3.5a.75.75 0 0 0 0 1.5h3.5v3.5a.75.75 0 0 0 1.5 0v-3.5h3.5a.75.75 0 0 0 0-1.5h-3.5v-3.5Z" />
-            </svg>
-          </Link>
-        )}
         <Link
           href="/app/catalog"
           title="Browse catalog"

@@ -146,7 +146,7 @@ export async function checkBuilderRunGate(
     const contract = tool.credentials?.length
       ? tool.credentials
       : tool.requiresKey
-        ? [{ depKey: tool.requiresKey, label: "Api key" }]
+        ? [{ depKey: tool.requiresKey, label: "API key" }]
         : [];
     if (contract.length === 0) continue;
     const provider =

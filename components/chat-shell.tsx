@@ -7,16 +7,12 @@ import { CopilotChat, useCopilotKit } from "@copilotkit/react-core/v2";
 import { AgentSidebar } from "./agent-sidebar";
 import { HitlHandlers } from "./hitl/approval-card";
 import { ToolRenders } from "./tools/tool-renders";
-import { useAuthConfig } from "@/lib/auth/use-auth-config";
-import { useCanManageAgents } from "@/lib/auth/use-can-manage-agents";
 import { useBilling } from "@/lib/billing/use-billing";
 import { UpgradeDialog } from "./upgrade-dialog";
 import type { PublicAgent } from "@/lib/agents/agents.config";
 
 export function ChatShell() {
   const router = useRouter();
-  const { config } = useAuthConfig();
-  const { canManage } = useCanManageAgents();
   const [agents, setAgents] = useState<PublicAgent[]>([]);
   const [hasLoaded, setHasLoaded] = useState(false);
   // The agent list failed to load (network error / non-401 failure) —
@@ -53,9 +49,6 @@ export function ChatShell() {
   useEffect(() => {
     applyStoredCollapsed.current();
   }, []);
-
-  // Show the empty-state CTA to org owners/admins OR in solo mode.
-  const canManageAgents_ = canManage === true || (config?.authDisabled ?? false);
 
   // The agent-list fetch, shared by mount, window-focus refetches, and the
   // error pane's Retry button. On failure it surfaces a retryable error
@@ -275,45 +268,21 @@ export function ChatShell() {
           </div>
         ) : hasLoaded ? (
           <div className="flex flex-1 flex-col items-center justify-center gap-4 text-center">
-            {canManageAgents_ ? (
-              <>
-                <p className="text-sm text-zinc-400">
-                  No agents configured yet.
-                </p>
-                <Link
-                  href="/agents?add=1"
-                  className="rounded-lg bg-blue-600 px-4 py-2 text-sm font-medium text-white transition-colors hover:bg-blue-700"
-                >
-                  Add your first agent →
-                </Link>
-                <Link
-                  href="/app/catalog"
-                  className="text-sm text-blue-600 hover:underline dark:text-blue-400"
-                >
-                  Browse the agent catalog →
-                </Link>
-                <a
-                  href="https://docs.ag-ui.com/quickstart/server"
-                  target="_blank"
-                  rel="noreferrer"
-                  className="text-xs text-zinc-500 hover:text-zinc-400"
-                >
-                  Need a backend? AG-UI quickstart →
-                </a>
-              </>
-            ) : (
-              <>
-                <p className="text-sm text-zinc-400">
-                  No agents available yet. Ask your administrator to add one.
-                </p>
-                <Link
-                  href="/app/catalog"
-                  className="text-sm text-blue-600 hover:underline dark:text-blue-400"
-                >
-                  Browse the agent catalog →
-                </Link>
-              </>
-            )}
+            <div className="flex flex-1 flex-col items-center justify-center gap-4 text-center">
+              <p className="text-sm text-zinc-400">No agents yet.</p>
+              <Link
+                href="/agents?add=1"
+                className="rounded-lg bg-blue-600 px-4 py-2 text-sm font-medium text-white transition-colors hover:bg-blue-700"
+              >
+                Add your first agent →
+              </Link>
+              <Link
+                href="/app/catalog"
+                className="text-sm text-blue-600 hover:underline dark:text-blue-400"
+              >
+                Browse the agent catalog →
+              </Link>
+            </div>
           </div>
         ) : (
           <div className="flex flex-1 items-center justify-center text-sm text-zinc-400">

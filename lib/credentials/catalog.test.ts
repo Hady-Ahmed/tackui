@@ -64,7 +64,7 @@ describe("deriveCredentialsCatalog", () => {
     expect(catalog.openai).toMatchObject({ kind: "llm", keyName: "openai_api_key" });
     expect(catalog.openrouter.label).toBe("Openrouter");
     // The single field of a single-key provider.
-    expect(catalog.openai.fields).toEqual([{ key: "api_key", label: "Api key" }]);
+    expect(catalog.openai.fields).toEqual([{ key: "api_key", label: "API key" }]);
   });
 
   it("skips keyless model providers (requires_key false — e.g. ollama)", () => {
@@ -121,7 +121,7 @@ describe("deriveCredentialsCatalog", () => {
       },
     ]);
     expect(catalog.openai.kind).toBe("llm");
-    expect(catalog.openai.fields).toEqual([{ key: "api_key", label: "Api key" }]);
+    expect(catalog.openai.fields).toEqual([{ key: "api_key", label: "API key" }]);
   });
 });
 
@@ -149,9 +149,12 @@ describe("fieldForDepKey", () => {
 });
 
 describe("prettifyProviderLabel", () => {
-  it("title-cases on word boundaries", () => {
-    expect(prettifyProviderLabel("openai")).toBe("Openai");
+  it("title-cases on word boundaries with acronym correction", () => {
+    expect(prettifyProviderLabel("openai")).toBe("OpenAI");
     expect(prettifyProviderLabel("tavily")).toBe("Tavily");
-    expect(prettifyProviderLabel("z-ai")).toBe("Z Ai");
+    expect(prettifyProviderLabel("z-ai")).toBe("Z AI");
+    expect(prettifyProviderLabel("azure_openai")).toBe("Azure OpenAI");
+    // Unknown words still plain title-case.
+    expect(prettifyProviderLabel("groq")).toBe("Groq");
   });
 });

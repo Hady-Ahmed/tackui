@@ -196,6 +196,15 @@ export interface PublicAgent {
   authorUserId?: string;
   /** Runner-requirements snapshot for builder agents (run-gate display). */
   requirements?: AgentRequirements;
+  /**
+   * The agent's current system prompt — builder agents only, read back
+   * from the AgentOS component config on GET /api/agents/[id] (the
+   * instructions are never stored locally). Omitted when the platform is
+   * unreachable — the edit form's blank-preserve wire contract keeps the
+   * stored value in that case. Not a secret (unlike jwtSecret): the owner
+   * needs to see and tweak it.
+   */
+  instructions?: string;
   installedTemplateUpdatedAt?: string;
   templateRemovedAt?: string;
   /**

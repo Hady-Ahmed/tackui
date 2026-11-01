@@ -119,7 +119,7 @@ export function ConnectorsAdmin() {
   };
 
   return (
-    <section>
+    <section id="connectors" className="scroll-mt-4">
       <div className="mb-4 flex items-center justify-between gap-3">
         <div>
           <h2 className="text-lg font-semibold text-zinc-900 dark:text-zinc-50">Connectors</h2>
@@ -270,12 +270,12 @@ export function ConnectorsAdmin() {
             <li className="rounded-xl border border-dashed border-zinc-200 px-4 py-6 text-center text-sm text-zinc-500 dark:border-zinc-800 dark:text-zinc-400">
               No connectors yet.{" "}
               <Link
-                href="/app/builder"
+                href="/agents?add=1"
                 className="text-blue-600 hover:underline dark:text-blue-400"
               >
-                Builder agents
+                Build an agent
               </Link>{" "}
-              reference them by name.
+              to reference them by name.
             </li>
           )}
         </ul>
