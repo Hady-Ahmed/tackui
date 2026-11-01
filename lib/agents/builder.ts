@@ -49,8 +49,8 @@ import type { AgentRequirements } from "./agents.config";
 /** Seconds a minted service token stays valid — minted per request. */
 const SERVICE_TOKEN_TTL_SECONDS = 600;
 
-export const AGENTOS_SERVICE_SUB = "tackui-service";
-export const AGENTOS_ADMIN_SCOPE = "app:superadmin";
+const AGENTOS_SERVICE_SUB = "tackui-service";
+const AGENTOS_ADMIN_SCOPE = "app:superadmin";
 export const AGENTOS_USER_SCOPE = "app:user";
 
 /**

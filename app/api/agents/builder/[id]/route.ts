@@ -132,8 +132,7 @@ export async function PATCH(
     // Model/tools/connectors replace wholesale when present; instructions
     // must come from the current config when not patched (it is not stored
     // locally — only the AgentOS component config holds it).
-    let resolvedInstructions: string;
-    if (patch.instructions === undefined) {
+    let resolvedInstructions: string;    if (patch.instructions === undefined) {
       // The AgentOS must be reachable to read back the current instructions.
       let currentConfig;
       try {
@@ -185,9 +184,29 @@ export async function PATCH(
       throw err;
     }
 
+    // A snapshot-less row can only be config-patched with a FULL config
+    // (model + tools + connectors): anything left unpatched can't be
+    // re-derived, and defaulting it to [] would publish a config that
+    // silently drops the agent's real tools/connectors — the same rule
+    // the model 409 above applies to the model half. Unreachable through
+    // the app (every builder create writes a snapshot); this guards
+    // hand-edited rows and future create paths.
+    if (
+      !existing.requirements &&
+      (patch.tools === undefined || patch.connectors === undefined)
+    ) {
+      return NextResponse.json(
+        {
+          error:
+            "This agent's saved configuration is incomplete — include its model, tools, and connectors in this update.",
+        },
+        { status: 409 },
+      );
+    }
+    // Reaching here with no snapshot means the patch supplied the full
+    // config — the `?? []` fallbacks can no longer fire.
     const tools = patch.tools ?? existing.requirements?.tools.map((t) => ({ name: t.name })) ?? [];
-    const connectors =
-      patch.connectors ?? existing.requirements?.connectors ?? [];
+    const connectors = patch.connectors ?? existing.requirements?.connectors ?? [];
 
     if (patch.connectors) {
       const orgConnectors = await getConnectorsByNames(user.orgId, patch.connectors);
@@ -263,10 +282,15 @@ export async function PATCH(
     // re-converges the projection for any concurrent edit to a disjoint
     // field. A concurrent edit to the SAME field diverges either way
     // (the retry-after-reload path fixes it); reverting is never worse.
+    // Restore ONLY the fields this PATCH actually wrote. requirements is
+    // restored UNCONDITIONALLY on a config change — null included: a
+    // snapshot-less row that gained a snapshot from this patch must lose
+    // it again on failure, or the local projection would lead the
+    // AgentOS (exactly the state this revert exists to prevent).
     const revert: UpdateBuilderAgentInput = {};
     if (patch.name !== undefined) revert.name = existing.name;
     if (patch.description !== undefined) revert.description = existing.description;
-    if (configChanged && existing.requirements) revert.requirements = existing.requirements;
+    if (configChanged) revert.requirements = existing.requirements ?? null;
     if (Object.keys(revert).length > 0) {
       await updateAgent(id, revert, user.orgId).catch((revertErr) => {
         console.error("[builder] compensating local revert failed", {

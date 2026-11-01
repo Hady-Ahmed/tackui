@@ -113,6 +113,9 @@ function agentDot(
 function AgentDot({ dot, titled = true }: { dot: DotSpec; titled?: boolean }) {
   return (
     <span
+      // role="img": aria-label on a bare span is ignored by assistive
+      // tech — the img role makes the status announcement land.
+      role="img"
       className={`absolute -bottom-0.5 -right-0.5 inline-block h-2 w-2 rounded-full border border-white dark:border-zinc-950 ${dot.cls}`}
       title={titled ? dot.title : undefined}
       aria-label={titled ? dot.aria : undefined}
@@ -380,6 +383,10 @@ function ExpandedContent({
             Agents
           </p>
           <span
+            // role="img" + aria-label: assistive tech ignores aria-label
+            // on bare spans; the img role makes the tooltip content
+            // announced (the title stays for mouse hover).
+            role="img"
             className="inline-flex cursor-help text-zinc-400 transition-colors hover:text-zinc-600 dark:hover:text-zinc-300"
             title={TEST_HELP}
             aria-label="What do the status dots mean?"
@@ -828,40 +835,52 @@ function ConversationList({
       cancelRename();
       return;
     }
-    const res = await fetch(`/api/threads/${threadId}`, {
-      method: "PATCH",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ title }),
-    });
-    if (!res.ok) {
-      const data = await res.json().catch(() => ({}));
-      setError(
-        (typeof data === "object" && data && "error" in data
-          ? String((data as { error: unknown }).error)
-          : null) || "Rename failed",
-      );
-      return;
+    try {
+      const res = await fetch(`/api/threads/${threadId}`, {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ title }),
+      });
+      if (!res.ok) {
+        const data = await res.json().catch(() => ({}));
+        setError(
+          (typeof data === "object" && data && "error" in data
+            ? String((data as { error: unknown }).error)
+            : null) || "Rename failed",
+        );
+        return;
+      }
+      cancelRename();
+      refetchThreads();
+    } catch {
+      // Network failure must not die silently — same copy as the other
+      // mutating surfaces.
+      setError("Couldn't reach the server — please try again.");
     }
-    cancelRename();
-    refetchThreads();
   };
 
   const handleDelete = async (threadId: string) => {
     if (!confirm("Delete this conversation? This cannot be undone.")) return;
-    const res = await fetch(`/api/threads/${threadId}`, {
-      method: "DELETE",
-    });
-    if (!res.ok) {
-      const data = await res.json().catch(() => ({}));
-      setError(
-        (typeof data === "object" && data && "error" in data
-          ? String((data as { error: unknown }).error)
-          : null) || "Delete failed",
-      );
-      return;
+    try {
+      const res = await fetch(`/api/threads/${threadId}`, {
+        method: "DELETE",
+      });
+      if (!res.ok) {
+        const data = await res.json().catch(() => ({}));
+        setError(
+          (typeof data === "object" && data && "error" in data
+            ? String((data as { error: unknown }).error)
+            : null) || "Delete failed",
+        );
+        return;
+      }
+      if (threadId === activeThreadId) onNewChat();
+      refetchThreads();
+    } catch {
+      // Network failure must not die silently — same copy as the other
+      // mutating surfaces.
+      setError("Couldn't reach the server — please try again.");
     }
-    if (threadId === activeThreadId) onNewChat();
-    refetchThreads();
   };
 
   if (isLoading) {
@@ -962,11 +981,12 @@ function ConversationList({
               >
                 {name}
               </button>
-              <span className="flex shrink-0 items-center opacity-0 transition-opacity group-hover:opacity-100">
+              <span className="flex shrink-0 items-center opacity-0 transition-opacity group-hover:opacity-100 group-focus-within:opacity-100">
                 <button
                   onClick={() => startRename(thread.id, name)}
                   title="Rename"
-                  className="px-1 py-1 text-xs text-zinc-400 hover:text-zinc-700 dark:hover:text-zinc-200"
+                  aria-label={`Rename conversation ${name}`}
+                  className="rounded px-1 py-1 text-xs text-zinc-400 hover:text-zinc-700 focus-visible:outline focus-visible:outline-2 focus-visible:outline-blue-500 dark:hover:text-zinc-200"
                 >
                   <svg
                     xmlns="http://www.w3.org/2000/svg"
@@ -981,7 +1001,8 @@ function ConversationList({
                 <button
                   onClick={() => handleDelete(thread.id)}
                   title="Delete"
-                  className="px-1 py-1 text-xs text-zinc-400 hover:text-red-600 dark:hover:text-red-400"
+                  aria-label={`Delete conversation ${name}`}
+                  className="rounded px-1 py-1 text-xs text-zinc-400 hover:text-red-600 focus-visible:outline focus-visible:outline-2 focus-visible:outline-blue-500 dark:hover:text-red-400"
                 >
                   <svg
                     xmlns="http://www.w3.org/2000/svg"

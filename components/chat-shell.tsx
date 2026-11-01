@@ -199,6 +199,7 @@ export function ChatShell() {
           <>
             {runError && (
               <div
+                role="alert"
                 className={`mx-4 mt-4 flex items-start justify-between gap-3 rounded-lg border px-4 py-3 text-sm ${
                   runErrorIsPaywall
                     ? // Quota/plan 402 — the paywall moment, not an error:

@@ -104,6 +104,12 @@ export function CredentialsPage() {
     wrapper();
   }, [load]);
 
+  const retry = () => {
+    setError(null);
+    setLoading(true);
+    void load().finally(() => setLoading(false));
+  };
+
   const onSave = async (provider: string, meta: CredentialMeta) => {
     const fields = newFields[provider] ?? {};
     if (!meta.fields.every((f) => (fields[f.key] ?? "").trim())) return;
@@ -202,12 +208,25 @@ export function CredentialsPage() {
         </header>
 
         {error && (
-          <div className="mb-4 rounded-lg border border-red-200 bg-red-50 p-3 text-sm text-red-700 dark:border-red-900 dark:bg-red-950 dark:text-red-300">
+          <div
+            role="alert"
+            className="mb-4 rounded-lg border border-red-200 bg-red-50 p-3 text-sm text-red-700 dark:border-red-900 dark:bg-red-950 dark:text-red-300"
+          >
             {error}
+            <button
+              type="button"
+              onClick={retry}
+              className="ml-3 rounded-md border border-red-300 px-2.5 py-1 text-xs font-medium text-red-700 transition-colors hover:bg-red-100 dark:border-red-800 dark:text-red-300 dark:hover:bg-red-900/40"
+            >
+              Retry
+            </button>
           </div>
         )}
         {notice && (
-          <div className="mb-4 rounded-lg border border-green-200 bg-green-50 p-3 text-sm text-green-700 dark:border-green-900 dark:bg-green-950 dark:text-green-300">
+          <div
+            role="status"
+            className="mb-4 rounded-lg border border-green-200 bg-green-50 p-3 text-sm text-green-700 dark:border-green-900 dark:bg-green-950 dark:text-green-300"
+          >
             {notice}
           </div>
         )}
@@ -285,14 +304,13 @@ export function CredentialsPage() {
             </h2>
             {catalog === null ? (
               <p className="text-sm text-zinc-500 dark:text-zinc-400">
-                The platform&apos;s key catalog is unavailable right now —
-                reconnect to add keys.
+                New keys can&apos;t be added right now — the key catalog is
+                unavailable. Your saved keys are unaffected; try again shortly.
               </p>
             ) : catalog && Object.keys(catalog).length === 0 ? (
               <p className="text-sm text-zinc-500 dark:text-zinc-400">
                 The agent builder offers no key providers yet — providers
-                appear when the platform exposes keyed models or tools.
-              </p>
+                appear when the platform exposes keyed models or tools.              </p>
             ) : addRows.length === 0 ? (
               <p className="text-sm text-zinc-500 dark:text-zinc-400">
                 All supported providers have keys saved.

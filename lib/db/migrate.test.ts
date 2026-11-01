@@ -6,6 +6,7 @@ import {
 } from "./migrate";
 import { setTestDb, query, closePool, type PgClient } from "./pg";
 import { registerPgMemShims } from "./pg-test-shim";
+import { useRealPostgres } from "./test-postgres";
 
 let db: IMemoryDb;
 
@@ -144,23 +145,32 @@ describe("runMigrations", () => {
 
   // pg-mem doesn't expose index metadata via the pg_catalog tables (it
   // tracks indexes internally but doesn't surface them through the standard
-  // views). Verify that the migration SQL parses + runs without error —
-  // the actual index presence is validated by real PG integration tests
-  // (see testcontainers suite, planned alongside PR4).
-  it.skip("creates the thread_metadata indexes for user_id and org_id", async () => {
-    await runMigrations();
-    const indexes = await query<{ indexname: string }>(`
-      SELECT i.relname as indexname
-      FROM pg_index x
-      JOIN pg_class c ON c.oid = x.indrelid
-      JOIN pg_class i ON i.oid = x.indexrelid
-      JOIN pg_namespace n ON n.oid = c.relnamespace
-      WHERE c.relname = 'thread_metadata'
-        AND n.nspname = 'public'
-      ORDER BY indexname
-    `);
-    const names = indexes.rows.map((r) => r.indexname);
-    expect(names).toContain("idx_thread_metadata_user_id");
-    expect(names).toContain("idx_thread_metadata_org_id");
+  // views). The migration SQL parsing itself is covered by the other tests
+  // in this file; actual index presence is asserted against a real
+  // Postgres via testcontainers (skips with a note when Docker is down).
+  it("creates the thread_metadata indexes for user_id and org_id", async (ctx) => {
+    const restore = await useRealPostgres();
+    if (!restore) {
+      ctx.skip();
+      return;
+    }
+    try {
+      await runMigrations();
+      const indexes = await query<{ indexname: string }>(`
+        SELECT i.relname as indexname
+        FROM pg_index x
+        JOIN pg_class c ON c.oid = x.indrelid
+        JOIN pg_class i ON i.oid = x.indexrelid
+        JOIN pg_namespace n ON n.oid = c.relnamespace
+        WHERE c.relname = 'thread_metadata'
+          AND n.nspname = 'public'
+        ORDER BY indexname
+      `);
+      const names = indexes.rows.map((r) => r.indexname);
+      expect(names).toContain("idx_thread_metadata_user_id");
+      expect(names).toContain("idx_thread_metadata_org_id");
+    } finally {
+      restore();
+    }
   });
 });

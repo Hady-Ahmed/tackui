@@ -378,6 +378,10 @@ export function PlatformAdmin() {
       .split("\n")
       .map((s) => s.trim())
       .filter((s) => s.length > 0);
+    // Whitespace-only paste (a lone newline): nothing to splice in — fall
+    // through to the default single-value paste instead of deleting the
+    // row (an empty `parts` splices it out entirely).
+    if (parts.length === 0) return;
     // Replacing a row invalidates its test timer/result exactly like
     // setModelRow does — a lingering timer would fire against a row that
     // no longer contains the tested id.
@@ -815,11 +819,18 @@ export function PlatformAdmin() {
         <button
           type="button"
           onClick={save}
-          // Disabled when there's nothing to save AND nothing to repair —
-          // a no-op save that pops "Catalog saved." is just noise.
+          // Disabled when there's nothing to save, or when an enabled
+          // provider still has no model ids (the file header documents
+          // this as client-side blocking — a save here would PUT the
+          // invalid row anyway, and the platform's 400 would reject the
+          // whole full-state batch, discarding every other valid change).
+          // The inline error on the row says what to repair; the tooltip
+          // names it on hover. Dead-row clearing is unaffected (unavailable
+          // rows are not "invalid").
           disabled={
             saving ||
             providers === null ||
+            invalidProviders.length > 0 ||
             (invalidProviders.length === 0 && dirtyCount === 0)
           }
           title={

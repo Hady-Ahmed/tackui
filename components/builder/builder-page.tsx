@@ -481,14 +481,16 @@ export function BuilderPage({
         {builderDisabled && (
           <div className="mb-6 rounded-lg border border-zinc-200 bg-white px-4 py-3 text-sm text-zinc-500 dark:border-zinc-800 dark:bg-zinc-950 dark:text-zinc-400">
             <div className="flex items-center justify-between gap-3">
-              <span>{modelsError ?? toolsError}</span>
+              <span>{[modelsError, toolsError].filter(Boolean).join(" · ")}</span>
               {/* Same recovery affordance as the admin page's Retry —
                   without it the only path out is a full browser reload. */}
               <button
                 type="button"
                 onClick={() => {
-                  setModelsError(null);
-                  setToolsError(null);
+                  // Errors stay up until the retry resolves (loadModels/
+                  // loadTools re-set them on failure; success lifts the
+                  // banner by setting the catalogs). Clearing them here
+                  // would flash the form enabled with empty dropdowns.
                   setRetryingCatalog(true);
                   void Promise.all([loadModels(), loadTools()]).finally(() =>
                     setRetryingCatalog(false),
@@ -579,7 +581,7 @@ export function BuilderPage({
               suffix) round-trips exactly. */}
           <div className="space-y-3">
             <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
-              <Field label="Provider" required error={errors.model}>
+              <Field label="Provider" required>
                 <select
                   value={form.model?.provider ?? ""}
                   onChange={(e) => {
@@ -608,8 +610,12 @@ export function BuilderPage({
                       a claim we can't back; but a value="" placeholder
                       here would render the select BLANK (the saved
                       provider matches no option), which is worse than a
-                      neutral label. */}
-                  {form.model &&
+                      neutral label. While the catalog is still LOADING the
+                      saved provider renders as its plain value — no claim,
+                      just no blank flash. */}
+                  {form.model && models === null ? (
+                    <option value={form.model.provider}>{form.model.provider}</option>
+                  ) : form.model &&
                   models !== null &&
                   models.length > 0 &&
                   !providerGroup ? (
@@ -632,7 +638,13 @@ export function BuilderPage({
               </Field>
               <Field label="Model" required error={errors.model}>
                 <select
-                  value={form.model && selectedModel ? form.model.id : ""}
+                  value={
+                    form.model && selectedModel
+                      ? form.model.id
+                      : form.model && models === null
+                        ? form.model.id // loading — show the saved value, never blank
+                        : ""
+                  }
                   onChange={(e) => {
                     // The placeholder rows carry an empty value — selecting
                     // them again must not write an empty model id.
@@ -646,8 +658,12 @@ export function BuilderPage({
                       renders as an explicit placeholder row and the notice
                       below explains the gap. Guarded on models !== null —
                       while loading, the catalog can't have judged the model
-                      stale yet — and on a NON-empty catalog: an empty one
-                      is the first-run state, not a removal. */}
+                      stale yet (the saved value renders plainly so the
+                      select never blanks) — and on a NON-empty catalog: an
+                      empty one is the first-run state, not a removal. */}
+                  {form.model && models === null && (
+                    <option value={form.model.id}>{form.model.id}</option>
+                  )}
                   {form.model && models !== null && models.length > 0 && !selectedModel && (
                     <option value="">{form.model.id} (no longer offered)</option>
                   )}
@@ -694,7 +710,7 @@ export function BuilderPage({
           {/* Tool palette — the platform's tool catalog (GET /api/tools,
               proxied from the AgentOS /platform/tools). Adding a tool to
               the platform's allowlist shows up here with zero code. */}
-          <Field label="Tools" hint={`Up to ${BUILDER_TOOLS_MAX} — the agent can use them at run time.`}>
+          <Field label="Tools" asGroup hint={`Up to ${BUILDER_TOOLS_MAX} — the agent can use them at run time.`}>
             <div className="space-y-2">
               {(tools ?? []).map((tool) => {
                 const checked = form.tools.includes(tool.name);
@@ -717,7 +733,9 @@ export function BuilderPage({
                       {tool.label}
                     </span>
                     {tool.description ? (
-                      <span className="truncate text-xs text-zinc-400">{tool.description}</span>
+                      <span className="min-w-0 truncate text-xs text-zinc-400">
+                        {tool.description}
+                      </span>
                     ) : null}
                     <KeyBadge
                       state={toolKeyState(tool, credentials)}
@@ -733,7 +751,7 @@ export function BuilderPage({
           </Field>
 
           {/* Connectors */}
-          <Field label="Connectors" hint="MCP servers the agent can use at run time — managed by org admins.">
+          <Field label="Connectors" asGroup hint="MCP servers the agent can use at run time — managed by org admins.">
             <div className="space-y-2">
               {(connectors ?? []).length === 0 ? (
                 <p className="text-xs text-zinc-500 dark:text-zinc-400">
@@ -761,8 +779,10 @@ export function BuilderPage({
                       onChange={() => toggleConnector(c.name)}
                       className="h-4 w-4 rounded border-zinc-300 text-blue-600 dark:border-zinc-600"
                     />
-                    <span className="font-medium text-zinc-900 dark:text-zinc-50">{c.name}</span>
-                    <span className="truncate text-xs text-zinc-400">{c.url}</span>
+                    <span className="min-w-0 truncate font-medium text-zinc-900 dark:text-zinc-50">
+                      {c.name}
+                    </span>
+                    <span className="min-w-0 truncate text-xs text-zinc-400">{c.url}</span>
                     {c.hasToken ? (
                       <span className="ml-auto shrink-0 rounded-full bg-green-100 px-1.5 py-0.5 text-[10px] font-medium text-green-700 dark:bg-green-950 dark:text-green-300">
                         token ✓
@@ -1076,18 +1096,46 @@ function Field({
   required,
   error,
   children,
+  asGroup,
 }: {
   label: string;
   hint?: string;
   required?: boolean;
   error?: string;
   children: React.ReactNode;
+  /** Checkbox-group variant: renders fieldset/legend instead of a label.
+   *  REQUIRED for groups of checkboxes — a <label> wrapping them would
+   *  wire the heading to the FIRST checkbox (clicking the title text
+   *  toggles it; screen readers announce the whole group as that one
+   *  control). */
+  asGroup?: boolean;
 }) {
+  const title = (
+    <>
+      {label}
+      {required && <span className="text-red-500"> *</span>}
+    </>
+  );
+  if (asGroup) {
+    return (
+      <fieldset className="border-0 p-0">
+        <legend className="mb-1 block text-xs font-medium text-zinc-700 dark:text-zinc-300">
+          {title}
+        </legend>
+        {children}
+        {error && (
+          <span className="mt-1 block text-[11px] text-red-600 dark:text-red-400">{error}</span>
+        )}
+        {hint && !error && (
+          <span className="mt-1 block text-[11px] text-zinc-400">{hint}</span>
+        )}
+      </fieldset>
+    );
+  }
   return (
     <label className="block">
       <span className="mb-1 block text-xs font-medium text-zinc-700 dark:text-zinc-300">
-        {label}
-        {required && <span className="text-red-500"> *</span>}
+        {title}
       </span>
       {children}
       {error && (

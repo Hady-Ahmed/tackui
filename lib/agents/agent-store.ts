@@ -79,7 +79,12 @@ const builderFieldShapes = {
   origin: agentOriginSchema.optional(),
   authorUserId: z.string().min(1).optional(),
   remoteAgentId: z.string().min(1).optional(),
-  requirements: requirementsSchema.optional(),
+  // Nullish (not just optional): the compensating revert in the builder
+  // PATCH route must be able to CLEAR a snapshot it added on a row that
+  // had none — null is only ever sent by that internal revert, never by
+  // a client body (the route constructs its UpdateBuilderAgentInput, it
+  // doesn't forward the raw request body).
+  requirements: requirementsSchema.nullish(),
 };
 
 /**
@@ -94,13 +99,15 @@ export type CreateAgentInput = z.infer<typeof createAgentBodySchema>;
  * Body schemas for the builder create/update path (lib/agents/builder) —
  * the base shapes plus builder provenance. The admin /agents form uses the
  * base schemas only, so clients there can't forge origin="builder".
+ *
+ * Only the inferred TYPES are exported: the builder routes validate with
+ * lib/agents/builder.ts's own schemas, so no runtime schema object needs
+ * to escape this module (the row schema below reuses the shapes).
  */
-export const createBuilderAgentBodySchema = z.object(builderFieldShapes);
-export type CreateBuilderAgentInput = z.infer<typeof createBuilderAgentBodySchema>;
-export const updateBuilderAgentBodySchema = z
-  .object(builderFieldShapes)
-  .partial();
-export type UpdateBuilderAgentInput = z.infer<typeof updateBuilderAgentBodySchema>;
+export type CreateBuilderAgentInput = z.infer<z.ZodObject<typeof builderFieldShapes>>;
+export type UpdateBuilderAgentInput = z.infer<
+  ReturnType<z.ZodObject<typeof builderFieldShapes>["partial"]>
+>;
 
 /**
  * Body schema for PATCH /api/agents/[id]. All fields optional; `id`
@@ -141,7 +148,16 @@ interface AgentRow {
 function parseRequirements(raw: unknown): AgentRequirements | undefined {
   if (raw == null) return undefined;
   const parsed = requirementsSchema.safeParse(raw);
-  return parsed.success ? parsed.data : undefined;
+  if (!parsed.success) {
+    // Fail closed (the agent runs ungated and the dispatcher rejects the
+    // run) but make the corruption OBSERVABLE — a silent undefined here
+    // looks identical to "snapshot-less row" and hides the cause.
+    console.warn("[agent-store] unparseable requirements blob — agent runs ungated", {
+      error: parsed.error.message,
+    });
+    return undefined;
+  }
+  return parsed.data;
 }
 
 const AGENT_SELECT_COLUMNS =

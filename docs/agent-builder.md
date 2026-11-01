@@ -286,7 +286,7 @@ Generic `/api/agents/[id]` PATCH **rejects builder-origin rows**
 component, so editing endpoint/authMode/jwtSecret here would write
 fields the registry ignores while desyncing the local name/description
 from the AgentOS component with no sync path. The builder route owns
-every edit for these rows (author or org admin). DELETE on the generic
+every edit for these rows (strictly the author — no admin override). DELETE on the generic
 route still works (it soft-deletes the remote component).
 
 The run request routes through `runWithRunnerContext` whenever the gate

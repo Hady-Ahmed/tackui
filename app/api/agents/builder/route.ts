@@ -108,8 +108,8 @@ export async function POST(request: Request) {
   }
 
   const remoteAgentId = generateAgentId();
-  // Tool names are validated against the curated palette + registry here —
-  // a stale/typo'd palette entry is client input, so a 400 (not a 500).
+  // Tool names are validated against the platform tools catalog here —
+  // a stale/typo'd name is client input, so a 400 (not a 500).
   let config: Record<string, unknown>;
   let requirements;
   try {

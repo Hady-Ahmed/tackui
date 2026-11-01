@@ -59,10 +59,13 @@ no Docker required, no cleanup between runs (see `vitest.config.ts`).
   mocks. Restore in `afterEach`.
 - **No production code changes for testability** — the in-memory pg-mem
   emulator + vitest's `isolate: true` handle DB isolation without needing
-  test-only exports. pg-mem doesn't support `WITH RECURSIVE` CTEs or
-  cross-statement `ROLLBACK` — the skipped tests in
-  `lib/agents/pg-runner.test.ts` are intentional; don't "fix" them (see
-  `docs/architecture.md` Future section for the testcontainers follow-up).
+  test-only exports. pg-mem doesn't support `WITH RECURSIVE` CTEs,
+  cross-statement `ROLLBACK`, or pg_catalog index metadata — the tests
+  that need those (`pg-runner.test.ts` connect() suite, the
+  `withTransaction` rollback test, the migration index test) run against
+  a real Postgres via `@testcontainers/postgresql` (`lib/db/
+  test-postgres.ts`; Docker required — they SKIP with a console note when
+  the daemon is down, so a Docker-less environment stays green).
 - **Security-critical code** (`lib/auth`, `lib/billing`, `lib/net`,
   `lib/ratelimit`) — test the bypass attempt, not just the happy path.
 

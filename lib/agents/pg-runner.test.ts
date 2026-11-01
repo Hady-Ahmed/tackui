@@ -1,9 +1,10 @@
-import { describe, it, expect, beforeEach } from "vitest";
+import { describe, it, expect, beforeEach, beforeAll, afterAll } from "vitest";
 import { EventType, type BaseEvent, type Message } from "@ag-ui/core";
 import { PostgresAgentRunner } from "./pg-runner";
 import { runWithUser, type RequestUser } from "@/lib/auth/request-context";
 import { query } from "@/lib/db/pg";
 import { runMigrations } from "@/lib/db/migrate";
+import { useRealPostgres } from "@/lib/db/test-postgres";
 
 const user1: RequestUser = {
   id: "user-1",
@@ -282,16 +283,29 @@ describe("PostgresAgentRunner — connect() smart replay", () => {
     runner.clearThreads();
   });
 
-  // connect() calls getHistoricRuns() — a `WITH RECURSIVE` CTE walking
-  // the parent_run_id chain. pg-mem's parser doesn't support
-  // `WITH RECURSIVE`, so these can only run against real Postgres (via
-  // testcontainers — planned integration suite, see docs/architecture.md
-  // "Future / extension points"). The
+  // These can only run against REAL Postgres — pg-mem's parser doesn't
+  // support `WITH RECURSIVE` (and can't do cross-statement ROLLBACK). A
+  // testcontainers Postgres is swapped in for this suite (Docker
+  // required — the daemon is up in dev; without it the suite SKIPS with a
+  // note instead of failing, keeping the suite green everywhere). The
   // connect() smart-replay logic (RUN_ERROR filtering, STATE_*
   // preservation, live-bridging) is exercised end-to-end by the manual
   // smoke test in docs/agent-registry.md.
+  let pgStarted = false;
+  let restorePg: (() => void) | null = null;
 
-  it.skip("replays events from agent_runs, filtering out RUN_ERROR", async () => {
+  beforeAll(async () => {
+    restorePg = await useRealPostgres();
+    pgStarted = restorePg !== null;
+  });
+
+  afterAll(() => {
+    restorePg?.();
+    restorePg = null;
+  });
+
+  it("replays events from agent_runs, filtering out RUN_ERROR", async (ctx) => {
+    ctx.skip(!pgStarted, "Real Postgres (Docker) unavailable");
     const eventsWithErr: BaseEvent[] = [
       { type: EventType.RUN_STARTED, threadId: "t-err" } as unknown as BaseEvent,
       { type: EventType.RUN_ERROR, message: "backend unreachable" } as unknown as BaseEvent,
@@ -315,7 +329,8 @@ describe("PostgresAgentRunner — connect() smart replay", () => {
     expect(received.find((e) => e.type === EventType.RUN_ERROR)).toBeUndefined();
   });
 
-  it.skip("preserves STATE_* events (intermediate events not lost)", async () => {
+  it("preserves STATE_* events (intermediate events not lost)", async (ctx) => {
+    ctx.skip(!pgStarted, "Real Postgres (Docker) unavailable");
     const eventsWithState: BaseEvent[] = [
       { type: EventType.STATE_SNAPSHOT, snapshot: { step: 1 } } as unknown as BaseEvent,
     ];
@@ -338,7 +353,8 @@ describe("PostgresAgentRunner — connect() smart replay", () => {
     expect(received.some((e) => e.type === EventType.STATE_SNAPSHOT)).toBe(true);
   });
 
-  it.skip("completes immediately (no live-bridging) when no run is in flight", async () => {
+  it("completes immediately (no live-bridging) when no run is in flight", async (ctx) => {
+    ctx.skip(!pgStarted, "Real Postgres (Docker) unavailable");
     await query(
       `INSERT INTO agent_runs (thread_id, run_id, events, input, version)
        VALUES ($1, $2, $3::jsonb, $4::jsonb, 1)`,

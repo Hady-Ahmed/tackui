@@ -282,6 +282,53 @@ describe("PATCH /api/agents/builder/[id]", () => {
     expect(stored?.description).toBe("A fixture agent"); // untouched by the revert
   });
 
+  describe("snapshot-less builder rows (hand-edited / future-bug guard)", () => {
+    let bare: AgentEntry;
+
+    beforeEach(async () => {
+      bare = await createFixture({ requirements: undefined });
+    });
+
+    it("409s a PARTIAL config patch (unpatched tools/connectors can't be re-derived — defaulting to [] would wipe them)", async () => {
+      const res = await patchAgent(bare.id, { model: { provider: "openai", id: "gpt-4o-mini" } });
+      expect(res.status).toBe(409);
+      expect(mockUpdateMeta).not.toHaveBeenCalled();
+      expect(mockUpdateConfig).not.toHaveBeenCalled();
+      // Nothing written locally either.
+      const stored = await getAgent(bare.id, testOrg);
+      expect(stored?.name).toBe("Fixture");
+    });
+
+    it("accepts a FULL config patch (model + tools + connectors — everything re-derived from the patch)", async () => {
+      const res = await patchAgent(bare.id, {
+        model: { provider: "openai", id: "gpt-4o-mini" },
+        tools: [],
+        connectors: [],
+      });
+      expect(res.status).toBe(200);
+      expect(mockUpdateConfig).toHaveBeenCalledTimes(1);
+      const stored = await getAgent(bare.id, testOrg);
+      expect(stored?.requirements?.model.id).toBe("gpt-4o-mini");
+    });
+
+    it("clears the added snapshot on a failed full config patch (the revert must restore the row to ITS prior state — no snapshot)", async () => {
+      mockUpdateConfig.mockRejectedValue(new AgentosError(503, "agentos down"));
+      const res = await patchAgent(bare.id, {
+        model: { provider: "openai", id: "gpt-4o-mini" },
+        tools: [],
+        connectors: [],
+      });
+      expect(res.status).toBe(503);
+      const stored = await getAgent(bare.id, testOrg);
+      // The local write added a snapshot; the compensating revert removes
+      // it again — otherwise the local row would lead the AgentOS with a
+      // config the platform never confirmed.
+      expect(stored?.requirements).toBeUndefined();
+      expect(stored?.name).toBe("Fixture");
+    });
+  });
+
+
   it("maps an AgentOS guard fetch failure to its status", async () => {
     mockGetComponent.mockRejectedValue(new AgentosError(503, "agentos offline"));
     const res = await patchAgent(agent.id, { name: "Renamed" });

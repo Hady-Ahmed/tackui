@@ -1,12 +1,12 @@
 import { describe, it, expect, beforeEach, afterEach } from "vitest";
 import { newDb, type IMemoryDb } from "pg-mem";
+import { useRealPostgres } from "./test-postgres";
 import {
   query,
   withTransaction,
   setTestDb,
   closePool,
-  getPool,
-  type PgClient,
+  getPool,  type PgClient,
 } from "./pg";
 
 let db: IMemoryDb;
@@ -77,34 +77,48 @@ describe("withTransaction", () => {
   });
 
   // ROLLBACK across multiple pg.query() calls is not honored by pg-mem
-  // (each statement auto-commits in its own implicit transaction).
-  // The COMMIT path above verifies that statements do execute within
-  // a withTransaction block; rollback behavior must be verified against
-  // real Postgres (see testcontainers-based integration suite, planned
-  // alongside PR4 when the PostgresAgentRunner lands).
-  it.skip("rolls back when fn throws", async () => {
-    await expect(
-      withTransaction(async (client) => {
-        await client.query(
-          "UPDATE accounts SET balance = balance - $1 WHERE id = 1",
-          [100],
-        );
-        await client.query(
-          "UPDATE accounts SET balance = balance + $1 WHERE id = 2",
-          [100],
-        );
-        throw new Error("simulated failure mid-transfer");
-      }),
-    ).rejects.toThrow("simulated failure mid-transfer");
+  // pg-mem can't do cross-statement ROLLBACK (each statement
+  // auto-commits in its own implicit transaction). The COMMIT path above
+  // verifies that statements execute within a withTransaction block;
+  // rollback behavior runs against a real Postgres via testcontainers
+  // (skips with a note when Docker is down).
+  it("rolls back when fn throws", async (ctx) => {
+    const restore = await useRealPostgres();
+    if (!restore) {
+      ctx.skip();
+      return;
+    }
+    try {
+      // The container persists across tests — reset the fixture rows.
+      await query("CREATE TABLE IF NOT EXISTS accounts (id int, balance int)");
+      await query("DELETE FROM accounts");
+      await query("INSERT INTO accounts (id, balance) VALUES (1, 100), (2, 0)");
 
-    const a1 = await query<{ balance: number }>(
-      "SELECT balance FROM accounts WHERE id = 1",
-    );
-    const a2 = await query<{ balance: number }>(
-      "SELECT balance FROM accounts WHERE id = 2",
-    );
-    expect(a1.rows[0].balance).toBe(100);
-    expect(a2.rows[0].balance).toBe(0);
+      await expect(
+        withTransaction(async (client) => {
+          await client.query(
+            "UPDATE accounts SET balance = balance - $1 WHERE id = 1",
+            [100],
+          );
+          await client.query(
+            "UPDATE accounts SET balance = balance + $1 WHERE id = 2",
+            [100],
+          );
+          throw new Error("simulated failure mid-transfer");
+        }),
+      ).rejects.toThrow("simulated failure mid-transfer");
+
+      const a1 = await query<{ balance: number }>(
+        "SELECT balance FROM accounts WHERE id = 1",
+      );
+      const a2 = await query<{ balance: number }>(
+        "SELECT balance FROM accounts WHERE id = 2",
+      );
+      expect(a1.rows[0].balance).toBe(100);
+      expect(a2.rows[0].balance).toBe(0);
+    } finally {
+      restore();
+    }
   });
 });
 

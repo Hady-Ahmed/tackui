@@ -278,7 +278,10 @@ entirely by simply not setting the env vars.
 - **Additional backends** — CrewAI, Mastra, Pydantic AI, Google ADK, AWS
   Strands, etc.
 - **Integration test suite (testcontainers + real Postgres):** pg-mem doesn't
-  support `WITH RECURSIVE` CTEs (used by `PostgresAgentRunner.getHistoricRuns`)
-  or cross-statement `ROLLBACK`. The 3 skipped tests in
-  `lib/agents/pg-runner.test.ts` cover these paths. A testcontainers-based
-  integration suite would run them against a real PG container in CI.
+  support `WITH RECURSIVE` CTEs (used by `PostgresAgentRunner.getHistoricRuns`),
+  cross-statement `ROLLBACK`, or pg_catalog index metadata. DONE: the tests
+  that need those run against a real Postgres via `@testcontainers/postgresql`
+  (`lib/db/test-postgres.ts` — per-file container, skip-with-note when Docker
+  is down). What remains here is broader integration coverage: multi-connection
+  consistency tests would need the same harness extended beyond the current
+  suites.
