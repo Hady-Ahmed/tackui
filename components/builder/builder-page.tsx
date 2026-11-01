@@ -1118,7 +1118,12 @@ function Field({
   );
   if (asGroup) {
     return (
-      <fieldset className="border-0 p-0">
+      // min-w-0 matters: <fieldset> has a legacy UA rule (min-width:
+      // min-content) that makes it refuse to shrink below its content's
+      // text width — long nowrap-truncated rows (tool descriptions,
+      // connector URLs) would blow the whole section out past the card
+      // edge instead of truncating.
+      <fieldset className="min-w-0 border-0 p-0">
         <legend className="mb-1 block text-xs font-medium text-zinc-700 dark:text-zinc-300">
           {title}
         </legend>

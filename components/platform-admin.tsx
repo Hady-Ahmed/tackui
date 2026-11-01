@@ -25,7 +25,9 @@
  *  - Toolkits group under free alphabetical bands derived at render time —
  *    no maintained category list anywhere (agno has none, and curated
  *    categories would mean a code change per re-organization). Function
- *    lists truncate to a few names with a native <details> expander.
+ *    lists truncate to a few names with a native <details> expander when
+ *    there are more; short lists render as plain text (no dead expander,
+ *    no class-name chip — it would just duplicate the toolkit's title).
  *  - An enabled provider with no model ids is blocked client-side (inline
  *    error + disabled save) AND server-side (the AgentOS PUT answers 400)
  *    — the tick-the-box-forget-the-rows state must not be saveable.
@@ -462,15 +464,22 @@ export function PlatformAdmin() {
 
   // Free alphabetical bands from the visible set — derived at render time,
   // nothing maintained. A filter that empties a band just drops the band.
-  // Sorted: the API orders rows by slug, but bands key off the label.
+  // Bands (and the order within each) key off the DISPLAYED title, so the
+  // visible grouping always matches the visible names — the API orders by
+  // slug, which diverges from the class-name titles.
   const toolBands = new Map<string, CatalogTool[]>();
   for (const t of visibleTools) {
-    const band = (t.label || t.slug).charAt(0).toUpperCase();
+    const band = toolTitle(t).charAt(0).toUpperCase();
     const bucket = toolBands.get(band);
     if (bucket) bucket.push(t);
     else toolBands.set(band, [t]);
   }
-  const bandEntries = [...toolBands.entries()].sort(([a], [b]) => a.localeCompare(b));
+  const bandEntries = [...toolBands.entries()]
+    .sort(([a], [b]) => a.localeCompare(b))
+    .map(([band, tools]) => [
+      band,
+      [...tools].sort((a, b) => toolTitle(a).localeCompare(toolTitle(b))),
+    ] as const);
 
   return (
     <div>
@@ -611,7 +620,7 @@ export function PlatformAdmin() {
                     // Disabling the checkbox outright would trap an
                     // enabled dead row in a permanent 400 loop.
                     disabled={saving || (!p.available && !d.enabled)}
-                    aria-label={`Enable ${p.slug}`}
+                    aria-label={`Enable ${p.class_name ?? p.slug}`}
                     title={
                       !p.available
                         ? d.enabled
@@ -632,19 +641,24 @@ export function PlatformAdmin() {
                     className="h-4 w-4 rounded border-zinc-300 text-blue-600 dark:border-zinc-600"
                   />
                   <span className="min-w-0 truncate font-medium text-zinc-900 dark:text-zinc-50">
-                    {p.slug}
+                    {/* The agno class name IS the honest display name
+                        ("AzureOpenAI", not "azure" — which reads like all
+                        of Azure when it's OpenAI-on-Azure only). Slug
+                        fallback for any provider without a class. */}
+                    {p.class_name ?? p.slug}
                   </span>
                   {!p.available && <Pill tone="amber">No longer available</Pill>}
-                  {open ? (
-                    <code className="min-w-0 flex-1 truncate text-xs text-zinc-400">{p.class_name}</code>
-                  ) : (
+                  {/* Expanded rows show no inline metadata — the model
+                      count pill is a collapsed-state summary, and the slug
+                      lives in the editor panel below where it's actually
+                      referenced (result keys, error copy). */}
+                  {!open &&
                     d.enabled &&
                     p.available && (
                       <Pill tone={modelCount > 0 ? "gray" : "amber"}>
                         {modelCount} {modelCount === 1 ? "model" : "models"}
                       </Pill>
-                    )
-                  )}
+                    )}
                   <span className="ml-auto flex shrink-0 items-center gap-2.5">
                     <span
                       className={`shrink-0 pr-0.5 text-xs text-zinc-400 transition-transform ${open ? "rotate-90" : ""}`}
@@ -662,7 +676,10 @@ export function PlatformAdmin() {
                         composes `slug:trimmed-row` and persists nothing;
                         buttons sit disabled with a tooltip when the
                         platform key is missing — the one place key state
-                        surfaces in this UI. */}
+                        surfaces in this UI. The slug is NOT displayed
+                        here: error copy names slugs, but the provider
+                        filter matches them too — type it there to find
+                        the row. */}
                     <div className="space-y-1.5">
                       {d.models.map((line, i) => {
                         const resultKey = `${p.slug}:${line.trim()}`;
@@ -674,12 +691,12 @@ export function PlatformAdmin() {
                               onPaste={(e) => pasteIntoRow(e, p.slug, i)}
                               disabled={saving}
                               placeholder="model-id"
-                              aria-label={`Model id ${i + 1} for ${p.slug}`}
+                              aria-label={`Model id ${i + 1} for ${p.class_name ?? p.slug}`}
                               className="min-w-0 flex-1 rounded-lg border border-zinc-200 bg-white px-3 py-1.5 font-mono text-xs text-zinc-900 outline-none transition-colors focus:border-blue-500 dark:border-zinc-700 dark:bg-zinc-900 dark:text-zinc-50"
                             />
                             <button
                               type="button"
-                              aria-label={`Test model id ${line.trim()} on ${p.slug}`}
+                              aria-label={`Test model id ${line.trim()} on ${p.class_name ?? p.slug}`}
                               disabled={
                                 saving || !p.env_key_set || testing !== null || !line.trim()
                               }
@@ -847,8 +864,17 @@ export function PlatformAdmin() {
   );
 }
 
+/** The displayed toolkit name — the agno class name ("CsvTools"), falling
+ *  back to the label, then the slug. One name everywhere: the row title,
+ *  the aria-label, and the alphabetical bands all key off this. */
+function toolTitle(tool: CatalogTool): string {
+  return (tool.class_name ?? tool.label) || tool.slug;
+}
+
 /** One compact toolkit row — toggle + label + credential chips, with the
-    function dump and class name tucked into a native <details>. */
+    function list expanding to the full untruncated list only when there
+    are more names than the preview shows ("Show less" sits below the
+    revealed list). */
 function ToolRow({
   tool,
   checked,
@@ -891,12 +917,12 @@ function ToolRow({
                   : undefined
                 : undefined
           }
-          aria-label={`Enable ${tool.label || tool.slug}`}
+          aria-label={`Enable ${toolTitle(tool)}`}
           onChange={(e) => onChange(e.target.checked)}
           className="h-4 w-4 shrink-0 rounded border-zinc-300 text-blue-600 dark:border-zinc-600"
         />
         <span className="min-w-0 truncate font-medium text-zinc-900 dark:text-zinc-50">
-          {tool.label}
+          {toolTitle(tool)}
         </span>
         {!tool.available && <Pill tone="amber">No longer available</Pill>}
         {tool.available && !tool.deliverable && (
@@ -922,35 +948,46 @@ function ToolRow({
           </span>
         )}
       </div>
-      {/* Function list — the bulk of the old card. Truncate to the first
-          few; the native <details> holds the rest + the class name. */}
-      <details
-        open={open}
-        onToggle={(e) => setOpen((e.target as HTMLDetailsElement).open)}
-        className="mt-1 text-xs text-zinc-500 dark:text-zinc-400"
-      >
-        <summary className="flex min-w-0 cursor-pointer list-none items-baseline gap-1 marker:hidden">
-          {tool.functions.length > 0 ? (
-            <>
-              <span className="min-w-0 truncate">{shown.join(", ")}</span>
-              {rest > 0 && (
-                <span className="shrink-0 whitespace-nowrap text-[11px] text-blue-600 hover:underline dark:text-blue-400">
-                  {" "}
-                  +{rest} more
-                </span>
-              )}
-            </>
-          ) : (
-            <span>No functions discovered.</span>
-          )}
-        </summary>
-        <p className="mt-1 break-words">{tool.functions.join(", ") || "—"}</p>
-        {tool.class_name && (
-          <p className="mt-0.5">
-            <code className="text-[10px]">{tool.class_name}</code>
+      {/* Function list — the bulk of the old card. Non-interactive whenever
+          the list already fits the preview (a clickable expander that only
+          re-shows the same names read as a bug). When it expands, the
+          summary (which must stay first to remain the native toggle)
+          hides, the FULL list renders untruncated, and a "Show less"
+          button BELOW the list becomes the collapse affordance — reading
+          like the end of the reveal, not a header above it. No class name
+          is rendered here: it duplicates the toolkit's title. */}
+      {tool.functions.length === 0 ? (
+        <p className="mt-1 text-xs text-zinc-500 dark:text-zinc-400">
+          No functions discovered.
+        </p>
+      ) : rest > 0 ? (
+        <details
+          open={open}
+          onToggle={(e) => setOpen((e.target as HTMLDetailsElement).open)}
+          className="group mt-1 text-xs text-zinc-500 dark:text-zinc-400"
+        >
+          <summary className="flex min-w-0 cursor-pointer list-none items-baseline gap-1 marker:hidden group-open:hidden">
+            <span className="min-w-0 truncate">{shown.join(", ")}</span>
+            <span className="shrink-0 whitespace-nowrap text-[11px] text-blue-600 hover:underline dark:text-blue-400">
+              +{rest} more
+            </span>
+          </summary>
+          <p className="mt-1 hidden break-words group-open:block">
+            {tool.functions.join(", ")}
           </p>
-        )}
-      </details>
+          <button
+            type="button"
+            onClick={() => setOpen(false)}
+            className="mt-0.5 hidden text-[11px] text-blue-600 hover:underline group-open:block dark:text-blue-400"
+          >
+            Show less
+          </button>
+        </details>
+      ) : (
+        <p className="mt-1 break-words text-xs text-zinc-500 dark:text-zinc-400">
+          {tool.functions.join(", ")}
+        </p>
+      )}
       {checked && (
         <p className="mt-1 text-[11px] text-amber-600 dark:text-amber-400">
           Disabling this toolkit stops agents that use it.
