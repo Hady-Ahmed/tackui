@@ -1,6 +1,6 @@
 /**
  * The agent builder service — tackui's server-side client for the shared
- * AgentOS platform (agent-warehouse `agents/platform-os`).
+ * AgentOS platform.
  *
  * Builder-created agents live in two places at once: the AgentOS component
  * store (the versioned config the dispatcher rehydrates at run time — the
@@ -45,6 +45,7 @@ import { NextResponse } from "next/server";
 import { AGENTOS_BASE_URL, AGENTOS_ENABLED, AGENTOS_JWT_SECRET } from "@/lib/config/agentos";
 import { providerForDepKey } from "@/lib/credentials/catalog";
 import type { AgentRequirements } from "./agents.config";
+import { requirementsSchema } from "./agent-store";
 
 /** Seconds a minted service token stays valid — minted per request. */
 const SERVICE_TOKEN_TTL_SECONDS = 600;
@@ -203,8 +204,9 @@ function extractDetail(raw: string): string | undefined {
  * should fail the builder request, not hold it open.
  *
  * Error copy discipline: `message` is end-user-safe (the platform is
- * called "the agent platform" — never "AgentOS", never method/path/status
- * framing, never a raw body). The upstream validation text rides in
+ * called "the agent builder" — never "the agent platform", never
+ * "AgentOS", never method/path/status framing, never a raw body). The
+ * upstream validation text rides in
  * `detail`, which only admin-gated routes may surface; 5xx bodies can
  * carry infra detail (agno internals, DB errors) but the same rule holds
  * — detail goes only where an operator is reading. Same boundary
@@ -419,7 +421,7 @@ export function buildRequirements(
   tools: AgentosTool[],
 ): AgentRequirements {
   const toolByName = new Map(tools.map((t) => [t.name, t]));
-  return {
+  const requirements: AgentRequirements = {
     model: {
       provider: model.provider,
       id: model.id,
@@ -435,7 +437,11 @@ export function buildRequirements(
       }
       return {
         name: t.name,
-        label: entry.label,
+        // Cosmetic-only upstream gap: an empty catalog label is omitted
+        // rather than stored (an empty string would fail the read schema
+        // and poison the whole snapshot). The UI renders the live catalog
+        // label anyway; the snapshot label is for gate/KeyForm copy.
+        label: entry.label || undefined,
         requiresKey: entry.requires_key,
         // The toolkit slug is the credential provider (dep keys derive from
         // it — multi-credential toolkits keep one provider). Fall back to
@@ -453,11 +459,33 @@ export function buildRequirements(
         // rather than a raw TypeError → 500. (The gate's legacy
         // single-dep fallback still demands the requiresKey dep when the
         // contract is absent — the snapshot is merely less precise.)
-        credentials: (entry.credentials ?? []).map((c) => ({ depKey: c.dep_key, label: c.label })),
+        credentials: (entry.credentials ?? []).map((c) => ({
+          depKey: c.dep_key,
+          // Cosmetic: an empty upstream label falls back to the dep key
+          // (functional gap — empty dep_key — is caught by the write-
+          // boundary validation below, not papered over here).
+          label: c.label || c.dep_key,
+        })),
       };
     }),
     connectors: spec.connectors,
   };
+  // Write-boundary validation: the snapshot must parse with the SAME
+  // schema every read applies. A malformed platform-catalog row (empty
+  // model provider, empty credential dep_key, …) previously wrote fine
+  // and then silently ungated the agent — parseRequirements dropped the
+  // blob on every read, the run gate returned the empty resolution, no
+  // 402, no delivery. Failing loudly at save time is the fail-closed
+  // posture this module already applies to missing contract fields.
+  const parsed = requirementsSchema.safeParse(requirements);
+  if (!parsed.success) {
+    const issue = parsed.error.issues[0];
+    const where = issue?.path.length ? issue.path.join(".") : "requirements";
+    throw new BuilderValidationError(
+      `Platform catalog data is inconsistent (${where}) — saving would create an agent that runs without its credential gates. Refresh the platform catalog and try again.`,
+    );
+  }
+  return parsed.data as AgentRequirements;
 }
 
 /* ---------------------------------------------------------------------- */

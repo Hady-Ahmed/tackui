@@ -1,7 +1,7 @@
 /**
  * AgentOS platform configuration.
  *
- * The platform-os agent (agent-warehouse) is shared multi-tenant
+ * The platform-os service is shared multi-tenant
  * infrastructure: builder-created agents are versioned component configs
  * on the AgentOS, and tackui's run path reaches them through this
  * deployment's platform credentials. This file is the single source of
@@ -30,7 +30,7 @@ export const AGENTOS_BASE_URL = (process.env.AGENTOS_BASE_URL ?? "").replace(
  * The platform JWT secret the AgentOS dispatcher verifies. tackui signs
  * per-request service tokens (app:superadmin) and user tokens (app:user,
  * sub = the running user's id) with this secret — the same HS256 wire
- * contract proven in the spike (agents/platform-os credentials.py).
+ * contract proven in the platform's own credentials module.
  * Required when AGENTOS_BASE_URL is set; a missing secret with a set
  * URL is a boot misconfiguration (every run would 401 at the dispatcher).
  */

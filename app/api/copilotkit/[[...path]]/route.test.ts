@@ -230,3 +230,44 @@ describe("copilotkit route — solo mode (self-host)", () => {
     expect(checkBuilderRunGate).not.toHaveBeenCalled();
   });
 });
+
+describe("copilotkit route — run-shaped path fails closed", () => {
+  beforeEach(async () => {
+    // An earlier test pins a 410 implementation on this mock — reset it
+    // so these tests exercise the path-classification layer only.
+    const { checkCatalogRunGates } = await import("@/lib/plans/enforcement");
+    vi.mocked(checkCatalogRunGates).mockResolvedValue(null);
+  });
+
+  it("404s a POST to /agent/<id>/run/<extra> before the inner handler", async () => {
+    const res = await POST(
+      new Request("http://localhost:3000/api/copilotkit/agent/test-agent/run/extra", {
+        method: "POST",
+        body: JSON.stringify({}),
+      }),
+    );
+    expect(res.status).toBe(404);
+    expect(checkBuilderRunGate).not.toHaveBeenCalled();
+  });
+
+  it("sends a stray-% run path through the gates (URL sanitizes %% to %25)", async () => {
+    // The WHATWG URL class normalizes an invalid "%" to "%25" at parse
+    // time, so a "malformed" agent id always decodes by the time it
+    // reaches the handler — no URIError, no gate skip. The request must
+    // flow through the normal gate path, not die in a 404.
+    await POST(
+      new Request("http://localhost:3000/api/copilotkit/agent/%25%25/run", {
+        method: "POST",
+        body: JSON.stringify({}),
+      }),
+    );
+    expect(checkBuilderRunGate).toHaveBeenCalledTimes(1);
+  });
+
+  it("does not 404 a well-formed run path", async () => {
+    const res = await POST(
+      new Request(RUN_URL, { method: "POST", body: JSON.stringify({}) }),
+    );
+    expect(res.status).not.toBe(404);
+  });
+});

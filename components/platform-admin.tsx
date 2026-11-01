@@ -887,6 +887,10 @@ function ToolRow({
   onChange: (checked: boolean) => void;
 }) {
   const [open, setOpen] = useState(false);
+  // Focus handoff refs: hiding the summary on open (or the "Show less"
+  // button on close) would otherwise drop keyboard focus to <body>.
+  const summaryRef = useRef<HTMLElement>(null);
+  const showLessRef = useRef<HTMLButtonElement>(null);
   const shown = tool.functions.slice(0, 3);
   const rest = tool.functions.length - shown.length;
   return (
@@ -963,10 +967,23 @@ function ToolRow({
       ) : rest > 0 ? (
         <details
           open={open}
-          onToggle={(e) => setOpen((e.target as HTMLDetailsElement).open)}
+          onToggle={(e) => {
+            const nowOpen = (e.target as HTMLDetailsElement).open;
+            setOpen(nowOpen);
+            // Keep the keyboard path continuous: the element the user
+            // was on (summary when opening, "Show less" when closing)
+            // is about to be display:none — move focus to its successor
+            // before it vanishes.
+            requestAnimationFrame(() =>
+              nowOpen ? showLessRef.current?.focus() : summaryRef.current?.focus(),
+            );
+          }}
           className="group mt-1 text-xs text-zinc-500 dark:text-zinc-400"
         >
-          <summary className="flex min-w-0 cursor-pointer list-none items-baseline gap-1 marker:hidden group-open:hidden">
+          <summary
+            ref={summaryRef}
+            className="flex min-w-0 cursor-pointer list-none items-baseline gap-1 marker:hidden group-open:hidden"
+          >
             <span className="min-w-0 truncate">{shown.join(", ")}</span>
             <span className="shrink-0 whitespace-nowrap text-[11px] text-blue-600 hover:underline dark:text-blue-400">
               +{rest} more
@@ -976,6 +993,7 @@ function ToolRow({
             {tool.functions.join(", ")}
           </p>
           <button
+            ref={showLessRef}
             type="button"
             onClick={() => setOpen(false)}
             className="mt-0.5 hidden text-[11px] text-blue-600 hover:underline group-open:block dark:text-blue-400"

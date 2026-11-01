@@ -335,7 +335,7 @@ function AgentChat({
 
   return (
     <CopilotChat
-      key={agentId + threadId}
+      key={`${agentId}:${threadId}`}
       agentId={agentId}
       threadId={threadId}
       className="flex-1"

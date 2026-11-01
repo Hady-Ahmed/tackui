@@ -18,7 +18,7 @@ import {
 } from "@ag-ui/client";
 import type { Message } from "@ag-ui/core";
 import { query, withTransaction } from "@/lib/db/pg";
-import { getRunnerUser } from "@/lib/auth/request-context";
+import { getReservedDepKeys, getRunnerUser } from "@/lib/auth/request-context";
 
 interface AgentRunRecord {
   id: number;
@@ -46,6 +46,49 @@ interface ActiveConnectionContext {
 const ACTIVE_CONNECTIONS = new Map<string, ActiveConnectionContext>();
 
 const SCHEMA_VERSION = 1;
+
+/**
+ * Defense in depth against secret persistence: the AG-UI schema allows
+ * events (and the stored run input) to carry the full request input,
+ * whose `context` array is where the run gate INJECTS this run's
+ * secrets (the model key, every tool dep key, mcp_connectors with org
+ * connector URLs+tokens). Today the dispatcher persists an empty
+ * context (verified against production-shaped data: zero reserved keys
+ * across all stored runs) — but an upstream change could start echoing
+ * it, and connect() replays stored events to browsers. Redact any
+ * context item whose description/name is a reserved dep key before
+ * persisting, so server-injected secrets can never reach `agent_runs`.
+ * Non-reserved client context is the client's own data and survives.
+ */
+export function redactReservedContext<T extends object>(
+  holder: T | undefined,
+  reserved: ReadonlySet<string>,
+): T | undefined {
+  const context = (holder as { context?: unknown } | undefined)?.context;
+  if (!holder || !Array.isArray(context)) return holder;
+  const kept = context.filter((item) => {
+    if (typeof item !== "object" || item === null) return true;
+    const { description, name } = item as { description?: unknown; name?: unknown };
+    return !reserved.has(String(description ?? "")) && !reserved.has(String(name ?? ""));
+  });
+  if (kept.length === context.length) return holder;
+  return { ...holder, context: kept };
+}
+
+/**
+ * Event-shaped variant: AG-UI events that carry an input embed it under
+ * `input` (RUN_STARTED), so the holder is `event.input`. Returns the
+ * original event object when there is nothing to redact.
+ */
+export function redactReservedEvent<E extends object>(
+  event: E,
+  reserved: ReadonlySet<string>,
+): E {
+  const input = (event as { input?: { context?: unknown } }).input;
+  if (!input) return event;
+  const safeInput = redactReservedContext(input, reserved);
+  return safeInput === input ? event : { ...event, input: safeInput };
+}
 
 /**
  * Postgres-backed AgentRunner. Replaces @copilotkit/sqlite-runner's
@@ -668,7 +711,15 @@ export class PostgresAgentRunner extends AgentRunner {
     input: RunAgentInput,
     parentRunId?: string | null,
   ): Promise<void> {
-    const compactedEvents = compactEvents(events);
+    // Reserved dep keys (this run's injected secrets) come from the
+    // runner ALS — storeRun only ever runs inside that scope. The
+    // non-contract key is added unconditionally so the redaction never
+    // depends on ALS presence alone. See redactReservedContext.
+    const reserved = new Set([...getReservedDepKeys(), "mcp_connectors"]);
+    const compactedEvents = compactEvents(events).map((event) =>
+      redactReservedEvent(event as { input?: { context?: unknown } }, reserved) as BaseEvent,
+    );
+    const safeInput = redactReservedContext(input as { context?: unknown }, reserved) as RunAgentInput;
     await query(
       `INSERT INTO agent_runs (thread_id, run_id, parent_run_id, events, input, version)
        VALUES ($1, $2, $3, $4::jsonb, $5::jsonb, $6)`,
@@ -677,7 +728,7 @@ export class PostgresAgentRunner extends AgentRunner {
         runId,
         parentRunId ?? null,
         JSON.stringify(compactedEvents),
-        JSON.stringify(input),
+        JSON.stringify(safeInput),
         SCHEMA_VERSION,
       ],
     );

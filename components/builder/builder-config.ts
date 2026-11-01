@@ -141,8 +141,9 @@ export function pickDefaultModel(models: PlatformModel[]): PlatformModel | null 
  * successfully but is empty; null while loading, when populated, or when
  * the fetch failed (the unreachable banner covers that case).
  *
- * Copy says "the agent platform", never "your agent platform" — SaaS end
- * users don't own the platform, and possessives imply they do.
+ * Copy says "the agent builder", never "the agent platform" or "AgentOS"
+ * — and never possessives ("your agent platform"): SaaS end users don't
+ * own the platform, and possessives imply they do.
  */
 export function catalogEmptyCopy(
   kind: "models" | "tools",
@@ -280,7 +281,11 @@ export function toolKeyState(
   if (credentials?.hasKey[provider ?? ""]) {
     return { status: "connected", providerLabel };
   }
-  return { status: "missing", providerLabel, provider };
+  // Only surface a provider for the Connect flow when the credentials
+  // catalog knows it — a toolkit slug that drifted out of the catalog
+  // would otherwise render a Connect button that opens an empty KeyForm
+  // (dead click). Mirrors modelKeyState's guard above.
+  return { status: "missing", providerLabel, provider: meta ? provider : null };
 }
 
 /**

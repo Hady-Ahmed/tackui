@@ -29,8 +29,8 @@ Nothing is cached agent-side, and nothing is persisted on the AgentOS.
 A builder agent exists in two stores at once:
 
 1. **The AgentOS component store** — the versioned config the dispatcher
-   rehydrates at run time (the "brain"). Lives in a separate repo
-   (`agent-warehouse`, `agents/platform-os/`). tackui is a client of
+   rehydrates at run time (the "brain"). Lives in a separate service
+   (the shared AgentOS). tackui is a client of
    this store over HTTP.
 2. **tackui's `agents` table** — provenance + the org-facing row the
    sidebar lists. Carries `origin: "builder"`, `author_user_id`,

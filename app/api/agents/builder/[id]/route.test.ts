@@ -384,3 +384,26 @@ describe("DELETE /api/agents/builder/[id]", () => {
     expect(await getAgent(agent.id, testOrg)).toBeNull();
   });
 });
+
+describe("PATCH — component-meta re-revert after a failed config publish", () => {
+  it("re-PATCHes component meta back when config fails after a successful meta write", async () => {
+    // Meta applied remotely, config publish failed: the local row reverts,
+    // but the component would keep the NEW name — and a later edit would
+    // clobber it from the stale local name. The compensating meta re-revert
+    // must restore the pre-patch name with the post-meta-write CAS version.
+    mockUpdateConfig.mockRejectedValue(new AgentosError(503, "agentos down"));
+    const res = await patchAgent(agent.id, { name: "Renamed", instructions: "new prompt" });
+    expect(res.status).toBe(503);
+    const stored = await getAgent(agent.id, testOrg);
+    expect(stored?.name).toBe("Fixture"); // local row reverted
+    expect(mockUpdateMeta).toHaveBeenCalledTimes(2);
+    expect(mockUpdateMeta).toHaveBeenLastCalledWith("comp-1", { name: "Fixture" }, 3);
+  });
+
+  it("does not re-revert meta when the meta write itself failed", async () => {
+    mockUpdateMeta.mockRejectedValue(new AgentosError(503, "agentos down"));
+    await patchAgent(agent.id, { name: "Renamed" });
+    expect(mockUpdateMeta).toHaveBeenCalledTimes(1);
+    expect(mockUpdateConfig).not.toHaveBeenCalled();
+  });
+});

@@ -240,19 +240,35 @@ export async function PATCH(
 
   // 1) Local row first, with a compensating revert below if the AgentOS
   //    half fails (the local projection never leads the AgentOS).
-  const updated = await updateAgent(
-    id,
-    {
-      name: nextLocal.name,
-      description: nextLocal.description,
-      ...(nextRequirements ? { requirements: nextRequirements } : {}),
-    },
-    user.orgId,
-  );
+  let updated;
+  try {
+    updated = await updateAgent(
+      id,
+      {
+        name: nextLocal.name,
+        description: nextLocal.description,
+        ...(nextRequirements ? { requirements: nextRequirements } : {}),
+      },
+      user.orgId,
+    );
+  } catch (err) {
+    // Same guard as the create route — a zod failure on a merged legacy
+    // row or a transient DB error must not escape as a raw stack-trace 500.
+    console.error("[builder] local update failed", {
+      agentId: id,
+      orgId: user.orgId,
+      error: err instanceof Error ? err.message : String(err),
+    });
+    return NextResponse.json(
+      { error: "Couldn't update the agent — please try again." },
+      { status: 500 },
+    );
+  }
   if (!updated) {
     return NextResponse.json({ error: "Agent not found" }, { status: 404 });
   }
 
+  let metaApplied = false;
   try {
     if (metaChanged) {
       await updateAgentosComponentMeta(
@@ -263,6 +279,7 @@ export async function PATCH(
         },
         component.current_version ?? 0,
       );
+      metaApplied = true;
     }
     if (configChanged && nextConfig) {
       await updateAgentosConfig(
@@ -299,6 +316,34 @@ export async function PATCH(
           error: revertErr instanceof Error ? revertErr.message : String(revertErr),
         });
       });
+    }
+    if (metaApplied) {
+      // The meta write succeeded before the config publish failed: the
+      // component now keeps the NEW name/description while the local row
+      // reverted to the old ones (local LAGS the AgentOS). Left alone, a
+      // later instructions-only PATCH publishes config.name from the
+      // stale local name and clobbers the component. Best-effort re-PATCH
+      // the component metadata back to the pre-patch values, reading the
+      // component first for the post-meta-write CAS version. A concurrent
+      // meta edit in this window diverges either way (same tradeoff the
+      // local revert makes); log-and-continue like the delete path.
+      try {
+        const fresh = await getAgentosComponent(existing.remoteAgentId);
+        await updateAgentosComponentMeta(
+          existing.remoteAgentId,
+          {
+            ...(patch.name !== undefined ? { name: existing.name } : {}),
+            ...(patch.description !== undefined ? { description: existing.description } : {}),
+          },
+          fresh.current_version ?? 0,
+        );
+      } catch (metaRevertErr) {
+        console.error("[builder] compensating component-meta revert failed", {
+          agentId: id,
+          remoteAgentId: existing.remoteAgentId,
+          error: metaRevertErr instanceof Error ? metaRevertErr.message : String(metaRevertErr),
+        });
+      }
     }
     if (err instanceof AgentosError && err.status === 409) {
       return NextResponse.json(

@@ -201,7 +201,7 @@ export function CredentialsPage() {
             </h1>
             <p className="mt-1 text-sm text-zinc-500 dark:text-zinc-400">
               Keys your agents run on. Stored encrypted for your account and
-              delivered to the agent platform per run — never shared.
+              delivered to the agent runner per run — never shared.
             </p>
           </div>
           <BackToChat />

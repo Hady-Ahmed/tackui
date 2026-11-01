@@ -272,8 +272,8 @@ export function AgentSidebar({
           aria-hidden="true"
         />
         <aside
-          className={`fixed inset-y-0 left-0 z-50 flex w-64 flex-col overflow-hidden border-r border-zinc-200 bg-white shadow-xl transition-transform duration-200 ease-in-out dark:border-zinc-800 dark:bg-zinc-950 ${
-            mobileOpen ? "translate-x-0" : "-translate-x-full"
+          className={`fixed inset-y-0 left-0 z-50 flex w-64 flex-col overflow-hidden border-r border-zinc-200 bg-white shadow-xl transition-[transform,visibility] duration-200 ease-in-out dark:border-zinc-800 dark:bg-zinc-950 ${
+            mobileOpen ? "visible translate-x-0" : "invisible -translate-x-full"
           }`}
         >
           <ExpandedContent
@@ -829,12 +829,18 @@ function ConversationList({
     setError(null);
   };
 
+  const [renaming, setRenaming] = useState(false);
+
   const submitRename = async (threadId: string) => {
+    // In-flight guard: a double-Enter or double-click on ✓ must not fire
+    // the PATCH twice.
+    if (renaming) return;
     const title = editValue.trim();
     if (!title) {
       cancelRename();
       return;
     }
+    setRenaming(true);
     try {
       const res = await fetch(`/api/threads/${threadId}`, {
         method: "PATCH",
@@ -856,6 +862,8 @@ function ConversationList({
       // Network failure must not die silently — same copy as the other
       // mutating surfaces.
       setError("Couldn't reach the server — please try again.");
+    } finally {
+      setRenaming(false);
     }
   };
 
@@ -946,8 +954,9 @@ function ConversationList({
                 />
                 <button
                   onClick={() => submitRename(thread.id)}
+                  disabled={renaming}
                   title="Save"
-                  className="shrink-0 text-xs font-medium text-green-600 hover:underline dark:text-green-400"
+                  className="shrink-0 text-xs font-medium text-green-600 hover:underline disabled:opacity-50 dark:text-green-400"
                 >
                   ✓
                 </button>

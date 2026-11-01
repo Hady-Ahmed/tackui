@@ -19,7 +19,8 @@ vi.mock("@/lib/config/agentos", () => ({
   AGENTOS_MISCONFIGURED: false,
 }));
 
-import { AgentosError, fetchAgentosModels, testPlatformModel } from "@/lib/agents/builder";
+import { AgentosError, buildRequirements, BuilderValidationError, fetchAgentosModels, testPlatformModel, type AgentosModel, type AgentosTool } from "@/lib/agents/builder";
+import { requirementsSchema } from "@/lib/agents/agent-store";
 
 function jsonResponse(body: unknown, status = 200) {
   return new Response(JSON.stringify(body), {
@@ -105,5 +106,49 @@ describe("agentosRequest error discipline", () => {
     expect(err.status).toBe(502);
     expect(err.message).toBe("The agent builder is unavailable right now — please try again shortly.");
     expect(err.detail).toBe("bad token");
+  });
+});
+
+describe("buildRequirements write-boundary validation", () => {
+  const model: AgentosModel = {
+    provider: "openai",
+    id: "gpt-5",
+    platform_tier: true,
+    requires_key: true,
+  };
+  const tool = (over: Partial<AgentosTool> = {}): AgentosTool => ({
+    name: "tavily_search",
+    label: "Web search (Tavily)",
+    requires_key: "tavily_api_key",
+    fallback_env: "TAVILY_API_KEY",
+    platform_fallback: false,
+    toolkit: "tavily",
+    credentials: [{ dep_key: "tavily_api_key", label: "Tavily API key" }],
+    ...over,
+  });
+  const spec = { tools: [{ name: "tavily_search" }], connectors: [] };
+
+  it("omits an empty catalog tool label instead of poisoning the snapshot", () => {
+    const req = buildRequirements(spec, model, [tool({ label: "" })]);
+    expect(req.tools[0].label).toBeUndefined();
+  });
+
+  it("falls back to the dep key when a credential label is empty", () => {
+    const req = buildRequirements(spec, model, [
+      tool({ credentials: [{ dep_key: "tavily_api_key", label: "" }] }),
+    ]);
+    expect(req.tools[0].credentials).toEqual([
+      { depKey: "tavily_api_key", label: "tavily_api_key" },
+    ]);
+  });
+
+  it("rejects a catalog row with an empty credential dep_key (fail loud at save)", () => {
+    const bad = [tool({ credentials: [{ dep_key: "", label: "x" }] })];
+    expect(() => buildRequirements(spec, model, bad)).toThrow(BuilderValidationError);
+  });
+
+  it("output parses with the same schema every read applies", () => {
+    const req = buildRequirements(spec, model, [tool()]);
+    expect(requirementsSchema.safeParse(req).success).toBe(true);
   });
 });

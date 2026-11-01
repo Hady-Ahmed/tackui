@@ -14,7 +14,15 @@ import { AGENT_ORIGINS } from "./agents.config";
 const agentAuthModeSchema = z.enum(["none", "jwt"]);
 const agentOriginSchema = z.enum(AGENT_ORIGINS);
 
-const requirementsSchema = z.object({
+/**
+ * The shape of the per-agent requirements snapshot stored with the row.
+ * One schema, two consumers: `parseRequirements` gates every READ (fail
+ * closed — an unparseable blob drops the requirements and the agent runs
+ * ungated, loudly logged), and `buildRequirements` validates every WRITE
+ * so a malformed platform-catalog row surfaces as a 4xx at save time
+ * instead of silently ungateing the agent later.
+ */
+export const requirementsSchema = z.object({
   model: z.object({
     provider: z.string().min(1),
     id: z.string().min(1),

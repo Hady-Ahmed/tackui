@@ -558,3 +558,91 @@ describe("lib/agents/run-gate", () => {
     expect(body.code).toBe("AGENT_REQUIREMENTS_MISSING");
   });
 });
+
+// (appended) contract-authoritative gating
+describe("lib/agents/run-gate — contract present despite null requiresKey", () => {
+  // A catalog row inconsistency: the legacy single-dep field is null but
+  // the credential contract is populated. The contract is authoritative —
+  // the gate must demand its deps (fail closed) rather than skip the tool.
+  beforeEach(() => {
+    mockGetAgent.mockReset();
+    mockGetCredentialSecrets.mockReset();
+    mockGetConnectorsByNames.mockReset();
+    mockConsumeQuota.mockReset();
+    mockGetEnforcementLimits.mockReset();
+    mockConsumeQuota.mockReturnValue({ allowed: true, resetAt: Date.now() + 1000, used: 1 });
+    mockGetEnforcementLimits.mockResolvedValue({
+      plan: "free",
+      limits: {
+        maxAgents: 3, concurrentRuns: 1, runsPerMinute: 10,
+        platformDailyQuota: 50, maxMembers: 1, canCreateOrg: false, label: "Free",
+      },
+    });
+  });
+
+  afterEach(() => {
+    delete process.env.SAAS_MODE;
+    vi.resetModules();
+  });
+
+  it("402s with the contract's copy when requiresKey is null but credentials exist", async () => {
+    mockGetAgent.mockResolvedValue(
+      builderAgent({
+        model: { provider: "openai", id: "gpt-5", platformTier: false },
+        tools: [
+          {
+            name: "search_x",
+            label: "Search X posts",
+            requiresKey: null,
+            provider: "x",
+            platformFallback: false,
+            credentials: [{ depKey: "x_consumer_key", label: "X consumer key" }],
+          },
+        ],
+        connectors: [],
+      }),
+    );
+    mockGetCredentialSecrets.mockResolvedValue({ openai: { api_key: "sk-runner" } });
+    const { checkBuilderRunGate } = await loadGate();
+    const result = await checkBuilderRunGate(
+      { id: "user-1", role: "member", name: "u", email: null, orgId: "org-1" },
+      "agent-1",
+    );
+    expect(result.response?.status).toBe(402);
+    const body = (await result.response?.json()) as { error?: string };
+    expect(body.error).toContain("X");
+  });
+
+  it("delivers the contract when the runner saved its fields", async () => {
+    mockGetAgent.mockResolvedValue(
+      builderAgent({
+        model: { provider: "openai", id: "gpt-5", platformTier: false },
+        tools: [
+          {
+            name: "search_x",
+            label: "Search X posts",
+            requiresKey: null,
+            provider: "x",
+            platformFallback: false,
+            credentials: [{ depKey: "x_consumer_key", label: "X consumer key" }],
+          },
+        ],
+        connectors: [],
+      }),
+    );
+    mockGetCredentialSecrets.mockResolvedValue({
+      openai: { api_key: "sk-runner" },
+      x: { consumer_key: "ck" },
+    });
+    const { checkBuilderRunGate } = await loadGate();
+    const result = await checkBuilderRunGate(
+      { id: "user-1", role: "member", name: "u", email: null, orgId: "org-1" },
+      "agent-1",
+    );
+    expect(result.response).toBeNull();
+    expect(result.contextItems).toEqual([
+      { description: "openai_api_key", value: "sk-runner" },
+      { description: "x_consumer_key", value: "ck" },
+    ]);
+  });
+});

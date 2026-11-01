@@ -1,5 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
+  BUILDER_CONNECTORS_MAX,
+  BUILDER_TOOLS_MAX,
   buildCreatePayload,
   buildUpdatePayload,
   catalogEmptyCopy,
@@ -277,6 +279,18 @@ describe("toolKeyState", () => {
       provider: null,
     });
   });
+
+  it("does not offer Connect for a toolkit slug the catalog doesn't know", () => {
+    // A toolkit slug present on the tool but absent from the credentials
+    // catalog can't be connected (KeyForm would render nothing) — the
+    // badge must not offer a dead-click Connect button.
+    const drifted = { ...TOOLS[2], toolkit: "ghost_toolkit" };
+    expect(toolKeyState(drifted, credentialsState(["tavily"]))).toEqual({
+      status: "missing",
+      providerLabel: "tavily_api_key",
+      provider: null,
+    });
+  });
 });
 
 describe("validateBuilderForm", () => {
@@ -313,6 +327,36 @@ describe("validateBuilderForm", () => {
   it("allows blank instructions on edit (blank preserves the stored ones)", () => {
     const errors = validateBuilderForm({ ...validForm, instructions: "" }, "edit");
     expect(errors.instructions).toBeUndefined();
+  });
+
+  it("rejects more tools than BUILDER_TOOLS_MAX", () => {
+    const errors = validateBuilderForm(
+      {
+        ...validForm,
+        tools: Array.from({ length: BUILDER_TOOLS_MAX + 1 }, (_, i) => `tool_${i}`),
+      },
+      "create",
+    );
+    expect(errors.tools).toBeDefined();
+  });
+
+  it("rejects more connectors than BUILDER_CONNECTORS_MAX", () => {
+    const errors = validateBuilderForm(
+      {
+        ...validForm,
+        connectors: Array.from({ length: BUILDER_CONNECTORS_MAX + 1 }, (_, i) => `conn_${i}`),
+      },
+      "create",
+    );
+    expect(errors.connectors).toBeDefined();
+  });
+
+  it("accepts exactly BUILDER_TOOLS_MAX tools", () => {
+    const errors = validateBuilderForm(
+      { ...validForm, tools: Array.from({ length: BUILDER_TOOLS_MAX }, (_, i) => `tool_${i}`) },
+      "create",
+    );
+    expect(errors.tools).toBeUndefined();
   });
 });
 

@@ -77,7 +77,7 @@ export async function getAgents(request?: Request): Promise<AgentsMap> {
         }
       : entry;
 
-    // Builder agents run on the shared AgentOS platform (agent-warehouse):
+    // Builder agents run on the shared AgentOS platform:
     // the endpoint is recomputed from the platform config (so a
     // AGENTOS_BASE_URL change takes effect without rewriting rows), and
     // auth is the AGENTOS user token — HS256, sub = the running user,

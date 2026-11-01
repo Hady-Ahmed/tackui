@@ -139,11 +139,18 @@ export async function checkBuilderRunGate(
   // predates the credentials/provider fields parses with the provider
   // re-derived from the dep key and the single dep as the contract.
   for (const tool of requirements.tools) {
-    if (!tool.requiresKey) continue;
-    const provider = tool.provider ?? providerForDepKey(tool.requiresKey);
+    // A present credential contract is authoritative even when the legacy
+    // single-dep field is null (upstream row inconsistency) — skipping it
+    // would let a tool the gate can never satisfy run unrequested and
+    // fail mid-run. Fail closed: demand the contract's deps.
     const contract = tool.credentials?.length
       ? tool.credentials
-      : [{ depKey: tool.requiresKey, label: "Api key" }];
+      : tool.requiresKey
+        ? [{ depKey: tool.requiresKey, label: "Api key" }]
+        : [];
+    if (contract.length === 0) continue;
+    const provider =
+      tool.provider ?? providerForDepKey(contract[0].depKey);
     for (const cred of contract) reservedDepKeys.add(cred.depKey);
     const fields = runnerFields[provider] ?? {};
     const missing = contract.filter(

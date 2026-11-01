@@ -305,10 +305,15 @@ export function BuilderPage({
   };
 
   const toggleTool = (name: string) => {
-    setForm((prev) => ({
-      ...prev,
-      tools: prev.tools.includes(name) ? prev.tools.filter((t) => t !== name) : [...prev.tools, name],
-    }));
+    setForm((prev) => {
+      if (prev.tools.includes(name)) return { ...prev, tools: prev.tools.filter((t) => t !== name) };
+      // Hard cap mirroring toggleConnector — without it the palette lets
+      // a user check past BUILDER_TOOLS_MAX and validateBuilderForm then
+      // rejects the submit with errors.tools, which nothing used to
+      // render (silent no-op trap).
+      if (prev.tools.length >= BUILDER_TOOLS_MAX) return prev;
+      return { ...prev, tools: [...prev.tools, name] };
+    });
   };
 
   const toggleConnector = (name: string) => {
@@ -506,7 +511,10 @@ export function BuilderPage({
         )}
 
         {error && (
-          <div className="mb-6 rounded-lg border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-700 dark:border-red-900 dark:bg-red-950 dark:text-red-300">
+          <div
+            role="alert"
+            className="mb-6 rounded-lg border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-700 dark:border-red-900 dark:bg-red-950 dark:text-red-300"
+          >
             <p>{error}</p>
             {planCap && !canManage && (
               <p className="mt-1 text-xs">
@@ -575,7 +583,8 @@ export function BuilderPage({
           {/* Model picker — provider, then model. The provider decides whose
               API key the run needs, so it's an explicit first choice, and the
               two selects can never disagree: changing the provider resets the
-              model to that provider's default (first tier-listed entry).
+              model to that provider's default (first localeCompare-sorted
+              entry — tier ordering is dormant).
               The model select holds raw ids — no combined provider:id value,
               so a model id containing a colon (e.g. OpenRouter's ":free"
               suffix) round-trips exactly. */}
@@ -710,7 +719,12 @@ export function BuilderPage({
           {/* Tool palette — the platform's tool catalog (GET /api/tools,
               proxied from the AgentOS /platform/tools). Adding a tool to
               the platform's allowlist shows up here with zero code. */}
-          <Field label="Tools" asGroup hint={`Up to ${BUILDER_TOOLS_MAX} — the agent can use them at run time.`}>
+          <Field
+            label="Tools"
+            asGroup
+            hint={`Up to ${BUILDER_TOOLS_MAX} — the agent can use them at run time.`}
+            error={errors.tools}
+          >
             <div className="space-y-2">
               {(tools ?? []).map((tool) => {
                 const checked = form.tools.includes(tool.name);
@@ -751,7 +765,12 @@ export function BuilderPage({
           </Field>
 
           {/* Connectors */}
-          <Field label="Connectors" asGroup hint="MCP servers the agent can use at run time — managed by org admins.">
+          <Field
+            label="Connectors"
+            asGroup
+            hint="MCP servers the agent can use at run time — managed by org admins."
+            error={errors.connectors}
+          >
             <div className="space-y-2">
               {(connectors ?? []).length === 0 ? (
                 <p className="text-xs text-zinc-500 dark:text-zinc-400">
@@ -970,6 +989,10 @@ function KeyForm({
   if (!meta) return null;
   const fields = meta.fields.length > 0 ? meta.fields : [{ key: "api_key", label: "Api key" }];
   const complete = fields.every((f) => (values[f.key] ?? "").trim().length > 0);
+  // Trim on save for parity with the credentials page — a pasted key with
+  // a trailing newline must not save broken here.
+  const trimmedValues = () =>
+    Object.fromEntries(Object.entries(values).map(([k, v]) => [k, v.trim()]));
   const setField = (key: string, value: string) =>
     setValues((prev) => ({ ...prev, [key]: value }));
   return (
@@ -1016,7 +1039,7 @@ function KeyForm({
         <button
           type="button"
           disabled={saving || !complete}
-          onClick={() => onSave(values)}
+          onClick={() => onSave(trimmedValues())}
           className="w-full rounded-lg bg-blue-600 px-4 py-2 text-sm font-medium text-white transition-colors hover:bg-blue-700 disabled:opacity-50"
         >
           {saving ? "Saving…" : fields.length > 1 ? "Save credentials" : "Save key"}

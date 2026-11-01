@@ -40,6 +40,28 @@ function runAgentIdFromPath(pathname: string): string | null {
   }
 }
 
+/**
+ * True for a run-SHAPED path (/agent/<id>/run, or any path under
+ * /agent/<id>/run/) whose agent id doesn't decode. Such a request is
+ * classified as a run for rate limiting but the gate lookup would skip
+ * it (runAgentIdFromPath returns null), so it must fail closed with a
+ * 404 instead of falling through to the inner handler.
+ */
+function isRunShapedButUnparseable(pathname: string): boolean {
+  const match = /\/agent\/([^/]+)\/run(\/|$)/.exec(pathname);
+  if (!match?.[1]) return false;
+  // Trailing segments after /run/ never match the gate extraction regex
+  // (anchored at the path end), so the gates would skip the request —
+  // treat the path as unparseable and fail closed.
+  if (match[2] === "/") return true;
+  try {
+    decodeURIComponent(match[1]);
+    return false;
+  } catch {
+    return true;
+  }
+}
+
 const runtime = new CopilotRuntime({
   agents: ({ request }) => getAgents(request),
   runner,
@@ -76,6 +98,9 @@ async function handler(request: Request): Promise<Response> {
     const isControlRequest =
       url.pathname.includes("/connect") || url.pathname.includes("/stop/");
     const isRunRequest = request.method === "POST" && !isControlRequest;
+    if (isRunRequest && isRunShapedButUnparseable(url.pathname)) {
+      return Response.json({ error: "Not found" }, { status: 404 });
+    }
 
     if (!isAuthDisabled()) {
       const user = await getRequestUser(request);

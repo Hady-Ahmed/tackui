@@ -1,6 +1,6 @@
 import { describe, it, expect, beforeEach, beforeAll, afterAll } from "vitest";
 import { EventType, type BaseEvent, type Message } from "@ag-ui/core";
-import { PostgresAgentRunner } from "./pg-runner";
+import { PostgresAgentRunner, redactReservedContext, redactReservedEvent } from "./pg-runner";
 import { runWithUser, type RequestUser } from "@/lib/auth/request-context";
 import { query } from "@/lib/db/pg";
 import { runMigrations } from "@/lib/db/migrate";
@@ -465,5 +465,70 @@ describe("PostgresAgentRunner — sync cache reads (getThreadMessages / getThrea
     expect(runner.getThreadMessages("t1")).toEqual([]);
     expect(runner.getThreadEvents("t1")).toEqual([]);
     expect(runner.getThreadState("t1")).toBeNull();
+  });
+});
+
+describe("redactReservedContext", () => {
+  // The reserved set the run gate injects into input.context: the model
+  // key, tool contract dep keys, and mcp_connectors (org connector
+  // URLs+tokens). Mirrors what storeRun assembles from the runner ALS.
+  const reserved = new Set(["openai_api_key", "x_consumer_key", "mcp_connectors"]);
+
+  it("filters context items whose description is a reserved dep key", () => {
+    const input = {
+      context: [
+        { description: "openai_api_key", value: "sk-secret" },
+        { description: "user_note", value: "keep me" },
+        { description: "mcp_connectors", value: [{ url: "https://x", token: "t" }] },
+      ],
+    };
+    const out = redactReservedContext(input, reserved);
+    expect(out).toEqual({ context: [{ description: "user_note", value: "keep me" }] });
+  });
+
+  it("matches on name as well as description", () => {
+    const input = { context: [{ name: "x_consumer_key", value: "v" }, { name: "safe", value: 1 }] };
+    expect(redactReservedContext(input, reserved)).toEqual({ context: [{ name: "safe", value: 1 }] });
+  });
+
+  it("returns the same object untouched when nothing is reserved", () => {
+    const input = { context: [{ description: "safe", value: 1 }] };
+    expect(redactReservedContext(input, reserved)).toBe(input);
+  });
+
+  it("leaves non-array and missing context alone", () => {
+    const notArray = { context: "nope" };
+    expect(redactReservedContext(notArray, reserved)).toBe(notArray);
+    const noContext = { messages: [] };
+    expect(redactReservedContext(noContext, reserved)).toBe(noContext);
+    expect(redactReservedContext(undefined, reserved)).toBeUndefined();
+  });
+
+  it("keeps non-object context items", () => {
+    const input = { context: ["raw-string", 42, null] };
+    expect(redactReservedContext(input, reserved)).toBe(input);
+  });
+
+  it("redacts events carrying an embedded input (RUN_STARTED shape)", () => {
+    const event = {
+      type: EventType.RUN_STARTED,
+      input: {
+        context: [
+          { description: "openai_api_key", value: "sk-secret" },
+          { description: "user_doc", value: "keep" },
+        ],
+      },
+    };
+    const out = redactReservedEvent(event, reserved);
+    expect((out as { input: { context: unknown[] } }).input.context).toEqual([
+      { description: "user_doc", value: "keep" },
+    ]);
+    // Original event object is not mutated.
+    expect((event as { input: { context: unknown[] } }).input.context).toHaveLength(2);
+  });
+
+  it("returns events without an embedded input untouched", () => {
+    const event = { type: EventType.RUN_STARTED };
+    expect(redactReservedEvent(event, reserved)).toBe(event);
   });
 });
