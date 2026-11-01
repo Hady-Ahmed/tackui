@@ -94,6 +94,20 @@ export function prettifyProviderLabel(provider: string): string {
 }
 
 /**
+ * Normalize a FIELD label that arrives from outside (the AgentOS toolkit
+ * contracts supply their own, e.g. "Api key") — same acronym correction,
+ * but word-preserving: it only rewrites known acronyms and leaves
+ * everything else (case, spacing) exactly as sent. "Api key" → "API key";
+ * "consumer key" → "consumer key".
+ */
+export function prettifyFieldLabel(label: string): string {
+  return label
+    .split(/\s+/)
+    .map((word) => LABEL_ACRONYMS[word.toLowerCase()] ?? word)
+    .join(" ");
+}
+
+/**
  * The field name a provider's dep key carries: the dep key is
  * `<provider>_<field>`, so with the provider known the field is the rest.
  * "tavily_api_key" + "tavily" → "api_key"; "x_consumer_key" + "x" →
@@ -134,7 +148,7 @@ export function deriveCredentialsCatalog(
     for (const cred of t.credentials) {
       const key = fieldForDepKey(provider, cred.dep_key);
       if (fields.some((f) => f.key === key)) continue;
-      fields.push({ key, label: cred.label });
+      fields.push({ key, label: prettifyFieldLabel(cred.label) });
     }
     if (fields.length === 0) continue;
     const existing = catalog[provider];

@@ -299,9 +299,16 @@ export function CredentialsPage() {
             {/* Add keys — only when the live catalog is available (PUT is
                 fail-closed against it, so offering rows when the platform
                 is down would just 503 on save). */}
-            <h2 className="mt-8 mb-2 text-sm font-semibold uppercase tracking-wide text-zinc-500 dark:text-zinc-400">
+            <h2 className="mt-8 mb-1 text-sm font-semibold uppercase tracking-wide text-zinc-500 dark:text-zinc-400">
               Connect a key
             </h2>
+            {/* The model/tool distinction, said ONCE here — it used to be
+                repeated on every provider row, which was filler by the
+                third entry. Per-row text now appears only when it carries
+                state (the "incomplete" note below). */}
+            <p className="mb-3 text-xs text-zinc-500 dark:text-zinc-400">
+              Model keys run the agent; tool keys power its tool calls.
+            </p>
             {catalog === null ? (
               <p className="text-sm text-zinc-500 dark:text-zinc-400">
                 New keys can&apos;t be added right now — the key catalog is
@@ -331,12 +338,15 @@ export function CredentialsPage() {
                       <div className="flex items-center justify-between gap-3">
                         <div className="min-w-0">
                           <p className="truncate text-sm font-medium">{meta.label}</p>
-                          <p className="truncate text-xs text-zinc-500 dark:text-zinc-400">
-                            {meta.kind === "llm"
-                              ? "Model key — the agent runs on it"
-                              : "Tool key — used by the agent's tool calls"}
-                            {isUpdate ? " · incomplete — add the missing fields" : ""}
-                          </p>
+                          {/* Per-row text only when it carries state — the
+                              static kind description ("Model key — the agent
+                              runs on it") lived here once per provider and
+                              moved to the one-line explainer above. */}
+                          {isUpdate && (
+                            <p className="text-xs text-amber-600 dark:text-amber-400">
+                              Incomplete — add the missing fields
+                            </p>
+                          )}
                         </div>
                       </div>
                       <div className="mt-2 space-y-2">

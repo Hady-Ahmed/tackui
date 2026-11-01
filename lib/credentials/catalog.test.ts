@@ -5,6 +5,7 @@ import {
   depKeyForProvider,
   fieldForDepKey,
   prettifyProviderLabel,
+  prettifyFieldLabel,
   providerForDepKey,
 } from "./catalog";
 
@@ -80,7 +81,7 @@ describe("deriveCredentialsCatalog", () => {
       keyName: "tavily_api_key",
       label: "Tavily",
     });
-    expect(catalog.tavily.fields).toEqual([{ key: "api_key", label: "Tavily api key" }]);
+    expect(catalog.tavily.fields).toEqual([{ key: "api_key", label: "Tavily API key" }]);
     // Multi-credential: one provider, four fields (dep key minus prefix).
     expect(catalog.x.fields.map((f) => f.key)).toEqual([
       "consumer_key",
@@ -156,5 +157,16 @@ describe("prettifyProviderLabel", () => {
     expect(prettifyProviderLabel("azure_openai")).toBe("Azure OpenAI");
     // Unknown words still plain title-case.
     expect(prettifyProviderLabel("groq")).toBe("Groq");
+  });
+});
+
+describe("prettifyFieldLabel", () => {
+  it("corrects known acronyms in platform-supplied field labels, word-preserving", () => {
+    // What the AgentOS toolkit contracts actually send.
+    expect(prettifyFieldLabel("Api key")).toBe("API key");
+    expect(prettifyFieldLabel("Tavily api key")).toBe("Tavily API key");
+    // Unknown words pass through untouched (case included).
+    expect(prettifyFieldLabel("consumer key")).toBe("consumer key");
+    expect(prettifyFieldLabel("X consumer secret")).toBe("X consumer secret");
   });
 });

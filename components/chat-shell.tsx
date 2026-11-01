@@ -204,7 +204,7 @@ export function ChatShell() {
             {runError && (
               <div
                 role="alert"
-                className={`mx-4 mt-4 flex items-start justify-between gap-3 rounded-lg border px-4 py-3 text-sm ${
+                className={`flex items-start justify-between gap-3 border-b px-4 py-2.5 text-sm ${
                   runErrorIsPaywall
                     ? // Quota/plan 402 — the paywall moment, not an error:
                       // calm blue info styling keeps the Upgrade button as
@@ -213,7 +213,22 @@ export function ChatShell() {
                     : "border-red-200 bg-red-50 text-red-700 dark:border-red-900 dark:bg-red-950 dark:text-red-300"
                 }`}
               >
-                <span>{runError.msg}</span>
+                <span>
+                  {runError.msg}{" "}
+                  {runError.code === "AGENT_REQUIREMENTS_MISSING" && (
+                    // The banner names what's missing; this closes the loop
+                    // with the fix. Neutral label — the joined 402 message
+                    // can cover missing connectors too (an /agents concern),
+                    // and the credentials page is still the right first stop
+                    // for the far more common missing-key case.
+                    <Link
+                      href="/app/credentials"
+                      className="font-medium underline underline-offset-2 hover:opacity-80"
+                    >
+                      Manage keys →
+                    </Link>
+                  )}
+                </span>
                 <div className="flex shrink-0 items-center gap-2">
                   {showRunUpgrade && (
                     <button
