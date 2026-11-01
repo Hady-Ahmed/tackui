@@ -79,12 +79,19 @@ describe("POST /api/admin/platform/test-model", () => {
     expect(mockTestPlatformModel).not.toHaveBeenCalled();
   });
 
-  it("enforces the agentMutate rate limit", async () => {
+  it("enforces the adminMutate rate limit", async () => {
     const { checkUserLimit } = await import("@/lib/ratelimit/middleware");
     vi.mocked(checkUserLimit).mockReturnValueOnce(
       new Response("Rate limited", { status: 429 }) as never,
     );
     const res = await post({ entry: "openai:gpt-4o-mini" });
     expect(res.status).toBe(429);
+    // The admin routes must draw from their own bucket — sharing the
+    // member-facing agentMutate budget 429'd legitimate admin iteration
+    // (fix-and-resave validation loops + per-row model tests).
+    expect(vi.mocked(checkUserLimit)).toHaveBeenCalledWith(
+      "admin-user",
+      "adminMutate",
+    );
   });
 });

@@ -27,7 +27,7 @@ export async function POST(request: NextRequest) {
   if (user.role !== "admin") {
     return NextResponse.json({ error: "Forbidden" }, { status: 403 });
   }
-  const limited = checkUserLimit(user.id, "agentMutate");
+  const limited = checkUserLimit(user.id, "adminMutate");
   if (limited) return limited;
 
   const body = await request.json().catch(() => null);

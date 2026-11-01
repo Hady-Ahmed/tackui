@@ -60,7 +60,15 @@ export function ChatShell() {
   // The agent-list fetch, shared by mount, window-focus refetches, and the
   // error pane's Retry button. On failure it surfaces a retryable error
   // instead of sitting on "Loading agents..." forever.
+  // Focus refetches are gated by staleness: refetch only if the last
+  // fetch is older than FOCUS_REFETCH_MIN_MS. Without the gate, every
+  // alt-tab and every dev hot-reload remount fired a GET — bursts of
+  // requests the user never consciously made, enough to trip the
+  // per-minute agentRead limit. Mount fetches stay ungated.
+  const lastFetchAtRef = useRef(0);
+  const FOCUS_REFETCH_MIN_MS = 30_000;
   const loadAgents = useCallback(async () => {
+    lastFetchAtRef.current = Date.now();
     try {
       const res = await fetch("/api/agents");
       if (res.status === 401) {
@@ -106,7 +114,10 @@ export function ChatShell() {
   useEffect(() => {
     loadAgentsRef.current = loadAgents;
     void loadAgentsRef.current();
-    const onFocus = () => void loadAgentsRef.current?.();
+    const onFocus = () => {
+      if (Date.now() - lastFetchAtRef.current < FOCUS_REFETCH_MIN_MS) return;
+      void loadAgentsRef.current?.();
+    };
     window.addEventListener("focus", onFocus);
     return () => {
       window.removeEventListener("focus", onFocus);

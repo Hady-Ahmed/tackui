@@ -243,12 +243,19 @@ describe("PUT /api/admin/platform/catalog", () => {
     expect(mockPutTools).not.toHaveBeenCalled();
   });
 
-  it("enforces the agentMutate rate limit", async () => {
+  it("enforces the adminMutate rate limit", async () => {
     const { checkUserLimit } = await import("@/lib/ratelimit/middleware");
     vi.mocked(checkUserLimit).mockReturnValueOnce(
       new Response("Rate limited", { status: 429 }) as never,
     );
     const res = await put({ tools: [{ slug: "tavily", enabled: true }] });
     expect(res.status).toBe(429);
+    // The admin routes must draw from their own bucket — sharing the
+    // member-facing agentMutate budget 429'd legitimate admin iteration
+    // (fix-and-resave validation loops + per-row model tests).
+    expect(vi.mocked(checkUserLimit)).toHaveBeenCalledWith(
+      "admin-user",
+      "adminMutate",
+    );
   });
 });

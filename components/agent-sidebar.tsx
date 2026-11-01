@@ -11,49 +11,21 @@ import { AccountMenu } from "./account-menu";
 import { ThemeToggle } from "./theme-toggle";
 import { useAuthConfig } from "@/lib/auth/use-auth-config";
 import { useCanManageAgents } from "@/lib/auth/use-can-manage-agents";
-import {
-  testEndpoint,
-  TEST_HELP,
-  type TestResult,
-  type TestStatus,
-} from "./test-connection";
 
 function planLabel(required: RequiredPlan): string {
   return required === "pro" ? "Pro" : "Team";
 }
 
-function dotClass(status: TestStatus): string {
-  switch (status) {
-    case "loading":
-      return "bg-zinc-400 animate-pulse";
-    case "ok":
-      return "bg-green-500";
-    case "fail":
-      return "bg-red-500";
-    default:
-      return "bg-zinc-300 dark:bg-zinc-600";
-  }
-}
-
-function dotTitle(status: TestStatus, message?: string): string {
-  switch (status) {
-    case "idle":
-      return "Not tested yet";
-    case "loading":
-      return "Testing connection...";
-    default:
-      return message || "";
-  }
-}
-
 /**
  * Resolved state-dot spec for an agent's avatar corner — null = no dot.
- * Precedence: Paused (amber) > plan-locked (blue) > probe status (manual
- * agents only — managed agents' endpoints never reach the client, so
- * there's nothing to probe). Removed agents get no dot (the "Removed"
- * chip carries it); healthy managed agents get none either. Shared by
- * the expanded rows and the collapsed rail — one source of truth for
- * the precedence order.
+ * Precedence: Paused (amber) > plan-locked (blue). Removed agents get no
+ * dot (the "Removed" chip carries it); healthy managed agents get none
+ * either. No reachability dot: a green probe only proves the endpoint
+ * answered *something* — not that the agent works — so it read as false
+ * reassurance. Dead endpoints surface at run time, and the edit surface
+ * keeps an explicit "Test connection" button. Shared by the expanded
+ * rows and the collapsed rail — one source of truth for the precedence
+ * order.
  */
 interface DotSpec {
   cls: string;
@@ -61,11 +33,7 @@ interface DotSpec {
   aria: string;
 }
 
-function agentDot(
-  agent: PublicAgent,
-  statuses: Record<string, TestResult>,
-  plan: string | null,
-): DotSpec | null {
+function agentDot(agent: PublicAgent, plan: string | null): DotSpec | null {
   const removed = Boolean(agent.templateRemovedAt);
   const paused = !removed && Boolean(agent.templateUnpublished);
   // Plan-gated install whose template's requiredPlan outranks the
@@ -90,15 +58,6 @@ function agentDot(
       cls: "bg-blue-500",
       title: `Requires the ${label} plan`,
       aria: `Requires the ${label} plan`,
-    };
-  }
-  if (agent.endpoint) {
-    const status = (statuses[agent.id] ?? { status: "idle" }).status;
-    const title = dotTitle(status, statuses[agent.id]?.message);
-    return {
-      cls: dotClass(status),
-      title,
-      aria: `Connection status: ${title}`,
     };
   }
   return null;
@@ -148,7 +107,6 @@ export function AgentSidebar({
   mobileOpen,
   onCloseMobile,
 }: AgentSidebarProps) {
-  const [statuses, setStatuses] = useState<Record<string, TestResult>>({});
   const { config } = useAuthConfig();
   const { canManage } = useCanManageAgents();
   // The viewer's org plan (null when billing isn't configured —
@@ -161,50 +119,6 @@ export function AgentSidebar({
   // links to /agents?add=1 — the workspace agent-management page with
   // the add form already open. The catalog book icon is for everyone.
   const showManageLink = canManage === true || (config?.authDisabled ?? false);
-
-  useEffect(() => {
-    let cancelled = false;
-    const testAll = async () => {
-      // Managed agents (catalog installs) carry no endpoint in the API
-      // response — the curator's backend URLs never reach the client —
-      // so there's nothing to probe. They show no status dot; their
-      // connection health is the curator's responsibility.
-      const entries = agents
-        .filter((a) => a.endpoint)
-        .map((a) => ({
-          id: a.id,
-          endpoint: a.endpoint as string,
-        }));
-      setStatuses((prev) => {
-        const next: Record<string, TestResult> = {};
-        for (const e of entries) next[e.id] = { status: "loading" };
-        for (const id of Object.keys(prev)) {
-          if (!next[id]) next[id] = prev[id];
-        }
-        return next;
-      });
-
-      const results = await Promise.all(
-        entries.map(async (e) => ({
-          id: e.id,
-          result: await testEndpoint(e.endpoint),
-        })),
-      );
-      if (cancelled) return;
-      setStatuses((prev) => {
-        const next = { ...prev };
-        for (const r of results) next[r.id] = r.result;
-        return next;
-      });
-    };
-    testAll();
-    const onFocus = () => testAll();
-    window.addEventListener("focus", onFocus);
-    return () => {
-      cancelled = true;
-      window.removeEventListener("focus", onFocus);
-    };
-  }, [agents]);
 
   const selectAgentAndClose = useCallback(
     (id: string) => {
@@ -237,7 +151,6 @@ export function AgentSidebar({
           <CollapsedContent
             agents={agents}
             activeAgent={activeAgent}
-            statuses={statuses}
             plan={plan}
             onSelectAgent={onSelectAgent}
             onNewChat={onNewChat}
@@ -249,7 +162,6 @@ export function AgentSidebar({
             agents={agents}
             activeAgent={activeAgent}
             activeThreadId={activeThreadId}
-            statuses={statuses}
             plan={plan}
             onSelectAgent={onSelectAgent}
             onNewChat={onNewChat}
@@ -280,7 +192,6 @@ export function AgentSidebar({
             agents={agents}
             activeAgent={activeAgent}
             activeThreadId={activeThreadId}
-            statuses={statuses}
             plan={plan}
             onSelectAgent={selectAgentAndClose}
             onNewChat={newChatAndClose}
@@ -299,7 +210,6 @@ function ExpandedContent({
   agents,
   activeAgent,
   activeThreadId,
-  statuses,
   plan,
   onSelectAgent,
   onNewChat,
@@ -311,7 +221,6 @@ function ExpandedContent({
   agents: PublicAgent[];
   activeAgent: string;
   activeThreadId: string;
-  statuses: Record<string, TestResult>;
   /** Viewer's org plan (null when billing isn't configured — never gate). */
   plan: string | null;
   onSelectAgent: (id: string) => void;
@@ -382,29 +291,6 @@ function ExpandedContent({
           <p className="text-xs font-medium uppercase tracking-wide text-zinc-400">
             Agents
           </p>
-          <span
-            // role="img" + aria-label: assistive tech ignores aria-label
-            // on bare spans; the img role makes the tooltip content
-            // announced (the title stays for mouse hover).
-            role="img"
-            className="inline-flex cursor-help text-zinc-400 transition-colors hover:text-zinc-600 dark:hover:text-zinc-300"
-            title={TEST_HELP}
-            aria-label="What do the status dots mean?"
-          >
-            <svg
-              xmlns="http://www.w3.org/2000/svg"
-              viewBox="0 0 16 16"
-              fill="currentColor"
-              className="h-3.5 w-3.5"
-              aria-hidden="true"
-            >
-              <path
-                fillRule="evenodd"
-                d="M8 15A7 7 0 1 0 8 1a7 7 0 0 0 0 14Zm0-9a1 1 0 1 1-2 0 1 1 0 0 1 2 0ZM7 7a.75.75 0 0 0 0 1.5h.25v2.5H7a.75.75 0 0 0 0 1.5h2a.75.75 0 0 0 0-1.5h-.25v-3A.75.75 0 0 0 8 7H7Z"
-                clipRule="evenodd"
-              />
-            </svg>
-          </span>
           <div className="ml-auto flex items-center gap-0.5">
             <Link
               href="/app/catalog"
@@ -489,7 +375,7 @@ function ExpandedContent({
             // the collapsed rail): amber = Paused, blue = plan-locked,
             // probe colors for manual agents; removed + healthy managed
             // agents show none.
-            const dot = agentDot(agent, statuses, plan);
+            const dot = agentDot(agent, plan);
             // Hover completes the clamped subtitle: managed agents get
             // the live tagline (whose tail the 2-line clamp may hide)
             // plus the description — the tooltip renders the newlines
@@ -597,7 +483,6 @@ function ExpandedContent({
 function CollapsedContent({
   agents,
   activeAgent,
-  statuses,
   plan,
   onSelectAgent,
   onNewChat,
@@ -606,7 +491,6 @@ function CollapsedContent({
 }: {
   agents: PublicAgent[];
   activeAgent: string;
-  statuses: Record<string, TestResult>;
   /** Viewer's org plan (null when billing isn't configured — never gate). */
   plan: string | null;
   onSelectAgent: (id: string) => void;
@@ -663,7 +547,7 @@ function CollapsedContent({
           // expanded rows (amber = Paused, blue = plan-locked, probe
           // colors for manual agents; managed agents without a flag show
           // none — never probed).
-          const dot = agentDot(agent, statuses, plan);
+          const dot = agentDot(agent, plan);
           const lockedLabel = agent.templateRequiredPlan
             ? planLabel(agent.templateRequiredPlan)
             : "";

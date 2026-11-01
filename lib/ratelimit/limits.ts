@@ -16,6 +16,14 @@ export const LIMITS = {
   agentMutate: { max: 10, windowMs: 60_000 },
   /** Per-user: agent reads (GET /api/agents). 60/min. */
   agentRead: { max: 60, windowMs: 60_000 },
+  /**
+   * Per-user: platform-admin catalog writes (PUT catalog, POST test-model).
+   * Separate from agentMutate: admin configuration legitimately bursts
+   * (fix-and-resave validation loops, testing several models) and must
+   * not compete with the member-facing mutation budget. Still bounded —
+   * a buggy loop can't hammer the AgentOS.
+   */
+  adminMutate: { max: 30, windowMs: 60_000 },
   /** Per-user: thread mutations (PATCH/DELETE /api/threads). 30/min. */
   threadMutate: { max: 30, windowMs: 60_000 },
   /** Per-IP: sign-in/sign-up attempts. 10/min. */

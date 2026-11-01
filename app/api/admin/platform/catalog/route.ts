@@ -8,8 +8,9 @@
  * reaches the browser (tackui mints the service token server-side). Gated
  * to platform admins only (role === "admin") — the catalog is global (one
  * shared AgentOS), so who may edit it must be global too; org owners/admins
- * must not set platform-wide policy. Rate-limited on the agentMutate
- * bucket. PUT validates nothing itself — the AgentOS is the source of
+ * must not set platform-wide policy. Rate-limited on the adminMutate
+ * bucket (admin configuration bursts legitimately; separate from the
+ * member-facing agentMutate budget). PUT validates nothing itself — the AgentOS is the source of
  * truth for the entry grammar and rejects bad entries with a 400 that is
  * passed through verbatim.
  */
@@ -85,7 +86,7 @@ export async function PUT(request: NextRequest) {
   if (user.role !== "admin") {
     return NextResponse.json({ error: "Forbidden" }, { status: 403 });
   }
-  const limited = checkUserLimit(user.id, "agentMutate");
+  const limited = checkUserLimit(user.id, "adminMutate");
   if (limited) return limited;
 
   const body = await request.json().catch(() => null);
