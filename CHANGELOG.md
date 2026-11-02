@@ -82,9 +82,9 @@ All notable changes to this project will be documented in this file. The format 
   carrier-grade NAT 100.64.0.0/10, 192.0.0.0/24, 198.18.0.0/15 and the
   TEST-NET documentation ranges; IPv4-mapped IPv6 is decoded in any textual
   form (hex `::ffff:7f00:1` included) via a full 8-group expander, and an
-  unparseable IPv6 literal is refused. Endpoints are re-checked on every run
-  (per-run guarantee, not per-save), and run-time agent traffic follows
-  redirects MANUALLY with the guard re-run on every hop — a public endpoint
+  unparseable IPv6 literal is refused. Every run request is guarded at
+  request time — the guarded fetch re-runs the check on the URL and on
+  every redirect hop MANUALLY followed — a public endpoint
   that 302s to an internal address no longer turns a validated URL into a
   pass-through.
 - **The CopilotKit runtime's global thread-wipe endpoint is unreachable** — `POST /api/copilotkit/threads/clear` is classified as a run by the proxy (POST, not connect/stop), fell through to the runner's `clearThreads()`, which deletes EVERY tenant's runs, run states, messages and metadata with no caller identity to scope by (the runner is server-side). Nothing in the app calls it; the route now refuses it unconditionally, before auth and before any rate-limit accounting could burn a slot on it.

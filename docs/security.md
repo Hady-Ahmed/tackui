@@ -17,19 +17,19 @@ cloud-metadata endpoints.
   reachability probe (`POST /api/agents/reachability-probe`) before fetching;
   catalog template create/PATCH. The install route does not re-check — it
   copies the endpoint from the already-validated template row.
-- **Re-validated at run time:** `getAgents` (lib/agents/registry.ts) re-runs
-  `assertSafeUrl` on every user-supplied endpoint every time an agent is
-  materialized — the guarantee is per-run, not per-save. Network reality
-  drifts (a public name that starts resolving private — DNS rebinding — or a
-  catalog template edited to a new endpoint); a failed re-check excludes the
-  agent from the run list (fail-closed) with a server-side warn. Builder
-  agents are excluded: their endpoint is platform config, not user-supplied.
-- **Redirects are re-guarded:** run-time agent traffic goes through
-  `fetchGuardedRedirects` (lib/net/safe-fetch.ts), which follows redirects
-  MANUALLY and re-runs the guard on EVERY hop (capped at 5). A public
-  endpoint that 302s to an internal address must not turn a validated URL
-  into a pass-through — Node's `fetch` follows redirects silently by
-  default. A 3xx without a `Location` header is returned as-is.
+- **Re-guarded at request time:** run-time agent traffic goes through
+  `fetchGuardedRedirects` (lib/net/safe-fetch.ts), which re-runs the guard
+  on the request URL and follows redirects MANUALLY with the guard re-run
+  on EVERY hop (capped at 5). A public endpoint that 302s to an internal
+  address must not turn a validated URL into a pass-through — Node's
+  `fetch` follows redirects silently by default. A 3xx without a
+  `Location` header is returned as-is. This is the per-run guarantee:
+  network reality drifts (DNS rebinding, a template edited to a new
+  endpoint) and every request is checked at the moment it is made. The
+  listing path (`getAgents`) deliberately does NOT re-check — an agent
+  whose endpoint became unresolvable must fail that run with an honest
+  error, not vanish from the runtime's agent list (which crashed
+  CopilotKit's `useAgent` on the whole chat page).
 - **Fail-closed DNS:** an unresolvable hostname is REFUSED (`UnsafeUrlError`),
   not passed through — the old fail-open behavior was a rebinding window
   (an attacker's authoritative server can refuse the guard's lookup and
@@ -49,7 +49,7 @@ cloud-metadata endpoints.
   "not permitted on the hosted service", self-hosters get the opt-in hint.
 - **PATCH semantics:** the guard only fires when the `endpoint` field is in
   the body — editing other fields on an existing private-endpoint agent works
-  without the flag. The run-time re-validation above applies the same rule
+  without the flag. The request-time guarding above applies the same rule
   to runs regardless of how the row was written.
 - **Error masking:** probe error messages are masked in the response (raw DNS
   errors can leak internal hostnames); the full error is logged server-side.

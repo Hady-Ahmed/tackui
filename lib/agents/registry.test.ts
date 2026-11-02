@@ -38,9 +38,11 @@ vi.mock("./agent-store", () => ({
 }));
 
 // The SSRF guard does real DNS lookups; test endpoints are fake hostnames
-// that would now fail the fail-closed resolver. The guard has its own
-// dedicated suite (lib/net/safe-fetch.test.ts) — here it's a no-op and
-// the redirect-guarded fetch passes through to global fetch.
+// that would fail the fail-closed resolver. The guard has its own
+// dedicated suite (lib/net/safe-fetch.test.ts) — here it's a no-op by
+// default (so listing tests don't depend on DNS) and the redirect-guarded
+// fetch passes through to global fetch. The listing test below overrides
+// assertSafeUrl to simulate a guard failure.
 vi.mock("@/lib/net/safe-fetch", async (importOriginal) => {
   const actual = await importOriginal<typeof import("@/lib/net/safe-fetch")>();
   return {
@@ -53,6 +55,7 @@ vi.mock("@/lib/net/safe-fetch", async (importOriginal) => {
 import { getAgents } from "./registry";
 import { listAgents } from "./agent-store";
 import { getRequestUser } from "@/lib/auth/context";
+import { assertSafeUrl } from "@/lib/net/safe-fetch";
 
 const aguiEntry = (overrides: Partial<AgentEntry> = {}): AgentEntry => ({
   id: "ag1",
@@ -111,6 +114,21 @@ describe("getAgents", () => {
     ]);
     const map = await getAgents(new Request("http://localhost"));
     expect(Object.keys(map).sort()).toEqual(["a1", "a2"]);
+  });
+
+  it("lists an agent whose endpoint fails the SSRF guard (enforcement is at fetch time, not listing)", async () => {
+    // The registry deliberately does NOT re-run the guard at listing. A
+    // dead endpoint (expired tunnel, transient DNS failure) must fail THAT
+    // run — via the guarded fetch, which re-runs the guard per hop — not
+    // vanish from the runtime's agent list. The old per-listing check
+    // removed the agent from /info, and CopilotKit's useAgent crashed the
+    // whole chat page with "Agent not found after runtime sync".
+    vi.mocked(assertSafeUrl).mockRejectedValue(
+      new Error("hostname could not be resolved"),
+    );
+    vi.mocked(listAgents).mockResolvedValue([aguiEntry({ id: "dead-dns" })]);
+    const map = await getAgents(new Request("http://localhost"));
+    expect(Object.keys(map)).toEqual(["dead-dns"]);
   });
 
   it("throws the no-agents copy when the org has zero agents", async () => {

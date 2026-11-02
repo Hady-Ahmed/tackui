@@ -13,7 +13,7 @@ import { getTemplatesByIds } from "@/lib/catalog/template-store";
 import { getRequestUser } from "@/lib/auth/context";
 import type { RequestUser } from "@/lib/auth/request-context";
 import { getRunContextItems, getReservedDepKeys } from "@/lib/auth/request-context";
-import { assertSafeUrl, fetchGuardedRedirects } from "@/lib/net/safe-fetch";
+import { fetchGuardedRedirects } from "@/lib/net/safe-fetch";
 
 export type AgentsMap = Record<string, AbstractAgent>;
 
@@ -115,23 +115,16 @@ export async function getAgents(request?: Request): Promise<AgentsMap> {
       continue;
     }
 
-    // Run-time re-validation of user-supplied endpoints: the save-time
-    // check happens once; network reality drifts (a public name that
-    // starts resolving private — DNS rebinding — or a catalog template
-    // edited to a new endpoint). Re-run the SSRF guard every time an
-    // agent is materialized so the guarantee is per-run, not per-save.
-    // Builder agents are excluded: their endpoint is platform config
-    // (AGENTOS_BASE_URL-derived), not user-supplied — they `continue`
-    // in the branch above, so this point only sees user-supplied URLs.
-    try {
-      await assertSafeUrl(resolved.endpoint);
-    } catch (err) {
-      console.warn(
-        `[registry] skipping agent ${entry.id}: endpoint failed the SSRF re-check`,
-        err instanceof Error ? err.message : err,
-      );
-      continue;
-    }
+    // NOTE: no SSRF re-check here, deliberately. An earlier version of
+    // this loop re-ran assertSafeUrl per listing and SKIPPED agents whose
+    // endpoint had become unresolvable (a dead Cloudflare tunnel, a
+    // transient DNS failure) — which removed the agent from the runtime's
+    // list and crashed CopilotKit's useAgent ("Agent not found after
+    // runtime sync") on the whole chat page. The guarantee is already
+    // enforced where it matters: every run request (and every redirect
+    // hop) goes through fetchGuardedRedirects, which re-runs the guard at
+    // request time. A dead endpoint fails THAT run with an honest error;
+    // it never breaks listing.
 
     map[entry.id] = createAgent(resolved, user);
   }
