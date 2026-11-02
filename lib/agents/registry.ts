@@ -159,15 +159,29 @@ function createAgent(entry: AgentEntry, user: RequestUser): AbstractAgent {
     headers.Authorization = `Bearer ${token}`;
   }
 
+  // Run-time fetch policy by origin — the SSRF guard defends against
+  // TENANT-SUPPLIED URLs, not operator config:
+  //
+  // - Builder agents target the shared platform (endpoint recomputed from
+  //   AGENTOS_BASE_URL at resolution time). That is operator infrastructure
+  //   — the same trust tier as the DB connection string — and under SaaS
+  //   mode it is usually on a PRIVATE network (Railway private service),
+  //   which the guard blocks by design (SSRF_GUARD_FORCE_ON ignores
+  //   ALLOW_PRIVATE_ENDPOINTS). Routing these fetches through the guard
+  //   made every builder run die with UnsafeUrlError. Plain fetch here.
+  //
+  // - Manual/template agents point at user-supplied endpoints. Those get
+  //   the redirect-guarded wrapper: every hop (initial URL + each
+  //   redirect) re-runs the SSRF guard, so a compromised backend cannot
+  //   302 the run into the host's private network. redirect:"manual"
+  //   removes Node's silent auto-follow; 3xx chains are re-validated per
+  //   hop (max 5).
   const agent = new HttpAgent({
     url: entry.endpoint,
     headers,
-    // Run-time fetches go through the redirect-guarded wrapper: every
-    // hop (initial URL + each redirect) re-runs the SSRF guard, so a
-    // compromised/attacker backend cannot 302 the run into the host's
-    // private network. redirect:"manual" removes Node's silent
-    // auto-follow; 3xx chains are re-validated per hop (max 5).
-    fetch: (url, init) => fetchGuardedRedirects(url, init),
+    ...(entry.origin === "builder"
+      ? {}
+      : { fetch: (url, init) => fetchGuardedRedirects(url, init) }),
   });
 
   // Forward the authenticated user's id via `forwardedProps.user_id`

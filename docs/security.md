@@ -17,19 +17,33 @@ cloud-metadata endpoints.
   reachability probe (`POST /api/agents/reachability-probe`) before fetching;
   catalog template create/PATCH. The install route does not re-check — it
   copies the endpoint from the already-validated template row.
-- **Re-guarded at request time:** run-time agent traffic goes through
-  `fetchGuardedRedirects` (lib/net/safe-fetch.ts), which re-runs the guard
-  on the request URL and follows redirects MANUALLY with the guard re-run
-  on EVERY hop (capped at 5). A public endpoint that 302s to an internal
-  address must not turn a validated URL into a pass-through — Node's
-  `fetch` follows redirects silently by default. A 3xx without a
-  `Location` header is returned as-is. This is the per-run guarantee:
-  network reality drifts (DNS rebinding, a template edited to a new
-  endpoint) and every request is checked at the moment it is made. The
-  listing path (`getAgents`) deliberately does NOT re-check — an agent
-  whose endpoint became unresolvable must fail that run with an honest
-  error, not vanish from the runtime's agent list (which crashed
-  CopilotKit's `useAgent` on the whole chat page).
+- **Re-guarded at request time (tenant-supplied endpoints):** run-time
+  traffic for manual/template agents goes through `fetchGuardedRedirects`
+  (lib/net/safe-fetch.ts), which re-runs the guard on the request URL and
+  follows redirects MANUALLY with the guard re-run on EVERY hop (capped at
+  5). A public endpoint that 302s to an internal address must not turn a
+  validated URL into a pass-through — Node's `fetch` follows redirects
+  silently by default. A 3xx without a `Location` header is returned
+  as-is. This is the per-run guarantee: network reality drifts (DNS
+  rebinding, a template edited to a new endpoint) and every request is
+  checked at the moment it is made. The listing path (`getAgents`)
+  deliberately does NOT re-check — an agent whose endpoint became
+  unresolvable must fail that run with an honest error, not vanish from
+  the runtime's agent list (which crashed CopilotKit's `useAgent` on the
+  whole chat page).
+- **Builder agents are exempt from the run-time guard — by trust, not
+  oversight.** The SSRF guard defends against TENANT-supplied URLs; a
+  builder agent's endpoint is recomputed from `AGENTOS_BASE_URL` at
+  resolution time — operator infrastructure, the same trust tier as the
+  DB connection string. Under SaaS mode the platform lives on a PRIVATE
+  network (Railway private service), which the force-on guard would
+  refuse by design — routing builder runs through the guard made every
+  builder run die with `UnsafeUrlError: hostname resolves to a private
+  address`. Builder runs use plain `fetch`; manual/template agents keep
+  the guarded wrapper. A tenant still cannot reach the private network
+  through the guard: every URL they can influence (manual endpoints,
+  template endpoints, probe URLs) is guarded at save time and at request
+  time.
 - **Fail-closed DNS:** an unresolvable hostname is REFUSED (`UnsafeUrlError`),
   not passed through — the old fail-open behavior was a rebinding window
   (an attacker's authoritative server can refuse the guard's lookup and

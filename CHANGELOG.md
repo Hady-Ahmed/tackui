@@ -82,11 +82,17 @@ All notable changes to this project will be documented in this file. The format 
   carrier-grade NAT 100.64.0.0/10, 192.0.0.0/24, 198.18.0.0/15 and the
   TEST-NET documentation ranges; IPv4-mapped IPv6 is decoded in any textual
   form (hex `::ffff:7f00:1` included) via a full 8-group expander, and an
-  unparseable IPv6 literal is refused. Every run request is guarded at
-  request time — the guarded fetch re-runs the check on the URL and on
-  every redirect hop MANUALLY followed — a public endpoint
-  that 302s to an internal address no longer turns a validated URL into a
-  pass-through.
+  unparseable IPv6 literal is refused. Run requests to tenant-supplied
+  endpoints (manual/template agents) are guarded at request time — the
+  guarded fetch re-runs the check on the URL and on every redirect hop
+  MANUALLY followed — a public endpoint that 302s to an internal address
+  no longer turns a validated URL into a pass-through. Builder agents are
+  exempt: their endpoint is operator-configured platform infrastructure
+  (AGENTOS_BASE_URL, typically a private-network address under SaaS
+  mode), not a tenant-supplied URL — wrapping it in the guard refused
+  every builder run under `SAAS_MODE=true` (`UnsafeUrlError: hostname
+  resolves to a private address`), including against the private-network
+  warehouse planned for production.
 - **The CopilotKit runtime's global thread-wipe endpoint is unreachable** — `POST /api/copilotkit/threads/clear` is classified as a run by the proxy (POST, not connect/stop), fell through to the runner's `clearThreads()`, which deletes EVERY tenant's runs, run states, messages and metadata with no caller identity to scope by (the runner is server-side). Nothing in the app calls it; the route now refuses it unconditionally, before auth and before any rate-limit accounting could burn a slot on it.
 - **The live run stream is redacted with the same rule as persistence** — the `RUN_STARTED` fill (emitted when the backend doesn't echo the input) copies `request.input`, whose context carries the gate-injected secrets (model keys + MCP connector tokens): those streamed to every subscriber while `storeRun` redacted only the persisted copy. Every live event now passes the same `redactReservedEvent` rule before any subscriber sees it, with the reserved set captured inside the runner ALS scope so the redaction never depends on callback timing.
 - **Closed the default-plan fallback that handed out the self-host sentinel** — `defaultPlan()` keyed on `BILLING_ENABLED`, so a SaaS deploy without Stripe wired (the exact state a launch passes through) fell back to the unlimited self-host plan for every org. It keys on `SAAS_MODE`: the hosted product's no-subscription default is free, always; `BILLING_ENABLED` only gates checkout.

@@ -48,14 +48,27 @@ vi.mock("@/lib/net/safe-fetch", async (importOriginal) => {
   return {
     ...actual,
     assertSafeUrl: vi.fn().mockResolvedValue(undefined),
-    fetchGuardedRedirects: vi.fn((url: string, init: RequestInit) => fetch(url, init)),
+    // Records its call args and returns a stub response — never a real
+    // request (the fetch-policy tests below call the stored fetch).
+    fetchGuardedRedirects: vi.fn(() =>
+      Promise.resolve(new Response("stub", { status: 200 })),
+    ),
   };
+});
+
+// Builder-agent resolution reads AGENTOS_BASE_URL at module scope
+// (lib/config/agentos.ts evaluates AGENTOS_ENABLED once at import). The
+// vi.mock factories above are hoisted above imports — vi.hoisted runs
+// with them, BEFORE the registry (and its config import) is evaluated.
+vi.hoisted(() => {
+  process.env.AGENTOS_BASE_URL = "http://localhost:7778";
+  process.env.AGENTOS_JWT_SECRET = "test-agentos-secret";
 });
 
 import { getAgents } from "./registry";
 import { listAgents } from "./agent-store";
 import { getRequestUser } from "@/lib/auth/context";
-import { assertSafeUrl } from "@/lib/net/safe-fetch";
+import { assertSafeUrl, fetchGuardedRedirects } from "@/lib/net/safe-fetch";
 
 const aguiEntry = (overrides: Partial<AgentEntry> = {}): AgentEntry => ({
   id: "ag1",
@@ -75,6 +88,10 @@ beforeEach(() => {
   getRunContextItems.mockReturnValue([]);
   getReservedDepKeys.mockReset();
   getReservedDepKeys.mockReturnValue([]);
+  // Restore the safe-fetch mock defaults (a test may have flipped
+  // assertSafeUrl to reject) and clear the guarded-fetch call history.
+  vi.mocked(assertSafeUrl).mockResolvedValue(undefined);
+  vi.mocked(fetchGuardedRedirects).mockClear();
 });
 
 // Drive the injected middleware (the last entry in the agent's private
@@ -129,6 +146,51 @@ describe("getAgents", () => {
     vi.mocked(listAgents).mockResolvedValue([aguiEntry({ id: "dead-dns" })]);
     const map = await getAgents(new Request("http://localhost"));
     expect(Object.keys(map)).toEqual(["dead-dns"]);
+  });
+
+  describe("run fetch policy (SSRF guard defends tenant-supplied URLs only)", () => {
+    // HttpAgent stores the constructor's fetch as an own property
+    // (this.fetch = options.fetch ?? wrapper around global fetch). Call it
+    // directly and observe which path runs.
+    const storedFetch = (agent: unknown) =>
+      (agent as unknown as {
+        fetch: (url: string, init?: RequestInit) => Promise<Response>;
+      }).fetch;
+
+    it("builder agents use plain fetch — the platform endpoint is operator config, not a tenant URL", async () => {
+      vi.mocked(listAgents).mockResolvedValue([
+        aguiEntry({ id: "b1", origin: "builder", remoteAgentId: "r1" }),
+      ]);
+      const map = await getAgents(new Request("http://localhost"));
+      const fetchFn = storedFetch(map["b1"]);
+
+      // The default (unguarded) wrapper bottoms out in global fetch — stub
+      // it so nothing real is dialed.
+      const globalFetch = vi.fn();
+      vi.stubGlobal("fetch", globalFetch);
+      try {
+        await fetchFn("http://localhost:7778/agui/r1", { method: "POST" });
+      } finally {
+        vi.unstubAllGlobals();
+      }
+      expect(vi.mocked(fetchGuardedRedirects)).not.toHaveBeenCalled();
+      expect(globalFetch).toHaveBeenCalledWith("http://localhost:7778/agui/r1", {
+        method: "POST",
+      });
+    });
+
+    it("manual agents keep the redirect-guarded fetch", async () => {
+      vi.mocked(listAgents).mockResolvedValue([aguiEntry({ id: "m1" })]);
+      const map = await getAgents(new Request("http://localhost"));
+      const fetchFn = storedFetch(map["m1"]);
+
+      await fetchFn("http://localhost:8001/agent", { method: "POST" });
+      expect(vi.mocked(fetchGuardedRedirects)).toHaveBeenCalledTimes(1);
+      expect(vi.mocked(fetchGuardedRedirects)).toHaveBeenCalledWith(
+        "http://localhost:8001/agent",
+        { method: "POST" },
+      );
+    });
   });
 
   it("throws the no-agents copy when the org has zero agents", async () => {
