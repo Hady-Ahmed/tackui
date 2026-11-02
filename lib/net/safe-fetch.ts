@@ -29,8 +29,9 @@ import { SSRF_GUARD_FORCE_ON } from "@/lib/config/saas";
  * land inside. The pre-check blocks raw IP literals and obvious
  * internal hostnames, which covers the vast majority of real-world SSRF.
  * Run-time re-validation (see lib/agents/registry.ts) re-runs this guard
- * against the endpoint on every run, narrowing the window to one
- * request.
+ * against the endpoint on every manual/template-agent run — builder-agent
+ * runs to the operator-configured platform are deliberately exempt
+ * (operator infrastructure, not a tenant URL).
  */
 
 const ALLOW_PRIVATE =
@@ -255,13 +256,26 @@ function isPrivateV6(ip: string): boolean {
 
 /**
  * A fetch wrapper for run-time agent traffic. Redirects are followed
- * MANUALLY and EVERY hop re-runs the SSRF guard: a public endpoint that
- * 302s to an internal address must not turn a validated endpoint into a
- * pass-through (the save-time check validated the first URL only, and
- * Node's fetch follows redirects silently). Hop count is capped to bound
- * loops; a 3xx without a Location header is returned as-is (nothing to
- * follow). The 303 semantics (method → GET, body dropped) are applied
- * per fetch spec.
+ * MANUALLY with two properties:
+ *
+ * 1. EVERY hop re-runs the SSRF guard: a public endpoint that 302s to an
+ *    internal address must not turn a validated endpoint into a
+ *    pass-through (the save-time check validated the first URL only, and
+ *    Node's fetch follows redirects silently). Hop count is capped to
+ *    bound loops; a 3xx without a Location header is returned as-is
+ *    (nothing to follow).
+ *
+ * 2. The fetch spec's redirect semantics are applied manually — the
+ *    guard's `redirect: "manual"` mode turns OFF the auto-follow that
+ *    normally provides them:
+ *      - 301/302/303 rewrite POST → GET and drop the body;
+ *      - a CROSS-ORIGIN hop strips Authorization/Cookie/
+ *        Proxy-Authorization. Without this, a compromised backend could
+ *        302 a run to a third-party collector and harvest the agent JWT
+ *        (headers.Authorization) plus the full conversation body — the
+ *        manual loop would have re-sent `init` verbatim where plain
+ *        fetch would have stripped them. Same-origin hops keep headers,
+ *        matching the spec.
  *
  * Throws UnsafeUrlError when a hop fails the guard — fail-closed: the
  * run errors instead of connecting somewhere unvalidated.
@@ -281,9 +295,26 @@ export async function fetchGuardedRedirects(
     }
     const location = res.headers.get("location");
     if (!location) return res;
-    current = new URL(location, current).toString();
-    if (res.status === 303) {
+
+    let next: URL;
+    try {
+      next = new URL(location, current);
+    } catch {
+      throw new UnsafeUrlError("invalid redirect location");
+    }
+
+    const status = res.status;
+    const method = (init.method ?? "GET").toUpperCase();
+    if (status === 303 || ((status === 301 || status === 302) && method === "POST")) {
       init = { ...init, method: "GET", body: undefined };
     }
+    if (next.origin !== new URL(current).origin) {
+      const headers = new Headers(init.headers);
+      headers.delete("authorization");
+      headers.delete("cookie");
+      headers.delete("proxy-authorization");
+      init = { ...init, headers };
+    }
+    current = next.toString();
   }
 }

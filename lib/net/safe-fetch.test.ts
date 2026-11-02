@@ -326,6 +326,80 @@ describe("assertSafeUrl", () => {
       const res = await fetchGuardedRedirects("http://93.184.216.34/x", { method: "GET" });
       expect(res.status).toBe(304);
     });
+
+    it("strips Authorization/Cookie on a CROSS-ORIGIN redirect hop", async () => {
+      // The manual loop re-sends init verbatim per hop; without the
+      // spec's cross-origin credential strip a compromised backend could
+      // 302 a run (carrying the agent JWT + the full conversation body)
+      // to a third-party collector.
+      const calls: Array<{ url: string; auth?: string; cookie?: string }> = [];
+      vi.stubGlobal(
+        "fetch",
+        vi.fn(async (url: string, init: RequestInit) => {
+          const h = new Headers(init.headers);
+          calls.push({ url, auth: h.get("authorization") ?? undefined, cookie: h.get("cookie") ?? undefined });
+          if (url === "http://93.184.216.34/run") {
+            return new Response(null, { status: 302, headers: { location: "http://93.184.216.35/run" } });
+          }
+          return new Response("ok", { status: 200 });
+        }),
+      );
+      const res = await fetchGuardedRedirects("http://93.184.216.34/run", {
+        method: "POST",
+        headers: { authorization: "Bearer agent-jwt", cookie: "session=abc" },
+        body: JSON.stringify({ messages: ["whole conversation"] }),
+      });
+      expect(res.status).toBe(200);
+      expect(calls[0]).toMatchObject({ auth: "Bearer agent-jwt", cookie: "session=abc" });
+      // The hop: credentials gone. Same-origin hop below would keep them.
+      expect(calls[1]).toMatchObject({ url: "http://93.184.216.35/run", auth: undefined, cookie: undefined });
+    });
+
+    it("keeps Authorization on a SAME-ORIGIN redirect hop", async () => {
+      const calls: Array<{ url: string; auth?: string }> = [];
+      vi.stubGlobal(
+        "fetch",
+        vi.fn(async (url: string, init: RequestInit) => {
+          calls.push({ url, auth: new Headers(init.headers).get("authorization") ?? undefined });
+          if (url === "http://93.184.216.34/a") {
+            return new Response(null, { status: 302, headers: { location: "http://93.184.216.34/b" } });
+          }
+          return new Response("ok", { status: 200 });
+        }),
+      );
+      await fetchGuardedRedirects("http://93.184.216.34/a", {
+        headers: { authorization: "Bearer agent-jwt" },
+      });
+      expect(calls[0]).toMatchObject({ auth: "Bearer agent-jwt" });
+      expect(calls[1]).toMatchObject({ auth: "Bearer agent-jwt" });
+    });
+
+    it("rewrites 302 POST → GET and drops the body (spec redirect semantics)", async () => {
+      const calls: Array<{ url: string; method: string; hasBody: boolean }> = [];
+      vi.stubGlobal(
+        "fetch",
+        vi.fn(async (url: string, init: RequestInit) => {
+          calls.push({ url, method: init.method ?? "GET", hasBody: init.body != null });
+          if (url === "http://93.184.216.34/x") {
+            return new Response(null, { status: 302, headers: { location: "http://93.184.216.34/y" } });
+          }
+          return new Response("ok", { status: 200 });
+        }),
+      );
+      await fetchGuardedRedirects("http://93.184.216.34/x", { method: "POST", body: "data" });
+      expect(calls[0]).toMatchObject({ method: "POST", hasBody: true });
+      expect(calls[1]).toMatchObject({ method: "GET", hasBody: false });
+    });
+
+    it("refuses a malformed Location header as UnsafeUrlError (not a bare TypeError)", async () => {
+      vi.stubGlobal(
+        "fetch",
+        vi.fn(async () => new Response(null, { status: 302, headers: { location: "http://[::1" } })),
+      );
+      await expect(
+        fetchGuardedRedirects("http://93.184.216.34/x", { method: "GET" }),
+      ).rejects.toMatchObject({ name: "UnsafeUrlError", message: "invalid redirect location" });
+    });
   });
 
   // The SaaS-mode forced SSRF guard lives in lib/config/saas.ts and is read
