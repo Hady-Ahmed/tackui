@@ -61,6 +61,16 @@ every `/run` request. This is the source of truth for message history — the
 frontend (CopilotKit's `agent.messages` + `PostgresAgentRunner`) stores and
 manages all messages.
 
+**Thread ids are per agent** — a `threadId` is only meaningful within the
+agent that created it. The frontend never reuses a thread id across two
+agents (CopilotKit keys threads by agent), and the platform-side session
+store matches on `(user_id, thread_id)` — it deliberately does NOT check
+that a run's component matches the session's component (parity with the
+stock AG-UI router). So two different agents writing into the same
+`thread_id` for the same user would interleave history; the frontend's
+keying is what prevents that, and any new backend consuming these threads
+must keep the same per-agent keying.
+
 Agent backends have two valid options for handling `input.messages`:
 
 1. **Stateless (read history):** Read `input.messages` from the request body

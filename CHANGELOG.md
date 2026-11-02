@@ -20,6 +20,19 @@ All notable changes to this project will be documented in this file. The format 
   in `lib/auth/auth.ts` runs only outside `SAAS_MODE`; on the hosted product
   the admin comes exclusively from `npm run create-admin` (which now also sets
   `"emailVerified" = true`).
+- **Small honest-UI fixes from the audit's nit sweep:** an empty connector
+  name now reports "Name is required" (the charset rule no longer
+  overwrites it); the builder's provider picker prettifies provider slugs
+  (same convention as the key badges — members pick "Openai Responses",
+  not the internal door slug; the option value stays the raw slug so the
+  PATCH contract is untouched); "Save changes" with a zero diff relabels
+  to "Open in chat" (a stale snapshot still says "Save changes" — that
+  click genuinely re-publishes the full config); the custom-endpoint form
+  at the plan cap opens the same UpgradeDialog the builder form opens
+  instead of showing a dead-end 402; "Configured agents (0)" no longer
+  flashes during load; the edit-load failure pane gained a Retry; and
+  member-visible copy consistently says "the agent builder" (the copy
+  test now pins the rule against bare "the platform").
 - **Failed fetches no longer impersonate empty states.** The /agents list
   shows a load-error pane with Retry (401 redirects to login) instead of
   claiming "No agents yet"; the builder's connector palette distinguishes a

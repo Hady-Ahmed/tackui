@@ -6,6 +6,7 @@ import type { PublicAgent, AgentAuthMode } from "@/lib/agents/agents.config";
 import { BackToChat } from "@/components/back-to-chat";
 import { BuilderForm } from "@/components/builder/builder-form";
 import { ConnectorsAdmin } from "@/components/connectors-admin";
+import { UpgradeDialog } from "@/components/upgrade-dialog";
 import { authClient } from "@/lib/auth/auth-client";
 import { useAuthConfig } from "@/lib/auth/use-auth-config";
 import { useCanManageAgents } from "@/lib/auth/use-can-manage-agents";
@@ -95,6 +96,10 @@ function AgentsPageInner() {
   const [editing, setEditing] = useState<Editing | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [submitting, setSubmitting] = useState(false);
+  // Plan-cap paywall on the custom-endpoint form — same moment the builder
+  // form handles with its UpgradeDialog (both forms live on this page; the
+  // handling must not depend on which tab the admin had open).
+  const [upgradeOpen, setUpgradeOpen] = useState(false);
   const { formTest, rowTests, runFormTest, runRowTest, resetFormTest } =
     useTestResults();
   const [formOpen, setFormOpen] = useState(false);
@@ -277,6 +282,10 @@ function AgentsPageInner() {
       if (!res.ok) {
         const data = await res.json().catch(() => ({}));
         setError(data.error || `Request failed (${res.status})`);
+        // Same paywall moment the builder form handles: the plan-cap 402
+        // opens the upgrade dialog for org admins instead of leaving a
+        // dead-end error message.
+        if (data.code === "PLAN_AGENT_LIMIT" && canManage) setUpgradeOpen(true);
         return;
       }
 
@@ -353,7 +362,9 @@ function AgentsPageInner() {
         <section className="mb-10">
           <div className="mb-4 flex items-center justify-between gap-3">
             <h2 className="text-sm font-semibold uppercase tracking-wide text-zinc-400">
-              Configured agents ({agents.length})
+              {/* The count only renders once loading resolved — "(0)" during
+                  the fetch reads as data loss on slow connections. */}
+              {loading ? "Configured agents" : `Configured agents (${agents.length})`}
             </h2>
             <button
               type="button"
@@ -709,6 +720,7 @@ function AgentsPageInner() {
         {canManage && (
           <ConnectorsAdmin />
         )}
+        <UpgradeDialog open={upgradeOpen} onClose={() => setUpgradeOpen(false)} />
       </div>
     </div>
   );

@@ -172,6 +172,15 @@ describe("staleModelCopy — saved model no longer in the catalog", () => {
     const copy = staleModelCopy({ provider: "cohere", id: "command-r" }, MODELS, null);
     expect(copy).toContain("cohere:command-r");
   });
+
+  it("names the entity 'the agent builder' — never bare 'the platform' (copy rule)", () => {
+    // Member-visible copy says "the agent builder". "The platform" is the
+    // drift the rule exists to prevent — one reword away from a
+    // member-facing "the agent platform".
+    const copy = staleModelCopy({ provider: "openai", id: "gpt-4o-2024" }, MODELS, null);
+    expect(copy).toContain("the agent builder");
+    expect(copy).not.toMatch(/\bthe platform\b/);
+  });
 });
 
 describe("providerForDepKeyInCatalog", () => {

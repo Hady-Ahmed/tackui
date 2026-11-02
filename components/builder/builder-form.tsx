@@ -52,6 +52,7 @@ import {
   groupModelsByProvider,
   modelKeyState,
   pickDefaultModel,
+  prettySlug,
   providerForDepKeyInCatalog,
   providerMeta,
   staleModelCopy,
@@ -328,6 +329,17 @@ export function BuilderForm({
       }
     : null;
 
+  // "Save changes" with a zero diff silently navigates to chat (the
+  // parent treats it like a save — close + open in chat). Label the
+  // button honestly when nothing is changed — EXCEPT on a stale snapshot,
+  // where the click genuinely re-publishes the full config and must keep
+  // saying "Save changes" (that's the unworkable-402 remedy's whole point).
+  const noChanges =
+    mode === "edit" &&
+    !staleSnapshot &&
+    original !== null &&
+    Object.keys(buildEditPayload(form, original)).length === 0;
+
   /* -------------------------------------------------------------------- */
   /* Actions                                                               */
   /* -------------------------------------------------------------------- */
@@ -493,13 +505,28 @@ export function BuilderForm({
     return (
       <div className="rounded-xl border border-zinc-200 bg-white p-6 text-center dark:border-zinc-800 dark:bg-zinc-950">
         <p className="text-sm text-zinc-500 dark:text-zinc-400">{agentError}</p>
-        <button
-          type="button"
-          onClick={onCancel}
-          className="mt-3 inline-block text-sm text-blue-600 hover:underline dark:text-blue-400"
-        >
-          Back to the agents list
-        </button>
+        {/* A transient 429 or blip is one click from recoverable — without
+            a Retry the only way back is a full round-trip through the list
+            page. Same affordance as the catalog banner's Retry. */}
+        <div className="mt-3 flex items-center justify-center gap-4">
+          <button
+            type="button"
+            onClick={() => {
+              setAgentError(null);
+              void loadAgent();
+            }}
+            className="text-sm text-blue-600 hover:underline dark:text-blue-400"
+          >
+            Retry
+          </button>
+          <button
+            type="button"
+            onClick={onCancel}
+            className="text-sm text-blue-600 hover:underline dark:text-blue-400"
+          >
+            Back to the agents list
+          </button>
+        </div>
       </div>
     );
   }
@@ -655,18 +682,22 @@ export function BuilderForm({
                   models.length > 0 &&
                   !providerGroup ? (
                   <option value={form.model.provider}>
-                    {form.model.provider} (no longer offered)
+                    {prettySlug(form.model.provider)} (no longer offered)
                   </option>
                 ) : form.model && models !== null && models.length === 0 ? (
                   <option value={form.model.provider}>
-                    {form.model.provider} (no models are enabled yet)
+                    {prettySlug(form.model.provider)} (no models are enabled yet)
                   </option>
                 ) : (
                   <option value="">Select a provider…</option>
                 )}
                 {groups.map((g) => (
                   <option key={g.provider} value={g.provider}>
-                    {g.provider}
+                    {/* The value stays the raw slug (the PATCH contract);
+                        the LABEL is prettified — members see "Openai
+                        Responses", not the internal door slug. Same
+                        convention as the key badges. */}
+                    {prettySlug(g.provider)}
                   </option>
                 ))}
               </select>
@@ -889,7 +920,9 @@ export function BuilderForm({
               ? "Saving…"
               : mode === "create"
                 ? "Create agent"
-                : "Save changes"}
+                : noChanges
+                  ? "Open in chat"
+                  : "Save changes"}
           </button>
           <button
             type="button"

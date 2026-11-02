@@ -83,10 +83,13 @@ export function ConnectorsAdmin() {
   const save = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!form) return;
-    // Client-side validation mirrors the store's zod schemas.
+    // Client-side validation mirrors the store's zod schemas. The regex
+    // check is conditional so an empty name reports "required", not the
+    // charset rule (the second check used to overwrite the first — the
+    // first thing an empty-form submitter saw was the wrong answer).
     const errors: Record<string, string> = {};
     if (!form.name.trim()) errors.name = "Name is required";
-    if (!/^[\w-]+$/.test(form.name.trim())) errors.name = "Name must be a-z, 0-9, - or _";
+    else if (!/^[\w-]+$/.test(form.name.trim())) errors.name = "Name must be a-z, 0-9, - or _";
     if (!form.url.trim()) errors.url = "URL is required";
     if (Object.keys(errors).length) {
       setFieldErrors(errors);

@@ -204,7 +204,7 @@ export function staleModelCopy(
   // false (nothing can be picked to replace it either).
   if (models.length === 0) return null;
   if (findModel(models, model.provider, model.id)) return null;
-  return `The agent's saved model (${model.provider}:${model.id}) is no longer offered by the platform. Pick a different one to replace it — saving other changes keeps the old model.`;
+  return `The agent's saved model (${model.provider}:${model.id}) is no longer offered by the agent builder. Pick a different one to replace it — saving other changes keeps the old model.`;
 }
 
 /** Display label derived from a provider/toolkit slug — mirrors the
