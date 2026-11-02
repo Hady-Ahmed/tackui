@@ -37,6 +37,7 @@ import {
 } from "@/lib/agents/builder";
 import { builderEndpoint } from "@/lib/config/agentos";
 import { getConnectorsByNames } from "@/lib/connectors/connector-store";
+import { ensurePlatformConnectors } from "@/lib/connectors/platform-sync";
 import { getCurrentUser } from "@/lib/auth/context";
 import { checkUserLimit } from "@/lib/ratelimit/middleware";
 import { checkAgentCountLimit } from "@/lib/plans/enforcement";
@@ -95,7 +96,11 @@ export async function POST(request: Request) {
 
   // Connectors must exist in the org's connector store at create time —
   // the run gate re-checks at run time, but a typo'd name shouldn't be
-  // storable in the first place.
+  // storable in the first place. The stored config references connector
+  // IDS (the platform registry's keys), so the validated rows double as
+  // the name→id map.
+  let connectorIds: string[] = [];
+  let referencedConnectors: Array<{ id: string; url: string; name: string }> = [];
   if (spec.connectors.length) {
     const orgConnectors = await getConnectorsByNames(user.orgId, spec.connectors);
     const missing = spec.connectors.filter((name) => !orgConnectors.has(name));
@@ -105,6 +110,11 @@ export async function POST(request: Request) {
         { status: 400 },
       );
     }
+    referencedConnectors = spec.connectors.map((name) => {
+      const row = orgConnectors.get(name)!;
+      return { id: row.id, url: row.url, name: row.name };
+    });
+    connectorIds = referencedConnectors.map((row) => row.id);
   }
 
   const remoteAgentId = generateAgentId();
@@ -113,9 +123,10 @@ export async function POST(request: Request) {
   let config: Record<string, unknown>;
   let requirements;
   try {
-    config = buildComponentConfig(remoteAgentId, spec, model, platformTools);
+    config = buildComponentConfig(remoteAgentId, { ...spec, connectorIds }, model, platformTools);
     // Same tool validation as buildComponentConfig — guarded too so a
-    // stale tool name can never escape as a raw 500.
+    // stale tool name can never escape as a raw 500. buildRequirements
+    // keeps the org-facing NAMES (the local snapshot renders them).
     requirements = buildRequirements(spec, model, platformTools);
   } catch (err) {
     if (err instanceof BuilderValidationError) {
@@ -166,6 +177,15 @@ export async function POST(request: Request) {
 
   // 2) The AgentOS component (the "brain" the dispatcher rehydrates).
   try {
+    // Belt-and-braces connector registration: connector edits push-first,
+    // so the registry normally already holds every referenced connector —
+    // re-upserting here additionally covers a restored/wiped platform
+    // database (otherwise the saved config would reference ids the
+    // registry lost, and runs would silently skip those connectors).
+    // Idempotent; failures compensate like any other platform failure.
+    if (referencedConnectors.length) {
+      await ensurePlatformConnectors(referencedConnectors);
+    }
     await createAgentosComponent({
       componentId: remoteAgentId,
       name: spec.name,

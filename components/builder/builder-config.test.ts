@@ -3,6 +3,7 @@ import {
   BUILDER_CONNECTORS_MAX,
   BUILDER_TOOLS_MAX,
   buildCreatePayload,
+  buildEditPayload,
   buildUpdatePayload,
   catalogEmptyCopy,
   createBlockedByEmptyModels,
@@ -447,6 +448,33 @@ describe("buildCreatePayload", () => {
 
   it("trims the identity fields", () => {
     expect(buildCreatePayload({ ...validForm, name: "  Researcher " }).name).toBe("Researcher");
+  });
+});
+
+describe("buildEditPayload", () => {
+  it("sends a FULL config when the row has no snapshot (original = null) — even with zero edits", () => {
+    // The stale-snapshot recovery pin: the run gate 402s snapshot-less
+    // rows with "open it in the agent builder and save it again". That
+    // remedy only works if a zero-edit save still produces a complete
+    // PATCH body (model + tools + connectors) — the server 409s anything
+    // partial, and a diff that happened to include one tool would
+    // silently destroy the agent's real tool set.
+    const untouchedForm = { ...validForm }; // exactly what the prefill produces
+    expect(buildEditPayload(untouchedForm, null)).toEqual({
+      name: validForm.name,
+      description: validForm.description,
+      instructions: validForm.instructions,
+      model: validForm.model,
+      tools: validForm.tools.map((name) => ({ name })),
+      connectors: validForm.connectors,
+    });
+  });
+
+  it("still diffs against the original when a snapshot exists", () => {
+    expect(buildEditPayload({ ...validForm, name: "Renamed" }, validForm)).toEqual({
+      name: "Renamed",
+      instructions: validForm.instructions,
+    });
   });
 });
 

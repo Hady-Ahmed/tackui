@@ -44,9 +44,9 @@ import {
   BUILDER_CONNECTORS_MAX,
   BUILDER_TOOLS_MAX,
   buildCreatePayload,
-  buildUpdatePayload,
   catalogEmptyCopy,
   createBlockedByEmptyModels,
+  buildEditPayload,
   extractErrorMessage,
   findModel,
   groupModelsByProvider,
@@ -261,6 +261,15 @@ export function BuilderForm({
   // PATCH also 403s, this is the UI mirror (defense in depth: the /agents
   // table only renders Edit on the author's own builder rows).
   const notAllowed = mode === "edit" && Boolean(agent) && (!isBuilder || !isAuthor);
+  // A snapshot-less row: the stored requirements blob failed to parse and
+  // was dropped at read (an older-format save). The run gate 402s these
+  // with "open it in the agent builder and save it again" — this flag
+  // turns that instruction into something the form can actually do: the
+  // PATCH must carry a FULL config (model + tools + connectors), because
+  // there is no snapshot to diff against and no snapshot to preserve
+  // fields from. See handleSubmit + the banner in the form body.
+  const staleSnapshot =
+    mode === "edit" && agent !== null && agent.requirements === undefined;
   const groups = models ? groupModelsByProvider(models) : [];
   const selectedModel = form.model
     ? findModel(models ?? [], form.model.provider, form.model.id)
@@ -372,11 +381,12 @@ export function BuilderForm({
     setSaving(true);
     try {
       const body =
-        mode === "create"
-          ? buildCreatePayload(form)
-          : buildUpdatePayload(form, original ?? form);
+        mode === "create" ? buildCreatePayload(form) : buildEditPayload(form, original);
       // Edit mode with no changes → nothing to publish; the parent treats
-      // it like a save (close + open in chat).
+      // it like a save (close + open in chat). Never fires for a stale
+      // snapshot — buildEditPayload sends the full config there (see its
+      // docstring), which is the point: "just save it again" must work
+      // even with zero edits.
       if (mode === "edit" && Object.keys(body).length === 0 && agent) {
         onSaved(agent);
         return;
@@ -505,6 +515,15 @@ export function BuilderForm({
               {retryingCatalog ? "Retrying…" : "Retry"}
             </button>
           </div>
+        </div>
+      )}
+
+      {staleSnapshot && (
+        <div className="rounded-lg border border-amber-200 bg-amber-50 px-4 py-3 text-sm text-amber-800 dark:border-amber-900 dark:bg-amber-950 dark:text-amber-200">
+          This agent was saved by an older version of the agent builder and
+          can&apos;t run until it&apos;s saved again. Its model, tools and
+          connectors have been cleared below — pick them again (the same ones
+          are fine), then save.
         </div>
       )}
 

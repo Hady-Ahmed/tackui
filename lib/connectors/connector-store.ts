@@ -114,6 +114,14 @@ export interface UpsertConnectorInput {
   url: string;
   /** Plaintext bearer token. Empty string / undefined = no auth. */
   token?: string;
+  /**
+   * The row id for a NEW connector. The connectors route generates it
+   * BEFORE the platform-registry push (the id is the registry key), so
+   * the push can precede the local insert; on conflict (existing row)
+   * this value is ignored. Omitted → generated here (direct-store calls
+   * that don't push-first).
+   */
+  id?: string;
 }
 
 /**
@@ -145,7 +153,7 @@ export async function upsertConnector(
        token = CASE WHEN $5::text IS NULL THEN connectors.token ELSE EXCLUDED.token END,
        updated_at = now()
      RETURNING id, org_id, name, url, token, created_at, updated_at`,
-    [randomUUID(), input.orgId, name, url, tokenForDb],
+    [input.id ?? randomUUID(), input.orgId, name, url, tokenForDb],
   );
   return rowToConnector(result.rows[0]);
 }

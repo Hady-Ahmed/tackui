@@ -101,7 +101,16 @@ is re-derived server-side at create/update time:
   name is a 400 — a stale client is user input).
 - **Connector names** are validated against the org's connector store at
   create time (a typo'd name must not be storable); the run gate
-  re-checks at run time.
+  re-checks at run time. The stored config references connector **ids**
+  — the platform connector registry's keys (see
+  [security.md](./security.md#credentials--connectors-stores-builder-subsystem))
+  — while the requirements snapshot keeps the org-facing names: ids are
+  globally unique (names are org-scoped and collide across orgs), and
+  the dispatcher matches the run wire's `mcp_connectors` keys against
+  the config's id list. Both routes also re-register the referenced
+  connectors with the platform registry (belt-and-braces over the
+  push-first sync at connector save — see
+  [security.md](./security.md#credentials--connectors-stores-builder-subsystem)).
 
 An unknown model (`provider:id` not in the catalog) is a
 `BuilderValidationError` → 400. The picker is populated from the same

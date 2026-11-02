@@ -17,15 +17,19 @@
  * (hard-locked off in SaaS mode).
  */
 import { NextRequest, NextResponse } from "next/server";
+import { randomUUID } from "crypto";
 import { z } from "zod";
 import { getCurrentUser, canManageAgents } from "@/lib/auth/context";
+import { AgentosError, agentosErrorResponse } from "@/lib/agents/builder";
 import { checkUserLimit } from "@/lib/ratelimit/middleware";
 import { assertSafeUrl, UnsafeUrlError } from "@/lib/net/safe-fetch";
 import {
+  getConnectorsByNames,
   listConnectors,
   upsertConnector,
   toPublicConnector,
 } from "@/lib/connectors/connector-store";
+import { upsertPlatformConnector } from "@/lib/connectors/platform-sync";
 
 const upsertConnectorBodySchema = z.object({
   name: z.string().trim().min(1).max(100),
@@ -81,9 +85,44 @@ export async function PUT(request: NextRequest) {
     throw err;
   }
 
+  // Push-first-then-commit: the platform's connector registry must hold
+  // the endpoint BEFORE the local row changes — the registry is what the
+  // platform resolves attach URLs from, so the two stores may only
+  // disagree in the harmless direction (platform momentarily ahead). If
+  // the push fails, NOTHING changed: the admin sees the error and
+  // retries, never a half-updated connector. The connector's id is the
+  // registry key (names are org-scoped and collide across orgs): new
+  // connectors generate it here so the push can precede the local
+  // insert; edits reuse the stored row's id.
+  let connectorId: string;
+  try {
+    const existing = (await getConnectorsByNames(user.orgId, [parsed.data.name])).get(
+      parsed.data.name,
+    );
+    connectorId = existing?.id ?? randomUUID();
+    await upsertPlatformConnector({
+      id: connectorId,
+      url: parsed.data.url,
+      name: parsed.data.name,
+    });
+  } catch (err) {
+    // A platform failure must surface as 502 (upstream), not 500 — the
+    // local row was NOT written (push-first), so a retry is safe.
+    if (err instanceof AgentosError) {
+      console.error("[connectors] platform registry push failed — local row unchanged", {
+        orgId: user.orgId,
+        name: parsed.data.name,
+        error: err.message,
+      });
+      return agentosErrorResponse(err);
+    }
+    throw err;
+  }
+
   try {
     const stored = await upsertConnector({
       orgId: user.orgId,
+      id: connectorId,
       name: parsed.data.name,
       url: parsed.data.url,
       token: parsed.data.token,

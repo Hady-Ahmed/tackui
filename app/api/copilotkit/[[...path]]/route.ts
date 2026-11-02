@@ -97,6 +97,20 @@ async function handler(request: Request): Promise<Response> {
     const url = new URL(request.url);
     const isControlRequest =
       url.pathname.includes("/connect") || url.pathname.includes("/stop/");
+
+    // Destructive runtime endpoints must never be reachable through this
+    // proxy. POST /threads/clear is classified as a run below (POST, not
+    // connect/stop), falls through to the inner handler, and reaches the
+    // runner's clearThreads() — which deletes EVERY tenant's runs, run
+    // states, messages and metadata with no user/org filter (the runner
+    // is server-side and has no caller identity to scope by). Nothing in
+    // this app calls it (per-thread cleanup happens server-side), so it
+    // is refused unconditionally — before auth, before any rate-limit
+    // accounting could burn a slot on it.
+    if (url.pathname.endsWith("/threads/clear")) {
+      return Response.json({ error: "Not available" }, { status: 403 });
+    }
+
     const isRunRequest = request.method === "POST" && !isControlRequest;
     if (isRunRequest && isRunShapedButUnparseable(url.pathname)) {
       return Response.json({ error: "Not found" }, { status: 404 });

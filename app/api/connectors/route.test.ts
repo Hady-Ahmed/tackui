@@ -13,6 +13,13 @@ vi.mock("@/lib/ratelimit/middleware", () => ({
   checkUserLimit: vi.fn().mockReturnValue(null),
 }));
 
+// The platform-registry push is a network round trip — stubbed for the
+// happy paths; the push-first ordering tests below rewire it.
+const mockUpsertPlatformConnector = vi.fn().mockResolvedValue(undefined);
+vi.mock("@/lib/connectors/platform-sync", () => ({
+  upsertPlatformConnector: (...a: unknown[]) => mockUpsertPlatformConnector(...a),
+}));
+
 // Mock the SSRF guard like the agents route tests do — the real one
 // performs DNS lookups and reads module-load-time env; the guard call
 // itself (and the 400 path on UnsafeUrlError) is what's under test here.
@@ -30,6 +37,7 @@ vi.mock("@/lib/net/safe-fetch", () => ({
 
 import { GET, PUT } from "./route";
 import { listConnectors, deleteConnector } from "@/lib/connectors/connector-store";
+import { AgentosError } from "@/lib/agents/builder";
 import { assertSafeUrl, UnsafeUrlError } from "@/lib/net/safe-fetch";
 import { checkUserLimit } from "@/lib/ratelimit/middleware";
 import { runMigrations } from "@/lib/db/migrate";
@@ -192,6 +200,51 @@ describe("PUT /api/connectors", () => {
     const list = await GET();
     const body2 = await list.json();
     expect(body2.connectors.map((c: { name: string }) => c.name)).not.toContain("metadata");
+  });
+
+  it("pushes to the platform registry FIRST, keyed by the connector's id", async () => {
+    const res = await put({ name: "github", url: "https://mcp.example.com/github" });
+    expect(res.status).toBe(200);
+    expect(mockUpsertPlatformConnector).toHaveBeenCalledTimes(1);
+    const pushed = mockUpsertPlatformConnector.mock.calls[0][0] as {
+      id: string;
+      url: string;
+      name: string;
+    };
+    // The registry key is the row's id (names collide across orgs), and the
+    // URL — not the token — is what gets registered.
+    const stored = (await listConnectors(ORG)).find((c) => c.name === "github");
+    expect(pushed).toEqual({
+      id: stored!.id,
+      url: "https://mcp.example.com/github",
+      name: "github",
+    });
+  });
+
+  it("reuses the existing row's id on edit (the registry key is stable)", async () => {
+    await put({ name: "github", url: "https://mcp.example.com/github" });
+    const first = mockUpsertPlatformConnector.mock.calls[0][0] as { id: string };
+    mockUpsertPlatformConnector.mockClear();
+    await put({ name: "github", url: "https://mcp.example.com/gh-v2" });
+    const second = mockUpsertPlatformConnector.mock.calls[0][0] as { id: string };
+    expect(second.id).toBe(first.id);
+    // The local row keeps its id across the edit too.
+    const stored = (await listConnectors(ORG)).find((c) => c.name === "github");
+    expect(stored!.id).toBe(first.id);
+  });
+
+  it("pushes FIRST: a failed platform push changes nothing locally (row absent)", async () => {
+    mockUpsertPlatformConnector.mockRejectedValueOnce(
+      new AgentosError(502, "agentos unavailable"),
+    );
+    const res = await put({ name: "github", url: "https://mcp.example.com/github" });
+    // The upstream status propagates (agentosErrorResponse) — and the local
+    // row was NOT written: a failed push leaves the two stores agreeing
+    // (both without the connector), so a retry is safe.
+    expect(res.status).toBe(502);
+    // Nothing was written locally — the push-first contract: a failed push
+    // leaves the two stores agreeing (both without the connector).
+    expect(await listConnectors(ORG)).toEqual([]);
   });
 });
 

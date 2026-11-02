@@ -37,6 +37,7 @@ import {
 import { getCurrentUser } from "@/lib/auth/context";
 import { checkUserLimit } from "@/lib/ratelimit/middleware";
 import { getConnectorsByNames } from "@/lib/connectors/connector-store";
+import { ensurePlatformConnectors } from "@/lib/connectors/platform-sync";
 import type { UpdateBuilderAgentInput } from "@/lib/agents/agent-store";
 import { agentosErrorResponse } from "@/lib/agents/builder";
 
@@ -115,6 +116,10 @@ export async function PATCH(
   };
   let nextRequirements = existing.requirements;
   let nextConfig: Record<string, unknown> | undefined;
+  // The effective connector set (resolved rows) — used for the
+  // belt-and-braces registry re-upsert at publish time. Empty unless the
+  // patch changed the config.
+  let referencedConnectors: Array<{ id: string; url: string; name: string }> = [];
 
   if (configChanged) {
     // Config changes re-derive platformTier from the catalog + tool
@@ -208,9 +213,16 @@ export async function PATCH(
     const tools = patch.tools ?? existing.requirements?.tools.map((t) => ({ name: t.name })) ?? [];
     const connectors = patch.connectors ?? existing.requirements?.connectors ?? [];
 
-    if (patch.connectors) {
-      const orgConnectors = await getConnectorsByNames(user.orgId, patch.connectors);
-      const missing = patch.connectors.filter((name) => !orgConnectors.has(name));
+    // The stored config references connector IDS (the platform registry's
+    // keys), so the whole EFFECTIVE set — patched or preserved from the
+    // snapshot — must resolve against the org's connector store. A
+    // preserved name whose connector was deleted since the agent was
+    // created now blocks the update: we can't publish an id we can't
+    // resolve, and silently dropping it would publish a config that
+    // silently loses the agent's connectors.
+    const orgConnectors = await getConnectorsByNames(user.orgId, connectors);
+    if (connectors.length) {
+      const missing = connectors.filter((name) => !orgConnectors.has(name));
       if (missing.length) {
         return NextResponse.json(
           { error: `Unknown connector${missing.length > 1 ? "s" : ""}: ${missing.join(", ")}` },
@@ -218,6 +230,12 @@ export async function PATCH(
         );
       }
     }
+    const connectorRows = connectors.map((name) => {
+      const row = orgConnectors.get(name)!;
+      return { id: row.id, url: row.url, name: row.name };
+    });
+    referencedConnectors = connectorRows;
+    const connectorIds = connectorRows.map((row) => row.id);
 
     const spec = {
       name: nextLocal.name,
@@ -226,7 +244,12 @@ export async function PATCH(
       connectors,
     };
     try {
-      nextConfig = buildComponentConfig(existing.remoteAgentId, spec, model, platformTools);
+      nextConfig = buildComponentConfig(
+        existing.remoteAgentId,
+        { ...spec, connectorIds },
+        model,
+        platformTools,
+      );
       // Same tool validation as buildComponentConfig — guarded too so a
       // stale tool name can never escape as a raw 500.
       nextRequirements = buildRequirements(spec, model, platformTools);
@@ -282,6 +305,14 @@ export async function PATCH(
       metaApplied = true;
     }
     if (configChanged && nextConfig) {
+      // Belt-and-braces connector registration (same rationale as the
+      // create route): re-upsert the effective connector set so a
+      // restored/wiped platform database can't leave the published config
+      // referencing ids the registry lost. Idempotent; a failure
+      // compensates like any other platform failure below.
+      if (referencedConnectors.length) {
+        await ensurePlatformConnectors(referencedConnectors);
+      }
       await updateAgentosConfig(
         existing.remoteAgentId,
         nextConfig,

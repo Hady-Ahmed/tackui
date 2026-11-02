@@ -12,8 +12,16 @@ vi.mock("@/lib/ratelimit/middleware", () => ({
   checkUserLimit: vi.fn().mockReturnValue(null),
 }));
 
+// The platform-registry delete is a network round trip — stubbed for the
+// happy paths; the push-first ordering test rewires it.
+const mockDeletePlatformConnector = vi.fn().mockResolvedValue(undefined);
+vi.mock("@/lib/connectors/platform-sync", () => ({
+  deletePlatformConnector: (...a: unknown[]) => mockDeletePlatformConnector(...a),
+}));
+
 import { DELETE } from "./route";
 import { listConnectors, deleteConnector, upsertConnector } from "@/lib/connectors/connector-store";
+import { AgentosError } from "@/lib/agents/builder";
 import { runMigrations } from "@/lib/db/migrate";
 import type { NextRequest } from "next/server";
 
@@ -72,5 +80,26 @@ describe("DELETE /api/connectors/[name]", () => {
     const body = await res.json();
     expect(body.ok).toBe(true);
     expect(await listConnectors(ORG)).toEqual([]);
+    // The platform registry entry is removed by the row's ID.
+    const stored = await upsertConnector({ orgId: ORG, name: "linear", url: "https://mcp.example.com/linear" });
+    await DELETE(new Request("http://localhost:3000/api/connectors/linear") as NextRequest, {
+      params: Promise.resolve({ name: "linear" }),
+    });
+    expect(mockDeletePlatformConnector).toHaveBeenLastCalledWith(stored.id);
+  });
+
+  it("deletes FIRST: a failed platform delete changes nothing locally (row intact)", async () => {
+    const stored = await upsertConnector({ orgId: ORG, name: "github", url: "https://mcp.example.com/github" });
+    mockDeletePlatformConnector.mockRejectedValueOnce(new AgentosError(502, "agentos unavailable"));
+    const res = await DELETE(new Request("http://localhost:3000/api/connectors/github") as NextRequest, {
+      params: Promise.resolve({ name: "github" }),
+    });
+    // The upstream status propagates (agentosErrorResponse) — and nothing
+    // was deleted locally: a failed delete leaves the two stores agreeing
+    // (both with the connector), so a retry is safe.
+    expect(res.status).toBe(502);
+    // Nothing was deleted locally — the push-first contract: a failed
+    // delete leaves the two stores agreeing (both with the connector).
+    expect((await listConnectors(ORG)).map((c) => c.id)).toEqual([stored.id]);
   });
 });

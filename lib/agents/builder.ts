@@ -226,7 +226,7 @@ function extractDetail(raw: string): string | undefined {
  * discipline as the dispatcher's run-error sanitization (platform-os
  * commit fac65cf).
  */
-async function agentosRequest<T>(
+export async function agentosRequest<T>(
   method: "GET" | "POST" | "PUT" | "PATCH" | "DELETE",
   path: string,
   body?: unknown,
@@ -391,7 +391,15 @@ export function buildComponentConfig(
     name: string;
     instructions: string;
     tools: Array<{ name: string }>;
-    connectors: string[];
+    /**
+     * Connector IDS — the platform connector registry's keys — NOT the
+     * org-facing names. Names are org-scoped and collide across orgs; the
+     * id is globally unique and is what the dispatcher matches the run
+     * wire's mcp_connectors keys against. The URLs live only in the
+     * platform registry (push-first-synced by this server); the config
+     * never carries one.
+     */
+    connectorIds: string[];
   },
   model: AgentosModel,
   tools: AgentosTool[],
@@ -422,11 +430,13 @@ export function buildComponentConfig(
     // the stored config contract (sessions align via AG-UI session_id).
     add_history_to_context: true,
     num_history_runs: 10,
-    // Connector names the agent references — written to the stored config so
+    // Connector IDS the agent references — written to the stored config so
     // the dispatcher can enforce "wire mcp_connectors ⊆ config-declared" at
     // run time (defense in depth against client-supplied context bypassing
-    // the run gate). Never a URL or token — those stay run-scoped deps.
-    ...(spec.connectors.length ? { connectors: spec.connectors } : {}),
+    // the run gate). Ids match the platform connector registry's keys; the
+    // wire keys and registry keys are the same namespace. Never a URL or
+    // token — URLs live in the registry, tokens stay run-scoped deps.
+    ...(spec.connectorIds.length ? { connectors: spec.connectorIds } : {}),
     ...(resolvedTools.length ? { tools: resolvedTools } : {}),
   };
 }

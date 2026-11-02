@@ -62,12 +62,32 @@ secret stores whose boundaries are worth stating explicitly:
   builder's connector palette can render. Tokens are write-only
   (`hasToken` booleans in GET responses) and encrypted at rest (same
   AES-256-GCM mechanism). PUT token semantics: omitted → preserve the
-  stored token, `""` → clear it, string → encrypt + store. The name is
-  the reference key in agent definitions (URL/payload-safe pattern).
+  stored token, `""` → clear it, string → encrypt + store. The connector's
+  server-generated **id** is the reference key in agent definitions and on
+  the run wire (names are org-scoped and collide across orgs; ids are
+  globally unique).
   **The connector URL runs `assertSafeUrl`** — an admin pointing a
   connector at a private/internal address is a 400 (the AgentOS fetches
   connector URLs at run time with the org's token attached; http(s)-only
   alone doesn't stop `https://169.254.169.254/`).
+
+**The platform resolves MCP attach URLs from its own registry — never
+from the run wire.** Connector create/edit **push-first-sync** the
+endpoint (id + URL + label, never tokens) to the platform's connector
+registry (`platform_connector` table, admin API
+`GET/PUT/DELETE /platform/connectors[/{connector_id}]`, written only by
+this server) BEFORE the local row is written — a failed push changes
+nothing and surfaces the error, so the two stores only ever disagree in
+the harmless direction (platform momentarily ahead). Deletes remove the
+registry entry first too. The run wire therefore carries
+`mcp_connectors: {connector_id: {token}}` — **no URLs**: a wire-supplied
+URL would be an SSRF primitive (the dispatcher connecting to
+attacker-chosen addresses from inside the deployment, with org tokens
+attached). The dispatcher attaches via the registry's URL for the wire's
+connector id, ignores any wire URL outright, and skips an unregistered
+id loudly (the run proceeds without it). Agent saves re-register their
+referenced connectors belt-and-braces (idempotent upserts) so a
+restored platform DB can't leave saved configs pointing at lost ids.
 
 ## Run-gate 402s (builder agents)
 
@@ -120,19 +140,31 @@ review that added the connector guard):
   can therefore never inject a connector URL (SSRF) or a BYOK key
   (credential injection) that bypassed the run gate's org scoping —
   including under a declared name: the stash is appended last, so the
-  server-resolved value for a declared connector always wins. Today the
-  wire payload's URL/token values are org-store-sourced (tackui resolves
-  them per run), not client-controlled.
+  server-resolved value for a declared connector always wins. The wire
+  payload carries connector ids + tokens only (see the registry section
+  above) — no URL exists on the wire to overwrite.
 - **Config-declared connectors enforced AgentOS-side** — the builder
-  writes the agent's connector names into the stored component config;
+  writes the agent's connector **ids** into the stored component config;
   the dispatcher refuses wire `mcp_connectors` keys outside that list
   (fail-closed, warning + skip). Scope the claim precisely: the
-  dispatcher enforces the *namespace*, not the payload — it checks names,
-  not URL/token values. If tackui's strip (the first wall) ever broke,
-  the name check would not stop a declared-name entry whose URL was
-  overwritten; the values would again be wire-trusted. That's why the
-  first wall is the one that matters, and the dispatcher check is
-  defense in depth.
+  dispatcher enforces the *namespace*, not the payload — a token value is
+  wire-trusted (it's the per-run credential), but the attach URL is NOT:
+  it comes from the connector registry, so even a fully forged declared
+  entry cannot aim the connection anywhere the org's admin didn't
+  register. That's why the first wall (tackui's strip) matters less here
+  than it did when URLs rode the wire — the registry closed the value
+  half of the primitive.
+- **Destructive runtime endpoints are unreachable** — the CopilotKit
+  runtime exposes `POST /threads/clear`, which reaches the runner's
+  `clearThreads()` and deletes every tenant's runs, run states, messages
+  and metadata with no caller identity to scope by (the runner is
+  server-side). The copilotkit route refuses it unconditionally — before
+  auth, before rate-limit accounting — since nothing in the app calls it.
+- **The live run stream is redacted like persistence** — the `RUN_STARTED`
+  fill (emitted when the backend doesn't echo the input) copies
+  `request.input`, whose context carries the gate-injected secrets; every
+  live event now passes the same `redactReservedEvent` rule `storeRun`
+  applies, before any subscriber sees it.
 
 **Trust model:** org isolation is entirely tackui-side. The AgentOS is an
 explicitly multi-tenant execution service with no org concept — any valid

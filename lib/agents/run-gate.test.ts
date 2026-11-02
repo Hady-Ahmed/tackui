@@ -548,9 +548,12 @@ describe("lib/agents/run-gate", () => {
     const items = result.contextItems;
     expect(items).toHaveLength(2);
     const item = items.find((i) => i.description === "mcp_connectors")!;
+    // Keyed by the connector's stable ID and carrying NO URL: the platform
+    // resolves attach URLs from its push-first-synced registry and ignores
+    // wire URLs outright (a wire URL would be an SSRF primitive). Only the
+    // token rides the wire, per run.
     expect(JSON.parse(item.value)).toEqual({
-      github: {
-        url: "https://mcp.example.com/github",
+      "conn-github": {
         token: "tok-123",
       },
     });

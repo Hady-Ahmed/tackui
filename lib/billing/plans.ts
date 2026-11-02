@@ -1,4 +1,4 @@
-import { BILLING_ENABLED } from "@/lib/config/saas";
+import { SAAS_MODE } from "@/lib/config/saas";
 
 /**
  * Plan definitions for the hosted SaaS offering.
@@ -99,9 +99,17 @@ export function getPlanLimits(plan: PlanId): PlanLimits {
  * Default plan for an org with no subscription row (SaaS: free;
  * self-host: self-host). Used by the subscription store + enforcement
  * layer as the fallback when no row exists yet.
+ *
+ * Keyed on SAAS_MODE, NOT BILLING_ENABLED: the question that decides the
+ * posture is "am I the hosted multi-tenant product?", not "is Stripe
+ * switched on?". A SaaS deploy where Stripe is not (yet) wired — or whose
+ * Stripe env vars are lost — must fall back to the RESTRICTED default
+ * (free); returning the self-host sentinel there would hand every org
+ * unlimited limits and pro-tier features. BILLING_ENABLED only gates
+ * whether paid plans can be CHECKED OUT, never whether limits apply.
  */
 export function defaultPlan(): PlanId {
-  return BILLING_ENABLED ? "free" : "self-host";
+  return SAAS_MODE ? "free" : "self-host";
 }
 
 /**

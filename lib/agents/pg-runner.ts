@@ -239,6 +239,11 @@ export class PostgresAgentRunner extends AgentRunner {
 
     const runAgent = async () => {
       const parentRunId = await this.getLatestRunId(request.threadId);
+      // The live stream is redacted with the SAME rule as persistence
+      // (storeRun below). Captured here — inside the runner ALS scope,
+      // which spans this whole async chain — so the redaction never
+      // depends on where a callback happens to run.
+      const liveReserved = new Set([...getReservedDepKeys(), "mcp_connectors"]);
       try {
         await request.agent.runAgent(request.input, {
           onEvent: ({ event }) => {
@@ -263,6 +268,16 @@ export class PostgresAgentRunner extends AgentRunner {
                 } as RunStartedEvent;
               }
             }
+            // Live redaction, BEFORE any subscriber sees the event: the
+            // RUN_STARTED fill above copies request.input — whose context
+            // carries the gate-injected secrets (model keys + MCP
+            // connector tokens) — into the event. Without this, those
+            // secrets stream to the browser on every run; storeRun
+            // redacted only the persisted copy.
+            processedEvent = redactReservedEvent(
+              processedEvent as { input?: { context?: unknown } },
+              liveReserved,
+            ) as BaseEvent;
 
             runSubject.next(processedEvent);
             nextSubject.next(processedEvent);

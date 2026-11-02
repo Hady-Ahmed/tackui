@@ -42,6 +42,13 @@ vi.mock("@/lib/agents/builder", async (importOriginal) => {
   };
 });
 
+// The belt-and-braces connector-registry upserts are platform round trips;
+// stubbed here (the name→id mapping is asserted directly below).
+const mockEnsureConnectors = vi.fn().mockResolvedValue(undefined);
+vi.mock("@/lib/connectors/platform-sync", () => ({
+  ensurePlatformConnectors: (...a: unknown[]) => mockEnsureConnectors(...a),
+}));
+
 import { PATCH, DELETE } from "./route";
 import { AgentosError } from "@/lib/agents/builder";
 import {
@@ -50,6 +57,7 @@ import {
   listAgents,
   deleteAgent,
 } from "@/lib/agents/agent-store";
+import { upsertConnector } from "@/lib/connectors/connector-store";
 import type { AgentEntry } from "@/lib/agents/agents.config";
 import { getSyntheticAdmin } from "@/lib/auth/context";
 import { runMigrations } from "@/lib/db/migrate";
@@ -247,6 +255,31 @@ describe("PATCH /api/agents/builder/[id]", () => {
     const res = await patchAgent(agent.id, { connectors: ["ghost"] });
     expect(res.status).toBe(400);
     expect(mockUpdateConfig).not.toHaveBeenCalled();
+  });
+
+  it("publishes config connectors as IDS (registry keys), keeps NAMES in the snapshot", async () => {
+    // Seed a real org connector; the patch references it by NAME (the
+    // member-facing form), but the published config must carry its ID —
+    // the platform connector registry's key namespace (names collide
+    // across orgs; ids don't).
+    const row = await upsertConnector({
+      orgId: testOrg,
+      name: "github",
+      url: "https://mcp.example.com/gh",
+    });
+    const res = await patchAgent(agent.id, { connectors: ["github"] });
+    expect(res.status).toBe(200);
+    expect(mockUpdateConfig).toHaveBeenCalledTimes(1);
+    const config = mockUpdateConfig.mock.calls[0][1] as Record<string, unknown>;
+    expect(config.connectors).toEqual([row.id]);
+    // The local requirements snapshot keeps the org-facing name.
+    const stored = await getAgent(agent.id, testOrg);
+    expect(stored?.requirements?.connectors).toEqual(["github"]);
+    // Belt-and-braces: the effective connector set is re-registered
+    // (idempotent) at publish time.
+    expect(mockEnsureConnectors).toHaveBeenCalledWith([
+      { id: row.id, url: row.url, name: "github" },
+    ]);
   });
 
   it("reverts the local row when the AgentOS publish fails", async () => {

@@ -355,6 +355,26 @@ export function buildCreatePayload(form: BuilderFormState): BuilderCreateWire {
 }
 
 /**
+ * The PATCH body for an edit-mode save. `original` is the form as loaded
+ * from the agent's snapshot — **null when the row has no snapshot** (the
+ * stored requirements failed to parse and were dropped at read).
+ *
+ * A snapshot-less row can only be config-patched with a FULL config
+ * (model + tools + connectors): the server 409s a partial patch because
+ * there is nothing to re-derive the missing halves from — and a diff that
+ * happened to include one tool would silently destroy the agent's real
+ * tool set. So the save sends the complete wire: "open it in the agent
+ * builder and save it again" (the run gate's remedy for a stale snapshot)
+ * works even with zero edits.
+ */
+export function buildEditPayload(
+  form: BuilderFormState,
+  original: BuilderFormState | null,
+): BuilderCreateWire | BuilderUpdateWire {
+  return original ? buildUpdatePayload(form, original) : buildCreatePayload(form);
+}
+
+/**
  * Serialize the changed subset of the form to the PATCH body. Blank
  * instructions on edit are omitted (preserve); model/tools/connectors
  * are only included when they differ from the original.

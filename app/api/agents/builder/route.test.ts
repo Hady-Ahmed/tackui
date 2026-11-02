@@ -46,6 +46,14 @@ vi.mock("@/lib/agents/builder", async (importOriginal) => {
   };
 });
 
+// The belt-and-braces connector-registry upserts are platform round trips
+// (asserted in the connectors route tests); stubbed here so a create with
+// connectors never touches the network.
+const mockEnsurePlatformConnectors = vi.fn().mockResolvedValue(undefined);
+vi.mock("@/lib/connectors/platform-sync", () => ({
+  ensurePlatformConnectors: (...a: unknown[]) => mockEnsurePlatformConnectors(...a),
+}));
+
 // Partial auth mock: getCurrentUser is controllable (401 test), while
 // getSyntheticAdmin stays real (solo-mode test user).
 const mockGetCurrentUser = vi.fn();
@@ -60,6 +68,7 @@ vi.mock("@/lib/auth/context", async (importOriginal) => {
 
 import { POST } from "./route";
 import { AgentosError } from "@/lib/agents/builder";
+import { upsertConnector } from "@/lib/connectors/connector-store";
 import {
   listAgents,
   deleteAgent,
@@ -314,5 +323,29 @@ describe("POST /api/agents/builder", () => {
     expect((await res.json()).error).toContain("not enabled");
     const remaining = await listAgents(testOrg, { bypassOrgScope: true });
     expect(remaining).toHaveLength(0);
+  });
+
+  // LAST: this file has no per-test mock clearing (see the not-called
+  // assertions above), so any test that lets mockCreateComponent fire must
+  // come after them. This one calls it by design.
+  it("publishes config connectors as IDS (registry keys) and registers them belt-and-braces", async () => {
+    const row = await upsertConnector({
+      orgId: testOrg,
+      name: "github",
+      url: "https://mcp.example.com/gh",
+    });
+    const res = await POST(post({ ...validBody, connectors: ["github"] }));
+    expect(res.status).toBe(201);
+    // The published config references the connector's ID — the platform
+    // registry's key namespace — never the org-facing name.
+    const config = mockCreateComponent.mock.calls.at(-1)![0].config as Record<string, unknown>;
+    expect(config.connectors).toEqual([row.id]);
+    expect(mockEnsurePlatformConnectors).toHaveBeenLastCalledWith([
+      { id: row.id, url: row.url, name: "github" },
+    ]);
+    // The local requirements snapshot keeps the org-facing name.
+    const body = await res.json();
+    const stored = await getAgent(body.id, testOrg);
+    expect(stored?.requirements?.connectors).toEqual(["github"]);
   });
 });

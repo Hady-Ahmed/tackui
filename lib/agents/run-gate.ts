@@ -226,9 +226,14 @@ export async function checkBuilderRunGate(
       );
     }
     if (connectors.size > 0) {
-      const payload: Record<string, { url: string; token: string }> = {};
+      // Keyed by the connector's stable ID, and deliberately carrying NO
+      // URL: the platform resolves attach URLs from its connector registry
+      // (push-first-synced by this server at connector save) and ignores
+      // wire URLs outright — a wire URL would be an SSRF primitive. Only
+      // the token rides the wire, per run.
+      const payload: Record<string, { token: string }> = {};
       for (const connector of connectors.values()) {
-        payload[connector.name] = { url: connector.url, token: connector.token };
+        payload[connector.id] = { token: connector.token };
       }
       contextItems.push({
         description: "mcp_connectors",
