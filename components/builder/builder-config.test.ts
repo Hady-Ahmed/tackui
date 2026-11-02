@@ -221,12 +221,12 @@ describe("modelKeyState", () => {
     ).toEqual({ status: "none" });
   });
 
-  it("labels unknown providers with the raw provider id and no connect form", () => {
+  it("labels unknown providers with a prettified id and no connect form", () => {
     expect(
       modelKeyState({ provider: "mystery", platformTier: false, requiresKey: true, depKey: "mystery_api_key" }, credentialsState([])),
     ).toEqual({
       status: "missing",
-      providerLabel: "mystery",
+      providerLabel: "Mystery",
       provider: null,
     });
   });
@@ -287,13 +287,15 @@ describe("modelKeyState", () => {
       credentialsState([]),
     );
     if (!state || state.status !== "missing") throw new Error("expected a missing state");
-    expect(state.providerLabel).toBe("openai-responses");
+    expect(state.providerLabel).toBe("Openai Responses");
     expect(state.provider).toBeNull();
   });
 
-  it("falls back to the raw slug label when the catalog is unavailable", () => {
+  it("falls back to a prettified slug label when the catalog is unavailable", () => {
     // No credentials state → no label and no hasKey; the vendor resolution
     // itself is pure dep-key math, so the CTA provider stays correct.
+    // The fallback prettifies the door slug — a member must never see a
+    // raw slug in a badge (see prettySlug).
     const state = modelKeyState(
       {
         provider: "openai-responses",
@@ -304,7 +306,7 @@ describe("modelKeyState", () => {
       null,
     );
     if (!state || state.status !== "missing") throw new Error("expected a missing state");
-    expect(state.providerLabel).toBe("openai-responses"); // no catalog → no label; raw slug fallback
+    expect(state.providerLabel).toBe("Openai Responses"); // no catalog → prettified slug fallback
     expect(state.provider).toBeNull(); // no catalog → no connect form to point at
   });
 });
@@ -345,11 +347,13 @@ describe("toolKeyState", () => {
     });
   });
 
-  it("falls back to the raw dep key as the label when the catalog doesn't know the provider", () => {
+  it("falls back to a prettified label when the catalog doesn't know the provider", () => {
+    // The raw dep key must never reach a member's eyes — the fallback
+    // prettifies the toolkit slug (or, absent even that, the dep key).
     const unknown = { ...TOOLS[2], toolkit: "", requiresKey: "mystery_api_key" };
     expect(toolKeyState(unknown, credentialsState(["tavily"]))).toEqual({
       status: "missing",
-      providerLabel: "mystery_api_key",
+      providerLabel: "Mystery Api Key", // dep key prettified, never raw
       provider: null,
     });
   });
@@ -361,7 +365,7 @@ describe("toolKeyState", () => {
     const drifted = { ...TOOLS[2], toolkit: "ghost_toolkit" };
     expect(toolKeyState(drifted, credentialsState(["tavily"]))).toEqual({
       status: "missing",
-      providerLabel: "tavily_api_key",
+      providerLabel: "Ghost Toolkit",
       provider: null,
     });
   });

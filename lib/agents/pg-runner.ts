@@ -483,6 +483,17 @@ export class PostgresAgentRunner extends AgentRunner {
   async stop(
     request: AgentRunnerStopRequest,
   ): Promise<boolean | undefined> {
+    // Ownership gate BEFORE anything is aborted: a member who learns
+    // another org's thread id must not be able to kill their in-flight
+    // run (trace interference / DoS). Fail closed — deny when the thread
+    // is unknown to this process or foreign; the caller learns nothing
+    // either way (false reads identically for "not running").
+    const user = getRunnerUser();
+    if (user) {
+      const cached = this.threadCache.get(request.threadId);
+      if (!cached || !this.threadVisible(cached, user)) return false;
+    }
+
     const runState = await this.getRunState(request.threadId);
     if (!runState.isRunning) return false;
 
@@ -505,6 +516,35 @@ export class PostgresAgentRunner extends AgentRunner {
     }
   }
 
+  // ─── Thread visibility ────────────────────────────────────────────────
+  //
+  // The single rule every thread path applies (list, messages, events,
+  // state, stop, delete, rename): the thread must belong to the caller's
+  // org AND be owned by them — or carry no recorded owner (legacy rows
+  // written when the runner ALS was absent are org-shared, matching the
+  // deleteThread org-mate semantics). Solo mode (no runner user) sees
+  // everything: one tenant, one operator.
+  //
+  // Without this, a signed-in member of any org could read another
+  // tenant's conversation messages/events/state — or kill another
+  // tenant's in-flight run — by knowing a thread id (leaked via logs,
+  // Sentry breadcrumbs, screenshots). The runtime's thread endpoints
+  // dispatch on threadId alone; the runner is where identity is available
+  // (getRunnerUser), so the runner is where the check lives.
+  //
+  // A thread that is not in THIS process's cache is denied for
+  // authenticated callers — fail-closed, same tradeoff deleteThread
+  // documented (the caches are the source of truth for what this process
+  // can serve; multi-instance SaaS needs the Redis migration).
+  private threadVisible(
+    t: Pick<LocalThreadEndpointRecord, "organizationId" | "createdById">,
+    user: { id: string; orgId: string } | null,
+  ): boolean {
+    if (!user) return true;
+    if (t.organizationId !== user.orgId) return false;
+    return t.createdById === user.id || t.createdById === "";
+  }
+
   // ─── LocalThreadEndpointRunner: 5 SYNC methods ────────────────────────
   //
   // These methods are called WITHOUT await by CopilotKit's runtime (see
@@ -514,31 +554,43 @@ export class PostgresAgentRunner extends AgentRunner {
 
   listThreads(): LocalThreadEndpointRecord[] {
     const user = getRunnerUser();
-    const userId = user?.id;
-    const orgId = user?.orgId;
     const all = Array.from(this.threadCache.values());
-    if (!userId) return all;
-    // Filter at read time — the cache contains threads across orgs.
-    // Scope by orgId (required, never null) + allow ownership of own
-    // threads. Platform admins do NOT bypass this filter — they see only
-    // their own threads in their active org, same as everyone else. Admin
-    // powers are limited to agent/user management, not thread browsing.
-    return all.filter(
-      (t) =>
-        (t.organizationId === orgId || t.organizationId === "") &&
-        (t.createdById === userId || t.createdById === ""),
-    );
+    if (!user) return all;
+    // Filter at read time — the cache contains threads across orgs. The
+    // org match is EXACT: the old `organizationId === ""` tolerance made
+    // metadata rows with no recorded org visible to every org. Platform
+    // admins do NOT bypass this filter — they see only their own threads
+    // in their active org, same as everyone else.
+    return all.filter((t) => this.threadVisible(t, user));
   }
 
   getThreadMessages(threadId: string): Message[] {
+    const user = getRunnerUser();
+    if (!user) return this.messageCache.get(threadId) ?? [];
+    const cached = this.threadCache.get(threadId);
+    // Cache-miss or foreign thread → indistinguishable empty response
+    // (the sync contract can't return errors; empty is what an unknown
+    // threadId already returned, so nothing new leaks).
+    if (!cached || !this.threadVisible(cached, user)) return [];
     return this.messageCache.get(threadId) ?? [];
   }
 
   getThreadEvents(threadId: string): BaseEvent[] {
+    const user = getRunnerUser();
+    if (!user) return this.eventsCache.get(threadId) ?? [];
+    const cached = this.threadCache.get(threadId);
+    if (!cached || !this.threadVisible(cached, user)) return [];
     return this.eventsCache.get(threadId) ?? [];
   }
 
   getThreadState(threadId: string): Record<string, unknown> | null {
+    const user = getRunnerUser();
+    if (user) {
+      const cached = this.threadCache.get(threadId);
+      // Same visibility rule as the other sync readers — the state
+      // snapshot is agent state, which can carry org-sensitive shapes.
+      if (!cached || !this.threadVisible(cached, user)) return null;
+    }
     const events = this.eventsCache.get(threadId) ?? [];
     for (let i = events.length - 1; i >= 0; i--) {
       const event = events[i];
@@ -647,13 +699,15 @@ export class PostgresAgentRunner extends AgentRunner {
       // OSS deploys, this is fine. For multi-instance SaaS, see the
       // class doc on the future Redis migration.
       //
-      // Platform admins do NOT bypass this check — they can only delete
-      // their own threads, same as everyone else. Admin powers are
-      // limited to agent/user management, not thread management.
+      // The org match is EXACT (threadVisible): the old three-way deny
+      // condition let a metadata row with empty org_id AND empty owner
+      // be deleted by ANY user of ANY org — the empty tolerance must not
+      // widen the org boundary, only the owner half. Platform admins do
+      // NOT bypass this check — they can only delete their own threads,
+      // same as everyone else. Admin powers are limited to agent/user
+      // management, not thread management.
       const cached = this.threadCache.get(threadId);
-      if (!cached) return false;
-      // Owner OR org-mate (same org can manage each other's threads).
-      if (cached.createdById !== uid && cached.createdById !== "" && cached.organizationId !== oid) return false;
+      if (!cached || !this.threadVisible(cached, { id: uid, orgId: oid ?? "" })) return false;
     }
 
     let deleted = false;
@@ -692,9 +746,10 @@ export class PostgresAgentRunner extends AgentRunner {
     const uid = userId ?? getRunnerUser()?.id;
     const oid = orgId ?? getRunnerUser()?.orgId;
     if (uid) {
+      // Same exact-org visibility rule as deleteThread (the empty-org
+      // tolerance must not widen the org boundary).
       const cached = this.threadCache.get(threadId);
-      if (!cached) return false;
-      if (cached.createdById !== uid && cached.createdById !== "" && cached.organizationId !== oid) return false;
+      if (!cached || !this.threadVisible(cached, { id: uid, orgId: oid ?? "" })) return false;
     }
 
     const result = await query(

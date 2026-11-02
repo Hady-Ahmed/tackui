@@ -31,12 +31,14 @@ import {
   updateAgentosComponentMeta,
   updateAgentosConfig,
   deleteAgentosComponent,
+  deriveRequirementsFromConfig,
   AgentosError,
   BuilderValidationError,
 } from "@/lib/agents/builder";
+import type { AgentRequirements } from "@/lib/agents/agents.config";
 import { getCurrentUser } from "@/lib/auth/context";
 import { checkUserLimit } from "@/lib/ratelimit/middleware";
-import { getConnectorsByNames } from "@/lib/connectors/connector-store";
+import { getConnectorsByNames, listConnectors } from "@/lib/connectors/connector-store";
 import { ensurePlatformConnectors } from "@/lib/connectors/platform-sync";
 import type { UpdateBuilderAgentInput } from "@/lib/agents/agent-store";
 import { agentosErrorResponse } from "@/lib/agents/builder";
@@ -331,14 +333,51 @@ export async function PATCH(
     // field. A concurrent edit to the SAME field diverges either way
     // (the retry-after-reload path fixes it); reverting is never worse.
     // Restore ONLY the fields this PATCH actually wrote. requirements is
-    // restored UNCONDITIONALLY on a config change — null included: a
-    // snapshot-less row that gained a snapshot from this patch must lose
-    // it again on failure, or the local projection would lead the
-    // AgentOS (exactly the state this revert exists to prevent).
+    // restored from the platform's CURRENT config when it can be
+    // re-derived: a 409 means a concurrent edit won the version race and
+    // the platform now serves THEIR config — restoring the pre-patch
+    // snapshot would leave the projection describing a config that no
+    // longer exists (stale model binding → the run gate gates the wrong
+    // credential). When re-derivation fails (platform unreachable, odd
+    // shape), fall back to the pre-patch snapshot — null included for a
+    // snapshot-less row, which keeps the projection from leading the
+    // AgentOS and the amber banner pointing at the truth.
     const revert: UpdateBuilderAgentInput = {};
     if (patch.name !== undefined) revert.name = existing.name;
     if (patch.description !== undefined) revert.description = existing.description;
-    if (configChanged) revert.requirements = existing.requirements ?? null;
+    if (configChanged) {
+      // The platform is the truth about the current config — a 409 means
+      // a concurrent editor's config is what it now serves. Re-derive the
+      // snapshot from it; on any failure fall back to the pre-patch
+      // snapshot below.
+      let rederived: AgentRequirements | null = null;
+      if (existing.remoteAgentId) {
+        try {
+          // Catalogs are re-fetched here (the main flow's copies are
+          // block-scoped): on a 409 the concurrent editor may have also
+          // changed what models/tools exist, and this is a failure path —
+          // one extra round trip is the right price for a correct revert.
+          const [currentConfig, models, tools, connectors] = await Promise.all([
+            getAgentosCurrentConfig(existing.remoteAgentId),
+            fetchAgentosModels(),
+            fetchBuilderTools(),
+            listConnectors(user.orgId),
+          ]);
+          rederived = deriveRequirementsFromConfig(
+            currentConfig,
+            models,
+            tools,
+            new Map(connectors.map((c) => [c.id, c.name] as const)),
+          );
+        } catch (err) {
+          console.warn(
+            "[builder] snapshot re-derivation skipped (platform unreachable)",
+            err instanceof Error ? err.message : err,
+          );
+        }
+      }
+      revert.requirements = rederived ?? existing.requirements ?? null;
+    }
     if (Object.keys(revert).length > 0) {
       await updateAgent(id, revert, user.orgId).catch((revertErr) => {
         console.error("[builder] compensating local revert failed", {
@@ -428,7 +467,25 @@ export async function DELETE(
     }
   }
 
-  const deleted = await deleteAgent(id, user.orgId);
+  // Same local-write guard as every sibling path in this file: a
+  // transient DB failure must not escape as a raw 500 AFTER the platform
+  // component was already soft-deleted (the user needs a retryable,
+  // honest error, not a stack trace — and the retry is safe because the
+  // platform delete above treats an already-deleted 404 as success).
+  let deleted;
+  try {
+    deleted = await deleteAgent(id, user.orgId);
+  } catch (err) {
+    console.error("[builder] local delete failed", {
+      agentId: id,
+      orgId: user.orgId,
+      error: err instanceof Error ? err.message : String(err),
+    });
+    return NextResponse.json(
+      { error: "Couldn't delete the agent — please try again." },
+      { status: 500 },
+    );
+  }
   if (!deleted) {
     return NextResponse.json({ error: "Agent not found" }, { status: 404 });
   }

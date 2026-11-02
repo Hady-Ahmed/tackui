@@ -29,6 +29,7 @@ import {
   buildComponentConfig,
   buildRequirements,
   createAgentosComponent,
+  deleteAgentosComponent,
   fetchAgentosModels,
   fetchBuilderTools,
   resolveBuilderModel,
@@ -203,6 +204,19 @@ export async function POST(request: Request) {
       remoteAgentId,
       orgId: user.orgId,
       error: err instanceof Error ? err.message : String(err),
+    });
+    // Best-effort platform-side delete too: if the AgentOS POST actually
+    // succeeded server-side but the RESPONSE timed out, the component
+    // exists platform-side with no local row — the compensating delete
+    // removes the orphan instead of leaving it for an operator to find.
+    // A 404 (component never created) is swallowed by the best-effort
+    // catch below; failure is logged, never surfaced to the user (the
+    // original create error takes precedence).
+    await deleteAgentosComponent(remoteAgentId).catch((delErr) => {
+      console.error("[builder] compensating platform delete failed", {
+        remoteAgentId,
+        error: delErr instanceof Error ? delErr.message : String(delErr),
+      });
     });
     await deleteAgent(created.id, user.orgId).catch((delErr) => {
       console.error("[builder] compensating local delete failed", {

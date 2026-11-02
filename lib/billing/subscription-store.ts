@@ -100,13 +100,22 @@ export async function getSubscription(
  * (free under SaaS, self-host when !SAAS_MODE) when no row exists. This
  * is the read path used by the enforcement layer — it never returns null.
  *
+ * Payment status gates limits: only `active`/`trialing` subscriptions
+ * keep their plan. A lapsed status (past_due, unpaid, canceled,
+ * incomplete_expired …) reads as free — dunning customers must not ride
+ * paid enforcement (agent caps, concurrent runs, quotas) until the
+ * subscription is fixed; the plan column alone is not authorization.
+ *
  * Note: the self-host "unlimited" short-circuit lives in the enforcement
  * layer (it gates on SAAS_MODE before calling this), not here. This fn
  * just reports what the subscriptions table says + the default fallback.
  */
 export async function getOrgPlan(orgId: string): Promise<PlanId> {
   const sub = await getSubscription(orgId);
-  return sub?.plan ?? defaultPlan();
+  if (!sub) return defaultPlan();
+  return sub.status === "active" || sub.status === "trialing"
+    ? sub.plan
+    : "free";
 }
 
 /**

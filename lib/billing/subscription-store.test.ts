@@ -63,6 +63,22 @@ describe("subscription-store", () => {
       // !BILLING_ENABLED in test env → default is "self-host"
       expect(await getOrgPlan(testOrg)).toBe("self-host");
     });
+
+    it("keeps the plan for active and trialing subscriptions", async () => {
+      await upsertSubscription(baseInput({ plan: "pro", status: "trialing" }));
+      expect(await getOrgPlan(testOrg)).toBe("pro");
+      await upsertSubscription(baseInput({ plan: "pro", status: "active" }));
+      expect(await getOrgPlan(testOrg)).toBe("pro");
+    });
+
+    it("reads lapsed payment statuses as free (the plan column alone is not authorization)", async () => {
+      // THE enforcement gap pin: past_due/unpaid/canceled rows must not
+      // keep riding paid enforcement until subscription.deleted fires.
+      for (const status of ["past_due", "unpaid", "canceled", "incomplete_expired"]) {
+        await upsertSubscription(baseInput({ plan: "team", status }));
+        expect(await getOrgPlan(testOrg)).toBe("free");
+      }
+    });
   });
 
   describe("getOrgSubscription", () => {

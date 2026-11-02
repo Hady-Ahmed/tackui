@@ -17,6 +17,30 @@ cloud-metadata endpoints.
   reachability probe (`POST /api/agents/reachability-probe`) before fetching;
   catalog template create/PATCH. The install route does not re-check — it
   copies the endpoint from the already-validated template row.
+- **Re-validated at run time:** `getAgents` (lib/agents/registry.ts) re-runs
+  `assertSafeUrl` on every user-supplied endpoint every time an agent is
+  materialized — the guarantee is per-run, not per-save. Network reality
+  drifts (a public name that starts resolving private — DNS rebinding — or a
+  catalog template edited to a new endpoint); a failed re-check excludes the
+  agent from the run list (fail-closed) with a server-side warn. Builder
+  agents are excluded: their endpoint is platform config, not user-supplied.
+- **Redirects are re-guarded:** run-time agent traffic goes through
+  `fetchGuardedRedirects` (lib/net/safe-fetch.ts), which follows redirects
+  MANUALLY and re-runs the guard on EVERY hop (capped at 5). A public
+  endpoint that 302s to an internal address must not turn a validated URL
+  into a pass-through — Node's `fetch` follows redirects silently by
+  default. A 3xx without a `Location` header is returned as-is.
+- **Fail-closed DNS:** an unresolvable hostname is REFUSED (`UnsafeUrlError`),
+  not passed through — the old fail-open behavior was a rebinding window
+  (an attacker's authoritative server can refuse the guard's lookup and
+  resolve public for the real fetch).
+- **Blocked ranges** (beyond RFC 1918/loopback/link-local/multicast):
+  carrier-grade NAT 100.64.0.0/10 (cloud internal services), IETF protocol
+  assignments 192.0.0.0/24, benchmark 198.18.0.0/15, TEST-NET documentation
+  ranges (192.0.2.0/24, 198.51.100.0/24, 203.0.113.0/24). IPv4-mapped IPv6
+  is decoded in ANY textual form (dotted `::ffff:127.0.0.1` and hex
+  `::ffff:7f00:1` alike) via a full 8-group expander; an unparseable IPv6
+  literal is refused (fail-closed).
 - **Opt-in:** `ALLOW_PRIVATE_ENDPOINTS=true` for self-hosters running backends
   on the same host. Defaults to `false`.
 - **SaaS hard-locks it ON:** `SSRF_GUARD_FORCE_ON` (= `SAAS_MODE`) prevents a
@@ -25,9 +49,8 @@ cloud-metadata endpoints.
   "not permitted on the hosted service", self-hosters get the opt-in hint.
 - **PATCH semantics:** the guard only fires when the `endpoint` field is in
   the body — editing other fields on an existing private-endpoint agent works
-  without the flag. Once stored, the CopilotKit runtime fetches the endpoint
-  during runs without re-checking (intentional — existing agents keep working
-  even if the env var changes).
+  without the flag. The run-time re-validation above applies the same rule
+  to runs regardless of how the row was written.
 - **Error masking:** probe error messages are masked in the response (raw DNS
   errors can leak internal hostnames); the full error is logged server-side.
 - **AgentOS error sanitization:** `AgentosError` (lib/agents/builder.ts) never
@@ -293,6 +316,35 @@ The in-memory store (`lib/ratelimit/store.ts`) is per-process. For
 multi-instance deployments, replace it with a Redis-backed store — the
 interface (`checkLimit` / `incrementConcurrent` / `decrementConcurrent`) stays
 the same.
+
+## Thread visibility (cross-tenant isolation)
+
+Every thread path — list (`listThreads`), reads
+(`getThreadMessages`/`getThreadEvents`/`getThreadState`), and mutations
+(`stop`, `deleteThread`, `renameThread`) — applies ONE rule
+(`PostgresAgentRunner.threadVisible`, lib/agents/pg-runner.ts):
+
+- **Exact org match** — the thread's `organizationId` must equal the
+  caller's. The old `organizationId === ""` tolerance made metadata rows
+  with no recorded org visible (and deletable/renameable/stoppable) by
+  every user of every org.
+- **Owner or empty owner** — the caller must be the thread's owner, OR the
+  row carries no recorded owner (legacy rows written when the runner ALS
+  was absent are org-shared, the org-mate semantics deleteThread already
+  had). Empty tolerance never widens the org boundary, only the owner half.
+- **Solo mode** (no runner user — `AUTH_DISABLED=true`) sees everything:
+  one tenant, one operator.
+- **Cache-miss is denied** for authenticated callers (fail-closed): the
+  in-memory caches are the source of truth for what this process can serve;
+  multi-instance SaaS needs the Redis migration the class doc describes.
+  Denials return empty/null/false — indistinguishable from an unknown
+  thread id, so nothing leaks either way.
+
+Without this, a signed-in member of any org could read another tenant's
+messages/events/state — or kill another tenant's in-flight run — by knowing
+a thread id (leaked via logs, Sentry breadcrumbs, screenshots). Platform
+admins do NOT bypass the rule: admin powers are limited to agent/user
+management, not thread management.
 
 ## Future / extension points
 

@@ -353,12 +353,56 @@ describe("PATCH /api/agents/builder/[id]", () => {
       });
       expect(res.status).toBe(503);
       const stored = await getAgent(bare.id, testOrg);
-      // The local write added a snapshot; the compensating revert removes
-      // it again — otherwise the local row would lead the AgentOS with a
-      // config the platform never confirmed.
+      // The default getAgentosCurrentConfig mock returns a config with no
+      // model — unresolvable, so the derivation declines and the fallback
+      // restores the row's prior state (no snapshot).
       expect(stored?.requirements).toBeUndefined();
       expect(stored?.name).toBe("Fixture");
     });
+
+    it("heals a snapshot-less row from the platform's current config on a failed publish", async () => {
+      // The platform's CURRENT config is the pre-patch truth — deriving
+      // the snapshot from it gives the row the projection it should have
+      // had all along (instead of leaving it snapshot-less with an amber
+      // banner), even though this PATCH failed.
+      mockGetCurrentConfig.mockResolvedValue({
+        model: { id: "gpt-4o-mini", name: "OpenAIChat" },
+        instructions: ["base prompt"],
+        tools: [],
+        connectors: [],
+      });
+      mockUpdateConfig.mockRejectedValue(new AgentosError(503, "agentos down"));
+      const res = await patchAgent(bare.id, {
+        model: { provider: "openai", id: "gpt-4o-mini" },
+        tools: [],
+        connectors: [],
+      });
+      expect(res.status).toBe(503);
+      const stored = await getAgent(bare.id, testOrg);
+      expect(stored?.requirements?.model.id).toBe("gpt-4o-mini");
+    });
+  });
+
+  it("re-derives the snapshot from the platform's current config on a 409 (the concurrent editor won)", async () => {
+    // The pre-patch snapshot says gpt-4o-mini; the concurrent editor's
+    // winning config binds gpt-5-flash. Restoring the pre-patch snapshot
+    // would gate the WRONG credential — the revert must describe the
+    // config the platform actually serves now.
+    mockGetCurrentConfig.mockResolvedValue({
+      model: { id: "gpt-5-flash", name: "OpenAIChat" },
+      instructions: ["their prompt"],
+      tools: [],
+      connectors: [],
+    });
+    mockFetchModels.mockResolvedValue([
+      ...MODELS,
+      { provider: "openai", id: "gpt-5-flash", platform_tier: true, requires_key: true, dep_key: "openai_api_key", name: "OpenAIChat" },
+    ]);
+    mockUpdateConfig.mockRejectedValue(new AgentosError(409, "version conflict"));
+    const res = await patchAgent(agent.id, { instructions: "my prompt" });
+    expect(res.status).toBe(409);
+    const stored = await getAgent(agent.id, testOrg);
+    expect(stored?.requirements?.model.id).toBe("gpt-5-flash");
   });
 
 

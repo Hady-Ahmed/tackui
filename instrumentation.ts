@@ -97,11 +97,25 @@ export async function register() {
   // rows already carrying the `enc:v1:` prefix are filtered out. When
   // no key is configured, warn loudly (secrets stay plaintext) instead
   // of backfilling.
+  // Encryption at rest is a boot REQUIREMENT outside solo-dev mode: with
+  // DB_ENCRYPTION_KEY unset, BYOK keys, connector tokens and agent JWT
+  // secrets would be stored unencrypted with only a console.warn — a
+  // config mistake that silently betrays the at-rest-encryption invariant
+  // (and the marketing/docs claim) in production. Solo mode
+  // (AUTH_DISABLED=true, a local playground with no real tenants or
+  // secrets) keeps the plaintext fallback so a bare `docker-compose up`
+  // demo still boots.
   const { isEncryptionConfigured } = await import("@/lib/crypto/encrypt");
   if (!isEncryptionConfigured()) {
-    console.warn(
-      "[encrypt] DB_ENCRYPTION_KEY is not set — agent JWT secrets will be stored in PLAINTEXT. Set DB_ENCRYPTION_KEY (generate with: openssl rand -hex 32) to enable encryption at rest.",
-    );
+    if (process.env.AUTH_DISABLED === "true") {
+      console.warn(
+        "[encrypt] DB_ENCRYPTION_KEY is not set — solo mode keeps the plaintext fallback (local playground only).",
+      );
+    } else {
+      throw new Error(
+        "DB_ENCRYPTION_KEY is required: BYOK keys, connector tokens and agent JWT secrets are encrypted at rest, and booting without the key would store them in plaintext. Set DB_ENCRYPTION_KEY (generate with: openssl rand -hex 32) — or set AUTH_DISABLED=true for a solo local playground.",
+      );
+    }
   } else {
     const { backfillEncryptedSecrets } = await import("@/lib/crypto/backfill");
     const backfillResult = await retryPg("encrypt-backfill", () =>

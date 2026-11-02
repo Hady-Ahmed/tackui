@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, afterEach } from "vitest";
-import { assertSafeUrl, UnsafeUrlError, isPrivateIp } from "./safe-fetch";
+import { assertSafeUrl, fetchGuardedRedirects, UnsafeUrlError, isPrivateIp } from "./safe-fetch";
 
 // The ALLOW_PRIVATE env var is read at module load time. These tests
 // run with the default (false) unless overridden via the `allowPrivate`
@@ -23,12 +23,28 @@ describe("isPrivateIp", () => {
     });
 
     it.each([
+      ["100.64.1.1", true, "CGNAT (RFC 6598) — cloud internal services"],
+      ["100.127.255.255", true, "CGNAT top edge"],
+      ["192.0.0.1", true, "IETF protocol assignments"],
+      ["198.18.0.1", true, "benchmark testing start"],
+      ["198.19.255.255", true, "benchmark testing end"],
+      ["192.0.2.1", true, "TEST-NET-1"],
+      ["198.51.100.7", true, "TEST-NET-2"],
+      ["203.0.113.9", true, "TEST-NET-3"],
+    ])("%s → %s (%s)", (ip, expected) => {
+      expect(isPrivateIp(ip, 4)).toBe(expected);
+    });
+
+    it.each([
       ["1.1.1.1", false, "public DNS"],
       ["8.8.8.8", false, "Google DNS"],
       ["172.15.255.255", false, "just below private range"],
       ["172.32.0.0", false, "just above private range"],
       ["11.0.0.1", false, "public 11.x"],
       ["193.0.0.1", false, "public"],
+      ["100.63.255.255", false, "just below CGNAT"],
+      ["100.128.0.0", false, "just above CGNAT"],
+      ["198.20.0.1", false, "just above benchmark range"],
     ])("%s → %s (%s)", (ip, expected) => {
       expect(isPrivateIp(ip, 4)).toBe(expected);
     });
@@ -57,6 +73,22 @@ describe("isPrivateIp", () => {
       expect(isPrivateIp("::ffff:127.0.0.1", 6)).toBe(true);
       expect(isPrivateIp("::ffff:169.254.169.254", 6)).toBe(true);
       expect(isPrivateIp("::ffff:8.8.8.8", 6)).toBe(false);
+      // Hex form of the embedded address — the old dotted-only regex
+      // missed this encoding entirely (0x7f00:0001 == 127.0.0.1).
+      expect(isPrivateIp("::ffff:7f00:1", 6)).toBe(true);
+      expect(isPrivateIp("::ffff:a809:201", 6)).toBe(false); // 168.9.2.1 public
+      expect(isPrivateIp("::ffff:a9fe:a9fe", 6)).toBe(true); // 169.254.169.254
+      // Full 8-group form (no :: compression).
+      expect(isPrivateIp("0:0:0:0:0:ffff:7f00:1", 6)).toBe(true);
+      // Deprecated v4-compatible form (::127.0.0.1 == all-zero 80-bit prefix).
+      expect(isPrivateIp("::7f00:1", 6)).toBe(true);
+      expect(isPrivateIp("::808:808", 6)).toBe(false); // 8.8.8.8 public
+    });
+
+    it("fails closed on unparseable IPv6 literals", () => {
+      // An address isIP() accepted but we can't decode is treated as
+      // private — an unknown encoding must never pass.
+      expect(isPrivateIp("::zzzz", 6)).toBe(true);
     });
 
     it("strips zone ids", () => {
@@ -149,13 +181,31 @@ describe("assertSafeUrl", () => {
       await expect(fresh("http://example.com/")).resolves.toBeUndefined();
     });
 
-    it("allows when DNS lookup fails (lets downstream fetch report)", async () => {
+    it("rejects when DNS lookup fails (fail-closed)", async () => {
+      // The old behavior passed unresolved names through — a rebinding
+      // window (attacker's authoritative server refuses the guard's
+      // lookup, resolves public for the real fetch). Now it refuses.
       vi.doMock("node:dns/promises", () => ({
         lookup: vi.fn().mockRejectedValue(new Error("ENOTFOUND")),
       }));
       vi.resetModules();
       const { assertSafeUrl: fresh } = await import("./safe-fetch");
-      await expect(fresh("http://nonexistent.example.com/")).resolves.toBeUndefined();
+      await expect(fresh("http://nonexistent.example.com/")).rejects.toMatchObject({
+        name: "UnsafeUrlError",
+        message: "hostname could not be resolved",
+      });
+    });
+
+    it("rejects when DNS resolves to an empty result (fail-closed)", async () => {
+      vi.doMock("node:dns/promises", () => ({
+        lookup: vi.fn().mockResolvedValue([]),
+      }));
+      vi.resetModules();
+      const { assertSafeUrl: fresh } = await import("./safe-fetch");
+      await expect(fresh("http://empty.example.com/")).rejects.toMatchObject({
+        name: "UnsafeUrlError",
+        message: "hostname could not be resolved",
+      });
     });
   });
 
@@ -179,6 +229,102 @@ describe("assertSafeUrl", () => {
       await expect(assertSafeUrl("file:///etc/passwd")).rejects.toThrow(
         UnsafeUrlError,
       );
+    });
+  });
+
+  describe("fetchGuardedRedirects", () => {
+    // Public IP-literal hosts — no DNS involved, the guard checks the
+    // literal directly (93.184.216.34 is a real public example-net IP;
+    // TEST-NET/benchmark ranges are deliberately avoided because the
+    // hardened guard blocks them).
+    afterEach(() => {
+      vi.unstubAllGlobals();
+    });
+
+    it("follows redirects to public targets", async () => {
+      vi.stubGlobal(
+        "fetch",
+        vi.fn(async (url: string) => {
+          if (url === "http://93.184.216.34/run") {
+            return new Response(null, { status: 302, headers: { location: "http://93.184.216.35/run" } });
+          }
+          return new Response("ok", { status: 200 });
+        }),
+      );
+      const res = await fetchGuardedRedirects("http://93.184.216.34/run", { method: "POST" });
+      expect(res.status).toBe(200);
+    });
+
+    it("refuses a redirect to a private address (the redirect SSRF vector)", async () => {
+      vi.stubGlobal(
+        "fetch",
+        vi.fn(async () => new Response(null, { status: 302, headers: { location: "http://169.254.169.254/latest/meta-data/" } })),
+      );
+      await expect(
+        fetchGuardedRedirects("http://93.184.216.34/run", { method: "GET" }),
+      ).rejects.toMatchObject({
+        name: "UnsafeUrlError",
+        message: "hostname resolves to a private address",
+      });
+    });
+
+    it("refuses when the INITIAL url is private (fail-closed entry)", async () => {
+      await expect(
+        fetchGuardedRedirects("http://127.0.0.1:8000/run", { method: "POST" }),
+      ).rejects.toThrow(UnsafeUrlError);
+    });
+
+    it("caps redirect loops", async () => {
+      vi.stubGlobal(
+        "fetch",
+        vi.fn(async () => new Response(null, { status: 302, headers: { location: "http://93.184.216.34/a" } })),
+      );
+      await expect(
+        fetchGuardedRedirects("http://93.184.216.34/a", { method: "GET" }),
+      ).rejects.toMatchObject({ name: "UnsafeUrlError", message: "too many redirects" });
+    });
+
+    it("applies 303 semantics (method → GET, body dropped)", async () => {
+      const calls: Array<{ url: string; method: string; hasBody: boolean }> = [];
+      vi.stubGlobal(
+        "fetch",
+        vi.fn(async (url: string, init: RequestInit) => {
+          calls.push({ url, method: init.method ?? "GET", hasBody: init.body != null });
+          if (url === "http://93.184.216.34/x") {
+            return new Response(null, { status: 303, headers: { location: "http://93.184.216.35/x" } });
+          }
+          return new Response("ok", { status: 200 });
+        }),
+      );
+      await fetchGuardedRedirects("http://93.184.216.34/x", { method: "POST", body: "data" });
+      expect(calls[0]).toMatchObject({ method: "POST", hasBody: true });
+      expect(calls[1]).toMatchObject({ method: "GET", hasBody: false });
+    });
+
+    it("resolves relative Location headers against the current URL", async () => {
+      vi.stubGlobal(
+        "fetch",
+        vi.fn(async (url: string) => {
+          if (url === "http://93.184.216.34/deep/path") {
+            return new Response(null, { status: 301, headers: { location: "/other" } });
+          }
+          if (url === "http://93.184.216.34/other") {
+            return new Response("ok", { status: 200 });
+          }
+          throw new Error(`unexpected fetch to ${url}`);
+        }),
+      );
+      const res = await fetchGuardedRedirects("http://93.184.216.34/deep/path", { method: "GET" });
+      expect(res.status).toBe(200);
+    });
+
+    it("returns a 3xx without a Location header as-is", async () => {
+      vi.stubGlobal(
+        "fetch",
+        vi.fn(async () => new Response(null, { status: 304 })),
+      );
+      const res = await fetchGuardedRedirects("http://93.184.216.34/x", { method: "GET" });
+      expect(res.status).toBe(304);
     });
   });
 

@@ -40,16 +40,23 @@ export function ConnectorsAdmin() {
   const [fieldErrors, setFieldErrors] = useState<Record<string, string>>({});
 
   const load = useCallback(async () => {
-    const res = await fetch("/api/connectors");
-    if (!res.ok) {
+    try {
+      const res = await fetch("/api/connectors");
+      if (!res.ok) {
+        const data = await res.json().catch(() => ({}));
+        setError(extractErrorMessage(data, `Failed to load connectors (${res.status})`));
+        return;
+      }
       const data = await res.json().catch(() => ({}));
-      setError(extractErrorMessage(data, `Failed to load connectors (${res.status})`));
+      setConnectors(Array.isArray(data.connectors) ? data.connectors : []);
+      setError(null);
+    } catch {
+      // A network throw must not leave "Loading…" forever — the admins
+      // see the error with the page's retry affordance instead.
+      setError("Couldn't reach the server — please try again.");
+    } finally {
       setLoading(false);
-      return;
     }
-    const data = await res.json().catch(() => ({}));
-    setConnectors(Array.isArray(data.connectors) ? data.connectors : []);
-    setLoading(false);
   }, []);
 
   useEffect(() => {
@@ -100,6 +107,8 @@ export function ConnectorsAdmin() {
       }
       setForm(null);
       await load();
+    } catch {
+      setError("Couldn't reach the server — please try again.");
     } finally {
       setSaving(false);
     }
@@ -107,15 +116,19 @@ export function ConnectorsAdmin() {
 
   const remove = async (connector: PublicConnector) => {
     if (!confirm(`Delete connector "${connector.name}"? Builder agents that reference it will stop running until it is re-added.`)) return;
-    const res = await fetch(`/api/connectors/${encodeURIComponent(connector.name)}`, {
-      method: "DELETE",
-    });
-    if (!res.ok) {
-      const data = await res.json().catch(() => ({}));
-      setError(extractErrorMessage(data, `Failed to delete the connector (${res.status})`));
-      return;
+    try {
+      const res = await fetch(`/api/connectors/${encodeURIComponent(connector.name)}`, {
+        method: "DELETE",
+      });
+      if (!res.ok) {
+        const data = await res.json().catch(() => ({}));
+        setError(extractErrorMessage(data, `Failed to delete the connector (${res.status})`));
+        return;
+      }
+      await load();
+    } catch {
+      setError("Couldn't reach the server — please try again.");
     }
-    await load();
   };
 
   return (

@@ -149,6 +149,20 @@ describe("buildRequirements write-boundary validation", () => {
     expect(() => buildRequirements(spec, model, bad)).toThrow(BuilderValidationError);
   });
 
+  it("rejects a keyed model with no declared dep key (broken platform row)", () => {
+    // The schema can't cross-check requiresKey against depKey — a row
+    // with requires_key=true and dep_key=null used to save fine and then
+    // 402 forever with "re-save in the agent builder" advice that could
+    // never work (a re-save persists the same null).
+    const broken: AgentosModel = { ...model, dep_key: null };
+    expect(() => buildRequirements(spec, broken, [tool()])).toThrow(
+      /requires an API key but declares no credential slot/,
+    );
+    // A keyless model legitimately carries dep_key null — must still save.
+    const keyless: AgentosModel = { ...model, requires_key: false, dep_key: null };
+    expect(() => buildRequirements(spec, keyless, [tool()])).not.toThrow();
+  });
+
   it("output parses with the same schema every read applies", () => {
     const req = buildRequirements(spec, model, [tool()]);
     expect(requirementsSchema.safeParse(req).success).toBe(true);

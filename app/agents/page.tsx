@@ -86,6 +86,7 @@ function AgentsPageInner() {
   const { billing } = useBilling();
   const [agents, setAgents] = useState<PublicAgent[]>([]);
   const [loading, setLoading] = useState(true);
+  const [listError, setListError] = useState<string | null>(null);
   const [form, setForm] = useState<FormState>(emptyForm);
   // The add panel's kind (builder default — the headline flow). Only
   // meaningful while !editing; admins can flip it, members see the
@@ -130,10 +131,27 @@ function AgentsPageInner() {
 
   const fetchAgents = useCallback(async () => {
     setLoading(true);
-    const res = await fetch("/api/agents");
-    if (res.ok) setAgents(await res.json());
-    setLoading(false);
-  }, []);
+    try {
+      const res = await fetch("/api/agents");
+      if (res.status === 401) {
+        // Session expired server-side — the login page is the honest
+        // surface (retrying here would fail forever).
+        router.push("/login");
+        return;
+      }
+      if (!res.ok) throw new Error(`Request failed (${res.status})`);
+      setAgents(await res.json());
+      setListError(null);
+    } catch {
+      // A failed list fetch must not render as "No agents yet" — that's
+      // a false claim (the agents may exist) with no way forward. The
+      // error pane below offers a retry; a 401 redirects via the login
+      // push above.
+      setListError("Couldn't reach the server — please try again.");
+    } finally {
+      setLoading(false);
+    }
+  }, [router]);
 
   const fetchRef = useRef(fetchAgents);
   useEffect(() => {
@@ -264,6 +282,10 @@ function AgentsPageInner() {
 
       await fetchAgents();
       closePanel();
+    } catch {
+      // A network throw is not a server-reported error — without this
+      // catch the button silently does nothing (unhandled rejection).
+      setError("Couldn't reach the server — please try again.");
     } finally {
       setSubmitting(false);
     }
@@ -274,14 +296,18 @@ function AgentsPageInner() {
     // a reference), so removal is just "this workspace stops having it".
     const label = name ?? id;
     if (!confirm(`Delete agent "${label}"? This cannot be undone.`)) return;
-    const res = await fetch(`/api/agents/${id}`, { method: "DELETE" });
-    if (!res.ok) {
-      const data = await res.json().catch(() => ({}));
-      setError(data.error || "Delete failed");
-      return;
+    try {
+      const res = await fetch(`/api/agents/${id}`, { method: "DELETE" });
+      if (!res.ok) {
+        const data = await res.json().catch(() => ({}));
+        setError(data.error || "Delete failed");
+        return;
+      }
+      if (editing?.id === id) closePanel();
+      await fetchAgents();
+    } catch {
+      setError("Couldn't reach the server — please try again.");
     }
-    if (editing?.id === id) closePanel();
-    await fetchAgents();
   };
 
   // Builder form outcomes. A save opens the agent in chat (the same
@@ -598,6 +624,17 @@ function AgentsPageInner() {
 
           {loading ? (
             <p className="text-sm text-zinc-400">Loading...</p>
+          ) : listError ? (
+            <div className="rounded-xl border border-red-200 bg-red-50 px-6 py-8 text-center dark:border-red-900 dark:bg-red-950">
+              <p className="text-sm text-red-700 dark:text-red-300">{listError}</p>
+              <button
+                type="button"
+                onClick={() => fetchRef.current()}
+                className="mt-3 rounded-lg border border-red-200 px-3 py-1.5 text-xs font-medium text-red-700 transition-colors hover:bg-red-100 dark:border-red-800 dark:text-red-300 dark:hover:bg-red-900"
+              >
+                Retry
+              </button>
+            </div>
           ) : agents.length === 0 ? (
             <div className="rounded-xl border border-dashed border-zinc-200 px-6 py-8 text-center dark:border-zinc-800">
               <p className="text-sm text-zinc-400">

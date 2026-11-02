@@ -47,8 +47,13 @@ providers are exposed to the login UI via `GET /api/auth/config`
   in `instrumentation.ts`); see
   [architecture.md](./architecture.md#postgres-auth--agent-store) for the
   shared pool.
-- **First user becomes admin:** the `databaseHooks.user.create.after` hook in
-  `lib/auth/auth.ts` promotes the first user to `admin` role (bootstrap only).
+- **First user becomes admin (self-host bring-up only):** the
+  `databaseHooks.user.create.after` hook in `lib/auth/auth.ts` promotes the
+  first user to `admin` role — but ONLY when `SAAS_MODE` is not `true`.
+  On the hosted service the admin is created exclusively by the operator
+  script (`npm run create-admin`, which also marks the email verified): an
+  automatic bootstrap would make the first person to sign up on the
+  hosted product an instance admin.
   Personal org + owner membership creation happens in the
   `databaseHooks.session.create.before` hook — it checks if the user already
   has an owner membership; if not (first signup — `user.create.after` is

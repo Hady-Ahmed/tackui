@@ -13,6 +13,7 @@ import { getTemplatesByIds } from "@/lib/catalog/template-store";
 import { getRequestUser } from "@/lib/auth/context";
 import type { RequestUser } from "@/lib/auth/request-context";
 import { getRunContextItems, getReservedDepKeys } from "@/lib/auth/request-context";
+import { assertSafeUrl, fetchGuardedRedirects } from "@/lib/net/safe-fetch";
 
 export type AgentsMap = Record<string, AbstractAgent>;
 
@@ -114,6 +115,24 @@ export async function getAgents(request?: Request): Promise<AgentsMap> {
       continue;
     }
 
+    // Run-time re-validation of user-supplied endpoints: the save-time
+    // check happens once; network reality drifts (a public name that
+    // starts resolving private — DNS rebinding — or a catalog template
+    // edited to a new endpoint). Re-run the SSRF guard every time an
+    // agent is materialized so the guarantee is per-run, not per-save.
+    // Builder agents are excluded: their endpoint is platform config
+    // (AGENTOS_BASE_URL-derived), not user-supplied — they `continue`
+    // in the branch above, so this point only sees user-supplied URLs.
+    try {
+      await assertSafeUrl(resolved.endpoint);
+    } catch (err) {
+      console.warn(
+        `[registry] skipping agent ${entry.id}: endpoint failed the SSRF re-check`,
+        err instanceof Error ? err.message : err,
+      );
+      continue;
+    }
+
     map[entry.id] = createAgent(resolved, user);
   }
   return map;
@@ -147,7 +166,16 @@ function createAgent(entry: AgentEntry, user: RequestUser): AbstractAgent {
     headers.Authorization = `Bearer ${token}`;
   }
 
-  const agent = new HttpAgent({ url: entry.endpoint, headers });
+  const agent = new HttpAgent({
+    url: entry.endpoint,
+    headers,
+    // Run-time fetches go through the redirect-guarded wrapper: every
+    // hop (initial URL + each redirect) re-runs the SSRF guard, so a
+    // compromised/attacker backend cannot 302 the run into the host's
+    // private network. redirect:"manual" removes Node's silent
+    // auto-follow; 3xx chains are re-validated per hop (max 5).
+    fetch: (url, init) => fetchGuardedRedirects(url, init),
+  });
 
   // Forward the authenticated user's id via `forwardedProps.user_id`
   // (Agno's documented convention for anonymous-caller attribution).

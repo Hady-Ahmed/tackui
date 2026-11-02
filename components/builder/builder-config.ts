@@ -207,6 +207,19 @@ export function staleModelCopy(
   return `The agent's saved model (${model.provider}:${model.id}) is no longer offered by the platform. Pick a different one to replace it — saving other changes keeps the old model.`;
 }
 
+/** Display label derived from a provider/toolkit slug — mirrors the
+ * catalog's prettifyProviderLabel convention (credentials-page.tsx keeps
+ * the same local copy). Used as the fallback when the credentials catalog
+ * is unavailable or a slug drifted: members must never see a raw dep key
+ * like "tavily_api_key" in a badge. */
+export function prettySlug(slug: string): string {
+  return slug
+    .split(/[-_]/)
+    .filter(Boolean)
+    .map((word) => word.charAt(0).toUpperCase() + word.slice(1))
+    .join(" ");
+}
+
 export function providerMeta(
   catalog: CredentialCatalog,
   provider: string,
@@ -261,7 +274,8 @@ export function modelKeyState(
     // broken-platform-row case (the live catalog always declares one).
     // Never slug-guess the vendor — the honest UI is "can't run": show
     // missing with no connect form (the run gate 402s the run anyway).
-    return { status: "missing", providerLabel: model.provider, provider: null };
+    // The door slug is prettified for display, never shown raw.
+    return { status: "missing", providerLabel: prettySlug(model.provider), provider: null };
   }
   // The credential lives under the VENDOR, not the door slug: one vendor's
   // API doors (openai-chat + openai-responses) collapse into the vendor's
@@ -272,7 +286,7 @@ export function modelKeyState(
     ? providerMeta(credentials.catalog, credentialProvider)
     : null;
   const hasKey = credentials?.hasKey[credentialProvider] ?? false;
-  const providerLabel = meta?.label ?? model.provider;
+  const providerLabel = meta?.label ?? prettySlug(model.provider);
   return hasKey
     ? { status: "connected", providerLabel }
     : { status: "missing", providerLabel, provider: meta ? credentialProvider : null };
@@ -302,7 +316,11 @@ export function toolKeyState(
     tool.toolkit ||
     (credentials ? providerForDepKeyInCatalog(credentials.catalog, tool.requiresKey) : null);
   const meta = credentials && provider ? providerMeta(credentials.catalog, provider) : null;
-  const providerLabel = meta?.label ?? tool.requiresKey;
+  // Never render the raw dep key — prettify the toolkit slug (or, when
+  // even that is absent, the requiresKey dep) the way the credentials
+  // page does. The raw form leaked in exactly the degraded states
+  // (catalog fetch failed, slug drifted) where attention is highest.
+  const providerLabel = meta?.label ?? prettySlug(tool.toolkit || tool.requiresKey);
   if (credentials?.hasKey[provider ?? ""]) {
     return { status: "connected", providerLabel };
   }

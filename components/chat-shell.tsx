@@ -215,12 +215,15 @@ export function ChatShell() {
               >
                 <span>
                   {runError.msg}{" "}
-                  {runError.code === "AGENT_REQUIREMENTS_MISSING" && (
+                  {runError.code === "AGENT_REQUIREMENTS_MISSING" &&
+                    runError.msg.includes("add your own") && (
                     // The banner names what's missing; this closes the loop
-                    // with the fix. Neutral label — the joined 402 message
-                    // can cover missing connectors too (an /agents concern),
-                    // and the credentials page is still the right first stop
-                    // for the far more common missing-key case.
+                    // with the fix. The link only fires on KEY blockers —
+                    // model/tool blockers are phrased "add your own … key"
+                    // — because the credentials page can only fix keys. A
+                    // missing-connector blocker ("an org admin needs to add
+                    // …") would strand the user on a page that can't help;
+                    // that fix lives with org admins on /agents#connectors.
                     <Link
                       href="/app/credentials"
                       className="font-medium underline underline-offset-2 hover:opacity-80"

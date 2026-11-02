@@ -290,7 +290,11 @@ via the `agentMutate` bucket. Order of checks:
    `jwtScopes: ["app:user"]`, origin/author/remote/requirements), then
    the AgentOS component is created. If the AgentOS call fails, the
    local row is deleted (compensating) so a retried create doesn't
-   orphan half an agent. 502/503 surfaces via `agentosErrorResponse`.
+   orphan half an agent — AND a best-effort `DELETE /components/{id}`
+   removes a possible platform-side orphan (the case where the POST
+   actually succeeded server-side but the response timed out leaves a
+   live component with no local trace). 502/503 surfaces via
+   `agentosErrorResponse`.
 5. Success → `201 { PublicAgent }`.
 
 `requirements` is written at create from the definition tackui itself
@@ -356,7 +360,14 @@ all (404, not 403 — no existence oracle for foreign rows).
   Config publishes are guarded with the component's `current_version`
   as `latest_version`; a 409 from the AgentOS means a concurrent edit
   landed first (reload + retry). One `GET /components/{id}` before any
-  writes serves as the guard source for both writes.
+  writes serves as the guard source for both writes. On a failed config
+  publish the revert re-derives the requirements snapshot from the
+  platform's CURRENT config (`deriveRequirementsFromConfig`,
+  best-effort — falls back to the pre-patch snapshot when the platform
+  is unreachable): after a 409 the platform serves the concurrent
+  editor's config, and restoring the pre-patch snapshot would gate the
+  wrong credential. The same derivation heals a snapshot-less row with
+  the platform's actual config.
 - Metadata changes (name/description) PATCH the component with a
   `current_version` guard.
 
@@ -566,8 +577,9 @@ requirements; runners keep their keys here.
   all-or-nothing per provider.
 - **AES-256-GCM at rest** (`enc:v1:<iv>:<ciphertext>:<tag>` via
   `lib/crypto/encrypt.ts`, encrypted at the write boundary — same
-  mechanism as agent JWT secrets; plaintext fallback when
-  `DB_ENCRYPTION_KEY` is unset, with a loud warning). A failed decrypt
+  mechanism as agent JWT secrets; plaintext fallback exists only in solo
+  mode (`AUTH_DISABLED=true`) — boot refuses without `DB_ENCRYPTION_KEY`
+  everywhere else). A failed decrypt
   (rotated key) logs and treats the key as absent.
 - **Per-run delivery:** the decrypted field maps (`getCredentialSecrets`
   → `Record<provider, Record<field, secret>>`) are consumed exclusively

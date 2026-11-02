@@ -175,7 +175,24 @@ export async function DELETE(
     }
   }
 
-  const ok = await deleteAgent(id, user.orgId);
+  // Same local-write guard as the builder route: a transient DB failure
+  // must not escape as a raw 500 AFTER the platform component was
+  // already soft-deleted. The retry is safe — the platform delete above
+  // treats an already-deleted 404 as success.
+  let ok;
+  try {
+    ok = await deleteAgent(id, user.orgId);
+  } catch (err) {
+    console.error("[agents] local delete failed", {
+      agentId: id,
+      orgId: user.orgId,
+      error: err instanceof Error ? err.message : String(err),
+    });
+    return NextResponse.json(
+      { error: "Couldn't delete the agent — please try again." },
+      { status: 500 },
+    );
+  }
   if (!ok) {
     return NextResponse.json({ error: "Agent not found" }, { status: 404 });
   }

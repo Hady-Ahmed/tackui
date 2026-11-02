@@ -91,6 +91,14 @@ Routes:
 
 - `getEnforcementLimits(orgId)` — returns `{ plan, limits }`. Self-host
   returns the unlimited sentinel without a DB call.
+- **Payment status gates limits:** `getOrgPlan`
+  (lib/billing/subscription-store.ts) reads the subscription's Stripe
+  status — only `active`/`trialing` keep their plan; a lapsed status
+  (`past_due`, `unpaid`, `canceled`, `incomplete_expired` …) reads as
+  **free**. The plan column alone is not authorization: a dunning org must
+  not ride paid enforcement (agent caps, concurrent runs, quotas) until the
+  subscription is fixed. The account-menu badge still shows the stored plan
+  + status honestly (display is not enforcement).
 - `checkAgentCountLimit(orgId)` — POST `/api/agents` rejects (402) when
   the org is at its plan's agent cap (free ≤ 3). Pro/team unlimited.
   Builder-agent creates (`POST /api/agents/builder`) count against the

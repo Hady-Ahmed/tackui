@@ -37,6 +37,19 @@ vi.mock("./agent-store", () => ({
   listAgents: vi.fn(),
 }));
 
+// The SSRF guard does real DNS lookups; test endpoints are fake hostnames
+// that would now fail the fail-closed resolver. The guard has its own
+// dedicated suite (lib/net/safe-fetch.test.ts) — here it's a no-op and
+// the redirect-guarded fetch passes through to global fetch.
+vi.mock("@/lib/net/safe-fetch", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("@/lib/net/safe-fetch")>();
+  return {
+    ...actual,
+    assertSafeUrl: vi.fn().mockResolvedValue(undefined),
+    fetchGuardedRedirects: vi.fn((url: string, init: RequestInit) => fetch(url, init)),
+  };
+});
+
 import { getAgents } from "./registry";
 import { listAgents } from "./agent-store";
 import { getRequestUser } from "@/lib/auth/context";

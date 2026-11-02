@@ -4,6 +4,37 @@ All notable changes to this project will be documented in this file. The format 
 
 ## [Unreleased]
 
+- **Payment status gates plan enforcement.** `getOrgPlan` reads the
+  subscription's Stripe status: only `active`/`trialing` keep their plan — a
+  lapsed status (`past_due`, `unpaid`, `canceled`, `incomplete_expired`) reads
+  as free, so a dunning org stops riding paid limits (agent caps, concurrent
+  runs, quotas) until the subscription is fixed. The plan column alone is not
+  authorization.
+- **`DB_ENCRYPTION_KEY` is a boot requirement outside solo mode.**
+  `instrumentation.ts` throws at boot when the key is missing and
+  `AUTH_DISABLED` is not `true` — BYOK keys, connector tokens and agent JWT
+  secrets are encrypted at rest, and booting without the key would store them
+  in plaintext with only a console.warn. Solo mode (local playground, no real
+  tenants) keeps the plaintext fallback.
+- **SaaS disables the first-user-admin bootstrap.** The first-signup promotion
+  in `lib/auth/auth.ts` runs only outside `SAAS_MODE`; on the hosted product
+  the admin comes exclusively from `npm run create-admin` (which now also sets
+  `"emailVerified" = true`).
+- **Failed fetches no longer impersonate empty states.** The /agents list
+  shows a load-error pane with Retry (401 redirects to login) instead of
+  claiming "No agents yet"; the builder's connector palette distinguishes a
+  failed fetch (error + Retry) from a genuinely empty org, and its
+  empty-state copy no longer says "add it" without an antecedent; the
+  Connectors admin's load/save/remove and the custom-endpoint form's
+  submit/delete catch network failures with the standard
+  "Couldn't reach the server — please try again."; the builder's
+  connect-key form renders save errors inline next to the inputs (the old
+  page-level banner sat several screens away from the form — a failed save
+  read as a silent no-op); the "Manage keys →" link on a blocked run fires
+  only for key blockers (a missing-connector blocker no longer strands the
+  user on a page that can't fix it); and key badges prettify
+  provider/toolkit slugs instead of leaking raw dep keys.
+
 - **Review-pass hardening for the doors feature.** The run gate's stale-snapshot
   refusal (keyed model without a declared `depKey`) is now pinned at the store
   level too — a pre-door blob must FAIL the schema and read back `undefined`
@@ -18,6 +49,31 @@ All notable changes to this project will be documented in this file. The format 
 - **The agent builder offers every model class a vendor ships — API doors included** — the platform's model discovery now registers every concrete model class each agno module defines instead of picking one canonical class per module: OpenAI's chat-completions and Responses API doors appear side by side (`openai-chat`, `openai-responses`), as do the generic adapters a self-hoster can point at their own server (`openai-like`, `openai-open-responses`), and the Responses doors of OpenRouter/xAI/Azure. Slugs are a pure function of where agno defines each class — the module's own file keeps the bare module slug (`openrouter`, `xai`), any other file gets `<module>-<file>` — never hand-picked, so nothing can flip out from under a saved row. One vendor's doors share the vendor's single key — the catalog now declares each provider's `dep_key` (deriving it from the slug would demand an `openai-responses_api_key` nobody can save) — and the same model id may exist under two doors: the registry binds component configs by `(id, class name)` instead of id alone, and the model catalog's global duplicate-id rule is now per-provider. tackui follows: the requirements snapshot REQUIRES the declared `depKey` and binding `name` (a keyed model without them is a stale snapshot — the run gate refuses it with a re-save instruction instead of guessing), the run gate resolves door-slug models' keys through the declared dep key and 402s with the vendor's label, the credentials page collapses a vendor's doors into one entry, and the builder's key-state badge routes "connect a key" at the vendor entry. `npx tsc --noEmit` clean; 850 tests green.
 
 ### Security
+- **Cross-tenant thread isolation (IDOR cluster).** The runner's thread
+  endpoints dispatched on `threadId` alone: a signed-in member of any org
+  could read another tenant's conversation messages/events/state — or kill
+  another tenant's in-flight run — by knowing a thread id (leaked via logs,
+  Sentry breadcrumbs, screenshots). One visibility rule now guards every
+  thread path (list, messages, events, state, stop, delete, rename): exact
+  org match + owner-or-empty-owner (legacy ownerless rows are org-shared,
+  matching the org-mate semantics deleteThread already had); solo mode (no
+  runner user) sees everything; a cache-miss is denied fail-closed and
+  denials are indistinguishable from unknown thread ids. The old
+  `organizationId === ""` tolerance in `listThreads`/`deleteThread` — which
+  let empty-org rows pass for every org — is gone.
+- **SSRF guard hardened: fail-closed DNS, more bogon ranges, run-time
+  re-validation, redirect re-guarding.** An unresolvable hostname is now
+  REFUSED instead of passed through (the old fail-open was a rebinding
+  window — an attacker's authoritative server can refuse the guard's lookup
+  and resolve public for the real fetch). The blocked set gains
+  carrier-grade NAT 100.64.0.0/10, 192.0.0.0/24, 198.18.0.0/15 and the
+  TEST-NET documentation ranges; IPv4-mapped IPv6 is decoded in any textual
+  form (hex `::ffff:7f00:1` included) via a full 8-group expander, and an
+  unparseable IPv6 literal is refused. Endpoints are re-checked on every run
+  (per-run guarantee, not per-save), and run-time agent traffic follows
+  redirects MANUALLY with the guard re-run on every hop — a public endpoint
+  that 302s to an internal address no longer turns a validated URL into a
+  pass-through.
 - **The CopilotKit runtime's global thread-wipe endpoint is unreachable** — `POST /api/copilotkit/threads/clear` is classified as a run by the proxy (POST, not connect/stop), fell through to the runner's `clearThreads()`, which deletes EVERY tenant's runs, run states, messages and metadata with no caller identity to scope by (the runner is server-side). Nothing in the app calls it; the route now refuses it unconditionally, before auth and before any rate-limit accounting could burn a slot on it.
 - **The live run stream is redacted with the same rule as persistence** — the `RUN_STARTED` fill (emitted when the backend doesn't echo the input) copies `request.input`, whose context carries the gate-injected secrets (model keys + MCP connector tokens): those streamed to every subscriber while `storeRun` redacted only the persisted copy. Every live event now passes the same `redactReservedEvent` rule before any subscriber sees it, with the reserved set captured inside the runner ALS scope so the redaction never depends on callback timing.
 - **Closed the default-plan fallback that handed out the self-host sentinel** — `defaultPlan()` keyed on `BILLING_ENABLED`, so a SaaS deploy without Stripe wired (the exact state a launch passes through) fell back to the unlimited self-host plan for every org. It keys on `SAAS_MODE`: the hosted product's no-subscription default is free, always; `BILLING_ENABLED` only gates checkout.

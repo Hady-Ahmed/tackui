@@ -216,12 +216,13 @@ export const auth = betterAuth({
     user: {
       create: {
         async after(user) {
-          // First-user-is-admin bootstrap only.
-          // Org + member creation moved to session.create.before — see
-          // the comment there for why (Better Auth defers user.create.after
-          // to post-transaction, so the member row isn't available when
-          // session.create.before fires).
+          // First-user-is-admin bootstrap — SOLO/SELF-HOST BRING-UP ONLY.
+          // Under SaaS mode the admin is created exclusively by the
+          // operator script (npm run create-admin, which also marks the
+          // email verified): an automatic bootstrap would make the first
+          // person to sign up on the hosted product an instance admin.
           // "user" is a reserved word in Postgres and must be double-quoted.
+          if (process.env.SAAS_MODE === "true") return;
           const row = await query<{ count: number }>(
             `SELECT COUNT(*)::int as count FROM "user"`,
           );

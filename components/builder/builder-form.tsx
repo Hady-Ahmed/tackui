@@ -104,6 +104,7 @@ export function BuilderForm({
     catalog: CredentialCatalog;
   } | null>(null);
   const [connectors, setConnectors] = useState<PublicConnector[] | null>(null);
+  const [connectorsError, setConnectorsError] = useState<string | null>(null);
   const [agent, setAgent] = useState<PublicAgent | null>(null);
   const [agentError, setAgentError] = useState<string | null>(null);
   const [form, setForm] = useState<BuilderFormState>({
@@ -121,6 +122,13 @@ export function BuilderForm({
   const [upgradeOpen, setUpgradeOpen] = useState(false);
   const [keyProvider, setKeyProvider] = useState<string | null>(null);
   const [keySaving, setKeySaving] = useState(false);
+  const [keyError, setKeyError] = useState<string | null>(null);
+  // Opens the connect form and clears any stale inline error — the error
+  // belongs to the (provider-keyed) form, not the page.
+  const openKeyForm = (provider: string) => {
+    setKeyProvider(provider);
+    setKeyError(null);
+  };
 
   const currentUserId = session?.user.id ?? config?.user?.id ?? null;
 
@@ -190,15 +198,18 @@ export function BuilderForm({
     try {
       const res = await fetch("/api/connectors");
       if (!res.ok) {
-        setConnectors([]);
+        // An outage is NOT the empty state: "No connectors yet" would be
+        // a confident false claim (the org's connectors exist — the page
+        // just can't see them). Leave connectors null; the palette
+        // renders the error with a retry instead.
+        setConnectorsError("Couldn't reach the server — please try again.");
         return;
       }
       const data = await res.json().catch(() => ({}));
       setConnectors(Array.isArray(data.connectors) ? data.connectors : []);
+      setConnectorsError(null);
     } catch {
-      // Same degradation as loadCredentials: the connector checkboxes just
-      // show an empty (not an error) state on a network failure.
-      setConnectors([]);
+      setConnectorsError("Couldn't reach the server — please try again.");
     }
   }, []);
 
@@ -348,6 +359,7 @@ export function BuilderForm({
 
   const saveKey = async (provider: string, fields: Record<string, string>) => {
     setKeySaving(true);
+    setKeyError(null);
     try {
       const res = await fetch("/api/credentials", {
         method: "PUT",
@@ -356,13 +368,16 @@ export function BuilderForm({
       });
       if (!res.ok) {
         const data = await res.json().catch(() => ({}));
-        setError(extractErrorMessage(data, "Failed to save the key"));
+        // Inline in KeyForm, not the page-level banner: the user's cursor
+        // is at the key form (possibly several screens below the banner) —
+        // an error only visible up top reads as a silent no-op.
+        setKeyError(extractErrorMessage(data, "Failed to save the key"));
         return false;
       }
       await loadCredentials();
       return true;
     } catch {
-      setError("Couldn't reach the server — please try again.");
+      setKeyError("Couldn't reach the server — please try again.");
       return false;
     } finally {
       setKeySaving(false);
@@ -710,7 +725,9 @@ export function BuilderForm({
           <div>
             <ModelKeyBadge
               state={modelState}
-              onConnect={() => setKeyProvider(form.model?.provider ?? null)}
+              onConnect={() => {
+                if (form.model?.provider) openKeyForm(form.model.provider);
+              }}
             />
           </div>
           {/* Platform admins manage what this picker offers — the
@@ -764,7 +781,9 @@ export function BuilderForm({
                   ) : null}
                   <KeyBadge
                     state={toolKeyState(tool, credentials)}
-                    onConnect={() => setKeyProvider(depProvider)}
+                    onConnect={() => {
+                      if (depProvider) openKeyForm(depProvider);
+                    }}
                   />
                 </label>
               );
@@ -783,7 +802,21 @@ export function BuilderForm({
           error={errors.connectors}
         >
           <div className="space-y-2">
-            {(connectors ?? []).length === 0 ? (
+            {connectorsError ? (
+              // Error ≠ empty: a failed fetch must not claim "No connectors
+              // yet" — the org's connectors may exist, the page just can't
+              // see them. Same retry affordance as the catalog banner.
+              <div className="flex items-center justify-between gap-3 rounded-lg border border-red-200 bg-red-50 px-3 py-2 dark:border-red-900 dark:bg-red-950">
+                <span className="text-xs text-red-700 dark:text-red-300">{connectorsError}</span>
+                <button
+                  type="button"
+                  onClick={loadConnectors}
+                  className="shrink-0 text-xs font-medium text-red-700 underline underline-offset-2 dark:text-red-300"
+                >
+                  Retry
+                </button>
+              </div>
+            ) : (connectors ?? []).length === 0 ? (
               <p className="text-xs text-zinc-500 dark:text-zinc-400">
                 No connectors yet.{" "}
                 {canManage ? (
@@ -806,7 +839,7 @@ export function BuilderForm({
                     Add one below ↓
                   </a>
                 ) : (
-                  "An org admin needs to add it before the agent can run."
+                  "An org admin needs to add connectors before the agent can run."
                 )}
               </p>
             ) : (
@@ -889,6 +922,7 @@ export function BuilderForm({
           key={keyProvider}
           meta={providerMeta(credentials.catalog, keyProvider)}
           saving={keySaving}
+          error={keyError}
           onSave={async (fields) => {
             const ok = await saveKey(keyProvider, fields);
             if (ok) setKeyProvider(null);
@@ -995,6 +1029,7 @@ function KeyBadge({
 function KeyForm({
   meta,
   saving,
+  error,
   onSave,
   onClose,
 }: {
@@ -1005,6 +1040,7 @@ function KeyForm({
     fields: { key: string; label: string }[];
   } | null;
   saving: boolean;
+  error: string | null;
   onSave: (fields: Record<string, string>) => void;
   onClose: () => void;
 }) {
@@ -1059,6 +1095,13 @@ function KeyForm({
             className={inputClass()}
           />
         ))}
+        {error && (
+          // Inline, right where the user is looking — the page-level
+          // banner is several screens away from this form.
+          <p className="text-[11px] text-red-600 dark:text-red-400" role="alert">
+            {error}
+          </p>
+        )}
         <button
           type="button"
           disabled={saving || !complete}

@@ -35,6 +35,7 @@ vi.mock("@/lib/plans/enforcement", () => ({
 const mockFetchModels = vi.fn();
 const mockFetchTools = vi.fn();
 const mockCreateComponent = vi.fn();
+const mockDeleteComponent = vi.fn().mockResolvedValue(undefined);
 vi.mock("@/lib/agents/builder", async (importOriginal) => {
   const actual =
     await importOriginal<typeof import("@/lib/agents/builder")>();
@@ -43,6 +44,7 @@ vi.mock("@/lib/agents/builder", async (importOriginal) => {
     fetchAgentosModels: (...a: unknown[]) => mockFetchModels(...a),
     fetchBuilderTools: (...a: unknown[]) => mockFetchTools(...a),
     createAgentosComponent: (...a: unknown[]) => mockCreateComponent(...a),
+    deleteAgentosComponent: (...a: unknown[]) => mockDeleteComponent(...a),
   };
 });
 
@@ -314,6 +316,13 @@ describe("POST /api/agents/builder", () => {
     expect(res.status).toBe(503);
     const remaining = await listAgents(testOrg, { bypassOrgScope: true });
     expect(remaining).toHaveLength(0);
+    // Best-effort platform-side compensation too: if the POST actually
+    // succeeded server-side but the response timed out, the component
+    // would otherwise exist platform-side with no local trace. A normal
+    // failure (nothing created) still attempts the delete — 404s are
+    // swallowed. The id is server-generated (12-hex), captured loosely.
+    expect(mockDeleteComponent).toHaveBeenCalledTimes(1);
+    expect(mockDeleteComponent).toHaveBeenCalledWith(expect.stringMatching(/^[0-9a-f]{12}$/));
   });
 
   it("returns 503 when the builder endpoint is not configured", async () => {

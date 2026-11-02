@@ -447,6 +447,18 @@ export function buildRequirements(
   model: AgentosModel,
   tools: AgentosTool[],
 ): AgentRequirements {
+  // Cross-field check the snapshot schema can't express: a keyed model
+  // with NO declared dep key is a broken platform row
+  // (deriveCredentialsCatalog already refuses it on the read side). If
+  // it saved, the agent would be permanently unrunnable with an
+  // unworkable remedy — the run gate 402s telling the user to re-save
+  // in the agent builder, but a re-save persists the same null. Fail at
+  // save time with the real cause.
+  if (model.requires_key && !model.dep_key) {
+    throw new BuilderValidationError(
+      `Platform catalog data is inconsistent: the model "${model.provider}:${model.id}" requires an API key but declares no credential slot. Refresh the platform catalog and try again, or pick a different model.`,
+    );
+  }
   const toolByName = new Map(tools.map((t) => [t.name, t]));
   const requirements: AgentRequirements = {
     model: {
@@ -613,6 +625,77 @@ export async function deleteAgentosComponent(componentId: string): Promise<void>
     "DELETE",
     `/components/${encodeURIComponent(componentId)}`,
   );
+}
+
+/**
+ * Derive the requirements snapshot from a component config — the inverse
+ * of buildComponentConfig for failure-path reverts. The builder PATCH
+ * revert uses this when a platform publish fails: a 409 means a
+ * concurrent edit won the version race, so the platform now serves THEIR
+ * config — restoring the caller's pre-patch snapshot would leave the
+ * local projection describing a config that no longer exists (stale
+ * model binding → the run gate gates the wrong credential).
+ *
+ * Best-effort by design: returns null when anything is unresolvable
+ * (config shape unexpected, model not in the catalog, connector id with
+ * no local name, broken catalog row) and the caller falls back to the
+ * pre-patch snapshot — the reload-and-retry path heals the row anyway.
+ */
+export function deriveRequirementsFromConfig(
+  config: Record<string, unknown> | undefined,
+  models: AgentosModel[],
+  tools: AgentosTool[],
+  connectorIdToName: Map<string, string>,
+): AgentRequirements | null {
+  try {
+    if (!config) return null;
+
+    const modelRef = config.model as { id?: unknown; name?: unknown } | undefined;
+    if (
+      !modelRef ||
+      typeof modelRef.id !== "string" ||
+      typeof modelRef.name !== "string"
+    ) {
+      return null;
+    }
+    // Same (id, name) binding the dispatcher resolves with — name
+    // disambiguates same-id API doors (openai-chat vs openai-responses).
+    const model =
+      models.find((m) => m.id === modelRef.id && m.name === modelRef.name) ??
+      models.find((m) => m.id === modelRef.id);
+    if (!model) return null;
+
+    const toolNames = Array.isArray(config.tools)
+      ? config.tools
+          .map((t) =>
+            t && typeof t === "object" && typeof (t as { name?: unknown }).name === "string"
+              ? (t as { name: string }).name
+              : null,
+          )
+          .filter((n): n is string => n !== null)
+      : [];
+
+    const connectorIds = Array.isArray(config.connectors)
+      ? config.connectors.filter((c): c is string => typeof c === "string")
+      : [];
+    // A config referencing a connector id we can't name locally would
+    // produce a lossy snapshot (silently dropped connector) — refuse
+    // the derivation rather than write it.
+    const connectorNames: string[] = [];
+    for (const id of connectorIds) {
+      const name = connectorIdToName.get(id);
+      if (name === undefined) return null;
+      connectorNames.push(name);
+    }
+
+    return buildRequirements(
+      { tools: toolNames.map((name) => ({ name })), connectors: connectorNames },
+      model,
+      tools,
+    );
+  } catch {
+    return null;
+  }
 }
 
 /* ---------------------------------------------------------------------- */

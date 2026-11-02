@@ -172,10 +172,13 @@ expose backend JWT verification keys.
   `rowToEntry` decrypts on read. Everything downstream (registry JWT
   minting, `toPublicAgent` stripping, blank-preserve PATCH) works
   unchanged on plaintext `AgentEntry.jwtSecret`.
-- **Plaintext fallback (documented):** when `DB_ENCRYPTION_KEY` is
-  unset, secrets are stored as plaintext — loud warning at boot
-  (instrumentation.ts) + once per process on write. Keeps zero-config
-  self-host working; set the key to get encryption.
+- **Plaintext fallback (solo mode only):** when `DB_ENCRYPTION_KEY` is
+  unset, secrets are stored as plaintext — but since the SaaS-hardening
+  pass, boot REFUSES without the key everywhere except solo mode
+  (`AUTH_DISABLED=true`, instrumentation.ts throws with the fix in the
+  error). The fallback keeps a bare `docker-compose up` local playground
+  working; any deployment with real tenants cannot boot plaintext.
+  Writes without a key still warn once per process (the solo path).
 - **Boot backfill** (`lib/crypto/backfill.ts`, wired into
   `instrumentation.ts`): idempotent pass that re-encrypts legacy
   plaintext rows (`jwt_secret NOT LIKE 'enc:v1:%'`) so existing

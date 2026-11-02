@@ -20,6 +20,14 @@ const user2: RequestUser = {
   email: "b@test.com",
   orgId: "org-1",
 };
+// A DIFFERENT org — the cross-tenant isolation tests' attacker/outsider.
+const user3: RequestUser = {
+  id: "user-3",
+  role: "user",
+  name: "Carol",
+  email: "c@test.com",
+  orgId: "org-2",
+};
 
 // Cache access helper — the sync LocalThreadEndpointRunner methods read
 // from private in-memory Maps. Tests need to seed these directly to
@@ -46,13 +54,14 @@ async function seedThreadCache(
   agentId: string,
   title: string,
   userId: string | null,
+  orgId = "org-1",
 ) {
   const nowIso = new Date().toISOString();
   caches(runner).threadCache.set(threadId, {
     id: threadId,
     name: title,
     agentId,
-    organizationId: "",
+    organizationId: orgId,
     createdById: userId ?? "",
     archived: false,
     createdAt: nowIso,
@@ -129,8 +138,10 @@ describe("PostgresAgentRunner — thread scoping (cache-based listThreads)", () 
       expect(threads).toHaveLength(2);
     });
 
-    it("returns threads with empty createdById for any user (legacy threads)", () => {
-      // Legacy threads have createdById === "" (null user_id in PG).
+    it("returns threads with empty createdById for org members (org-shared legacy rows)", () => {
+      // Legacy rows with no recorded owner are org-shared (org-mate
+      // semantics, same rule deleteThread applies) — but only within the
+      // RIGHT org: the org match is exact.
       seedThreadCache(runner, "t1", "agent-a", "Legacy chat", null);
       seedThreadCache(runner, "t2", "agent-a", "Alice's chat", user1.id);
 
@@ -138,7 +149,25 @@ describe("PostgresAgentRunner — thread scoping (cache-based listThreads)", () 
       expect(threads).toHaveLength(2);
     });
 
-    it("isolates users from each other", () => {
+    it("hides empty-org metadata rows from every authenticated user (the cross-tenant leak)", () => {
+      // Rows written with NO org must not pass the filter for every
+      // org — the empty tolerance widened the org boundary to everyone.
+      seedThreadCache(runner, "t1", "agent-a", "Orphaned chat", null, "");
+      const threads = runWithUser(user1, () => runner.listThreads());
+      expect(threads).toHaveLength(0);
+    });
+
+    it("isolates orgs from each other", () => {
+      seedThreadCache(runner, "t1", "agent-a", "Org-1 chat", user1.id);
+      seedThreadCache(runner, "t2", "agent-a", "Org-2 chat", user3.id, "org-2");
+
+      const org1Threads = runWithUser(user1, () => runner.listThreads());
+      const org2Threads = runWithUser(user3, () => runner.listThreads());
+      expect(org1Threads.map((t) => t.id)).toEqual(["t1"]);
+      expect(org2Threads.map((t) => t.id)).toEqual(["t2"]);
+    });
+
+    it("isolates owners within the same org", () => {
       seedThreadCache(runner, "t1", "agent-a", "Alice's chat", user1.id);
       seedThreadCache(runner, "t2", "agent-a", "Bob's chat", user2.id);
 
@@ -174,14 +203,14 @@ describe("PostgresAgentRunner — thread scoping (cache-based listThreads)", () 
     it("prevents non-owner from deleting via explicit userId param", async () => {
       await seedThread(runner, "t1", "agent-a", "Alice's chat", user1.id);
 
-      const ok = await runner.deleteThread("t1", user2.id);
+      const ok = await runner.deleteThread("t1", user2.id, "org-1");
       expect(ok).toBe(false);
     });
 
     it("allows deletion of legacy threads (null user_id → createdById=''", async () => {
       await seedThread(runner, "t1", "agent-a", "Legacy chat", null);
 
-      const ok = await runner.deleteThread("t1", user1.id);
+      const ok = await runner.deleteThread("t1", user1.id, "org-1");
       expect(ok).toBe(true);
     });
 
@@ -201,7 +230,7 @@ describe("PostgresAgentRunner — thread scoping (cache-based listThreads)", () 
         ["t1", JSON.stringify([{ id: "m1", role: "user", content: "hi" }])],
       );
 
-      const ok = await runner.deleteThread("t1", user1.id);
+      const ok = await runner.deleteThread("t1", user1.id, "org-1");
       expect(ok).toBe(true);
 
       const ar = await query("SELECT count(*)::int as c FROM agent_runs WHERE thread_id = $1", ["t1"]);
@@ -235,7 +264,7 @@ describe("PostgresAgentRunner — thread scoping (cache-based listThreads)", () 
     it("allows owner to rename their thread", async () => {
       await seedThread(runner, "t1", "agent-a", "Old title", user1.id);
 
-      const ok = await runner.renameThread("t1", "New title", user1.id);
+      const ok = await runner.renameThread("t1", "New title", user1.id, "org-1");
       expect(ok).toBe(true);
 
       // Cache should reflect the new name.
@@ -253,7 +282,7 @@ describe("PostgresAgentRunner — thread scoping (cache-based listThreads)", () 
     it("prevents non-owner from renaming", async () => {
       await seedThread(runner, "t1", "agent-a", "Alice's chat", user1.id);
 
-      const ok = await runner.renameThread("t1", "Hacked", user2.id);
+      const ok = await runner.renameThread("t1", "Hacked", user2.id, "org-1");
       expect(ok).toBe(false);
       expect(runner.listThreads()[0].name).toBe("Alice's chat");
     });
@@ -261,7 +290,7 @@ describe("PostgresAgentRunner — thread scoping (cache-based listThreads)", () 
     it("allows renaming legacy threads (null user_id)", async () => {
       await seedThread(runner, "t1", "agent-a", "Legacy", null);
 
-      const ok = await runner.renameThread("t1", "Renamed", user1.id);
+      const ok = await runner.renameThread("t1", "Renamed", user1.id, "org-1");
       expect(ok).toBe(true);
     });
 
@@ -271,6 +300,70 @@ describe("PostgresAgentRunner — thread scoping (cache-based listThreads)", () 
       const ok = await runner.renameThread("t1", "New title");
       expect(ok).toBe(true);
     });
+  });
+});
+
+describe("PostgresAgentRunner — thread reads + stop (cross-tenant IDOR guards)", () => {
+  let runner: PostgresAgentRunner;
+
+  beforeEach(async () => {
+    runner = makeRunner();
+    await runner.awaitRefreshed();
+    runner.clearThreads();
+  });
+
+  it("hides another org's cached messages/events/state from a member of a different org", async () => {
+    seedThreadCache(runner, "t1", "agent-a", "Alice's chat", user1.id);
+    caches(runner).messageCache.set("t1", [
+      { id: "m1", role: "user", content: "the launch keys are under the mat" },
+    ]);
+    caches(runner).eventsCache.set("t1", [
+      { type: EventType.STATE_SNAPSHOT, snapshot: { apiKey: "sk-internal" } } as BaseEvent,
+    ]);
+
+    const carol = runWithUser(user3, () => ({
+      messages: runner.getThreadMessages("t1"),
+      events: runner.getThreadEvents("t1"),
+      state: runner.getThreadState("t1"),
+    }));
+    // Empty/null — indistinguishable from an unknown thread id. Nothing
+    // about another org's thread may cross the boundary, even though the
+    // process cache holds it.
+    expect(carol.messages).toEqual([]);
+    expect(carol.events).toEqual([]);
+    expect(carol.state).toBeNull();
+  });
+
+  it("serves the owner their own thread", async () => {
+    seedThreadCache(runner, "t1", "agent-a", "Alice's chat", user1.id);
+    caches(runner).messageCache.set("t1", [
+      { id: "m1", role: "user", content: "hello" },
+    ]);
+    const messages = runWithUser(user1, () => runner.getThreadMessages("t1"));
+    expect(messages).toHaveLength(1);
+  });
+
+  it("serves org-mates an ownerless (legacy) thread in their own org", () => {
+    seedThreadCache(runner, "t1", "agent-a", "Legacy chat", null);
+    caches(runner).messageCache.set("t1", [
+      { id: "m1", role: "user", content: "org-shared" },
+    ]);
+    const messages = runWithUser(user2, () => runner.getThreadMessages("t1"));
+    expect(messages).toHaveLength(1);
+  });
+
+  it("refuses to stop another org's in-flight run", async () => {
+    seedThreadCache(runner, "t1", "agent-a", "Alice's chat", user1.id);
+    const stopped = await runWithUser(user3, () => runner.stop({ threadId: "t1" }));
+    expect(stopped).toBe(false);
+  });
+
+  it("refuses to delete another org's thread (the row survives)", async () => {
+    await seedThread(runner, "t1", "agent-a", "Alice's chat", user1.id);
+    const deleted = await runWithUser(user3, () => runner.deleteThread("t1"));
+    expect(deleted).toBe(false);
+    const row = await query(`SELECT thread_id FROM thread_metadata WHERE thread_id = $1`, ["t1"]);
+    expect(row.rows).toHaveLength(1);
   });
 });
 
