@@ -1,5 +1,6 @@
-import { describe, it, expect, beforeEach, beforeAll, afterAll } from "vitest";
+import { describe, it, expect, beforeEach, beforeAll, afterAll, vi } from "vitest";
 import { EventType, type BaseEvent, type Message } from "@ag-ui/core";
+import type { AbstractAgent } from "@ag-ui/client";
 import { PostgresAgentRunner, redactReservedContext, redactReservedEvent } from "./pg-runner";
 import { runWithUser, type RequestUser } from "@/lib/auth/request-context";
 import { query } from "@/lib/db/pg";
@@ -486,6 +487,128 @@ describe("PostgresAgentRunner — isRunning / stop", () => {
   it("stop returns false when no run is in flight", async () => {
     const result = await runner.stop({ threadId: "t-never" });
     expect(result).toBe(false);
+  });
+});
+
+describe("PostgresAgentRunner — stop during a thread's FIRST in-flight run", () => {
+  // The stop gate reads the in-memory thread cache, which (before the
+  // seed-in-startRun fix) was only populated at run END — so stopping a
+  // brand-new thread's first in-flight run was impossible for everyone.
+  // This needs a REAL run through startRun (getHistoricRuns uses a
+  // recursive CTE pg-mem can't parse), so: real Postgres, same skip
+  // discipline as the connect() suite above.
+  let runner: PostgresAgentRunner;
+
+  beforeEach(async () => {
+    runner = makeRunner();
+    await runner.awaitRefreshed();
+    runner.clearThreads();
+  });
+
+  let pgStarted = false;
+  let restorePg: (() => void) | null = null;
+
+  beforeAll(async () => {
+    restorePg = await useRealPostgres();
+    pgStarted = restorePg !== null;
+  });
+
+  afterAll(() => {
+    restorePg?.();
+    restorePg = null;
+  });
+
+  // A stub agent that emits RUN_STARTED and then hangs until abortRun()
+  // is called — simulating an in-flight model stream that only the stop
+  // path can end.
+  function hangingAgent(threadId: string, runId: string) {
+    let release!: () => void;
+    const blocker = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const abortRun = vi.fn(() => release());
+    const agent = {
+      agentId: "agent-a",
+      agentName: "A",
+      abortRun,
+      runAgent: async (
+        _input: unknown,
+        hooks: { onEvent: (e: { event: BaseEvent }) => void },
+      ) => {
+        hooks.onEvent({
+          event: { type: EventType.RUN_STARTED, threadId, runId } as unknown as BaseEvent,
+        });
+        await blocker;
+        hooks.onEvent({
+          event: { type: EventType.RUN_FINISHED, threadId, runId } as unknown as BaseEvent,
+        });
+      },
+    } as unknown as AbstractAgent;
+    return { agent, abortRun };
+  }
+
+  function startRun(threadId: string, runId: string) {
+    const { agent, abortRun } = hangingAgent(threadId, runId);
+    const events: BaseEvent[] = [];
+    let startedResolve!: () => void;
+    let completeResolve!: () => void;
+    const started = new Promise<void>((r) => (startedResolve = r));
+    const completed = new Promise<void>((r) => (completeResolve = r));
+    // The run must start INSIDE the runner ALS for user1 — the
+    // provisional cache seed takes its owner/org from getRunnerUser().
+    const observable = runWithUser(user1, () =>
+      runner.run({
+        threadId,
+        agent,
+        input: {
+          threadId,
+          runId,
+          messages: [{ id: "m1", role: "user", content: "hello" }],
+          state: {},
+          tools: [],
+          context: [],
+          forwardedProps: {},
+        },
+      }),
+    );
+    observable.subscribe({
+      next: (event) => {
+        events.push(event);
+        if (event.type === EventType.RUN_STARTED) startedResolve();
+      },
+      complete: () => completeResolve(),
+    });
+    return { events, started, completed, abortRun };
+  }
+
+  it("the owner can stop their own in-flight first run (no cache entry yet)", async (ctx) => {
+    ctx.skip(!pgStarted, "Real Postgres (Docker) unavailable");
+    const { started, completed, abortRun } = startRun("t-stop-first", "run-sf1");
+
+    await started;
+    const stopped = await runWithUser(user1, () =>
+      runner.stop({ threadId: "t-stop-first" }),
+    );
+    expect(stopped).toBe(true);
+    expect(abortRun).toHaveBeenCalledTimes(1);
+
+    await completed;
+  });
+
+  it("a foreign-org user still cannot stop another org's in-flight first run", async (ctx) => {
+    ctx.skip(!pgStarted, "Real Postgres (Docker) unavailable");
+    const { started, completed } = startRun("t-stop-cross", "run-sf2");
+
+    await started;
+    const stopped = await runWithUser(user3, () =>
+      runner.stop({ threadId: "t-stop-cross" }),
+    );
+    expect(stopped).toBe(false);
+
+    // The run is still in flight — the owner aborts it to let the
+    // runner finish cleanly.
+    await runWithUser(user1, () => runner.stop({ threadId: "t-stop-cross" }));
+    await completed;
   });
 });
 

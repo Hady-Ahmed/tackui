@@ -237,6 +237,29 @@ export class PostgresAgentRunner extends AgentRunner {
       stopRequested: false,
     });
 
+    // Seed the thread cache NOW, not at run end. The ownership gate in
+    // stop() (and every sync runner read) consults this cache, and it was
+    // otherwise only populated by captureThreadData() AFTER the run
+    // finishes — so stop() on a thread's FIRST in-flight run hit a cache
+    // miss and denied the owner: the stop button silently did nothing on
+    // the first message of every new chat, for every signed-in user.
+    // Seed only when absent: a cached thread keeps its real title and
+    // createdAt (captureThreadData reconciles the row at run end).
+    if (!this.threadCache.has(request.threadId)) {
+      const runnerUser = getRunnerUser();
+      const nowIso = new Date().toISOString();
+      this.threadCache.set(request.threadId, {
+        id: request.threadId,
+        name: this.deriveTitle(request.input.messages ?? []),
+        agentId: request.agent.agentId ?? "default",
+        organizationId: runnerUser?.orgId ?? "",
+        createdById: runnerUser?.id ?? "",
+        archived: false,
+        createdAt: nowIso,
+        updatedAt: nowIso,
+      });
+    }
+
     const runAgent = async () => {
       const parentRunId = await this.getLatestRunId(request.threadId);
       // The live stream is redacted with the SAME rule as persistence
