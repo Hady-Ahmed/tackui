@@ -184,12 +184,22 @@ describe("getAgents", () => {
       const map = await getAgents(new Request("http://localhost"));
       const fetchFn = storedFetch(map["m1"]);
 
-      await fetchFn("http://localhost:8001/agent", { method: "POST" });
+      // Stub global fetch — if the wrapper ever vanishes (regression to
+      // plain fetch), the assertion fails cleanly instead of dialing a
+      // real socket to the fake endpoint.
+      const globalFetch = vi.fn();
+      vi.stubGlobal("fetch", globalFetch);
+      try {
+        await fetchFn("http://localhost:8001/agent", { method: "POST" });
+      } finally {
+        vi.unstubAllGlobals();
+      }
       expect(vi.mocked(fetchGuardedRedirects)).toHaveBeenCalledTimes(1);
       expect(vi.mocked(fetchGuardedRedirects)).toHaveBeenCalledWith(
         "http://localhost:8001/agent",
         { method: "POST" },
       );
+      expect(globalFetch).not.toHaveBeenCalled();
     });
   });
 

@@ -168,7 +168,10 @@ function createAgent(entry: AgentEntry, user: RequestUser): AbstractAgent {
   //   mode it is usually on a PRIVATE network (Railway private service),
   //   which the guard blocks by design (SSRF_GUARD_FORCE_ON ignores
   //   ALLOW_PRIVATE_ENDPOINTS). Routing these fetches through the guard
-  //   made every builder run die with UnsafeUrlError. Plain fetch here.
+  //   made every builder run die with UnsafeUrlError. Plain fetch here —
+  //   with Node's default redirect bound (20) rather than the guarded
+  //   path's 5: a bound is a loop-safety net, not a security control, and
+  //   the platform endpoint is not tenant-influenced.
   //
   // - Manual/template agents point at user-supplied endpoints. Those get
   //   the redirect-guarded wrapper: every hop (initial URL + each

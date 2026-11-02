@@ -234,6 +234,17 @@ export async function agentosRequest<T>(
   if (!AGENTOS_ENABLED) {
     throw new AgentosError(503, "The agent builder isn't enabled on this deployment.");
   }
+  // Path hygiene (defense-in-depth). Every caller pre-encodes
+  // interpolated ids with encodeURIComponent (the ids are server-generated
+  // 12-hex today); this guard refuses — loudly, as a 500 — the characters
+  // that would turn a forgotten encoding into a URL-injection primitive
+  // carrying the app:superadmin service token to an attacker-chosen
+  // platform route: query strings, fragments, whitespace, control chars.
+  // Raw "/" inside a segment stays syntactically valid (it is the segment
+  // separator); the encoding discipline at the call sites covers it.
+  if (!/^\/[A-Za-z0-9._~/%-]*$/.test(path)) {
+    throw new AgentosError(500, "Internal error building the platform request.");
+  }
   let res: Response;
   try {
     res = await fetch(`${AGENTOS_BASE_URL}${path}`, {

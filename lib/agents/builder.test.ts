@@ -19,7 +19,7 @@ vi.mock("@/lib/config/agentos", () => ({
   AGENTOS_MISCONFIGURED: false,
 }));
 
-import { AgentosError, buildRequirements, BuilderValidationError, fetchAgentosModels, testPlatformModel, type AgentosModel, type AgentosTool } from "@/lib/agents/builder";
+import { AgentosError, agentosRequest, buildRequirements, BuilderValidationError, fetchAgentosModels, testPlatformModel, type AgentosModel, type AgentosTool } from "@/lib/agents/builder";
 import { requirementsSchema } from "@/lib/agents/agent-store";
 
 function jsonResponse(body: unknown, status = 200) {
@@ -106,6 +106,25 @@ describe("agentosRequest error discipline", () => {
     expect(err.status).toBe(502);
     expect(err.message).toBe("The agent builder is unavailable right now — please try again shortly.");
     expect(err.detail).toBe("bad token");
+  });
+
+  it("refuses a path with injection-prone characters (a forgotten encodeURIComponent)", async () => {
+    // Defense-in-depth: the request path carries the app:superadmin
+    // service token, so a tenant-supplied string reaching agentosRequest
+    // raw must fail loudly, never reach fetch.
+    for (const bad of [
+      "/components/x?next=evil",
+      "/components/x#frag",
+      "/components/a b",
+      "components/x",
+    ]) {
+      const fetchSpy = vi.fn();
+      vi.stubGlobal("fetch", fetchSpy);
+      const err = await rejection(agentosRequest("GET", bad));
+      expect(err).toBeInstanceOf(AgentosError);
+      expect(err.status).toBe(500);
+      expect(fetchSpy).not.toHaveBeenCalled();
+    }
   });
 });
 
