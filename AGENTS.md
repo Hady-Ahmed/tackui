@@ -121,6 +121,13 @@ no Docker required, no cleanup between runs (see `vitest.config.ts`).
   persisting or fetching. Private IPs are blocked unless
   `ALLOW_PRIVATE_ENDPOINTS=true` (hard-locked ON under SaaS mode). The guard
   only fires on PATCH when `endpoint` is actually in the body.
+  **Run-time fetch policy is per-origin** (lib/agents/registry.ts):
+  manual/template-agent runs re-run the guard on every redirect hop via
+  `fetchGuardedRedirects`; builder-agent runs to the platform are
+  deliberately EXEMPT (operator infrastructure — the endpoint is
+  recomputed from `AGENTOS_BASE_URL`, not tenant-supplied). "Completing"
+  the guard coverage onto builder runs breaks every run under SaaS mode
+  — see docs/security.md.
 - **Rate-limit wiring on new routes:** every new route handler gets a
   per-user limit via `lib/ratelimit` (`checkUserLimit` / `acquireConcurrent`).
   Run-stream routes must exempt stop/connect paths — otherwise

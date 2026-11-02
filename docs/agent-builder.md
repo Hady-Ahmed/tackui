@@ -434,7 +434,7 @@ its dep keys:
 | `openai_api_key` / `openrouter_api_key` | the runner's decrypted `api_key` field (when the model needs one) |
 | `tavily_api_key` | the runner's Tavily `api_key` field (when a keyed tool runs) |
 | `x_consumer_key`, `x_consumer_secret`, `x_access_token`, `x_access_token_secret` | the runner's X toolkit fields (one item each) |
-| `mcp_connectors` | JSON string `{name: {url, token}}` for the org's configured connectors referenced by the agent |
+| `mcp_connectors` | JSON string `{connector_id: {token}}` for the org's configured connectors referenced by the agent — **ids only, no URLs**; the platform resolves attach URLs from its own registry |
 
 These keys are **server-resolved only** — the registry middleware strips
 any client-sent context item with a reserved dep key before merging the
@@ -615,10 +615,15 @@ stays deletable.
 ## Connectors — `lib/connectors/connector-store.ts`
 
 The org-level MCP server registry ("connect an MCP server"). Admins
-configure once per org; builder agents reference connectors **by name**
-(`AgentRequirements.connectors`), and the run path resolves each name to
-its URL + token and delivers them per-run as `mcp_connectors` JSON —
-the AgentOS never stores connector config itself.
+configure once per org; builder agents reference connectors **by stable
+id** (`AgentRequirements.connectors` holds `connectorIds: string[]`), and
+the run path delivers `{connector_id: {token}}` per-run as the
+`mcp_connectors` context item — **no URLs on the wire**. Attach URLs
+resolve server-side from the platform's connector registry
+(`platform_connector`): the platform stores the id→URL mapping (pushed
+and verified at save time), the wire carries only tokens, and a
+connector id the component's config doesn't declare is refused
+(fail-closed) — see `lib/agents/run-gate.ts` and the security docs.
 
 - **Org-scoped:** rows keyed `UNIQUE (org_id, name)`. Writes are
   org-admin gated (`canManageAgents`); reads are member-accessible so
@@ -629,26 +634,35 @@ the AgentOS never stores connector config itself.
   encrypt + store. Implemented in the SQL upsert (CASE on the raw
   param); the admin form mirrors it (blank field = omit, "Clear token"
   checkbox = `""`).
-- **Name is the reference key:** URL/payload-safe pattern
-  (`^[a-z0-9][a-z0-9_-]*$`), max 100 — it's used in agent definitions
-  and the AG-UI context payload. Renames create a new connector and
-  orphan the agents referencing the old name, so the name is immutable
-  in edit mode (the admin form enforces this). URLs are http(s)-only
+- **Name vs id:** the org-facing **name** is the human reference
+  (URL/payload-safe pattern `^[a-z0-9][a-z0-9_-]*$`, max 100,
+  immutable after creation — renames create a new connector). The
+  **id** (server-generated 12-hex) is what agent configs, the wire
+  payload, and the platform registry key on. URLs are http(s)-only
   (`file:`/`ftp:`/`data:` have no legitimate use — they're fetched by
   the AgentOS at run time) **and** must pass `assertSafeUrl` — private/
   internal addresses are a 400 (`ALLOW_PRIVATE_ENDPOINTS=true` opts out
-  for self-host; SaaS mode hard-locks the guard on).
+  for self-host; SaaS mode hard-locks the guard on). The URL is also
+  pushed to the platform registry (push-first, then the local commit).
 - **Token encrypted at rest** (same AES-256-GCM mechanism); a failed
-  decrypt degrades to "no auth" rather than failing the org.
+  decrypt degrades to "no auth" rather than failing the org. Tokens are
+  never stored platform-side.
 - **Delete** confirms the builder-agent breakage (the run-gate copy
   agents hit after a connector they use is removed: "an org admin needs
   to add it before it can run" — the gate 402s).
 - Rate-limited: writes via the `connectorMutate` bucket (20/min), reads
   via `agentRead` (60/min).
 - **AgentOS-side enforcement:** the builder also writes the referenced
-  connector names into the stored component config; the dispatcher
+  connector **ids** into the stored component config; the dispatcher
   refuses wire `mcp_connectors` keys outside that list (fail-closed,
-  warning + skip). Config carries names only — never URLs or tokens.
+  warning + skip). Config carries ids only — never URLs or tokens.
+- **Upgrade note (pre-registry agents):** components created before the
+  connector registry carry connector *names* in their stored config.
+  After the registry redesign deploys, the wire carries ids and the
+  dispatcher filters against the declared list — such agents silently
+  run without their connectors until re-saved in the builder. If you
+  upgrade a deployment that predates the registry, re-publish
+  (re-save) every builder agent that uses connectors.
 
 The admin UI is the Connectors section on `/agents`
 (`components/connectors-admin.tsx`).

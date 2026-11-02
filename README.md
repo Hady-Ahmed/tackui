@@ -310,7 +310,7 @@ See [`.env.example`](.env.example) for the full list with comments.
 | Variable | Required? | Description |
 | --- | --- | --- |
 | `DATABASE_URL` | Yes | Postgres connection string (e.g. `postgres://user:pass@localhost:5432/dbname`) |
-| `AGENTOS_BASE_URL` | No | Base URL of the AgentOS platform service (e.g. `http://agent-os:8100`) that powers the agent builder (`/app/builder`). Required together with `AGENTOS_JWT_SECRET` for the builder to activate; when unset the builder is disabled (builder routes return 503 and the UI shows a disabled state). No trailing slash. |
+| `AGENTOS_BASE_URL` | No | Base URL of the AgentOS platform service (e.g. `http://agent-os:7778`) that powers the agent builder. Required together with `AGENTOS_JWT_SECRET` for the builder to activate; when unset the builder is disabled (builder routes return 503 and the UI shows a disabled state). No trailing slash. |
 | `AGENTOS_JWT_SECRET` | No | JWT secret shared with the AgentOS dispatcher (HS256). Required whenever `AGENTOS_BASE_URL` is set — without it every builder run fails auth at the dispatcher (a boot warning is logged). |
 | `BETTER_AUTH_SECRET` | Yes (unless `AUTH_DISABLED=true`) | Secret for signing session cookies. Generate with `openssl rand -hex 32`. The app refuses to boot without it when auth is enabled. |
 | `BETTER_AUTH_URL` | Yes (unless `AUTH_DISABLED=true`) | Public base URL of the app (e.g. `http://localhost:3000`) |

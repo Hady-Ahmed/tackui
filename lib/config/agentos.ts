@@ -18,7 +18,7 @@
 export const AGENTOS_ENABLED = !!process.env.AGENTOS_BASE_URL;
 
 /**
- * Base URL of the platform-os AgentOS (e.g. "http://agent-os:8100").
+ * Base URL of the platform-os AgentOS (e.g. "http://agent-os:7778").
  * No trailing slash — builderEndpoint joins path segments directly.
  */
 export const AGENTOS_BASE_URL = (process.env.AGENTOS_BASE_URL ?? "").replace(
