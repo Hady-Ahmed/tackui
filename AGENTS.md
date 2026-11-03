@@ -160,6 +160,10 @@ no Docker required, no cleanup between runs (see `vitest.config.ts`).
 - `app/api/` — REST routes (agents, catalog, auth, billing, threads, org,
   health, copilotkit runtime)
 - `components/` — chat shell, sidebar, account menu, dialogs, tool renders
+- `agent-builder/` — the AgentOS service the agent builder runs on
+  (Python/uv, own venv + `uv run pytest`; moved here from the old
+  agent-warehouse monorepo — see `docs/agent-builder.md` and the
+  `ci-python.yml` workflow, which tests it only when the folder changes)
 - `proxy.ts` — cookie gate + per-IP flood protection + rate limiting
 - `docs/` — architecture deep-dives (index below)
 

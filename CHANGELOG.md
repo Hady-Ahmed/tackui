@@ -4,6 +4,14 @@ All notable changes to this project will be documented in this file. The format 
 
 ## [Unreleased]
 
+- **The agent-builder service now lives in this repo** (`agent-builder/`
+  at the root), moved out of the agent-warehouse monorepo where it sat
+  beside unrelated projects. Location-only move — no functional change.
+  Its Python tests run in CI via a path-filtered workflow
+  (`ci-python.yml`), and the service's dependency pins carry over the
+  exact versions the warehouse lock had tested (the `agents_shared.auth`
+  module it used is vendored into the folder).
+
 - **CopilotKit runtime telemetry is opt-out by default for new setups.**
   `.env.example` now ships `COPILOTKIT_TELEMETRY_DISABLED=true` (the
   runtime's anonymous usage telemetry is on by default; `DO_NOT_TRACK=1`

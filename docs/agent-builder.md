@@ -1,5 +1,13 @@
 # Agent Builder
 
+> **Where the service lives:** the AgentOS service's source is in THIS
+> repo, under `agent-builder/` at the root (a Python/uv project, moved
+> out of the old agent-warehouse monorepo — a location-only move, no
+> functional change). Set up its venv with `cd agent-builder && uv sync
+> --all-groups`, run its tests with `uv run pytest` (a Docker daemon is
+> required — testcontainers Postgres), and deploy it as its own service
+> (see the Dockerfile in that folder).
+
 Phase 1 "create your own agents" — any signed-in org member can build an
 agent on the platform AgentOS service (identity/name, model picker, tool
 palette, MCP connectors) without touching the admin `/agents` page. The
@@ -25,7 +33,7 @@ org's connector config (`connectors` table) are resolved fresh and
 delivered per-run as AG-UI context items. Nothing is cached agent-side,
 and nothing is persisted on the AgentOS.
 
-## Where an agent lives (two places, two repos)
+## Where an agent lives (two stores)
 
 A builder agent exists in two stores at once:
 
@@ -247,7 +255,7 @@ a per-provider column when the Phase 3 tier/publishing wakes.
 - The underlying AgentOS surface is `GET /platform/available` (the
   discovery scan) + `GET/PUT /platform/catalog/{models,tools}` +
   `POST /platform/test/model` — admin-scope only, documented in the
-  platform-os README.
+  service's README (`agent-builder/README.md`).
 
 ## The tool palette — the platform tools catalog
 
