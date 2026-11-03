@@ -20,7 +20,8 @@ export type AgentsMap = Record<string, AbstractAgent>;
 /**
  * Context keys the CLIENT may never set — they are resolved server-side
  * (run gate → stash) or not at all. `mcp_connectors` carries org MCP
- * connector configs (url + token); `<provider>_api_key` carries BYOK
+ * connector ids + tokens (attach URLs resolve server-side from the
+ * platform's registry, never the wire); `<provider>_api_key` carries BYOK
  * secrets. Both reach the backend as dependencies the dispatcher trusts,
  * so a client-supplied value would bypass the run gate's org scoping
  * (SSRF / credential injection). Mirrors the dep-key convention the

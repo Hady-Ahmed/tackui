@@ -208,13 +208,18 @@ created through the agent builder
   requests to the AgentOS use this id.
 - `requirements` — a JSON snapshot of what a RUNNER needs to run the
   agent (`{ model: {provider, id, platformTier}, tools: [{name,
-  requiresKey?, provider?, platformFallback?}], connectors: [names] }`),
+  requiresKey?, provider?, platformFallback?}], connectors: [{id, name}] }`),
   written at create/update from the definition tackui itself built. The
   AgentOS stored config is the source of truth; this snapshot only powers
   the pre-run run gate so run requests need no AgentOS round-trip.
   Snapshots that predate the `provider`/`platformFallback` tool fields
   parse fail-closed (provider re-derived from the dep key, fallback
-  false).
+  false). Connector snapshots that predate the id form carry names —
+  they resolve against nothing and 402 until the agent is re-saved.
+  When the gate refuses a run it aggregates the remedies into the 402:
+  a missing connector needs an org admin to add it (and the agent
+  re-saved in the agent builder); an unreadable connector token needs
+  the admin to re-enter it.
 
 How they differ from manual/template agents at run time:
 

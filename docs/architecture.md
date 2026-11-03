@@ -111,22 +111,43 @@ concurrent runs on the same thread both pass the "not running" check.
 
 Every exit path goes through `teardownRun`, which releases the lock **only
 while `current_run_id` still matches this run** and removes the
-`ACTIVE_CONNECTIONS` entry **only while it's still this run's object**. This
-matters for the abort race: stop() clears the lock, a replacement run can
-re-claim it and overwrite the map entry, and then the aborted run's teardown
-fires — an unconditional release would free the *replacement's* lock (letting
-a third run interleave) and clearing the shared entry would break the
-replacement's stop button.
+`ACTIVE_CONNECTIONS` entry **only while it's still this run's object**.
+
+`stop()` deliberately does NOT release the lock — it only flags the
+connection (`stopRequested`) and calls `abortRun()`. The aborted run keeps
+the lock through its persistence window (partial `storeRun` +
+`captureThreadData` happen after the abort lands) and releases it in its own
+teardown, which the `current_run_id` guard makes safe. The earlier design
+released the lock inside `stop()`, which opened two races: a replacement run
+could acquire the freed lock and interleave with the aborted run's
+persistence (clobbered snapshots, out-of-order history), and the
+abort-failure "restore" could overwrite a successor's `current_run_id` with
+the stale id — wedging `is_running = true` until the next boot. Trade-off:
+between `stop()` and the aborted run's teardown, `is_running` still reads
+true, so an *immediate* replacement run gets "Thread already running" for
+the abort+persistence window (sub-second in practice; a hung backend that
+ignores the abort holds the lock until the boot reset, the same failure mode
+a hung non-stopped run always had).
 
 Failure handling is split by a `preRun` flag: **pre-run failures** (historic
 read, parent-run resolution) release the lock and rethrow — the run stream
 *errors*, matching the old contract; **mid-run failures** persist
-best-effort, release, and complete the stream. The persistence in the
-failure path is individually guarded so a `storeRun` throw can't skip the
-rest of the teardown. `instrumentation.ts` also resets stale
+best-effort, release, and complete the stream. The ENTIRE mid-run unwind
+(finalize events, persistence, snapshot capture) is one guarded block so a
+throw from any step — including `finalizeRunEvents` — can't skip the
+teardown. `instrumentation.ts` also resets stale
 `is_running = true` rows at boot (single-instance constraint: no run can be
 in flight in a process that is still starting), so a crash no longer leaves
 threads permanently "already running".
+
+`connect()` never replays a run twice: when a run is in flight, live
+events are bridged from its subject — but if the historic replay snapshot
+already contains that run's id (the connect landed between `storeRun` and
+teardown), the bridge is skipped entirely. Every event a run emits is
+emitted *before* `storeRun` persists it, so a covered replay means the
+subject can only add duplicates (the messageId dedup doesn't cover
+`TOOL_CALL_*`/`STATE_*`, and a duplicate `TOOL_CALL_START` trips the AG-UI
+verifier).
 
 ### In-memory cache (sync interface bridge)
 

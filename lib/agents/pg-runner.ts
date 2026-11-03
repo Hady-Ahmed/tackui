@@ -37,6 +37,8 @@ interface ActiveConnectionContext {
   runSubject?: ReplaySubject<BaseEvent>;
   currentEvents?: BaseEvent[];
   stopRequested?: boolean;
+  /** This run's id — lets connect() detect "replay already covers this run". */
+  runId?: string;
 }
 
 // Active connections for streaming events and stop support. Owned by this
@@ -249,6 +251,7 @@ export class PostgresAgentRunner extends AgentRunner {
       runSubject,
       currentEvents: currentRunEvents,
       stopRequested: false,
+      runId: request.input.runId,
     };
 
     ACTIVE_CONNECTIONS.set(request.threadId, myConnection);
@@ -413,21 +416,21 @@ export class PostgresAgentRunner extends AgentRunner {
           error: err instanceof Error ? err.message : String(err),
         });
 
-        const appendedEvents = finalizeRunEvents(currentRunEvents, {
-          stopRequested: myConnection.stopRequested ?? false,
-        });
-        for (const event of appendedEvents) {
-          runSubject.next(event);
-          nextSubject.next(event);
-        }
-
-        // Teardown must survive its own failures: a storeRun or
-        // captureThreadData throw here previously skipped the rest of the
-        // teardown — is_running stayed true forever (the thread became
-        // unrunnable until a boot reset) and the SSE subjects never
-        // completed (the client hung). Persist what we have, log what
-        // failed, and always finish the teardown.
+        // Finalize, persist, and snapshot — ALL inside one guarded block.
+        // finalizeRunEvents + the subject emits previously ran OUTSIDE the
+        // guard: a throw there skipped the teardown below, wedging the
+        // run lock (the thread became unrunnable until a boot reset) and
+        // leaving the SSE subjects open. Every fallible step of the
+        // mid-run unwind is inside the try; the teardown ALWAYS runs.
         try {
+          const appendedEvents = finalizeRunEvents(currentRunEvents, {
+            stopRequested: myConnection.stopRequested ?? false,
+          });
+          for (const event of appendedEvents) {
+            runSubject.next(event);
+            nextSubject.next(event);
+          }
+
           if (currentRunEvents.length > 0) {
             await this.storeRun(
               request.threadId,
@@ -555,8 +558,29 @@ export class PostgresAgentRunner extends AgentRunner {
     const activeConnection = ACTIVE_CONNECTIONS.get(request.threadId);
     const runState = await this.getRunState(request.threadId);
 
+    // A connect() landing between a run's storeRun and its teardown would
+    // otherwise replay the just-persisted run TWICE: once from the
+    // historic replay above, once from the subject's replay buffer. The
+    // messageId dedup below only covers TEXT_MESSAGE_* — duplicated
+    // TOOL_CALL_START / STATE_* events would pass it and the AG-UI
+    // verifier rejects a duplicate TOOL_CALL_START outright. The decisive
+    // fact: every event a run ever emits is emitted BEFORE storeRun
+    // persists it — so when the replay snapshot already contains the
+    // in-flight run, the bridge can only add duplicates. Skip it and
+    // complete: the client got the full history in the replay. (If
+    // storeRun commits AFTER our snapshot, the replay lacks the run, the
+    // bridge supplies it exactly once, and no duplication is possible —
+    // both orderings are covered by checking the SAME snapshot we
+    // replayed from.)
+    const persistedRunIds = new Set(historicRuns.map((run) => run.run_id));
+    const replayCoversActiveRun =
+      activeConnection != null &&
+      activeConnection.runId != null &&
+      persistedRunIds.has(activeConnection.runId);
+
     if (
       activeConnection &&
+      !replayCoversActiveRun &&
       (runState.isRunning || activeConnection.stopRequested)
     ) {
       activeConnection.subject.subscribe({
@@ -609,15 +633,28 @@ export class PostgresAgentRunner extends AgentRunner {
     if (connection.stopRequested) return false;
 
     connection.stopRequested = true;
-    await this.setRunState(request.threadId, false);
+
+    // The run lock is NOT released here. The aborted run still has to
+    // persist its partial history (storeRun + captureThreadData) after
+    // the abort lands — releasing the lock first let a replacement run
+    // acquire it and race the aborted run's persistence (interleaved
+    // snapshots, history out of order). Instead the lock stays with the
+    // aborted run until its own teardownRun releases it — that release is
+    // guarded by the current_run_id match, so it can never clobber a
+    // successor. Trade-off (documented in docs/architecture.md): between
+    // stop() and the aborted run's teardown, is_running still reads true,
+    // so an immediate replacement run gets "Thread already running" for
+    // the abort+persistence window (sub-second in practice).
 
     try {
       agent.abortRun();
       return true;
     } catch (error) {
       console.error("Failed to abort agent run", error);
+      // The abort failed and the run CONTINUES — it still owns the lock
+      // (never released above), so there is nothing to restore: the run's
+      // own teardown releases it when it settles.
       connection.stopRequested = false;
-      await this.setRunState(request.threadId, true, runState.currentRunId ?? undefined);
       return false;
     }
   }
@@ -1023,10 +1060,11 @@ export class PostgresAgentRunner extends AgentRunner {
    * mid-run failure, pre-run failure). Two guarded steps:
    *
    * 1. Release the run lock only when THIS run still owns it: the
-   *    `current_run_id` match fails after stop() cleared the state and a
-   *    replacement run re-claimed it — an aborted run's teardown must
-   *    not release the REPLACEMENT's lock (that would let a third run
-   *    interleave with the replacement).
+   *    `current_run_id` match fails when a successor run re-claimed the
+   *    state after a boot reset — this run's teardown must not release
+   *    the SUCCESSOR's lock (that would let a third run interleave with
+   *    it). Note stop() no longer releases the lock itself: the aborted
+   *    run keeps it through persistence and releases it HERE (see stop()).
    * 2. Remove the map entry only while it is still this run's OBJECT
    *    (identity check against the captured connection): a replacement
    *    run's entry keeps its agent/subject references — its stop button

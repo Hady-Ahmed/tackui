@@ -65,7 +65,7 @@ import { POST } from "./route";
 import { NextResponse } from "next/server";
 import { getRequestUser, getSyntheticAdmin } from "@/lib/auth/context";
 import { isAuthDisabled } from "@/lib/auth/auth";
-import { acquireConcurrent } from "@/lib/ratelimit/middleware";
+import { acquireConcurrent, checkUserLimit } from "@/lib/ratelimit/middleware";
 import { checkBuilderRunGate, consumeBuilderRunQuota } from "@/lib/agents/run-gate";
 import {
   runWithRunnerContext,
@@ -378,5 +378,79 @@ describe("copilotkit route — duplicate-slash run paths normalize into the gate
     );
     expect(res.status).toBe(404);
     expect(checkBuilderRunGate).not.toHaveBeenCalled();
+  });
+});
+
+describe("copilotkit route — /threads/clear refusal + run-classification exemptions", () => {
+  beforeEach(async () => {
+    // Same leak discipline as the suggest describe above.
+    vi.mocked(isAuthDisabled).mockReturnValue(false);
+    const { checkCatalogRunGates } = await import("@/lib/plans/enforcement");
+    vi.mocked(checkCatalogRunGates).mockResolvedValue(null);
+  });
+
+  // POST /threads/clear reaches the runner's clearThreads() — which
+  // deletes EVERY tenant's runs/messages/state with no user filter. The
+  // proxy route refuses it unconditionally, before auth and before any
+  // rate-limit accounting. The inner handler only ever returns "ok" (200),
+  // so a 403 body proves the short-circuit happened before dispatch.
+  it("refuses POST /threads/clear with 403 before the inner handler", async () => {
+    const res = await POST(
+      new Request("http://localhost:3000/api/copilotkit/threads/clear", {
+        method: "POST",
+        body: JSON.stringify({}),
+      }),
+    );
+    expect(res.status).toBe(403);
+    expect(await res.json()).toEqual({ error: "Not available" });
+  });
+
+  it("refuses the double-slash variant too (normalization happens before the guard)", async () => {
+    // `/threads//clear` normalizes to `/threads/clear` — the guard must
+    // still fire on the collapsed path, not be bypassed by the raw path
+    // (the same normalization the run gates rely on).
+    const res = await POST(
+      new Request("http://localhost:3000/api/copilotkit/threads//clear", {
+        method: "POST",
+        body: JSON.stringify({}),
+      }),
+    );
+    expect(res.status).toBe(403);
+    expect(await res.json()).toEqual({ error: "Not available" });
+  });
+
+  // Stopping a run at the concurrent cap must not 429: stop/connect are
+  // classified as control requests, not runs — no per-minute limit, no
+  // concurrent slot. (If they were misclassified, an at-cap user's stop
+  // would try to acquire a 4th slot and the run would become unstoppable.)
+  it("stop and connect paths skip the rate limit and the concurrent slot", async () => {
+    vi.mocked(acquireConcurrent).mockReturnValue(() => {});
+
+    const stopRes = await POST(
+      new Request("http://localhost:3000/api/copilotkit/agent/test-agent/stop/t-1", {
+        method: "POST",
+        body: JSON.stringify({}),
+      }),
+    );
+    const connectRes = await POST(
+      new Request("http://localhost:3000/api/copilotkit/agent/test-agent/connect", {
+        method: "POST",
+        body: JSON.stringify({}),
+      }),
+    );
+
+    expect(stopRes.status).toBe(200);
+    expect(connectRes.status).toBe(200);
+    expect(checkUserLimit).not.toHaveBeenCalled();
+    expect(acquireConcurrent).not.toHaveBeenCalled();
+  });
+
+  it("a plain run on the same URL shape still consumes the limit + slot (contrast pin)", async () => {
+    vi.mocked(acquireConcurrent).mockReturnValue(() => {});
+
+    await POST(new Request(RUN_URL, { method: "POST", body: JSON.stringify({}) }));
+
+    expect(checkUserLimit).toHaveBeenCalledTimes(1);
+    expect(acquireConcurrent).toHaveBeenCalledTimes(1);
   });
 });

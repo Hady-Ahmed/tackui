@@ -1,5 +1,8 @@
 import { NextResponse } from "next/server";
 import { query } from "@/lib/db/pg";
+import { checkLimit } from "@/lib/ratelimit/store";
+import { LIMITS } from "@/lib/ratelimit/limits";
+import { getClientIp } from "@/lib/ratelimit/client-ip";
 
 /**
  * Liveness health check. Returns 200 if the Node process is alive and
@@ -14,14 +17,34 @@ import { query } from "@/lib/db/pg";
  * orchestrator readiness gates and post-deploy smoke checks; keep the
  * plain probe for liveness.
  *
- * This route is exempt from the proxy.ts cookie gate so orchestrators
- * (Docker Compose healthcheck, k8s liveness probe, load balancers) can
- * poll it without a session cookie.
+ * This route is exempt from the proxy.ts cookie gate AND per-IP flood
+ * limiter so orchestrators (Docker Compose healthcheck, k8s liveness
+ * probe, load balancers) can poll it without a session cookie. That
+ * exemption is safe for liveness (pure CPU, no I/O) but NOT for the deep
+ * probe (a PG roundtrip per call) — so the deep branch rate-limits
+ * itself per client IP. Legitimate orchestrators poll every few seconds
+ * (≤30/min, one or two IPs); an anonymous flood of deep probes 429s
+ * like any other /api route would.
  */
 export async function GET(request: Request) {
   const deep = new URL(request.url).searchParams.get("deep") === "true";
   if (!deep) {
     return NextResponse.json({ ok: true });
+  }
+
+  const ip = getClientIp((name) => request.headers.get(name));
+  const limited = checkLimit(`healthDeep:${ip}`, LIMITS.healthDeep.max, LIMITS.healthDeep.windowMs);
+  if (!limited.allowed) {
+    const retryAfter = Math.ceil((limited.resetAt - Date.now()) / 1000);
+    return NextResponse.json(
+      { ok: false, error: "Too many requests. Try again later." },
+      {
+        status: 429,
+        headers: {
+          "Retry-After": String(Math.max(1, retryAfter)),
+        },
+      },
+    );
   }
 
   try {
@@ -39,7 +62,7 @@ export async function GET(request: Request) {
     // unauthenticated and errors can carry connection-string fragments.
     console.error("[health] deep probe failed:", message);
     return NextResponse.json(
-      { ok: true, db: false, error: "database unreachable" },
+      { ok: false, db: false, error: "database unreachable" },
       { status: 503 },
     );
   }

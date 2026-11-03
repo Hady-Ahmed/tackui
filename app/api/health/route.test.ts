@@ -8,9 +8,13 @@ vi.mock("@/lib/db/pg", () => ({
 }));
 
 import { GET } from "./route";
+import { _resetForTests } from "@/lib/ratelimit/store";
 
 beforeEach(() => {
   mockQuery.mockReset();
+  // The deep probe's per-IP limiter is module state — fresh window per
+  // test so the 429 pins below start from an empty counter.
+  _resetForTests();
 });
 
 describe("GET /api/health", () => {
@@ -38,6 +42,9 @@ describe("GET /api/health", () => {
     const res = await GET(new Request("http://localhost:3000/api/health?deep=true"));
     expect(res.status).toBe(503);
     const body = await res.json();
+    // `ok` is false too — a body reading ok:true on a failure status would
+    // confuse boolean-keyed smoke scripts.
+    expect(body.ok).toBe(false);
     expect(body.db).toBe(false);
     expect(JSON.stringify(body)).not.toContain("secret");
     expect(JSON.stringify(body)).not.toContain("db.internal");
@@ -49,6 +56,61 @@ describe("GET /api/health", () => {
     const res = await GET(new Request("http://localhost:3000/api/health?deep=1"));
     expect(res.status).toBe(200);
     expect(await res.json()).toEqual({ ok: true });
+    expect(mockQuery).not.toHaveBeenCalled();
+  });
+
+  it("deep probe: floods of the unauthenticated DB roundtrip 429 per client IP", async () => {
+    // The route is exempt from the proxy's per-IP flood limiter (orchestrator
+    // probes carry no session), so the deep branch limits itself — otherwise
+    // an anonymous flood of ?deep=true is an unauthenticated DB-load vector.
+    mockQuery.mockResolvedValue({ rows: [{ applied: 13 }] });
+    for (let i = 0; i < 30; i++) {
+      const res = await GET(
+        new Request("http://localhost:3000/api/health?deep=true", {
+          headers: { "x-forwarded-for": "203.0.113.7" },
+        }),
+      );
+      expect(res.status).toBe(200);
+    }
+    const flooded = await GET(
+      new Request("http://localhost:3000/api/health?deep=true", {
+        headers: { "x-forwarded-for": "203.0.113.7" },
+      }),
+    );
+    expect(flooded.status).toBe(429);
+    // The 429 never reaches the DB.
+    expect(mockQuery).toHaveBeenCalledTimes(30);
+  });
+
+  it("deep probe: the per-IP limit isolates clients — another IP still passes", async () => {
+    mockQuery.mockResolvedValue({ rows: [{ applied: 13 }] });
+    for (let i = 0; i < 30; i++) {
+      await GET(
+        new Request("http://localhost:3000/api/health?deep=true", {
+          headers: { "x-forwarded-for": "203.0.113.7" },
+        }),
+      );
+    }
+    // A different client IP (e.g. the real orchestrator) is unaffected.
+    const res = await GET(
+      new Request("http://localhost:3000/api/health?deep=true", {
+        headers: { "cf-connecting-ip": "198.51.100.9" },
+      }),
+    );
+    expect(res.status).toBe(200);
+  });
+
+  it("plain liveness stays unlimited — the flood cap only guards the deep branch", async () => {
+    // Even with the same IP exhausted on deep probes, the plain probe
+    // (no I/O) keeps answering.
+    for (let i = 0; i < 35; i++) {
+      const res = await GET(
+        new Request("http://localhost:3000/api/health", {
+          headers: { "x-forwarded-for": "203.0.113.7" },
+        }),
+      );
+      expect(res.status).toBe(200);
+    }
     expect(mockQuery).not.toHaveBeenCalled();
   });
 });

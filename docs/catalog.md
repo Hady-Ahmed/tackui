@@ -69,6 +69,18 @@ changes the org's agent list) → `checkTemplateInstall` (plan gate) →
   (id preserved) → `200 { installed: false, updated: bool }`. Invisible
   to users — the catalog card just shows "✓ Added to workspace" (live propagation
   means there is no user-facing update action).
+- **Install race is DB-enforced:** two concurrent installs of the same
+  template both pass `findInstalledAgentId` (check-then-act), but the
+  partial unique index from migration 0015 (`agents_org_template_uniq`
+  on `(org_id, source_template_id) WHERE source_template_id IS NOT NULL`)
+  makes the second INSERT fail with 23505 — `installTemplate()` catches
+  the violation and falls back to re-syncing the winner's row, so the org
+  always ends up with exactly one installed copy. Manual agents are
+  unaffected (NULL `source_template_id`, NULLs distinct).
+  Known residual edge: `checkAgentCountLimit` is still check-then-act, so
+  N concurrent installs of *different* templates at the cap boundary can
+  briefly overshoot the plan's agent cap by N−1 rows — accepted (no data
+  corruption, monetization-only, requires simultaneous admin installs).
 
 Catalog card text clamping — tagline clamps to 2 lines and description
 to 4 (`ExpandableText` in `components/expandable-text.tsx`: `line-clamp`

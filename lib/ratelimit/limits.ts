@@ -42,6 +42,11 @@ export const LIMITS = {
   /** GET /api/billing/subscription + GET /api/org — account/org reads
    *  that hit multiple DB tables (org also counts members per org). */
   accountRead: { max: 60, windowMs: 60_000 },
+  /** GET /api/health?deep=true — unauthenticated DB roundtrip. The proxy
+   *  leaves /api/health unlimited (orchestrators poll it without a
+   *  session), so the deep branch rate-limits itself per IP: liveness
+   *  stays free, but the DB-touching readiness probe can't be flooded. */
+  healthDeep: { max: 30, windowMs: 60_000 },
 } as const;
 
 export type LimitName = keyof typeof LIMITS;

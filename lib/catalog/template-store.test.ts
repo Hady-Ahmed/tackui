@@ -616,6 +616,54 @@ describe("installTemplate (idempotent upsert)", () => {
     expect(await findInstalledAgentId(template.id, OTHER_ORG)).toBe(b.agent.id);
     expect(await findInstalledAgentId("missing-template", TEST_ORG)).toBeNull();
   });
+
+  it("two concurrent installs of the same template produce exactly ONE agent row", async () => {
+    // The find-then-insert race: both calls observe "not installed", both
+    // INSERT. Migration 0015's partial unique index makes the second
+    // INSERT fail with 23505; the loser falls back to re-syncing the
+    // winner's row. The invariant holds regardless of which call wins:
+    // one row, and both results point at it.
+    const template = await createTemplate(validInput);
+    const [a, b] = await Promise.all([
+      installTemplate(template, TEST_ORG),
+      installTemplate(template, TEST_ORG),
+    ]);
+    const rows = await listAgents(TEST_ORG);
+    expect(rows).toHaveLength(1);
+    expect(new Set([a.agent.id, b.agent.id]).size).toBe(1);
+    expect(await findInstalledAgentId(template.id, TEST_ORG)).toBe(a.agent.id);
+  });
+
+  it("the partial unique index blocks duplicates at the DB level but not manual agents", async () => {
+    const template = await createTemplate(validInput);
+    await installTemplate(template, TEST_ORG);
+
+    // A second installed copy for the same (org, template) is rejected.
+    await expect(
+      query(
+        `INSERT INTO agents (id, name, description, endpoint, org_id, auth_mode, source_template_id)
+         VALUES ('ffffffffffff', 'Dup', 'd', 'http://localhost:8000/agent', $1, 'none', $2)`,
+        [TEST_ORG, template.id],
+      ),
+    ).rejects.toMatchObject({ code: "23505" });
+
+    // The index is PARTIAL: manually-created agents (NULL
+    // source_template_id) can share an org freely — NULLs are distinct.
+    await expect(
+      query(
+        `INSERT INTO agents (id, name, description, endpoint, org_id, auth_mode)
+         VALUES ('aaaaaaaaaaaa', 'Manual A', 'd', 'http://localhost:8000/agent', $1, 'none')`,
+        [TEST_ORG],
+      ),
+    ).resolves.toBeTruthy();
+    await expect(
+      query(
+        `INSERT INTO agents (id, name, description, endpoint, org_id, auth_mode)
+         VALUES ('bbbbbbbbbbbb', 'Manual B', 'd', 'http://localhost:8000/agent', $1, 'none')`,
+        [TEST_ORG],
+      ),
+    ).resolves.toBeTruthy();
+  });
 });
 
 describe("annotateAgentTemplateState (curator-state chips)", () => {

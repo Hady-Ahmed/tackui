@@ -237,10 +237,14 @@ Other hardening in the same spirit:
   probe without a session. Wired into `docker-compose.yml` healthcheck.
   `?deep=true` is the readiness variant: it round-trips Postgres and counts
   the applied `schema_migrations` rows (200 `{ok, db: true, migrations: n}`,
-  503 `{db: false}` when the DB is unreachable — generic error body, the
-  detail is logged server-side). Boot fail-fast backs this up: migration or
-  auth-table failure after the retry window exits non-zero, so a broken
-  container reports unhealthy instead of serving 500s behind a green probe.
+  503 `{ok: false, db: false}` when the DB is unreachable — generic error
+  body, the detail is logged server-side). The proxy's flood-limit exemption
+  is safe for liveness (no I/O) but not for the deep branch, so the deep
+  probe rate-limits itself per client IP (30/min, `healthDeep` preset) — an
+  anonymous flood of deep probes 429s like any other `/api` route. Boot
+  fail-fast backs this up: migration or auth-table failure after the retry
+  window exits non-zero, so a broken container reports unhealthy instead of
+  serving 500s behind a green probe.
 - **Session-cookie `secure` flag** pinned to `NODE_ENV === "production"`.
 
 ## Rate limiting

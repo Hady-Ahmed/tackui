@@ -502,11 +502,12 @@ export async function countTemplateInstalls(templateId: string): Promise<number>
 
 /**
  * Find the id of the agent row this org installed from a template (the
- * upsert target). Oldest wins if duplicates somehow exist (they
- * shouldn't — install is guarded, and nothing can set
- * source_template_id on a manually-created agent). Exported for the
- * install route, which must distinguish new installs (agent-count cap
- * applies) from re-syncs (no new row, cap irrelevant).
+ * upsert target). Oldest wins if duplicates somehow exist (they can't be
+ * created anymore — the partial unique index from migration 0015 makes a
+ * second install INSERT for the same (org, template) fail with 23505 —
+ * and nothing can set source_template_id on a manually-created agent).
+ * Exported for the install route, which must distinguish new installs
+ * (agent-count cap applies) from re-syncs (no new row, cap irrelevant).
  */
 export async function findInstalledAgentId(
   templateId: string,
@@ -553,68 +554,109 @@ export async function installTemplate(
   template: AgentTemplate,
   orgId: string,
 ): Promise<InstallResult> {
-  const existingId = await findInstalledAgentId(template.id, orgId);
   const syncedAt = new Date(template.updatedAt);
   const jwtSecretForDb = template.jwtSecret ? encryptSecret(template.jwtSecret) : null;
   const jwtScopesForDb = template.jwtScopes?.join(",") ?? null;
 
+  const existingId = await findInstalledAgentId(template.id, orgId);
   if (existingId) {
-    // Capture the previous sync snapshot BEFORE the update so `updated`
-    // reflects whether this re-sync actually brought anything new.
-    const previousSyncedAt =
-      (await getAgent(existingId, orgId))?.installedTemplateUpdatedAt ?? null;
-    // jwt_secret/jwt_scopes are COALESCEd: the template row may carry no
-    // secret because the curator genuinely removed it — or because the
-    // stored ciphertext is UNDECRYPTABLE (key rotation/backup mismatch),
-    // which rowToTemplate downgrades to secret-less. Either way, nulling
-    // would wipe a previously-synced working secret from the agent row
-    // (the tombstone fallback would lose its auth). Preserve what the
-    // row already has unless the template actually brings a secret.
+    return resyncInstalledAgent(existingId, template, orgId, syncedAt);
+  }
+
+  // First install. Two concurrent installs of the same template can both
+  // observe "not installed" here (find-then-insert across requests) — the
+  // partial unique index from migration 0015 makes the second INSERT fail
+  // with 23505, and the loser falls back to re-syncing the winner's row
+  // instead of creating a duplicate.
+  const id = generateAgentId();
+  try {
     await query(
-      `UPDATE agents
-       SET name = $1, description = $2, endpoint = $3, auth_mode = $4,
-           jwt_secret = COALESCE($5, agents.jwt_secret),
-           jwt_scopes = COALESCE($6, agents.jwt_scopes),
-           installed_template_updated_at = $7, updated_at = now()
-       WHERE id = $8 AND org_id = $9`,
+      `INSERT INTO agents
+         (id, name, description, endpoint, org_id, auth_mode, jwt_secret,
+          jwt_scopes, source_template_id, installed_template_updated_at)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)`,
       [
+        id,
         template.name,
         template.description,
         template.endpoint,
+        orgId,
         template.authMode,
         jwtSecretForDb,
         jwtScopesForDb,
+        template.id,
         syncedAt,
-        existingId,
-        orgId,
       ],
     );
-    const agent = (await getAgent(existingId, orgId))!;
-    const changed = previousSyncedAt === null || template.updatedAt > previousSyncedAt;
-    return { agent, installed: false, updated: changed };
+  } catch (err) {
+    if (!isUniqueViolation(err)) throw err;
+    const winnerId = await findInstalledAgentId(template.id, orgId);
+    if (!winnerId) throw err;
+    return resyncInstalledAgent(winnerId, template, orgId, syncedAt);
   }
+  const agent = (await getAgent(id, orgId))!;
+  return { agent, installed: true, updated: false };
+}
 
-  const id = generateAgentId();
+/**
+ * The re-sync half of installTemplate, shared by the plain re-sync path
+ * and the lost-install-race fallback. Updates the existing agent row's
+ * config snapshot from the template (agent id preserved — threads
+ * intact) and reports whether the sync brought anything new.
+ */
+async function resyncInstalledAgent(
+  existingId: string,
+  template: AgentTemplate,
+  orgId: string,
+  syncedAt: Date,
+): Promise<InstallResult> {
+  // Capture the previous sync snapshot BEFORE the update so `updated`
+  // reflects whether this re-sync actually brought anything new.
+  const previousSyncedAt =
+    (await getAgent(existingId, orgId))?.installedTemplateUpdatedAt ?? null;
+  // jwt_secret/jwt_scopes are COALESCEd: the template row may carry no
+  // secret because the curator genuinely removed it — or because the
+  // stored ciphertext is UNDECRYPTABLE (key rotation/backup mismatch),
+  // which rowToTemplate downgrades to secret-less. Either way, nulling
+  // would wipe a previously-synced working secret from the agent row
+  // (the tombstone fallback would lose its auth). Preserve what the
+  // row already has unless the template actually brings a secret.
+  const jwtSecretForDb = template.jwtSecret ? encryptSecret(template.jwtSecret) : null;
+  const jwtScopesForDb = template.jwtScopes?.join(",") ?? null;
   await query(
-    `INSERT INTO agents
-       (id, name, description, endpoint, org_id, auth_mode, jwt_secret,
-        jwt_scopes, source_template_id, installed_template_updated_at)
-     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)`,
+    `UPDATE agents
+     SET name = $1, description = $2, endpoint = $3, auth_mode = $4,
+         jwt_secret = COALESCE($5, agents.jwt_secret),
+         jwt_scopes = COALESCE($6, agents.jwt_scopes),
+         installed_template_updated_at = $7, updated_at = now()
+     WHERE id = $8 AND org_id = $9`,
     [
-      id,
       template.name,
       template.description,
       template.endpoint,
-      orgId,
       template.authMode,
       jwtSecretForDb,
       jwtScopesForDb,
-      template.id,
       syncedAt,
+      existingId,
+      orgId,
     ],
   );
-  const agent = (await getAgent(id, orgId))!;
-  return { agent, installed: true, updated: false };
+  const agent = (await getAgent(existingId, orgId))!;
+  const changed = previousSyncedAt === null || template.updatedAt > previousSyncedAt;
+  return { agent, installed: false, updated: changed };
+}
+
+/**
+ * True when the error is a Postgres unique-constraint violation (23505).
+ * The node-pg error carries `code`; defensive on anything else.
+ */
+function isUniqueViolation(err: unknown): boolean {
+  return (
+    typeof err === "object" &&
+    err !== null &&
+    (err as { code?: unknown }).code === "23505"
+  );
 }
 
 export interface RunUsage {

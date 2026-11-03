@@ -316,7 +316,7 @@ See [`.env.example`](.env.example) for the full list with comments.
 | `BETTER_AUTH_URL` | Yes (unless `AUTH_DISABLED=true`) | Public base URL of the app (e.g. `http://localhost:3000`) |
 | `AUTH_DISABLED` | No | Set to `true` to skip login (solo mode). **Never use this in any deployment exposed to the internet or shared users.** |
 | `ALLOW_PRIVATE_ENDPOINTS` | No | Set to `true` to allow creating/editing agents with endpoints that resolve to private/internal IPs (e.g. when agent backends run on the same host). Defaults to `false` (blocks private IPs to prevent SSRF). |
-| `DB_ENCRYPTION_KEY` | No | 32-byte hex key (generate with `openssl rand -hex 32`) used to encrypt secrets at rest (AES-256-GCM): agent JWT secrets, BYOK credential fields, connector tokens, and catalog template JWT secrets. When unset, secrets are stored in plaintext (a warning is logged at boot). Rotating the key requires re-saving each secret (an old ciphertext becomes unreadable and shows up as "re-enter"/"re-save" prompts, never as a broken run). |
+| `DB_ENCRYPTION_KEY` | Yes (unless `AUTH_DISABLED=true`) | 32-byte hex key (generate with `openssl rand -hex 32`) used to encrypt secrets at rest (AES-256-GCM): agent JWT secrets, BYOK credential fields, connector tokens, and catalog template JWT secrets. Required in any mode with auth — the app refuses to boot without it (storing tenant secrets in plaintext is never acceptable); only solo mode may omit it (plaintext + a boot warning). Rotating the key requires re-saving each secret: an old ciphertext becomes unreadable, which surfaces as "incomplete"/re-enter prompts for BYOK credentials and connector tokens, and as failed runs for agents whose JWT secret can't be decrypted (the backend rejects the unsigned request) until the secret is re-saved. |
 | `TRUSTED_PROXY_HOPS` | No | Number of trusted reverse-proxy hops in front of the server, used to resolve the real client IP from `X-Forwarded-For` (default `1`). Set to `2` for Cloudflare → Nginx → app, etc. When behind Cloudflare → Traefik (Coolify), the proxy checks `CF-Connecting-IP` first (Traefik overwrites XFF with the edge IP). This env var is the fallback for non-Cloudflare deploys. |
 | `CONCURRENT_RUN_TIMEOUT_MS` | No | Watchdog timeout (ms) for concurrent-run rate-limit slots. Default `600000` (10 min). Floor `60000`. Safety net only — the actual SSE stream / agent run is NOT cancelled; only the counter is decremented to prevent slot leaks when a client opens a run and drops TCP without triggering `ReadableStream.cancel()`. Override if your agents do legitimately long research runs. |
 | `SENTRY_DSN` | No | Sentry DSN for server-side error tracking. No-op if unset. |
@@ -377,17 +377,23 @@ The app sets the following headers on all responses:
 
 The app has two-layer rate limiting to protect against abuse and server overload:
 
-**Per-IP flood protection** (in `proxy.ts`, pre-auth): 300 requests/min per IP on all `/api/*` routes (except `/api/health` which is unlimited, and `/api/auth/*` which has its own limiter). Uses `CF-Connecting-IP` (Cloudflare) or `X-Forwarded-For` (with `TRUSTED_PROXY_HOPS`) for IP extraction behind a reverse proxy.
+**Per-IP flood protection** (in `proxy.ts`, pre-auth): 300 requests/min per IP on all `/api/*` routes (except `/api/auth/*` which has its own limiter, and `/api/health` whose plain liveness probe is unlimited — the `?deep=true` readiness probe rate-limits itself at 30/min per IP since it touches the database). Uses `CF-Connecting-IP` (Cloudflare) or `X-Forwarded-For` (with `TRUSTED_PROXY_HOPS`) for IP extraction behind a reverse proxy.
 
 **Per-user route limits** (in route handlers, post-auth):
 
 | Route | Limit | Concurrent |
 | --- | --- | --- |
-| `/api/copilotkit/*` (POST runs only — connect/info exempt) | 20/min per user | 3 concurrent run streams per user |
+| `/api/copilotkit/*` (POST runs only — connect/stop/info exempt) | 20/min per user | 3 concurrent run streams per user |
 | `/api/agents/reachability-probe` | 30/min per user | — |
 | `/api/agents` POST + PATCH/DELETE | 10/min per user | — |
 | `/api/agents` GET | 60/min per user | — |
 | `/api/threads/[id]` PATCH/DELETE | 30/min per user | — |
+| `/api/credentials` PUT/DELETE | 20/min per user | — |
+| `/api/connectors` PUT/DELETE | 20/min per user | — |
+| `/api/billing/checkout` + `/api/billing/portal` POST | 10/min per user | — |
+| `/api/billing/subscription` + `/api/org` GET | 60/min per user | — |
+
+This table mirrors the presets in `lib/ratelimit/limits.ts` — the single source of truth (the admin catalog-write and platform-admin limits also live there; see `docs/security.md` for the full wiring).
 
 **Better Auth rate limiting**: sign-in is limited to 10/min per IP, sign-up to 5/min per IP.
 

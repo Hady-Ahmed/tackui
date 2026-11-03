@@ -467,7 +467,7 @@ also returns the exact set of dep keys it delivered (`reservedDepKeys`);
 the registry strips client items against that set on top of the
 mechanical regex, so multi-field contract deps can't be forged either.
 The AgentOS enforces the same boundary from its side: the dispatcher only
-attaches wire `mcp_connectors` whose names the component's stored config
+attaches wire `mcp_connectors` whose **ids** the component's stored config
 declares, so the namespace stays closed even if a tackui bug reopens it.
 
 **Keys are the runner's own — never the platform's.** A runner key is

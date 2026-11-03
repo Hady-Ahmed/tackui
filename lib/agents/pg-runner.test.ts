@@ -2,7 +2,7 @@ import { describe, it, expect, beforeEach, beforeAll, afterAll, vi } from "vites
 import { EventType, type BaseEvent, type Message } from "@ag-ui/core";
 import type { AbstractAgent } from "@ag-ui/client";
 import { PostgresAgentRunner, redactReservedContext, redactReservedEvent } from "./pg-runner";
-import { runWithUser, type RequestUser } from "@/lib/auth/request-context";
+import { runWithUser, runWithRunnerContext, type RequestUser } from "@/lib/auth/request-context";
 import { query } from "@/lib/db/pg";
 import { runMigrations } from "@/lib/db/migrate";
 import { useRealPostgres } from "@/lib/db/test-postgres";
@@ -947,45 +947,156 @@ describe("PostgresAgentRunner — run lock + teardown lifecycle", () => {
     await first.settled;
   });
 
-  it("an aborted run's teardown leaves a replacement run's lock and connection intact", async (ctx) => {
+  it("stop() defers the lock release to the aborted run's own teardown", async (ctx) => {
     ctx.skip(!pgStarted, "Real Postgres (Docker) unavailable");
-    // A: hangs; stop() does NOT end it (abortReleases: false) — its
-    // teardown stays pending until the test releases it.
+    // A: hangs; stop() does NOT end it (throwOnRelease → its catch path
+    // persists the partial run, then tears down).
     const a = startControlled("t-race", "run-A", { throwOnRelease: true });
     await a.started;
 
-    // Stop A: the lock is released, A's teardown has NOT run yet.
+    // Stop A: abort is requested, but the lock is NOT released here —
+    // the aborted run keeps it through its persistence window. The old
+    // behavior released the lock in stop(), letting a replacement run
+    // race the aborted run's storeRun/captureThreadData (interleaved
+    // snapshots, out-of-order history) and making the abort-failure
+    // restore path able to overwrite a successor's lock with a stale
+    // run id (stuck is_running forever).
     const stopped = await runWithUser(user1, () =>
       runner.stop({ threadId: "t-race" }),
     );
     expect(stopped).toBe(true);
 
-    // B claims the freed lock and overwrites the map entry while A's
-    // teardown is still pending.
-    const b = startControlled("t-race", "run-B", { abortReleases: true });
-    await b.started;
+    // A replacement run attempted while the aborted run still holds the
+    // lock is refused — it can only start once A's teardown releases.
+    const refused = await runAs(runner, user1, "t-race", "run-B");
+    expect((refused.error as Error).message).toBe("Thread already running");
 
-    // NOW fail A: its catch-path teardown runs while B is live.
+    // Release A: the catch path persists, then the teardown releases the
+    // lock (current_run_id still matches run-A — no restore needed).
     a.release();
     await a.settled;
 
-    // B's lock survived A's teardown — the old teardown unconditionally
-    // wrote is_running=false here, which would let a THIRD run interleave
-    // with B.
     const state = await query<{
       is_running: boolean;
       current_run_id: string | null;
     }>(`SELECT is_running, current_run_id FROM run_state WHERE thread_id = 't-race'`);
-    expect(state.rows[0]?.is_running).toBe(true);
-    expect(state.rows[0]?.current_run_id).toBe("run-B");
+    expect(state.rows[0]?.is_running).toBe(false);
 
-    // B's connection entry survived too — the owner can still stop it,
-    // and the abort reaches B's agent (the old teardown cleared the
-    // entry's agent reference and deleted it).
+    // The thread is runnable again — and the owner can still stop a NEW
+    // run (the map entry handling is intact for the replacement).
+    const b = startControlled("t-race", "run-B2", { abortReleases: true });
+    await b.started;
     const stopB = await runWithUser(user1, () => runner.stop({ threadId: "t-race" }));
     expect(stopB).toBe(true);
     expect(b.abortRun).toHaveBeenCalledTimes(1);
     await b.settled;
+  });
+
+  it("a connect() landing after storeRun but before teardown does not replay the run twice", async (ctx) => {
+    ctx.skip(!pgStarted, "Real Postgres (Docker) unavailable");
+    // Window: the success path persists the run (storeRun) and THEN
+    // tears down (release + map cleanup). A connect() in between used to
+    // bridge the in-flight subject on top of a replay that already
+    // contained the persisted run — duplicating every non-message event
+    // (the messageId dedup doesn't cover TOOL_CALL_START, which the
+    // AG-UI verifier rejects outright). Now: when the replay snapshot
+    // already contains the in-flight run id, the bridge is skipped.
+    const gate: { open: boolean; waiting: (() => void)[] } = {
+      open: false,
+      waiting: [],
+    };
+    const original = (
+      runner as unknown as {
+        captureThreadData: (...args: unknown[]) => Promise<void>;
+      }
+    ).captureThreadData;
+    const spy = vi
+      .spyOn(
+        runner as unknown as {
+          captureThreadData: (...args: unknown[]) => Promise<void>;
+        },
+        "captureThreadData",
+      )
+      .mockImplementation(async function (this: unknown, ...args: unknown[]) {
+        if (!gate.open) {
+          await new Promise<void>((resolve) => gate.waiting.push(resolve));
+        }
+        return original.apply(runner, args);
+      });
+
+    const toolCallAgent = {
+      agentId: "agent-a",
+      agentName: "A",
+      abortRun: vi.fn(),
+      runAgent: async (
+        _input: unknown,
+        hooks: { onEvent: (e: { event: BaseEvent }) => void },
+      ) => {
+        const ev = (type: EventType, extra: Record<string, unknown>) =>
+          hooks.onEvent({ event: { type, ...extra } as unknown as BaseEvent });
+        ev(EventType.RUN_STARTED, { threadId: "t-connect-dup", runId: "run-dup" });
+        ev(EventType.TEXT_MESSAGE_START, { messageId: "m1", role: "assistant" });
+        ev(EventType.TEXT_MESSAGE_CONTENT, { messageId: "m1", delta: "hi" });
+        ev(EventType.TEXT_MESSAGE_END, { messageId: "m1" });
+        ev(EventType.TOOL_CALL_START, { toolCallId: "tc1", toolCallName: "ping" });
+        ev(EventType.TOOL_CALL_ARGS, { toolCallId: "tc1", delta: "{}" });
+        ev(EventType.TOOL_CALL_END, { toolCallId: "tc1" });
+        ev(EventType.RUN_FINISHED, { threadId: "t-connect-dup", runId: "run-dup" });
+      },
+    } as unknown as AbstractAgent;
+
+    const events: BaseEvent[] = [];
+    let settledResolve!: () => void;
+    const settled = new Promise<void>((r) => (settledResolve = r));
+    const observable = runWithUser(user1, () =>
+      runner.run({
+        threadId: "t-connect-dup",
+        agent: toolCallAgent,
+        input: runInput("t-connect-dup", "run-dup"),
+      }),
+    );
+    observable.subscribe({
+      next: (e) => events.push(e),
+      complete: () => settledResolve(),
+      error: () => settledResolve(),
+    });
+
+    // Wait until the run is persisted but captureThreadData (and thus the
+    // teardown) is still blocked.
+    await vi.waitFor(async () => {
+      const persisted = await query<{ n: string }>(
+        `SELECT count(*)::text AS n FROM agent_runs WHERE thread_id = 't-connect-dup' AND run_id = 'run-dup'`,
+      );
+      expect(persisted.rows[0]?.n).toBe("1");
+    });
+
+    // connect() while the run is in-flight-but-persisted.
+    const connectEvents: BaseEvent[] = [];
+    let connectDone = false;
+    runWithUser(user1, () =>
+      runner.connect({ threadId: "t-connect-dup" }),
+    ).subscribe({
+      next: (e) => connectEvents.push(e),
+      complete: () => {
+        connectDone = true;
+      },
+      error: () => {
+        connectDone = true;
+      },
+    });
+    await vi.waitFor(() => expect(connectDone).toBe(true));
+
+    // The replay carried the run exactly once: one TOOL_CALL_START for tc1.
+    const toolCallStarts = connectEvents.filter(
+      (e) => e.type === EventType.TOOL_CALL_START,
+    );
+    expect(toolCallStarts).toHaveLength(1);
+
+    // Un-block the run so its teardown completes cleanly.
+    gate.open = true;
+    for (const resolve of gate.waiting) resolve();
+    await settled;
+    spy.mockRestore();
   });
 
   it("a pre-run failure errors the stream and releases the lock", async (ctx) => {
@@ -1247,5 +1358,127 @@ describe("redactReservedContext", () => {
   it("returns events without an embedded input untouched", () => {
     const event = { type: EventType.RUN_STARTED };
     expect(redactReservedEvent(event, reserved)).toBe(event);
+  });
+});
+
+describe("PostgresAgentRunner — redaction chain integration (live ALS → stream → persisted)", () => {
+  // The pure-function tests above pin redactReservedContext/Event in
+  // isolation. This suite pins the WIRING — the part a unit test can't:
+  // a real run inside a real runWithRunnerContext ALS scope (the way the
+  // copilotkit route invokes it), whose reserved set flows through
+  // getReservedDepKeys() into BOTH the live onEvent redaction and the
+  // storeRun persistence redaction. Needs real Postgres (recursive CTE).
+  let runner: PostgresAgentRunner;
+
+  beforeEach(async () => {
+    runner = makeRunner();
+    await runner.awaitRefreshed();
+    runner.clearThreads();
+  });
+
+  let pgStarted = false;
+  let restorePg: (() => void) | null = null;
+
+  beforeAll(async () => {
+    restorePg = await useRealPostgres();
+    pgStarted = restorePg !== null;
+  });
+
+  afterAll(() => {
+    restorePg?.();
+    restorePg = null;
+  });
+
+  it("drops the run's injected secrets from the live stream and the persisted row; client context survives", async (ctx) => {
+    ctx.skip(!pgStarted, "Real Postgres (Docker) unavailable");
+
+    const reservedDepKeys = ["sk_test_model_key_12345", "tavily_api_key"];
+    const contextItems = [
+      { description: "sk_test_model_key_12345", value: "sk-secret-value" },
+      { description: "tavily_api_key", value: "tvly-secret-value" },
+      // A non-reserved item (the client's own context) must survive both
+      // redaction passes.
+      { description: "user_note", value: "not-a-secret" },
+    ];
+
+    // Emits RUN_STARTED withOUT an input — startRun fills it from
+    // request.input (whose context here is the gate's injected set), the
+    // exact path the live redaction must cover.
+    const agent = {
+      agentId: "agent-a",
+      agentName: "A",
+      abortRun: vi.fn(),
+      runAgent: async (
+        _input: unknown,
+        hooks: { onEvent: (e: { event: BaseEvent }) => void },
+      ) => {
+        hooks.onEvent({
+          event: { type: EventType.RUN_STARTED, threadId: "t-redact", runId: "run-redact" } as unknown as BaseEvent,
+        });
+        hooks.onEvent({
+          event: { type: EventType.TEXT_MESSAGE_START, messageId: "m1", role: "assistant" } as unknown as BaseEvent,
+        });
+        hooks.onEvent({
+          event: { type: EventType.TEXT_MESSAGE_CONTENT, messageId: "m1", delta: "hi" } as unknown as BaseEvent,
+        });
+        hooks.onEvent({
+          event: { type: EventType.TEXT_MESSAGE_END, messageId: "m1" } as unknown as BaseEvent,
+        });
+        hooks.onEvent({
+          event: { type: EventType.RUN_FINISHED, threadId: "t-redact", runId: "run-redact" } as unknown as BaseEvent,
+        });
+      },
+    } as unknown as AbstractAgent;
+
+    // The run must start INSIDE the runner-context ALS — the same way
+    // the copilotkit route wraps builder runs (user + stashed deps +
+    // reserved keys in one scope).
+    const events: BaseEvent[] = [];
+    const outcome = await new Promise<{ completed: boolean; error: unknown }>((resolve) => {
+      let observable!: ReturnType<PostgresAgentRunner["run"]>;
+      runWithRunnerContext(user1, contextItems, reservedDepKeys, async () => {
+        observable = runner.run({
+          threadId: "t-redact",
+          agent,
+          input: {
+            threadId: "t-redact",
+            runId: "run-redact",
+            messages: [{ id: "m1", role: "user", content: "hello" }],
+            state: {},
+            tools: [],
+            context: contextItems,
+            forwardedProps: {},
+          },
+        });
+      });
+      observable.subscribe({
+        next: (e) => events.push(e),
+        error: (err) => resolve({ completed: false, error: err }),
+        complete: () => resolve({ completed: true, error: null }),
+      });
+    });
+    expect(outcome.completed).toBe(true);
+
+    // ── Live stream: the RUN_STARTED the browser would have seen ─────
+    const liveStarted = events.find((e) => e.type === EventType.RUN_STARTED) as {
+      input?: { context?: { description: string; value: string }[] };
+    };
+    expect(liveStarted.input?.context).toBeDefined();
+    const liveDescriptions = liveStarted.input!.context!.map((c) => c.description);
+    expect(liveDescriptions).toEqual(["user_note"]);
+    const liveRaw = JSON.stringify(events);
+    expect(liveRaw).not.toContain("sk-secret-value");
+    expect(liveRaw).not.toContain("tvly-secret-value");
+
+    // ── Persisted: the agent_runs row (events + input) is clean ──────
+    const stored = await query<{ events: unknown; input: unknown }>(
+      `SELECT events, input FROM agent_runs WHERE thread_id = 't-redact' AND run_id = 'run-redact'`,
+    );
+    expect(stored.rows).toHaveLength(1);
+    const storedRaw = JSON.stringify(stored.rows[0]);
+    expect(storedRaw).not.toContain("sk-secret-value");
+    expect(storedRaw).not.toContain("tvly-secret-value");
+    // The client's own context item survives in the persisted input.
+    expect(storedRaw).toContain("not-a-secret");
   });
 });
