@@ -4,6 +4,15 @@ All notable changes to this project will be documented in this file. The format 
 
 ## [Unreleased]
 
+- **Completed runs now refresh the thread event cache.** The runner's
+  sync event/state readers (CopilotKit's runtime exposes them as
+  `/threads/:id/events` and `/threads/:id/state`) only ever saw the
+  history as of the last `connect()` — a finished run wasn't merged in,
+  so those reads served pre-run history until the thread was reconnected.
+  Persisting a run now merges its (redacted) events into the cache, with
+  the same RUN_ERROR filter the replay path applies. The shipped chat UI
+  wasn't affected (it replays via `connect`); the fix closes the gap for
+  the HTTP surface and external tooling.
 - **Boot fails fast when migrations can't apply; `/api/health?deep=true`
   reports readiness (security audit, Phase F).** Previously a migration
   failure after the retry window was only logged — the server booted and

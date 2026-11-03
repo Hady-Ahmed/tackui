@@ -1033,6 +1033,84 @@ describe("PostgresAgentRunner — run lock + teardown lifecycle", () => {
     expect(state.rows[0]?.is_running).toBe(false);
     spy.mockRestore();
   });
+
+  it("refreshes the events cache when a run persists (sync readers see the new run)", async (ctx) => {
+    ctx.skip(!pgStarted, "Real Postgres (Docker) unavailable");
+    // The audit's eventsCache staleness finding, verified REAL: the cache
+    // was only ever populated by connect(), so after a run the sync
+    // readers (CopilotKit's runtime /threads/:id/events and /state HTTP
+    // endpoints) served the PRE-RUN history. storeRun now merges the
+    // persisted events into the cache.
+    expect(runner.getThreadEvents("t-cache")).toEqual([]);
+
+    const outcome = await runAs(runner, user1, "t-cache", "run-cache-1");
+    expect(outcome.completed).toBe(true);
+
+    const events = runner.getThreadEvents("t-cache");
+    expect(events.some((e) => e.type === EventType.RUN_STARTED)).toBe(true);
+    expect(events.some((e) => e.type === EventType.RUN_FINISHED)).toBe(true);
+
+    // A second run MERGES into the same stream — both runs' events are
+    // visible (and the compacted stream stays stable across the merge).
+    const second = await runAs(runner, user1, "t-cache", "run-cache-2");
+    expect(second.completed).toBe(true);
+    const after = runner.getThreadEvents("t-cache");
+    const startedRunIds = after
+      .filter((e) => e.type === EventType.RUN_STARTED)
+      .map((e) => (e as { runId?: string }).runId);
+    expect(startedRunIds).toContain("run-cache-1");
+    expect(startedRunIds).toContain("run-cache-2");
+  });
+
+  it("a failed run's RUN_ERROR is persisted but never lands in the replay cache", async (ctx) => {
+    ctx.skip(!pgStarted, "Real Postgres (Docker) unavailable");
+    // Same filter connect() applies before replaying: the AG-UI verifier
+    // locks on a replayed RUN_ERROR mid-stream, so the sync replay surface
+    // must never carry one — even though the row itself is persisted.
+    const failingAgent = {
+      agentId: "agent-a",
+      agentName: "A",
+      abortRun: vi.fn(),
+      runAgent: async (
+        _input: unknown,
+        hooks: { onEvent: (e: { event: BaseEvent }) => void },
+      ) => {
+        hooks.onEvent({
+          event: { type: EventType.RUN_STARTED, threadId: "t-cache-err", runId: "run-err" } as unknown as BaseEvent,
+        });
+        hooks.onEvent({
+          event: { type: EventType.RUN_ERROR, message: "boom" } as unknown as BaseEvent,
+        });
+      },
+    } as unknown as AbstractAgent;
+
+    const outcome = await new Promise<{ completed: boolean; events: BaseEvent[] }>((resolve) => {
+      const events: BaseEvent[] = [];
+      runWithUser(user1, () =>
+        runner.run({
+          threadId: "t-cache-err",
+          agent: failingAgent,
+          input: runInput("t-cache-err", "run-err"),
+        }),
+      ).subscribe({
+        next: (e) => events.push(e),
+        error: () => resolve({ completed: false, events }),
+        complete: () => resolve({ completed: true, events }),
+      });
+    });
+
+    // The RUN_ERROR reached the live stream (the client contract)...
+    expect(outcome.events.some((e) => e.type === EventType.RUN_ERROR)).toBe(true);
+    // ...was persisted...
+    const persisted = await query<{ events: BaseEvent[] }>(
+      `SELECT events FROM agent_runs WHERE thread_id = 't-cache-err'`,
+    );
+    expect(JSON.stringify(persisted.rows[0]?.events)).toContain("RUN_ERROR");
+    // ...but the replay cache filters it, keeping the rest.
+    const cached = runner.getThreadEvents("t-cache-err");
+    expect(cached.some((e) => e.type === EventType.RUN_ERROR)).toBe(false);
+    expect(cached.some((e) => e.type === EventType.RUN_STARTED)).toBe(true);
+  });
 });
 
 describe("PostgresAgentRunner — sync cache reads (getThreadMessages / getThreadState)", () => {

@@ -145,7 +145,10 @@ always the source of truth:**
    PG is still correct.
 2. **Read-through on async paths:** `connect()` and `run()` (both async via
    fire-and-forget Observable pattern) fetch from PG INTO the cache before
-   completing.
+   completing, and `storeRun` merges each run's persisted events into
+   `eventsCache` when it persists them — so the sync readers (CopilotKit's
+   runtime `/threads/:id/events` and `/threads/:id/state` endpoints) reflect
+   completed runs immediately, not just after the next `connect()`.
 3. **Sync methods read cache ONLY** — no DB I/O, no Promises.
 
 Single-instance deployments (OSS self-hosters, solo mode) have no staleness —

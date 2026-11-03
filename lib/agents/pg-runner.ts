@@ -909,6 +909,23 @@ export class PostgresAgentRunner extends AgentRunner {
         SCHEMA_VERSION,
       ],
     );
+    // Read-through refresh: the sync readers (CopilotKit's runtime exposes
+    // /threads/:id/events and /threads/:id/state backed by the caches) used
+    // to serve the PRE-RUN history after a run — eventsCache was only ever
+    // populated by connect(). Merge this run's persisted events into the
+    // cache (PG write succeeded → cache may follow), with the same
+    // RUN_ERROR filter connect() applies before replaying: AG-UI's
+    // verifier locks on a replayed RUN_ERROR mid-stream, so the replay
+    // surface must never carry one.
+    const priorEvents = this.eventsCache.get(threadId) ?? [];
+    this.eventsCache.set(
+      threadId,
+      compactEvents(
+        [...priorEvents, ...compactedEvents].filter(
+          (event) => event.type !== EventType.RUN_ERROR,
+        ),
+      ),
+    );
   }
 
   private async getHistoricRuns(threadId: string): Promise<AgentRunRecord[]> {

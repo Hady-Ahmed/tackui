@@ -119,6 +119,17 @@ is re-derived server-side at create/update time:
   push-first sync at connector save — see
   [security.md](./security.md#credentials--connectors-stores-builder-subsystem)).
 
+A note on concurrent first-time connector creates (accepted, document-only):
+two simultaneous creates of the same-named connector in one org collapse to
+a single local row — the store is an `ON CONFLICT (org_id, name)` upsert, so
+the second write wins the row. Each request pushes its own registry entry
+first (push-first ordering), so the losing request's registry entry can
+linger under an id that nothing references. That orphan is harmless by
+construction: registry entries are URL-only (tokens are per-run deliveries,
+never stored there) and the dispatcher resolves attach URLs by the id the
+local row carries, which is always the winner's. No code path reads a
+registry id that isn't in a local row.
+
 An unknown model (`provider:id` not in the catalog) is a
 `BuilderValidationError` → 400. The picker is populated from the same
 endpoint, so a mismatch means a stale client or tampering.
