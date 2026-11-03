@@ -4,6 +4,13 @@ All notable changes to this project will be documented in this file. The format 
 
 ## [Unreleased]
 
+- **Boot no longer spams an Edge-Runtime `process.exit` warning.** The
+  fail-fast helper moved from `instrumentation.ts` into its own Node-only
+  module (`lib/db/fail-fast.ts`) behind a dynamic import: instrumentation
+  is compiled for the Edge runtime too, and the Edge compiler rejects
+  Node-only APIs it can see even when a `NEXT_RUNTIME` guard prevents them
+  from ever running. Boot behavior is unchanged.
+
 - **Replay history is verifier-safe without lying about failures.** The
   connect() replay filters persisted `RUN_ERROR` events (the AG-UI verifier
   locks on them mid-stream, making failed-run threads permanently unreadable

@@ -36,24 +36,6 @@ async function retryPg<T>(
 }
 
 /**
- * Fail fast when a boot step that leaves the app non-functional exhausted
- * its retries: without app tables (migrations) or auth tables, every
- * request 500s — and a merely-logged error would let orchestrators keep a
- * permanently-broken container "healthy". Exiting non-zero makes the
- * container unhealthy (Docker/k8s restart it; compose dependency gates
- * never go green), which is the truthful signal. Real PG connectivity is
- * verified by the retries themselves — this fires only when PG accepted
- * connections but the step still failed, OR PG never came up in ~30s.
- */
-function failFast(step: string, err?: unknown): never {
-  const detail = err instanceof Error ? err.message : err ? String(err) : "retries exhausted";
-  console.error(
-    `[boot] FATAL: ${step} failed (${detail}) — the app cannot serve requests without it. Exiting non-zero so the orchestrator restarts/reports unhealthy.`,
-  );
-  process.exit(1);
-}
-
-/**
  * Next.js instrumentation hook — runs ONCE on server boot, before any
  * request is accepted. Used to auto-run database migrations so self-hosters
  * can just `docker-compose up` without manually running migrate commands.
@@ -89,14 +71,21 @@ export async function register() {
   // Migrations are Node.js-only — they need node:fs, node:path, and pg.
   if (process.env.NEXT_RUNTIME === "edge") return;
 
+  // Node-only module (process.exit): dynamic import keeps it out of the
+  // Edge bundle — see lib/db/fail-fast.ts for why that matters.
+  const { failFast } = await import("@/lib/db/fail-fast");
   const { runMigrations } = await import("@/lib/db/migrate");
   const { ensureAuthTables } = await import("@/lib/auth/migrate");
   const { ensureSoloOrg } = await import("@/lib/auth/solo-org");
   const { logAgentosWarnings } = await import("@/lib/config/agentos");
 
   const migrationResult = await retryPg("migrate", () => runMigrations());
-  if (!migrationResult) failFast("migrations");
-  if (migrationResult.applied.length > 0) {
+  // if/else rather than an early failFast(): TS only narrows via a
+  // never-returning call when the callee is a statically-typed binding,
+  // and a destructured dynamic import doesn't qualify.
+  if (!migrationResult) {
+    failFast("migrations");
+  } else if (migrationResult.applied.length > 0) {
     console.log(`[migrate] applied ${migrationResult.applied.length} migration(s): ${migrationResult.applied.join(", ")}`);
   } else {
     console.log("[migrate] no new migrations to apply");
