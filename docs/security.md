@@ -235,6 +235,12 @@ Other hardening in the same spirit:
 - **`/api/health`** (`app/api/health/route.ts`) — liveness check returning
   `200 { ok: true }`. Bypassed by `proxy.ts` cookie gate so orchestrators can
   probe without a session. Wired into `docker-compose.yml` healthcheck.
+  `?deep=true` is the readiness variant: it round-trips Postgres and counts
+  the applied `schema_migrations` rows (200 `{ok, db: true, migrations: n}`,
+  503 `{db: false}` when the DB is unreachable — generic error body, the
+  detail is logged server-side). Boot fail-fast backs this up: migration or
+  auth-table failure after the retry window exits non-zero, so a broken
+  container reports unhealthy instead of serving 500s behind a green probe.
 - **Session-cookie `secure` flag** pinned to `NODE_ENV === "production"`.
 
 ## Rate limiting

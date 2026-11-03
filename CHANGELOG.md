@@ -4,6 +4,17 @@ All notable changes to this project will be documented in this file. The format 
 
 ## [Unreleased]
 
+- **Boot fails fast when migrations can't apply; `/api/health?deep=true`
+  reports readiness (security audit, Phase F).** Previously a migration
+  failure after the retry window was only logged — the server booted and
+  served 500s while liveness probes stayed green, so orchestrators kept a
+  permanently-broken container running. Boot now exits non-zero when the
+  migrations or auth tables can't be brought up (the run-state reset stays
+  non-fatal — it strands threads as "already running", it doesn't break
+  requests). The readiness probe (`?deep=true`) round-trips Postgres and
+  counts the applied migrations, returning 503 with a generic error when
+  the DB is unreachable — for orchestrator readiness gates and
+  post-deploy smoke checks. The plain probe is unchanged liveness.
 - **Credentials/template hardening + billing/org rate limits (security
   audit, Phase C).** Four closes: (1) a credentials UPDATE now intersects
   the stored row with the provider's current contract before merging, so

@@ -8,6 +8,11 @@ const PG_MAX_RETRIES = 15;
  * connections when the app boots (the docker-compose healthcheck checks
  * local socket readiness, not cross-container TCP). Retries until PG
  * accepts connections.
+ *
+ * Returns null when every attempt failed — callers that leave the app
+ * NON-FUNCTIONAL in that state must fail fast (exit non-zero) instead of
+ * booting a server that 500s everything while the orchestrator's liveness
+ * probe keeps it "healthy" forever.
  */
 async function retryPg<T>(
   label: string,
@@ -28,6 +33,24 @@ async function retryPg<T>(
     }
   }
   return null;
+}
+
+/**
+ * Fail fast when a boot step that leaves the app non-functional exhausted
+ * its retries: without app tables (migrations) or auth tables, every
+ * request 500s — and a merely-logged error would let orchestrators keep a
+ * permanently-broken container "healthy". Exiting non-zero makes the
+ * container unhealthy (Docker/k8s restart it; compose dependency gates
+ * never go green), which is the truthful signal. Real PG connectivity is
+ * verified by the retries themselves — this fires only when PG accepted
+ * connections but the step still failed, OR PG never came up in ~30s.
+ */
+function failFast(step: string, err?: unknown): never {
+  const detail = err instanceof Error ? err.message : err ? String(err) : "retries exhausted";
+  console.error(
+    `[boot] FATAL: ${step} failed (${detail}) — the app cannot serve requests without it. Exiting non-zero so the orchestrator restarts/reports unhealthy.`,
+  );
+  process.exit(1);
 }
 
 /**
@@ -72,35 +95,37 @@ export async function register() {
   const { logAgentosWarnings } = await import("@/lib/config/agentos");
 
   const migrationResult = await retryPg("migrate", () => runMigrations());
-  if (migrationResult) {
-    if (migrationResult.applied.length > 0) {
-      console.log(`[migrate] applied ${migrationResult.applied.length} migration(s): ${migrationResult.applied.join(", ")}`);
-    } else {
-      console.log("[migrate] no new migrations to apply");
-    }
-
-    // Stale run-state reset: is_running=true rows surviving a crash or
-    // restart previously made those threads permanently unrunnable —
-    // "Thread already running" with no recovery path, because no process
-    // owns them anymore (ACTIVE_CONNECTIONS is empty at boot and stop()
-    // only reaches in-process connections). Safe at boot: no run can be
-    // in flight in a process that is still starting. Single-instance
-    // deployments only (the documented constraint) — a second instance
-    // booting would reset the first one's live locks.
-    const resetResult = await retryPg("run-state-reset", async () => {
-      const { query } = await import("@/lib/db/pg");
-      return query(
-        `UPDATE run_state SET is_running = false, current_run_id = NULL WHERE is_running = true`,
-      );
-    });
-    if (resetResult && resetResult.rowCount && resetResult.rowCount > 0) {
-      console.log(
-        `[boot] reset ${resetResult.rowCount} stale in-flight run state(s) from a previous process`,
-      );
-    }
+  if (!migrationResult) failFast("migrations");
+  if (migrationResult.applied.length > 0) {
+    console.log(`[migrate] applied ${migrationResult.applied.length} migration(s): ${migrationResult.applied.join(", ")}`);
+  } else {
+    console.log("[migrate] no new migrations to apply");
   }
 
-  await retryPg("auth", () => ensureAuthTables());
+  // Stale run-state reset: is_running=true rows surviving a crash or
+  // restart previously made those threads permanently unrunnable —
+  // "Thread already running" with no recovery path, because no process
+  // owns them anymore (ACTIVE_CONNECTIONS is empty at boot and stop()
+  // only reaches in-process connections). Safe at boot: no run can be
+  // in flight in a process that is still starting. Single-instance
+  // deployments only (the documented constraint) — a second instance
+  // booting would reset the first one's live locks.
+  // Non-fatal: a failed reset strands threads as "already running"
+  // (annoying, recoverable by rerunning boot) but does not 500 the app.
+  const resetResult = await retryPg("run-state-reset", async () => {
+    const { query } = await import("@/lib/db/pg");
+    return query(
+      `UPDATE run_state SET is_running = false, current_run_id = NULL WHERE is_running = true`,
+    );
+  });
+  if (resetResult && resetResult.rowCount && resetResult.rowCount > 0) {
+    console.log(
+      `[boot] reset ${resetResult.rowCount} stale in-flight run state(s) from a previous process`,
+    );
+  }
+
+  const authOk = await retryPg("auth", () => ensureAuthTables());
+  if (!authOk) failFast("auth tables");
   console.log("[auth] tables ensured");
 
   if (process.env.AUTH_DISABLED === "true") {
