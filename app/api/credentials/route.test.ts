@@ -27,7 +27,7 @@ import { DELETE as DELETE_PROVIDER } from "./[provider]/route";
 import { runMigrations } from "@/lib/db/migrate";
 import { query } from "@/lib/db/pg";
 import { checkUserLimit } from "@/lib/ratelimit/middleware";
-import { setCredential } from "@/lib/credentials/credential-store";
+import { setCredential, getCredentialSecrets } from "@/lib/credentials/credential-store";
 import type { NextRequest } from "next/server";
 
 const USER_ID = "cred-route-user";
@@ -92,6 +92,11 @@ async function putAs(caller: string, body: unknown) {
       body: JSON.stringify(body),
     }) as NextRequest,
   );
+}
+
+/** Read primitive for assertions — the decrypted stored value. */
+function storedApiKey(userId: string) {
+  return getCredentialSecrets(userId).then((secrets) => secrets.openai?.api_key ?? null);
 }
 
 async function del(provider: string, caller?: string) {
@@ -239,6 +244,68 @@ describe("PUT /api/credentials", () => {
     expect(stored.rows[0].fields.api_key).toMatch(/^enc:v1:/);
     expect(stored.rows[0].fields.api_key).not.toContain("sk-first");
     expect(stored.rows[0].fields.api_key).not.toContain("sk-second");
+  });
+
+  it("update: a blank field keeps the stored value (single-field rotation still needs a value)", async () => {
+    await put({ provider: "x", fields: { consumer_key: "ck", consumer_secret: "cs", access_token: "at", access_token_secret: "ats" } });
+    const res = await put({ provider: "x", fields: { consumer_key: "  ", consumer_secret: "", access_token: "at-new", access_token_secret: "" } });
+    expect(res.status).toBe(200);
+    expect((await getCredentialSecrets(USER_ID)).x).toEqual({
+      consumer_key: "ck",
+      consumer_secret: "cs",
+      access_token: "at-new",
+      access_token_secret: "ats",
+    });
+  });
+
+  it("update: omitted fields keep the stored values too", async () => {
+    await put({ provider: "x", fields: { consumer_key: "ck", consumer_secret: "cs", access_token: "at", access_token_secret: "ats" } });
+    const res = await put({ provider: "x", fields: { access_token_secret: "ats-new" } });
+    expect(res.status).toBe(200);
+    expect((await getCredentialSecrets(USER_ID)).x).toEqual({
+      consumer_key: "ck",
+      consumer_secret: "cs",
+      access_token: "at",
+      access_token_secret: "ats-new",
+    });
+  });
+
+  it("update: merges over a partial stored row (completing a contract the platform extended)", async () => {
+    // Stored directly (the store is catalog-agnostic): three of x's four
+    // fields — e.g. the shape saved before the platform added a field.
+    await setCredential({
+      userId: USER_ID,
+      provider: "x",
+      kind: "tool",
+      fields: { consumer_key: "ck", consumer_secret: "cs", access_token: "at" },
+    });
+    const res = await put({ provider: "x", fields: { access_token_secret: "ats-new" } });
+    expect(res.status).toBe(200);
+    expect((await getCredentialSecrets(USER_ID)).x).toEqual({
+      consumer_key: "ck",
+      consumer_secret: "cs",
+      access_token: "at",
+      access_token_secret: "ats-new",
+    });
+  });
+
+  it("update: a wholly-blank submission is rejected (no silent no-op writes)", async () => {
+    await put({ provider: "openai", fields: { api_key: "sk-first" } });
+    const res = await put({ provider: "openai", fields: { api_key: "   " } });
+    expect(res.status).toBe(400);
+    expect(await storedApiKey(USER_ID)).toBe("sk-first");
+  });
+
+  it("update on a row-less provider still requires the full contract", async () => {
+    const res = await put({ provider: "x", fields: { consumer_key: "ck" } });
+    expect(res.status).toBe(400);
+    expect((await res.json()).error).toContain("all of its fields");
+  });
+
+  it("rejects an unknown BLANK field name too (the typo guard runs before blanks drop)", async () => {
+    const res = await put({ provider: "openai", fields: { api_key: "", apy_kye: "x" } });
+    expect(res.status).toBe(400);
+    expect((await res.json()).error).toContain("apy_kye");
   });
 
   it("rejects a missing fields map (400)", async () => {

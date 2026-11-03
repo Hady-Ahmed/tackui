@@ -88,7 +88,10 @@ secret stores whose boundaries are worth stating explicitly:
   `DB_ENCRYPTION_KEY` is unset, same mechanism as agent JWT secrets).
   **Write-only surface:** `GET /api/credentials` returns field NAMES
   only (plus a `hasKey` boolean); the plaintext is accepted on PUT and
-  never returned — same boundary discipline as `agents.jwtSecret`. The
+  never returned — same boundary discipline as `agents.jwtSecret`. PUT
+  update semantics mirror the connectors' position-aware merge: blank or
+  omitted fields keep the stored values when a row exists; a new
+  provider requires the full contract (all-or-nothing). The
   decrypted key is consumed exclusively by the run path and delivered
   per-run as an AG-UI context item — never persisted AgentOS-side, never
   cached agent-side. Rows are scoped `UNIQUE (user_id, provider)`; no FK

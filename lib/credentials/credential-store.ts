@@ -159,6 +159,26 @@ export async function getCredentialSecrets(
   return out;
 }
 
+/**
+ * Decrypt one provider's saved fields — the update path's merge source
+ * (blank submitted field = keep the stored value). Returns null when
+ * nothing is saved, or when nothing decrypts (same fail-closed treatment
+ * as the run path: an undecryptable row is treated as absent, forcing a
+ * full re-entry rather than silently keeping garbage).
+ */
+export async function getCredentialDecrypted(
+  userId: string,
+  provider: string,
+): Promise<Record<string, string> | null> {
+  const result = await query<{ fields: Record<string, string> | null }>(
+    `SELECT fields FROM credentials WHERE user_id = $1 AND provider = $2`,
+    [userId, provider],
+  );
+  const row = result.rows[0];
+  if (!row?.fields) return null;
+  return decryptFields(row.fields, provider);
+}
+
 function decryptFields(
   fields: Record<string, string>,
   provider: string,

@@ -568,13 +568,20 @@ requirements; runners keep their keys here.
   platform is unreachable — saved rows always render from the local DB,
   only new keys are blocked); the plaintext is accepted on `PUT` and
   never returned — same boundary discipline as `agents.jwtSecret` and
-  connector tokens. `PUT` takes `{provider, fields: {name: value}}` —
-  the provider's FULL contract, **fail-closed** on three counts: the
-  provider must exist in the LIVE catalog (a stale/offline platform →
-  503, no key saved), unknown field names are rejected (a typo would
-  silently never deliver), and missing ones are rejected (a partial
-  contract would pass the run gate and fail mid-run). The save is
-  all-or-nothing per provider.
+  connector tokens. `PUT` takes `{provider, fields: {name: value}}` and
+  is **fail-closed** on three counts: the provider must exist in the
+  LIVE catalog (a stale/offline platform → 503, no key saved), unknown
+  field names are rejected (a typo would silently never deliver, even
+  blank ones), and the saved map must cover the full contract — a
+  partial contract would pass the run gate and fail mid-run. The save
+  is all-or-nothing per provider. **Completeness is position-aware:**
+  for a NEW provider every declared field must be submitted non-empty;
+  for an UPDATE blank/omitted fields KEEP the stored values
+  (`getCredentialDecrypted` provides the merge source — an undecryptable
+  row is treated as absent, forcing full re-entry), so rotating one
+  field of a toolkit doesn't require re-typing the rest. A wholly-blank
+  update is rejected (the schema requires ≥1 non-blank value) — a no-op
+  write would silently look like a rotation.
 - **AES-256-GCM at rest** (`enc:v1:<iv>:<ciphertext>:<tag>` via
   `lib/crypto/encrypt.ts`, encrypted at the write boundary — same
   mechanism as agent JWT secrets; plaintext fallback exists only in solo
@@ -604,13 +611,17 @@ contract, save gated on every field being filled (a partial contract
 can't be saved). The dedicated **`/app/credentials` ("API keys") page**
 (`components/credentials-page.tsx`, linked from the account menu) is the
 management surface: saved rows always render (multi-field rows show the
-field count); add-rows come from the live catalog per request (no cache)
-and also include providers whose saved fields no longer cover the
-contract (the platform added a field → "incomplete — add the missing
-fields" re-connect path); when the platform is unreachable a banner
-explains that saved keys are unaffected and only new keys are blocked; a
-saved provider that left the catalog shows "No longer supported" and
-stays deletable.
+field count) and carry an **Edit** button that opens the contract's form
+in place (one row edits at a time; blank inputs mean "keep the current
+value" — the row's Save enables once ≥1 field is filled; rows flagged
+"No longer supported" hide Edit, since their contract no longer exists);
+add-rows come from the live catalog per request (no cache) and also
+include providers whose saved fields no longer cover the contract (the
+platform added a field → "incomplete — add the missing fields"
+re-connect path); when the platform is unreachable a banner explains
+that saved keys are unaffected and only new keys are blocked; a saved
+provider that left the catalog shows "No longer supported" and stays
+deletable.
 
 ## Connectors — `lib/connectors/connector-store.ts`
 

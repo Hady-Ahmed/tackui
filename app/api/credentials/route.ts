@@ -4,6 +4,8 @@
  * GET    /api/credentials            — saved rows + the live catalog
  * PUT    /api/credentials            — upsert one provider's fields
  *                                      {provider, fields: {name: value}}
+ *                                      blank/missing values KEEP the stored
+ *                                      ones when a row already exists
  * DELETE /api/credentials/:provider  — remove one provider's credentials
  *
  * Credentials are write-only: GET responses carry field NAMES, never
@@ -15,9 +17,18 @@
  * comes back null with `catalogError`, and new keys can't be added (PUT is
  * fail-closed — it validates against the live catalog) until it's back.
  *
- * PUT validates the field set against the provider's derived contract: the
- * exact fields the contract declares, every one non-empty. A partial
- * contract would pass the run gate and fail mid-run, so it can't be saved.
+ * PUT validates the field set against the provider's derived contract. The
+ * semantics are position-aware:
+ *  - NEW provider (nothing saved): every declared field required, all
+ *    non-empty — a partial contract would pass the run gate and fail
+ *    mid-run, so it can't be saved.
+ *  - UPDATE (a row exists): submitted blank/missing fields KEEP the stored
+ *    values — the merged map must still cover the contract. This is what
+ *    makes rotating one field of the X toolkit (e.g. just the access
+ *    token) possible without re-typing the other three.
+ * A wholly-blank update (nothing to merge in) is rejected: the UI only
+ * enables Save when at least one field is filled, and a no-op write would
+ * silently look like a rotation.
  */
 import { NextRequest, NextResponse } from "next/server";
 import { z } from "zod";
@@ -27,13 +38,23 @@ import {
   fetchCredentialsCatalog,
   type CredentialCatalogEntry,
 } from "@/lib/credentials/catalog";
-import { listCredentials, setCredential } from "@/lib/credentials/credential-store";
+import {
+  listCredentials,
+  setCredential,
+  getCredentialDecrypted,
+} from "@/lib/credentials/credential-store";
 
+/**
+ * Field values may be blank — a blank (or absent) field means "keep the
+ * stored value" when the provider already has a saved row (see PUT). At
+ * least one non-blank value is still required so an update is never a
+ * silent no-op.
+ */
 const setCredentialBodySchema = z.object({
   provider: z.string().trim().min(1).max(64),
   fields: z
-    .record(z.string(), z.string().trim().min(1, "Must not be empty").max(500))
-    .refine((fields) => Object.keys(fields).length > 0, {
+    .record(z.string(), z.string().max(500))
+    .refine((fields) => Object.values(fields).some((v) => v.trim().length > 0), {
       message: "At least one field is required",
     }),
 });
@@ -116,8 +137,8 @@ export async function PUT(request: NextRequest) {
     );
   }
 
-  // Exact contract match: unknown field names are rejected (a typo would
-  // silently never deliver), missing ones too (fail-closed mid-run guard).
+  // Exact contract match on SUBMITTED keys: unknown field names are
+  // rejected even when blank (a typo would silently never deliver).
   const contractKeys = entry.fields.map((f) => f.key).sort();
   const submittedKeys = Object.keys(parsed.data.fields).sort();
   const unknown = submittedKeys.filter((k) => !contractKeys.includes(k));
@@ -127,7 +148,22 @@ export async function PUT(request: NextRequest) {
       { status: 400 },
     );
   }
-  const absent = contractKeys.filter((k) => !submittedKeys.includes(k));
+
+  // Blank values drop out — they mean "keep the stored value" on update
+  // and count as missing on a new provider. At least one non-blank value
+  // is guaranteed by the body schema (whitespace-only maps fail it).
+  const provided: Record<string, string> = {};
+  for (const [key, value] of Object.entries(parsed.data.fields)) {
+    const trimmed = value.trim();
+    if (trimmed) provided[key] = trimmed;
+  }
+
+  // Position-aware completeness: a NEW provider must carry the full
+  // contract; an UPDATE merges the submitted values over the stored ones
+  // and only the merged map must cover the contract.
+  const stored = await getCredentialDecrypted(user.id, parsed.data.provider);
+  const fields = { ...(stored ?? {}), ...provided };
+  const absent = contractKeys.filter((k) => !(k in fields));
   if (absent.length > 0) {
     const labels = entry.fields
       .filter((f) => absent.includes(f.key))
@@ -140,18 +176,18 @@ export async function PUT(request: NextRequest) {
   }
 
   try {
-    const stored = await setCredential({
+    const storedRecord = await setCredential({
       userId: user.id,
       provider: parsed.data.provider,
       kind: entry.kind,
-      fields: parsed.data.fields,
+      fields,
     });
     return NextResponse.json({
-      provider: stored.provider,
-      kind: stored.kind,
+      provider: storedRecord.provider,
+      kind: storedRecord.kind,
       hasKey: true,
-      fields: stored.fields,
-      updatedAt: stored.updatedAt,
+      fields: storedRecord.fields,
+      updatedAt: storedRecord.updatedAt,
     });
   } catch (err) {
     console.error("[credentials] failed to store credential", {

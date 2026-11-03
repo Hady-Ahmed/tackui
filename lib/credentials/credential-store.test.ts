@@ -3,6 +3,7 @@ import {
   setCredential,
   listCredentials,
   getCredentialSecrets,
+  getCredentialDecrypted,
   deleteCredential,
 } from "./credential-store";
 import { runMigrations } from "@/lib/db/migrate";
@@ -260,6 +261,34 @@ describe("getCredentialSecrets", () => {
     );
     const secrets = await getCredentialSecrets(USER);
     expect(secrets).toEqual({});
+    expect(errSpy).toHaveBeenCalled();
+  });
+});
+
+describe("getCredentialDecrypted", () => {
+  it("returns null when nothing is saved", async () => {
+    expect(await getCredentialDecrypted(USER, "tavily")).toBeNull();
+  });
+
+  it("returns the decrypted field map for one provider only", async () => {
+    await setCredential({ userId: USER, provider: "openai", kind: "llm", fields: { api_key: "sk-a" } });
+    await setCredential({ userId: USER, provider: "tavily", kind: "tool", fields: { api_key: "tvly-a" } });
+    expect(await getCredentialDecrypted(USER, "tavily")).toEqual({ api_key: "tvly-a" });
+  });
+
+  it("stays scoped to the calling user", async () => {
+    await setCredential({ userId: OTHER_USER, provider: "openai", kind: "llm", fields: { api_key: "theirs" } });
+    expect(await getCredentialDecrypted(USER, "openai")).toBeNull();
+  });
+
+  it("treats an undecryptable row as absent (fail-closed — forces full re-entry)", async () => {
+    const errSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    await setCredential({ userId: USER, provider: "openai", kind: "llm", fields: { api_key: "good" } });
+    await query(
+      `UPDATE credentials SET fields = '{"api_key": "enc:v1:AAAAAAAAAAAAAAAA:AAAA:AAAAAAAAAAAAAAAAAAAAAA=="}' WHERE user_id = $1`,
+      [USER],
+    );
+    expect(await getCredentialDecrypted(USER, "openai")).toBeNull();
     expect(errSpy).toHaveBeenCalled();
   });
 });

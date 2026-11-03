@@ -12,9 +12,12 @@
  *    deletable, only NEW keys can't be added (PUT validates against the
  *    live catalog, fail-closed).
  *  - PUT  → {provider, fields: {name: value}} — the provider's full
- *    contract, validated field-by-field against the live catalog (every
- *    declared field required; a partial contract would pass the run gate
- *    and fail mid-run).
+ *    contract, validated field-by-field against the live catalog. The
+ *    semantics are position-aware: a NEW provider needs every declared
+ *    field non-empty; an UPDATE keeps stored values for blank/omitted
+ *    fields (that's how one field of a toolkit rotates without re-typing
+ *    the rest). A wholly-blank update is rejected — Save stays disabled
+ *    until at least one field is filled.
  *  - DELETE /:provider — accepts any saved provider, including ones the
  *    catalog no longer declares (a removed provider must never lock a key
  *    in; the row shows "No longer supported" and stays deletable).
@@ -22,7 +25,9 @@
  * A provider's connect form renders one input per field of its contract —
  * single-key providers have one ("API key"); multi-credential toolkits (the
  * X toolkit) have several. The plaintext never leaves this page except in
- * the PUT body — GET responses carry field NAMES only.
+ * the PUT body — GET responses carry field NAMES only. Editing works the
+ * same way: the Edit button opens the contract's form in place inside
+ * "Saved keys", with blank inputs meaning "keep the current value".
  */
 
 import { useCallback, useEffect, useState } from "react";
@@ -74,6 +79,10 @@ export function CredentialsPage() {
   const [savingProvider, setSavingProvider] = useState<string | null>(null);
   const [deletingProvider, setDeletingProvider] = useState<string | null>(null);
   const [newFields, setNewFields] = useState<Record<string, Record<string, string>>>({});
+  // Editing state — one saved row at a time; its inputs live in editFields
+  // (blank input = keep the stored value, mirroring the PUT update merge).
+  const [editingProvider, setEditingProvider] = useState<string | null>(null);
+  const [editFields, setEditFields] = useState<Record<string, Record<string, string>>>({});
 
   const load = useCallback(async () => {
     try {
@@ -136,6 +145,56 @@ export function CredentialsPage() {
       }
       setNotice(`${providerLabel(provider)} key saved.`);
       setNewFields((prev) => ({ ...prev, [provider]: {} }));
+      await load();
+    } catch {
+      setError("Couldn't reach the server — please try again.");
+    } finally {
+      setSavingProvider(null);
+    }
+  };
+
+  const onEditStart = (provider: string) => {
+    setEditingProvider(provider);
+    setEditFields((prev) => ({ ...prev, [provider]: {} }));
+  };
+
+  const onEditCancel = () => {
+    const provider = editingProvider;
+    setEditingProvider(null);
+    if (provider) setEditFields((prev) => ({ ...prev, [provider]: {} }));
+  };
+
+  const onSaveEdit = async (provider: string, meta: CredentialMeta) => {
+    const values = editFields[provider] ?? {};
+    // Only the filled fields go on the wire — blanks mean "keep the
+    // stored value" (the route merges them over the saved row).
+    const fields = Object.fromEntries(
+      meta.fields
+        .map((f) => [f.key, (values[f.key] ?? "").trim()])
+        .filter(([, v]) => v !== ""),
+    );
+    if (Object.keys(fields).length === 0) return;
+    setSavingProvider(provider);
+    setError(null);
+    setNotice(null);
+    try {
+      const res = await fetch("/api/credentials", {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ provider, fields }),
+      });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) {
+        setError(
+          typeof data.error === "string" && data.error
+            ? data.error
+            : `Failed to update the ${provider} key (${res.status})`,
+        );
+        return;
+      }
+      setNotice(`${providerLabel(provider)} key updated.`);
+      setEditingProvider(null);
+      setEditFields((prev) => ({ ...prev, [provider]: {} }));
       await load();
     } catch {
       setError("Couldn't reach the server — please try again.");
@@ -255,41 +314,125 @@ export function CredentialsPage() {
               <ul className="divide-y divide-zinc-200 dark:divide-zinc-800">
                 {saved.map((c) => {
                   const known = catalogHas(c.provider);
-                  const label = known
-                    ? catalog![c.provider].label
-                    : providerLabel(c.provider);
+                  const meta = known ? catalog![c.provider] : null;
+                  const label = meta?.label ?? providerLabel(c.provider);
+                  const editing = editingProvider === c.provider;
+                  // Same shape as the add rows: an empty contract falls
+                  // back to the single api_key field.
+                  const editInputs =
+                    meta && meta.fields.length > 0
+                      ? meta.fields
+                      : [{ key: "api_key", label: "API key" }];
+                  const editValues = editFields[c.provider] ?? {};
+                  const editFilled = editInputs.some(
+                    (f) => (editValues[f.key] ?? "").trim().length > 0,
+                  );
                   return (
-                    <li
-                      key={c.provider}
-                      className="flex items-center justify-between gap-3 py-3"
-                    >
-                      <div className="min-w-0">
-                        <p className="truncate text-sm font-medium">{label}</p>
-                        <p className="truncate text-xs text-zinc-500 dark:text-zinc-400">
-                          {c.kind === "llm" ? "Model key" : "Tool key"}
-                          {c.fields.length > 1 ? ` · ${c.fields.length} fields` : ""} · saved{" "}
-                          {new Date(c.updatedAt).toLocaleDateString()}
-                        </p>
+                    <li key={c.provider} className="py-3">
+                      <div className="flex items-center justify-between gap-3">
+                        <div className="min-w-0">
+                          <p className="truncate text-sm font-medium">{label}</p>
+                          <p className="truncate text-xs text-zinc-500 dark:text-zinc-400">
+                            {c.kind === "llm" ? "Model key" : "Tool key"}
+                            {c.fields.length > 1 ? ` · ${c.fields.length} fields` : ""} · saved{" "}
+                            {new Date(c.updatedAt).toLocaleDateString()}
+                          </p>
+                        </div>
+                        <div className="flex shrink-0 items-center gap-2">
+                          {/* A provider removed from the live catalog is
+                              shown but flagged — the key still works for the
+                              deletion path, and the run gate handles it.
+                              Edit is hidden with it (and whenever the catalog
+                              is unreachable): editing renders the contract's
+                              fields, which only the live catalog knows. */}
+                          {known === false && (
+                            <span className="rounded-full bg-amber-100 px-2 py-0.5 text-[10px] font-medium text-amber-700 dark:bg-amber-950 dark:text-amber-300">
+                              No longer supported
+                            </span>
+                          )}
+                          {!editing && meta && (
+                            <button
+                              type="button"
+                              onClick={() => onEditStart(c.provider)}
+                              // One row edits at a time, and edits pause
+                              // while a save/delete is in flight.
+                              disabled={
+                                editingProvider !== null ||
+                                savingProvider !== null ||
+                                deletingProvider !== null
+                              }
+                              className="rounded-lg border border-zinc-300 px-3 py-1.5 text-xs font-medium text-zinc-700 transition-colors hover:bg-zinc-100 disabled:opacity-50 dark:border-zinc-700 dark:text-zinc-300 dark:hover:bg-zinc-900"
+                            >
+                              Edit
+                            </button>
+                          )}
+                          {editing ? (
+                            <button
+                              type="button"
+                              onClick={onEditCancel}
+                              disabled={savingProvider !== null}
+                              className="rounded-lg border border-zinc-300 px-3 py-1.5 text-xs font-medium text-zinc-700 transition-colors hover:bg-zinc-100 disabled:opacity-50 dark:border-zinc-700 dark:text-zinc-300 dark:hover:bg-zinc-900"
+                            >
+                              Cancel
+                            </button>
+                          ) : (
+                            <button
+                              onClick={() => onDelete(c.provider)}
+                              // Save and delete disable each other — see the
+                              // add-row Save button below.
+                              disabled={deletingProvider !== null || savingProvider !== null}
+                              className="rounded-lg border border-red-300 px-3 py-1.5 text-xs font-medium text-red-600 transition-colors hover:bg-red-50 disabled:opacity-50 dark:border-red-800 dark:text-red-400 dark:hover:bg-red-950"
+                            >
+                              {deletingProvider === c.provider ? "Deleting…" : "Delete"}
+                            </button>
+                          )}
+                        </div>
                       </div>
-                      <div className="flex shrink-0 items-center gap-2">
-                        {/* A provider removed from the live catalog is
-                            shown but flagged — the key still works for the
-                            deletion path, and the run gate handles it. */}
-                        {known === false && (
-                          <span className="rounded-full bg-amber-100 px-2 py-0.5 text-[10px] font-medium text-amber-700 dark:bg-amber-950 dark:text-amber-300">
-                            No longer supported
-                          </span>
-                        )}
-                        <button
-                          onClick={() => onDelete(c.provider)}
-                          // Save and delete disable each other — see the
-                          // add-row Save button below.
-                          disabled={deletingProvider !== null || savingProvider !== null}
-                          className="rounded-lg border border-red-300 px-3 py-1.5 text-xs font-medium text-red-600 transition-colors hover:bg-red-50 disabled:opacity-50 dark:border-red-800 dark:text-red-400 dark:hover:bg-red-950"
-                        >
-                          {deletingProvider === c.provider ? "Deleting…" : "Delete"}
-                        </button>
-                      </div>
+                      {/* Inline edit form — opens inside Saved keys (the
+                          add rows below stay untouched). Blank input =
+                          keep the stored value. */}
+                      {editing && meta && (
+                        <div className="mt-2 space-y-2 rounded-xl border border-zinc-200 bg-white p-3 dark:border-zinc-800 dark:bg-zinc-950">
+                          <p className="text-xs text-zinc-500 dark:text-zinc-400">
+                            Leave a field blank to keep its current value.
+                          </p>
+                          {editInputs.map((field) => (
+                            <input
+                              key={field.key}
+                              type="password"
+                              value={editValues[field.key] ?? ""}
+                              onChange={(e) =>
+                                setEditFields((prev) => ({
+                                  ...prev,
+                                  [c.provider]: {
+                                    ...(prev[c.provider] ?? {}),
+                                    [field.key]: e.target.value,
+                                  },
+                                }))
+                              }
+                              placeholder={`${label} ${field.label}`}
+                              aria-label={`${label} ${field.label}`}
+                              className="w-full rounded-lg border border-zinc-200 bg-white px-3 py-2 text-sm text-zinc-900 outline-none transition-colors focus:border-blue-500 dark:border-zinc-700 dark:bg-zinc-900 dark:text-zinc-50"
+                            />
+                          ))}
+                          <button
+                            type="button"
+                            disabled={
+                              !editFilled ||
+                              savingProvider !== null ||
+                              deletingProvider !== null
+                            }
+                            onClick={() => onSaveEdit(c.provider, meta)}
+                            className="w-full rounded-lg bg-blue-600 px-4 py-2 text-sm font-medium text-white transition-colors hover:bg-blue-700 disabled:opacity-50"
+                          >
+                            {savingProvider === c.provider
+                              ? "Saving…"
+                              : editInputs.length > 1
+                                ? "Save credentials"
+                                : "Save key"}
+                          </button>
+                        </div>
+                      )}
                     </li>
                   );
                 })}

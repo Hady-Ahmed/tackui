@@ -4,6 +4,14 @@ All notable changes to this project will be documented in this file. The format 
 
 ## [Unreleased]
 
+- **Saved API keys are editable.** Each row on the API keys page gains an
+  Edit button (next to Delete) that opens the provider's form in place —
+  blank inputs mean "keep the current value", so one field of a
+  multi-credential toolkit (e.g. the X toolkit's access token) rotates
+  without re-typing the rest. PUT semantics are position-aware: new
+  providers still require the full contract; updates merge submitted
+  values over the stored ones (undecryptable rows are treated as absent,
+  forcing full re-entry) and a wholly-blank update is rejected.
 - **Payment status gates plan enforcement.** `getOrgPlan` reads the
   subscription's Stripe status: only `active`/`trialing` keep their plan — a
   lapsed status (`past_due`, `unpaid`, `canceled`, `incomplete_expired`) reads
