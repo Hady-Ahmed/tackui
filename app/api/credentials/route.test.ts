@@ -328,6 +328,54 @@ describe("PUT /api/credentials", () => {
     expect(await storedApiKey(USER_ID)).toBe("sk-first");
   });
 
+  it("update: an UNDECRYPTABLE stored row is treated as absent — a partial submission is rejected (forces full re-entry)", async () => {
+    // Key rotation / backup mismatch: the stored ciphertext no longer
+    // decrypts. The route must NOT merge the submission over garbage (a
+    // half-valid row that partially works) — the row reads as absent, so
+    // a single-field submission fails the completeness check and the user
+    // must re-enter the full contract.
+    const errSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    await setCredential({ userId: USER_ID, provider: "x", kind: "tool", fields: { consumer_key: "ck", consumer_secret: "cs", access_token: "at", access_token_secret: "ats" } });
+    await query(
+      `UPDATE credentials SET fields = '{"consumer_key": "enc:v1:AAAAAAAAAAAAAAAA:AAAA:AAAAAAAAAAAAAAAAAAAAAA==", "consumer_secret": "enc:v1:AAAAAAAAAAAAAAAA:AAAA:AAAAAAAAAAAAAAAAAAAAAA==", "access_token": "enc:v1:AAAAAAAAAAAAAAAA:AAAA:AAAAAAAAAAAAAAAAAAAAAA==", "access_token_secret": "enc:v1:AAAAAAAAAAAAAAAA:AAAA:AAAAAAAAAAAAAAAAAAAAAA=="}' WHERE user_id = $1 AND provider = 'x'`,
+      [USER_ID],
+    );
+    const res = await put({ provider: "x", fields: { consumer_key: "ck-new" } });
+    expect(res.status).toBe(400);
+    expect((await res.json()).error).toContain("all of its fields");
+
+    // Re-entering the FULL contract still works (the undecryptable row is
+    // upserted, not stuck) and the new values are the only ones stored.
+    const full = await put({
+      provider: "x",
+      fields: { consumer_key: "ck-new", consumer_secret: "cs-new", access_token: "at-new", access_token_secret: "ats-new" },
+    });
+    expect(full.status).toBe(200);
+    expect((await getCredentialSecrets(USER_ID)).x).toEqual({
+      consumer_key: "ck-new",
+      consumer_secret: "cs-new",
+      access_token: "at-new",
+      access_token_secret: "ats-new",
+    });
+    errSpy.mockRestore();
+  });
+
+  it("GET still lists an undecryptable row (field NAMES) so the user can re-enter it", async () => {
+    const errSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    await setCredential({ userId: USER_ID, provider: "openai", kind: "llm", fields: { api_key: "sk-good" } });
+    await query(
+      `UPDATE credentials SET fields = '{"api_key": "enc:v1:AAAAAAAAAAAAAAAA:AAAA:AAAAAAAAAAAAAAAAAAAAAA=="}' WHERE user_id = $1 AND provider = 'openai'`,
+      [USER_ID],
+    );
+    const res = await GET();
+    expect(res.status).toBe(200);
+    const body = await res.json();
+    const row = body.credentials.find((c: { provider: string }) => c.provider === "openai");
+    expect(row).toBeDefined();
+    expect(row.fields).toContain("api_key"); // names only — never values
+    errSpy.mockRestore();
+  });
+
   it("update on a row-less provider still requires the full contract", async () => {
     const res = await put({ provider: "x", fields: { consumer_key: "ck" } });
     expect(res.status).toBe(400);

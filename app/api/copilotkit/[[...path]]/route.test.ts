@@ -131,6 +131,26 @@ describe("copilotkit route — builder run gate wiring", () => {
     expect(acquireConcurrent).not.toHaveBeenCalled();
   });
 
+  it("never pushes per-run dependencies for a gate-refused run (guard before push)", async () => {
+    // Phase ordering, credential half: the per-run dependency stash is
+    // created inside runWithRunnerContext — a gate-refused run must never
+    // reach it, otherwise the registry middleware could deliver resolved
+    // credentials for a run the gate already refused.
+    vi.mocked(checkBuilderRunGate).mockResolvedValue(
+      resolution({
+        response: NextResponse.json({ error: "gated" }, { status: 402 }),
+        contextItems: [{ description: "tavily_api_key", value: "tvly-secret" }],
+        reservedDepKeys: ["tavily_api_key"],
+      }),
+    );
+
+    const res = await POST(new Request(RUN_URL, { method: "POST" }));
+
+    expect(res.status).toBe(402);
+    expect(runWithRunnerContext).not.toHaveBeenCalled();
+    expect(consumeBuilderRunQuota).not.toHaveBeenCalled();
+  });
+
   it("leaves the slot to the stream wrapper on the happy path", async () => {
     // On success the slot is released when the SSE stream closes
     // (wrapStreamWithRelease), NOT synchronously — releasing here would

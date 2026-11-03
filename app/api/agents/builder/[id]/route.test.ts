@@ -50,6 +50,7 @@ vi.mock("@/lib/connectors/platform-sync", () => ({
 }));
 
 import { PATCH, DELETE } from "./route";
+import { checkUserLimit } from "@/lib/ratelimit/middleware";
 import { AgentosError } from "@/lib/agents/builder";
 import {
   createAgent,
@@ -154,6 +155,15 @@ describe("PATCH /api/agents/builder/[id]", () => {
     mockGetCurrentUser.mockResolvedValue(null);
     const res = await patchAgent(agent.id, { name: "Renamed" });
     expect(res.status).toBe(401);
+  });
+
+  it("returns 429 when the agentMutate rate limit refuses", async () => {
+    vi.mocked(checkUserLimit).mockReturnValueOnce(
+      new Response("Rate limited", { status: 429 }) as never,
+    );
+    const res = await patchAgent(agent.id, { name: "Renamed" });
+    expect(res.status).toBe(429);
+    expect(mockGetComponent).not.toHaveBeenCalled();
   });
 
   it("returns 404 for an unknown agent", async () => {
@@ -422,6 +432,15 @@ describe("DELETE /api/agents/builder/[id]", () => {
     mockGetCurrentUser.mockResolvedValue(null);
     const res = await deleteAgentById(agent.id);
     expect(res.status).toBe(401);
+  });
+
+  it("returns 429 when the agentMutate rate limit refuses", async () => {
+    vi.mocked(checkUserLimit).mockReturnValueOnce(
+      new Response("Rate limited", { status: 429 }) as never,
+    );
+    const res = await deleteAgentById(agent.id);
+    expect(res.status).toBe(429);
+    expect(mockGetComponent).not.toHaveBeenCalled();
   });
 
   it("returns 404 for an unknown agent", async () => {

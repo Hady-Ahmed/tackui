@@ -452,4 +452,36 @@ describe("assertSafeUrl", () => {
       await expect(fresh("http://8.8.8.8/")).resolves.toBeUndefined();
     });
   });
+
+  describe("ALLOW_PRIVATE_ENDPOINTS opt-in (self-host only)", () => {
+    const origAllowPrivate = process.env.ALLOW_PRIVATE_ENDPOINTS;
+
+    afterEach(() => {
+      if (origAllowPrivate === undefined) delete process.env.ALLOW_PRIVATE_ENDPOINTS;
+      else process.env.ALLOW_PRIVATE_ENDPOINTS = origAllowPrivate;
+      delete process.env.SAAS_MODE;
+      vi.resetModules();
+    });
+
+    it("ALLOWS private URLs when set outside SaaS mode (the documented self-host opt-in)", async () => {
+      // The positive half of the SaaS tests above: self-hosters pointing
+      // the builder at a backend on their private network (e.g. a
+      // docker-compose service) must be able to opt in explicitly.
+      process.env.ALLOW_PRIVATE_ENDPOINTS = "true";
+      vi.resetModules();
+      const { assertSafeUrl: fresh } = await import("./safe-fetch");
+      await expect(fresh("http://127.0.0.1:8000/agent")).resolves.toBeUndefined();
+      await expect(fresh("http://10.0.0.1:8000/")).resolves.toBeUndefined();
+      await expect(fresh("http://192.168.1.10:3000/")).resolves.toBeUndefined();
+    });
+
+    it("still blocks private URLs when unset (default)", async () => {
+      delete process.env.ALLOW_PRIVATE_ENDPOINTS;
+      vi.resetModules();
+      const { assertSafeUrl: fresh } = await import("./safe-fetch");
+      await expect(fresh("http://127.0.0.1:8000/agent")).rejects.toMatchObject({
+        name: "UnsafeUrlError",
+      });
+    });
+  });
 });

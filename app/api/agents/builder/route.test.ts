@@ -69,6 +69,7 @@ vi.mock("@/lib/auth/context", async (importOriginal) => {
 });
 
 import { POST } from "./route";
+import { checkUserLimit } from "@/lib/ratelimit/middleware";
 import { AgentosError } from "@/lib/agents/builder";
 import { upsertConnector } from "@/lib/connectors/connector-store";
 import {
@@ -162,6 +163,16 @@ describe("POST /api/agents/builder", () => {
     mockGetCurrentUser.mockResolvedValueOnce(null);
     const res = await POST(post(validBody));
     expect(res.status).toBe(401);
+    expect(mockFetchModels).not.toHaveBeenCalled();
+    expect(mockCreateComponent).not.toHaveBeenCalled();
+  });
+
+  it("returns 429 when the agentMutate rate limit refuses", async () => {
+    vi.mocked(checkUserLimit).mockReturnValueOnce(
+      new Response("Rate limited", { status: 429 }) as never,
+    );
+    const res = await POST(post(validBody));
+    expect(res.status).toBe(429);
     expect(mockFetchModels).not.toHaveBeenCalled();
     expect(mockCreateComponent).not.toHaveBeenCalled();
   });
