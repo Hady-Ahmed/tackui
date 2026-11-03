@@ -1008,6 +1008,139 @@ describe("PostgresAgentRunner — run lock + teardown lifecycle", () => {
     expect(runner.getThreadEvents("t-del")).toEqual([]);
   });
 
+  it("a lock row inside the grace window is refused, not stolen", async (ctx) => {
+    ctx.skip(!pgStarted, "Real Postgres (Docker) unavailable");
+    // The grace is what makes the stale-lock steal safe against the
+    // concurrent-claims race: a map-absent row younger than the grace is
+    // a winner still mid-registration, not an orphan. A row aged just
+    // under STALE_LOCK_GRACE_MS must still be refused — a regression
+    // that drops the grace (or the NaN→refuse default) would let a
+    // second run steal a fresh winner's lock and double-stream a thread.
+    await query(
+      `INSERT INTO run_state (thread_id, is_running, current_run_id, updated_at)
+       VALUES ('t-grace', true, 'run-ghost', now() - interval '5 seconds')`,
+    );
+    const outcome = await runAs(runner, user1, "t-grace", "run-live");
+    expect((outcome.error as Error).message).toBe("Thread already running");
+    const state = await query<{ current_run_id: string | null }>(
+      `SELECT current_run_id FROM run_state WHERE thread_id = 't-grace'`,
+    );
+    // The refused acquire left the row untouched.
+    expect(state.rows[0]?.current_run_id).toBe("run-ghost");
+  });
+
+  it("a connect bridging an in-flight run terminates the trailing failed run first", async (ctx) => {
+    ctx.skip(!pgStarted, "Real Postgres (Docker) unavailable");
+    // The round-3 rule leaves a failed run unresolved at the END of the
+    // persisted history — correct when the stream ends there. But the
+    // live bridge appends the in-flight run's RUN_STARTED to the SAME
+    // verified stream, and the verifier rejects RUN_STARTED while a run
+    // is still active: when the bridge will fire, the trailing failed
+    // run must be closed (open sequences first) exactly as the
+    // in-history unlock case. (Found in round 4; the
+    // failed-run-then-retry-in-history case is pinned separately.)
+    const failingAgent = {
+      agentId: "agent-a",
+      agentName: "A",
+      abortRun: vi.fn(),
+      runAgent: async (
+        _input: unknown,
+        hooks: { onEvent: (e: { event: BaseEvent }) => void },
+      ) => {
+        hooks.onEvent({
+          event: { type: EventType.RUN_STARTED, threadId: "t-bridge", runId: "run-fail-1" } as unknown as BaseEvent,
+        });
+        hooks.onEvent({
+          event: { type: EventType.TEXT_MESSAGE_START, messageId: "m1", role: "assistant" } as unknown as BaseEvent,
+        });
+        hooks.onEvent({
+          event: {
+            type: EventType.TOOL_CALL_START,
+            toolCallId: "tc1",
+            toolCallName: "search",
+            parentMessageId: "m1",
+          } as unknown as BaseEvent,
+        });
+        hooks.onEvent({
+          event: { type: EventType.RUN_ERROR, message: "boom" } as unknown as BaseEvent,
+        });
+      },
+    } as unknown as AbstractAgent;
+
+    await new Promise<void>((resolve) => {
+      runWithUser(user1, () =>
+        runner.run({
+          threadId: "t-bridge",
+          agent: failingAgent,
+          input: runInput("t-bridge", "run-fail-1"),
+        }),
+      ).subscribe({ complete: () => resolve(), error: () => resolve() });
+    });
+
+    // A retry is in flight and stays open until we release it.
+    const live = startControlled("t-bridge", "run-live", { abortReleases: true });
+    await live.started;
+
+    const connectEvents: BaseEvent[] = [];
+    let connectDone = false;
+    runWithUser(user1, () => runner.connect({ threadId: "t-bridge" })).subscribe({
+      next: (e) => connectEvents.push(e),
+      complete: () => {
+        connectDone = true;
+      },
+      error: () => {
+        connectDone = true;
+      },
+    });
+    // The bridge streams the in-flight run; it completes only at teardown.
+    await vi.waitFor(() =>
+      expect(
+        connectEvents.some(
+          (e) =>
+            e.type === EventType.RUN_STARTED &&
+            (e as { runId?: string }).runId === "run-live",
+        ),
+      ).toBe(true),
+    );
+    live.release();
+    await live.settled;
+    await vi.waitFor(() => expect(connectDone).toBe(true));
+
+    // The replay closed the failed run before the bridge's RUN_STARTED…
+    const finishIdx = connectEvents.findIndex(
+      (e) =>
+        e.type === EventType.RUN_FINISHED &&
+        (e as { runId?: string }).runId === "run-fail-1",
+    );
+    const liveStartIdx = connectEvents.findIndex(
+      (e) =>
+        e.type === EventType.RUN_STARTED &&
+        (e as { runId?: string }).runId === "run-live",
+    );
+    expect(finishIdx).toBeGreaterThanOrEqual(0);
+    expect(liveStartIdx).toBeGreaterThan(finishIdx);
+    // …with the open sequences closed before the terminator…
+    const msgEndIdx = connectEvents.findIndex(
+      (e) =>
+        e.type === EventType.TEXT_MESSAGE_END &&
+        (e as { messageId?: string }).messageId === "m1",
+    );
+    const toolEndIdx = connectEvents.findIndex(
+      (e) =>
+        e.type === EventType.TOOL_CALL_END &&
+        (e as { toolCallId?: string }).toolCallId === "tc1",
+    );
+    for (const idx of [msgEndIdx, toolEndIdx]) {
+      expect(idx).toBeGreaterThanOrEqual(0);
+      expect(idx).toBeLessThan(finishIdx);
+    }
+    // …no RUN_ERROR anywhere, and the live run finished at the end.
+    expect(connectEvents.some((e) => e.type === EventType.RUN_ERROR)).toBe(false);
+    expect(
+      connectEvents[connectEvents.length - 1]?.type,
+    ).toBe(EventType.RUN_FINISHED);
+  });
+
   it("stop() defers the lock release to the aborted run's own teardown", async (ctx) => {
     ctx.skip(!pgStarted, "Real Postgres (Docker) unavailable");
     // A: hangs; stop() does NOT end it (throwOnRelease → its catch path

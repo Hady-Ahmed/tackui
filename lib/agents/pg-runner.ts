@@ -133,14 +133,21 @@ export function redactReservedEvent<E extends object>(
  *   sequences that a bare synthetic terminator would leave dangling
  *   (permanently-spinning tool calls on reconnect).
  * - A run left unterminated at the END of the history is left
- *   unresolved: the spec makes resolving a truncated final run the
- *   consumer's business, and re-presenting a failed run with a success
- *   terminator would erase the failure the live client actually saw.
+ *   unresolved — UNLESS the caller is about to append a live bridge to
+ *   the same verified stream (`opts.terminateTrailing`, set by
+ *   startConnect when it will subscribe an in-flight run's subject after
+ *   the replay): the bridge's first event is the new run's RUN_STARTED,
+ *   and a producer must close what it opened before a new RUN_STARTED in
+ *   the same stream. The bridge supplies the "later RUN_STARTED" the
+ *   synthesis exists for — it just isn't in the persisted history list.
  *
  * The failure flavor is preserved in the synthesized tool-call results
  * (status "error") so replayed history reads as failed, not completed.
  */
-function buildReplayEvents(events: BaseEvent[]): BaseEvent[] {
+function buildReplayEvents(
+  events: BaseEvent[],
+  opts: { terminateTrailing?: boolean } = {},
+): BaseEvent[] {
   const out: BaseEvent[] = [];
   let openRun: { threadId: string; runId: string } | null = null;
   const openMessageIds = new Set<string>();
@@ -208,8 +215,14 @@ function buildReplayEvents(events: BaseEvent[]): BaseEvent[] {
     }
     out.push(event);
   }
-  // End of history with an open run: intentionally unresolved — no
-  // synthetic terminator (see the docstring).
+  // End of history with an open run: unresolved by default — but a
+  // caller appending a live bridge to this same stream must close the
+  // run first (the bridge's RUN_STARTED would otherwise trip the
+  // verifier's "run still active" lock).
+  if (opts.terminateTrailing && openRun) {
+    closeOpenSequences();
+    out.push(syntheticRunFinished(openRun));
+  }
   return out;
 }
 
@@ -671,10 +684,32 @@ export class PostgresAgentRunner extends AgentRunner {
         allHistoricEvents.push(event);
       }
     }
+    const snapshotRunIds = new Set(historicRuns.map((run) => run.run_id));
+
+    // Bridge-decision inputs are gathered BEFORE the replay is built:
+    // the trailing-run terminator and the live-bridge decision must
+    // agree on the SAME map/runState reads. If they didn't, a run
+    // registering between the two reads would be bridged onto a replay
+    // left unresolved (the verifier sees RUN_STARTED while a run is
+    // still active) or a replay terminated with no bridge to justify
+    // it. All awaits happen up front; from here to the bridge
+    // subscription every decision is synchronous off these values.
+    const activeConnection = ACTIVE_CONNECTIONS.get(request.threadId);
+    const runState = await this.getRunState(request.threadId);
+    const messages = await this.fetchThreadMessages(request.threadId);
+
+    // willBridge: an in-flight run exists and the snapshot does NOT
+    // cover it — the bridge will append its buffered events (first: its
+    // RUN_STARTED) to this same stream, so a trailing unresolved run in
+    // the replay must be closed first (see buildReplayEvents).
+    const willBridge =
+      activeConnection?.runId != null && !snapshotRunIds.has(activeConnection.runId);
     // Filter RUN_ERROR + verifier-safe replay shaping (conditional
     // synthetic terminator, closure of sequences the errored run left
     // open — see buildReplayEvents) BEFORE compacting.
-    const compactedEvents = compactEvents(buildReplayEvents(allHistoricEvents));
+    const compactedEvents = compactEvents(
+      buildReplayEvents(allHistoricEvents, { terminateTrailing: willBridge }),
+    );
 
     // ─── Read-through: populate caches from the PG fetch ──────────────
     // The sync LocalThreadEndpointRunner methods (getThreadEvents,
@@ -688,11 +723,9 @@ export class PostgresAgentRunner extends AgentRunner {
     // STATE_SNAPSHOT) until the next write on the thread. A cache
     // holding a runId absent from the snapshot proves a newer write
     // landed: skip and let the newer value stand.
-    const snapshotRunIds = new Set(historicRuns.map((run) => run.run_id));
     if (!this.cacheHoldsRunOutsideSnapshot(request.threadId, snapshotRunIds)) {
       this.eventsCache.set(request.threadId, compactedEvents);
     }
-    const messages = await this.fetchThreadMessages(request.threadId);
     if (messages.length > 0) this.messageCache.set(request.threadId, messages);
 
     const emittedMessageIds = new Set<string>();
@@ -704,8 +737,8 @@ export class PostgresAgentRunner extends AgentRunner {
     }
 
     // ─── Live-bridging: if a run is in flight, stream new events ──────
-    const activeConnection = ACTIVE_CONNECTIONS.get(request.threadId);
-    const runState = await this.getRunState(request.threadId);
+    // `activeConnection` and `runState` were read up front (see above)
+    // so this decision matches the terminator that shaped the replay.
 
     // A connect() landing between a run's storeRun and its teardown would
     // otherwise replay the just-persisted run TWICE: once from the

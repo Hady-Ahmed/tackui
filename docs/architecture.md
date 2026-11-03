@@ -99,13 +99,17 @@ and shapes replay through `buildReplayEvents`: persisted `RUN_ERROR` events
 are filtered out (the AG-UI verifier locks on them mid-stream, making
 failed-run threads permanently unreadable on reconnect), and an unterminated
 run is closed with a synthetic `RUN_FINISHED` — closing any message/tool-call
-sequences the errored run left open first — ONLY when a later `RUN_STARTED`
-follows it in the same history (the next run's `RUN_STARTED` would otherwise
-trip the verifier's "run still active" lock and reject the whole replay). A
-run left unterminated at the END of the history stays unresolved: the spec
-makes resolving a truncated final run the consumer's business, and
-re-presenting the failure as a completed turn would erase what the live
-client actually watched. The same shaping applies when a run is merged into
+sequences the errored run left open first — when a later `RUN_STARTED` would
+otherwise follow in the same verified stream: either a later run's
+`RUN_STARTED` already in the history (the next run's start would otherwise
+trip the verifier's "run still active" lock and reject the whole replay), or
+a live bridge about to append an in-flight run's buffered events (whose
+first event is that run's `RUN_STARTED`) to the same stream. A run left
+unterminated at the END of the history with no bridge following stays
+unresolved: the spec makes resolving a truncated final run the consumer's
+business, and re-presenting the failure as a completed turn would erase
+what the live client actually watched. The same shaping applies when a run
+is merged into
 the events cache, so sync reads (`/threads/:id/events`) get identical
 history. It exposes
 `renameThread`/`deleteThread`, used by `PATCH/DELETE /api/threads/[id]` — the
@@ -139,6 +143,19 @@ true, so an *immediate* replacement run gets "Thread already running" for
 the abort+persistence window (sub-second in practice; a hung backend that
 ignores the abort holds the lock until the boot reset, the same failure mode
 a hung non-stopped run always had).
+
+A third recovery covers the failure mode between those two: `teardownRun`'s
+release is best-effort, so a **transient DB failure during release** used to
+leave `is_running = true` with no runtime path back — every subsequent run
+refused with "Thread already running" until the next restart. `acquireRunState`
+now detects the orphan: a `current_run_id` with **no live `ACTIVE_CONNECTIONS`
+entry in this process** is stale (a genuine holder registers its map entry
+synchronously right after the acquire — no await in between — so a fresh
+map-absent row is a winner still mid-registration in a concurrent race, not
+an orphan), and after a grace window (`STALE_LOCK_GRACE_MS`, 10s) the next
+run attempt steals the lock with a loud log line. The grace is what makes
+the steal safe; the liveness check is in-process by design (single-instance,
+the same assumption as the boot-time reset).
 
 Failure handling is split by a `preRun` flag: **pre-run failures** (historic
 read, parent-run resolution) release the lock and rethrow — the run stream
@@ -174,13 +191,24 @@ always the source of truth:**
 
 1. **Write-through:** write paths (`captureThreadData`, `deleteThread`,
    `renameThread`) update PG FIRST, then the cache. If the cache update fails,
-   PG is still correct.
+   PG is still correct. `deleteThread` clears all three caches **regardless
+   of deleted row counts** (a first in-flight run has no persisted rows yet,
+   but the thread is already user-visible) and marks the live connection
+   `threadDeleted` when a run is still streaming: the run's persistence
+   window (`storeRun` + `captureThreadData`) checks the marker and skips
+   writing, so a delete racing a run cannot resurrect the thread — the
+   marker dies with the connection at teardown.
 2. **Read-through on async paths:** `connect()` and `run()` (both async via
    fire-and-forget Observable pattern) fetch from PG INTO the cache before
    completing, and `storeRun` merges each run's persisted events into
    `eventsCache` when it persists them — so the sync readers (CopilotKit's
    runtime `/threads/:id/events` and `/threads/:id/state` endpoints) reflect
    completed runs immediately, not just after the next `connect()`.
+   `connect()`'s read-through write is **skipped when the cache already
+   holds a runId absent from its snapshot** — a run committing between the
+   history read and the write merged itself into the cache, and the older
+   snapshot would regress the sync readers to pre-run history until the
+   next write on the thread.
 3. **Sync methods read cache ONLY** — no DB I/O, no Promises.
 
 Single-instance deployments (OSS self-hosters, solo mode) have no staleness —

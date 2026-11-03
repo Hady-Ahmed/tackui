@@ -154,8 +154,9 @@ surfaces the zod limits in-field (`maxLength` + live `n/200` and
      agent — you can use it again in 5h 12m." + the free-tier-only
      "Upgrade to Pro for more usage." clause; the quota 402 banner also
      carries an inline Upgrade button that opens the upgrade dialog —
-     the conversion ask lands at the paywall moment, not behind the
-     account menu). The button only renders when an upgrade actually
+     the upgrade path surfaces in the message the user is already
+     reading, rather than only behind the account menu). The button only
+     renders when an upgrade actually
      helps (free quota exhaustion or a plan-lock; paid plans share one
      quota cap, so pro users who exhaust it get the countdown without a
      button) and the pricing page (Free tier lists "Daily usage limits

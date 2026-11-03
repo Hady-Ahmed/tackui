@@ -14,11 +14,14 @@ All notable changes to this project will be documented in this file. The format 
   tool-call sequences left open under a "finished" run (permanently-spinning
   tool calls on reconnect). The synthesis is now conditional and properly
   closed: a synthetic `RUN_FINISHED` is appended ONLY when a later
-  `RUN_STARTED` follows in the same history (the next run's start would
-  otherwise trip the verifier's "run still active" lock), any open message
-  or tool-call sequence is closed first with an error-flavored tool result,
-  and a run unterminated at the END of the history stays unresolved —
-  the spec makes resolving a truncated final run the consumer's business.
+  `RUN_STARTED` would otherwise follow in the same verified stream — a
+  later run's start already in the history (the verifier-unlock case), or
+  a live bridge about to append an in-flight run's events (whose first
+  event is its RUN_STARTED) to the same stream — and any open message or
+  tool-call sequence is closed first with an error-flavored tool result.
+  A run unterminated at the END of the history with no bridge following
+  stays unresolved — the spec makes resolving a truncated final run the
+  consumer's business.
 - **Deleting a thread mid-run can no longer resurrect it.** A thread deleted
   from the sidebar while its run was still streaming came back on run
   completion: the finishing run's persistence re-inserted the run/message/
