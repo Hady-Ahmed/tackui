@@ -26,7 +26,7 @@ agent's .env is ever read: those carry PROD databases, which must never
 reach this script.
 Cost: two short GLM completions + one Tavily basic search.
 
-    DATABASE_URL=postgresql://... uv run python agents/platform-os/smoke_test.py
+    DATABASE_URL=postgresql://... uv run python agent-builder/smoke_test.py
 """
 import json
 import os
@@ -119,7 +119,7 @@ def boot():
 
     if not os.getenv("OPENROUTER_API_KEY"):
         sys.exit(
-            "OPENROUTER_API_KEY missing — put it in agents/platform-os/.env "
+            "OPENROUTER_API_KEY missing — put it in agent-builder/.env "
             "(or the shell env) to run the live smoke test."
         )
     if not os.getenv("DATABASE_URL"):
