@@ -240,7 +240,9 @@ export function BuilderForm({
         instructions: a?.instructions ?? "",
         model: req ? { provider: req.model.provider, id: req.model.id } : null,
         tools: req?.tools.map((t) => t.name) ?? [],
-        connectors: req?.connectors ?? [],
+        // The form's connector state holds org-facing NAMES; the snapshot
+        // carries {id, name} pairs.
+        connectors: req?.connectors.map((c) => c.name) ?? [],
       });
     } catch {
       // Without this, edit mode strands on "Loading…" forever.
@@ -325,7 +327,10 @@ export function BuilderForm({
         instructions: agent.instructions ?? "",
         model: { provider: agent.requirements.model.provider, id: agent.requirements.model.id },
         tools: agent.requirements.tools.map((t) => t.name),
-        connectors: agent.requirements.connectors,
+        // The form's connector state holds org-facing NAMES (the picker's
+        // vocabulary); the snapshot carries {id, name} pairs — map to
+        // names so the edit diff compares like with like.
+        connectors: agent.requirements.connectors.map((c) => c.name),
       }
     : null;
 

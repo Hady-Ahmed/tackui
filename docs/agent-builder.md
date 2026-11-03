@@ -104,10 +104,17 @@ is re-derived server-side at create/update time:
   re-checks at run time. The stored config references connector **ids**
   — the platform connector registry's keys (see
   [security.md](./security.md#credentials--connectors-stores-builder-subsystem))
-  — while the requirements snapshot keeps the org-facing names: ids are
-  globally unique (names are org-scoped and collide across orgs), and
-  the dispatcher matches the run wire's `mcp_connectors` keys against
-  the config's id list. Both routes also re-register the referenced
+  — and the requirements snapshot carries **`{id, name}` pairs**: the id
+  is the stable reference (ids are globally unique; names are org-scoped
+  and collide across orgs) and the dispatcher matches the run wire's
+  `mcp_connectors` keys against the config's id list. Snapshotting the id
+  makes delete-and-recreate visible: a recreated connector gets a new id,
+  the stored config still declares the old one, and the run gate 402s
+  (demanding a re-save) instead of delivering a token the dispatcher will
+  refuse mid-run. The run gate resolves the snapshot's ids with
+  `getConnectorsByIds`; the PATCH route blocks a preserved connector whose
+  id no longer resolves (409, "deleted or re-created… include connectors").
+  Both routes also re-register the referenced
   connectors with the platform registry (belt-and-braces over the
   push-first sync at connector save — see
   [security.md](./security.md#credentials--connectors-stores-builder-subsystem)).
@@ -300,7 +307,7 @@ via the `agentMutate` bucket. Order of checks:
 `requirements` is written at create from the definition tackui itself
 built: `{ model: {provider, id, platformTier, requiresKey}, tools: [{name,
 requiresKey, provider, platformFallback, credentials}], connectors:
-[names] }` (`buildRequirements()`) — the tool rows carry the full
+[{id, name}] }` (`buildRequirements()`) — the tool rows carry the full
 credential contract so the run gate can enforce all-or-nothing delivery
 of multi-credential toolkits, and the model's `requiresKey: false` (a
 keyless provider like ollama) tells the gate to demand no key at all —
@@ -407,7 +414,13 @@ runs before `acquireConcurrent`).
   fail mid-run). Snapshots written before multi-credential support
   treat the single `requiresKey` dep as the contract.
 - **Connector:** a required org MCP connector is not configured →
-  "an org admin needs to add it before it can run." Missing connectors
+  "an org admin needs to add it before it can run." Connectors resolve
+  **by id** (snapshot `{id, name}` pairs): a connector that was deleted
+  and re-created keeps its name but gets a new id, so the gate 402s and
+  asks for the agent to be re-saved in the agent builder. A connector
+  whose saved token can't be decrypted is also a blocker ("token can't
+  be read — re-enter it") — it is never treated as tokenless. Missing
+  connectors
   are always blockers — there is no platform fallback for connector
   credentials in any mode.
 

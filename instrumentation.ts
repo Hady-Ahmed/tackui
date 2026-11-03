@@ -78,6 +78,26 @@ export async function register() {
     } else {
       console.log("[migrate] no new migrations to apply");
     }
+
+    // Stale run-state reset: is_running=true rows surviving a crash or
+    // restart previously made those threads permanently unrunnable —
+    // "Thread already running" with no recovery path, because no process
+    // owns them anymore (ACTIVE_CONNECTIONS is empty at boot and stop()
+    // only reaches in-process connections). Safe at boot: no run can be
+    // in flight in a process that is still starting. Single-instance
+    // deployments only (the documented constraint) — a second instance
+    // booting would reset the first one's live locks.
+    const resetResult = await retryPg("run-state-reset", async () => {
+      const { query } = await import("@/lib/db/pg");
+      return query(
+        `UPDATE run_state SET is_running = false, current_run_id = NULL WHERE is_running = true`,
+      );
+    });
+    if (resetResult && resetResult.rowCount && resetResult.rowCount > 0) {
+      console.log(
+        `[boot] reset ${resetResult.rowCount} stale in-flight run state(s) from a previous process`,
+      );
+    }
   }
 
   await retryPg("auth", () => ensureAuthTables());

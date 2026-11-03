@@ -87,11 +87,17 @@ export interface AgentRequirements {
     credentials?: { depKey: string; label: string }[];
   }[];
   /**
-   * MCP connector names (org-level, connectors table) this agent wires in.
-   * The run gate checks the runner's org has each connector configured;
-   * their URL + token are delivered per-run via AG-UI context.
+   * MCP connectors (org-level, connectors table) this agent wires in,
+   * carried as the connector's stable ID plus its org-facing name. The ID
+   * is what the stored AgentOS config declares and what the dispatcher
+   * matches the run wire's mcp_connectors keys against — snapshotting the
+   * ID (not just the name) is what makes delete-and-recreate visible: a
+   * recreated connector gets a NEW id while the stored config still
+   * declares the old one, and the run gate must 402 instead of silently
+   * delivering a token for a connector the config never declared. The
+   * name is for gate copy and display only.
    */
-  connectors: string[];
+  connectors: { id: string; name: string }[];
 }
 
 export interface AgentEntry {

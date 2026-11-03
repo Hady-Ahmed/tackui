@@ -18,9 +18,9 @@ vi.mock("@/lib/credentials/credential-store", async (importOriginal) => {
   };
 });
 
-const mockGetConnectorsByNames = vi.fn();
+const mockGetConnectorsByIds = vi.fn();
 vi.mock("@/lib/connectors/connector-store", () => ({
-  getConnectorsByNames: (...a: unknown[]) => mockGetConnectorsByNames(...a),
+  getConnectorsByIds: (...a: unknown[]) => mockGetConnectorsByIds(...a),
 }));
 
 const mockConsumeQuota = vi.fn();
@@ -45,15 +45,21 @@ import type { Connector } from "@/lib/connectors/connector-store";
 // re-import under the right env via loadSaaS()/plain dynamic import.
 void import("./run-gate");
 
-function connectorFixture(name: string, token = ""): Connector {
+function connectorFixture(
+  name: string,
+  token = "",
+  overrides: Partial<Connector> = {},
+): Connector {
   return {
     id: `conn-${name}`,
     orgId: "org-1",
     name,
     url: `https://mcp.example.com/${name}`,
     token,
+    tokenUndecryptable: false,
     createdAt: "2026-01-01T00:00:00Z",
     updatedAt: "2026-01-01T00:00:00Z",
+    ...overrides,
   };
 }
 
@@ -96,7 +102,7 @@ describe("lib/agents/run-gate", () => {
   beforeEach(() => {
     mockGetAgent.mockReset();
     mockGetCredentialSecrets.mockReset();
-    mockGetConnectorsByNames.mockReset();
+    mockGetConnectorsByIds.mockReset();
     mockConsumeQuota.mockReset();
     mockGetEnforcementLimits.mockReset();
     mockConsumeQuota.mockReturnValue({
@@ -517,9 +523,12 @@ describe("lib/agents/run-gate", () => {
 
   it("402s a required connector the org has not configured", async () => {
     mockGetAgent.mockResolvedValue(
-      builderAgent({ ...miniRequirements, connectors: ["github"] }),
+      builderAgent({
+        ...miniRequirements,
+        connectors: [{ id: "conn-github", name: "github" }],
+      }),
     );
-    mockGetConnectorsByNames.mockResolvedValue(new Map());
+    mockGetConnectorsByIds.mockResolvedValue(new Map());
     const { checkBuilderRunGate } = await loadSaaSGate();
     const result = await checkBuilderRunGate(
       { id: "user-1", role: "member", name: "u", email: null, orgId: "org-1" },
@@ -533,10 +542,13 @@ describe("lib/agents/run-gate", () => {
 
   it("injects configured connectors as the mcp_connectors JSON dep", async () => {
     mockGetAgent.mockResolvedValue(
-      builderAgent({ ...miniRequirements, connectors: ["github"] }),
+      builderAgent({
+        ...miniRequirements,
+        connectors: [{ id: "conn-github", name: "github" }],
+      }),
     );
-    mockGetConnectorsByNames.mockResolvedValue(
-      new Map([["github", connectorFixture("github", "tok-123")]]),
+    mockGetConnectorsByIds.mockResolvedValue(
+      new Map([["conn-github", connectorFixture("github", "tok-123")]]),
     );
     mockGetCredentialSecrets.mockResolvedValue({ openai: { api_key: "sk-runner" } });
     const { checkBuilderRunGate } = await loadSaaSGate();
@@ -558,7 +570,60 @@ describe("lib/agents/run-gate", () => {
       },
     });
     expect(result.reservedDepKeys).toContain("mcp_connectors");
-    expect(mockGetConnectorsByNames).toHaveBeenCalledWith("org-1", ["github"]);
+    expect(mockGetConnectorsByIds).toHaveBeenCalledWith("org-1", ["conn-github"]);
+  });
+
+  it("402s when a snapshot connector id no longer exists (deleted-and-recreated)", async () => {
+    // Delete-and-recreate: the connector NAME still exists in the org, but
+    // with a NEW id. The snapshot declares the OLD id, the stored AgentOS
+    // config declares the OLD id — a name-based lookup would silently
+    // satisfy the gate and deliver a token keyed by the NEW id, which the
+    // dispatcher refuses mid-run. Id-based resolution makes the mismatch a
+    // pre-run 402.
+    mockGetAgent.mockResolvedValue(
+      builderAgent({
+        ...miniRequirements,
+        connectors: [{ id: "conn-old", name: "github" }],
+      }),
+    );
+    // The org's store resolves a DIFFERENT id under the same name — an
+    // id-keyed lookup for conn-old finds nothing.
+    mockGetConnectorsByIds.mockResolvedValue(new Map());
+    const { checkBuilderRunGate } = await loadSaaSGate();
+    const result = await checkBuilderRunGate(
+      { id: "user-1", role: "member", name: "u", email: null, orgId: "org-1" },
+      "agent-1",
+    );
+    expect(result.response?.status).toBe(402);
+    const body = await result.response!.json();
+    expect(body.error).toContain("github");
+    expect(body.error).toContain("re-save");
+  });
+
+  it("402s a connector whose stored token can't be decrypted (not treated as no-auth)", async () => {
+    mockGetAgent.mockResolvedValue(
+      builderAgent({
+        ...miniRequirements,
+        connectors: [{ id: "conn-github", name: "github" }],
+      }),
+    );
+    mockGetConnectorsByIds.mockResolvedValue(
+      new Map([
+        ["conn-github", connectorFixture("github", "", { tokenUndecryptable: true })],
+      ]),
+    );
+    mockGetCredentialSecrets.mockResolvedValue({ openai: { api_key: "sk-runner" } });
+    const { checkBuilderRunGate } = await loadSaaSGate();
+    const result = await checkBuilderRunGate(
+      { id: "user-1", role: "member", name: "u", email: null, orgId: "org-1" },
+      "agent-1",
+    );
+    expect(result.response?.status).toBe(402);
+    const body = await result.response!.json();
+    expect(body.error).toContain("can't be read");
+    // No mcp_connectors delivery — an empty bearer token would fail the
+    // run mid-stream against an authed MCP server.
+    expect(result.contextItems).toHaveLength(0);
   });
 
   it("consumeBuilderRunQuota consumes the platform-key quota (SaaS) — the wiring stays for Phase 3", async () => {
@@ -603,9 +668,12 @@ describe("lib/agents/run-gate", () => {
 
   it("still blocks a missing connector on self-host (no fallback exists)", async () => {
     mockGetAgent.mockResolvedValue(
-      builderAgent({ ...miniRequirements, connectors: ["github"] }),
+      builderAgent({
+        ...miniRequirements,
+        connectors: [{ id: "conn-github", name: "github" }],
+      }),
     );
-    mockGetConnectorsByNames.mockResolvedValue(new Map());
+    mockGetConnectorsByIds.mockResolvedValue(new Map());
     mockGetCredentialSecrets.mockResolvedValue({ openai: { api_key: "sk-selfhost" } });
     const { checkBuilderRunGate } = await loadGate();
     const result = await checkBuilderRunGate(
@@ -622,10 +690,13 @@ describe("lib/agents/run-gate", () => {
       builderAgent({
         model: { provider: "openai", id: "gpt-5", platformTier: false, depKey: "openai_api_key", name: "OpenAIChat" },
         tools: [{ name: "unknown_tool", requiresKey: "tavily_api_key", platformFallback: false }],
-        connectors: ["github", "linear"],
+        connectors: [
+          { id: "conn-github", name: "github" },
+          { id: "conn-linear", name: "linear" },
+        ],
       }),
     );
-    mockGetConnectorsByNames.mockResolvedValue(new Map());
+    mockGetConnectorsByIds.mockResolvedValue(new Map());
     const { checkBuilderRunGate } = await loadSaaSGate();
     const result = await checkBuilderRunGate(
       { id: "user-1", role: "member", name: "u", email: null, orgId: "org-1" },
@@ -650,7 +721,7 @@ describe("lib/agents/run-gate — contract present despite null requiresKey", ()
   beforeEach(() => {
     mockGetAgent.mockReset();
     mockGetCredentialSecrets.mockReset();
-    mockGetConnectorsByNames.mockReset();
+    mockGetConnectorsByIds.mockReset();
     mockConsumeQuota.mockReset();
     mockGetEnforcementLimits.mockReset();
     mockConsumeQuota.mockReturnValue({ allowed: true, resetAt: Date.now() + 1000, used: 1 });

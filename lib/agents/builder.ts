@@ -454,7 +454,11 @@ export function buildComponentConfig(
 
 /** The local requirements snapshot persisted with the agent row. */
 export function buildRequirements(
-  spec: { tools: Array<{ name: string }>; connectors: string[] },
+  spec: {
+    tools: Array<{ name: string }>;
+    /** Resolved connector refs — the org's stable ids + org-facing names. */
+    connectors: Array<{ id: string; name: string }>;
+  },
   model: AgentosModel,
   tools: AgentosTool[],
 ): AgentRequirements {
@@ -526,6 +530,9 @@ export function buildRequirements(
         })),
       };
     }),
+    // Connector refs carried as {id, name}: the id is the stable
+    // reference (stored config + dispatcher wire contract), the name is
+    // for gate copy.
     connectors: spec.connectors,
   };
   // Write-boundary validation: the snapshot must parse with the SAME
@@ -692,15 +699,15 @@ export function deriveRequirementsFromConfig(
     // A config referencing a connector id we can't name locally would
     // produce a lossy snapshot (silently dropped connector) — refuse
     // the derivation rather than write it.
-    const connectorNames: string[] = [];
+    const connectorRefs: Array<{ id: string; name: string }> = [];
     for (const id of connectorIds) {
       const name = connectorIdToName.get(id);
       if (name === undefined) return null;
-      connectorNames.push(name);
+      connectorRefs.push({ id, name });
     }
 
     return buildRequirements(
-      { tools: toolNames.map((name) => ({ name })), connectors: connectorNames },
+      { tools: toolNames.map((name) => ({ name })), connectors: connectorRefs },
       model,
       tools,
     );

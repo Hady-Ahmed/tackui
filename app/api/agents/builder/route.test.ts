@@ -352,9 +352,13 @@ describe("POST /api/agents/builder", () => {
     expect(mockEnsurePlatformConnectors).toHaveBeenLastCalledWith([
       { id: row.id, url: row.url, name: "github" },
     ]);
-    // The local requirements snapshot keeps the org-facing name.
+    // The local requirements snapshot carries {id, name} pairs — the id is
+    // the stable reference (stored config + dispatcher wire contract), the
+    // name is for gate copy.
     const body = await res.json();
     const stored = await getAgent(body.id, testOrg);
-    expect(stored?.requirements?.connectors).toEqual(["github"]);
+    expect(stored?.requirements?.connectors).toEqual([
+      { id: row.id, name: "github" },
+    ]);
   });
 });

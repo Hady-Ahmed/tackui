@@ -101,6 +101,33 @@ and its smart-replay `connect()` filters `RUN_ERROR` events before
 local SSE runner doesn't support CopilotKit's Intelligence-platform-only
 `useThreads` mutations.
 
+### Run lock lifecycle
+
+The per-thread run lock lives in the `run_state` table
+(`is_running`, `current_run_id`). `startRun` claims it with an **atomic
+conditional upsert** (`acquireRunState`: `INSERT … ON CONFLICT … WHERE
+is_running = false RETURNING`) — the check-then-act pair it replaced let two
+concurrent runs on the same thread both pass the "not running" check.
+
+Every exit path goes through `teardownRun`, which releases the lock **only
+while `current_run_id` still matches this run** and removes the
+`ACTIVE_CONNECTIONS` entry **only while it's still this run's object**. This
+matters for the abort race: stop() clears the lock, a replacement run can
+re-claim it and overwrite the map entry, and then the aborted run's teardown
+fires — an unconditional release would free the *replacement's* lock (letting
+a third run interleave) and clearing the shared entry would break the
+replacement's stop button.
+
+Failure handling is split by a `preRun` flag: **pre-run failures** (historic
+read, parent-run resolution) release the lock and rethrow — the run stream
+*errors*, matching the old contract; **mid-run failures** persist
+best-effort, release, and complete the stream. The persistence in the
+failure path is individually guarded so a `storeRun` throw can't skip the
+rest of the teardown. `instrumentation.ts` also resets stale
+`is_running = true` rows at boot (single-instance constraint: no run can be
+in flight in a process that is still starting), so a crash no longer leaves
+threads permanently "already running".
+
 ### In-memory cache (sync interface bridge)
 
 CopilotKit's `LocalThreadEndpointRunner` interface requires the 5 thread

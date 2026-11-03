@@ -257,7 +257,7 @@ describe("PATCH /api/agents/builder/[id]", () => {
     expect(mockUpdateConfig).not.toHaveBeenCalled();
   });
 
-  it("publishes config connectors as IDS (registry keys), keeps NAMES in the snapshot", async () => {
+  it("publishes config connectors as IDS (registry keys), snapshot carries {id, name}", async () => {
     // Seed a real org connector; the patch references it by NAME (the
     // member-facing form), but the published config must carry its ID —
     // the platform connector registry's key namespace (names collide
@@ -272,9 +272,13 @@ describe("PATCH /api/agents/builder/[id]", () => {
     expect(mockUpdateConfig).toHaveBeenCalledTimes(1);
     const config = mockUpdateConfig.mock.calls[0][1] as Record<string, unknown>;
     expect(config.connectors).toEqual([row.id]);
-    // The local requirements snapshot keeps the org-facing name.
+    // The local requirements snapshot carries {id, name} pairs — the id
+    // is the stable reference (a delete-and-recreate changes it, which
+    // the run gate must see), the name is for gate copy.
     const stored = await getAgent(agent.id, testOrg);
-    expect(stored?.requirements?.connectors).toEqual(["github"]);
+    expect(stored?.requirements?.connectors).toEqual([
+      { id: row.id, name: "github" },
+    ]);
     // Belt-and-braces: the effective connector set is re-registered
     // (idempotent) at publish time.
     expect(mockEnsureConnectors).toHaveBeenCalledWith([

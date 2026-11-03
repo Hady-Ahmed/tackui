@@ -612,6 +612,71 @@ describe("PostgresAgentRunner — stop during a thread's FIRST in-flight run", (
   });
 });
 
+// An agent that emits RUN_STARTED then RUN_FINISHED and returns — the
+// run completes on its own, exercising the full startRun pipeline.
+function finishingAgent(threadId: string, runId: string) {
+  const agent = {
+    agentId: "agent-a",
+    agentName: "A",
+    abortRun: vi.fn(),
+    runAgent: async (
+      _input: unknown,
+      hooks: { onEvent: (e: { event: BaseEvent }) => void },
+    ) => {
+      hooks.onEvent({
+        event: { type: EventType.RUN_STARTED, threadId, runId } as unknown as BaseEvent,
+      });
+      hooks.onEvent({
+        event: { type: EventType.RUN_FINISHED, threadId, runId } as unknown as BaseEvent,
+      });
+    },
+  } as unknown as AbstractAgent;
+  return agent;
+}
+
+function runInput(threadId: string, runId: string) {
+  return {
+    threadId,
+    runId,
+    messages: [{ id: "m1", role: "user" as const, content: "hello" }],
+    state: {},
+    tools: [],
+    context: [],
+    forwardedProps: {},
+  };
+}
+
+/** Drive a full run() for `user` and collect its outcome (events/error/completion). */
+function runAs(
+  runner: PostgresAgentRunner,
+  user: RequestUser,
+  threadId: string,
+  runId: string,
+) {
+  return new Promise<{
+    events: BaseEvent[];
+    error: unknown;
+    completed: boolean;
+  }>((resolve) => {
+    const events: BaseEvent[] = [];
+    let completed = false;
+    runWithUser(user, () =>
+      runner.run({
+        threadId,
+        agent: finishingAgent(threadId, runId),
+        input: runInput(threadId, runId),
+      }),
+    ).subscribe({
+      next: (e) => events.push(e),
+      error: (err) => resolve({ events, error: err, completed }),
+      complete: () => {
+        completed = true;
+        resolve({ events, error: null, completed });
+      },
+    });
+  });
+}
+
 describe("PostgresAgentRunner — run/connect cross-tenant guards", () => {
   // startRun writes runs keyed by threadId alone and startConnect replays
   // history by threadId alone — both previously trusted the caller with
@@ -641,70 +706,11 @@ describe("PostgresAgentRunner — run/connect cross-tenant guards", () => {
     restorePg = null;
   });
 
-  // An agent that emits RUN_STARTED then RUN_FINISHED and returns — the
-  // run completes on its own, exercising the full startRun pipeline.
-  function finishingAgent(threadId: string, runId: string) {
-    const agent = {
-      agentId: "agent-a",
-      agentName: "A",
-      abortRun: vi.fn(),
-      runAgent: async (
-        _input: unknown,
-        hooks: { onEvent: (e: { event: BaseEvent }) => void },
-      ) => {
-        hooks.onEvent({
-          event: { type: EventType.RUN_STARTED, threadId, runId } as unknown as BaseEvent,
-        });
-        hooks.onEvent({
-          event: { type: EventType.RUN_FINISHED, threadId, runId } as unknown as BaseEvent,
-        });
-      },
-    } as unknown as AbstractAgent;
-    return agent;
-  }
-
-  function runInput(threadId: string, runId: string) {
-    return {
-      threadId,
-      runId,
-      messages: [{ id: "m1", role: "user" as const, content: "hello" }],
-      state: {},
-      tools: [],
-      context: [],
-      forwardedProps: {},
-    };
-  }
-
-  function runAs(user: RequestUser, threadId: string, runId: string) {
-    return new Promise<{
-      events: BaseEvent[];
-      error: unknown;
-      completed: boolean;
-    }>((resolve) => {
-      const events: BaseEvent[] = [];
-      let completed = false;
-      runWithUser(user, () =>
-        runner.run({
-          threadId,
-          agent: finishingAgent(threadId, runId),
-          input: runInput(threadId, runId),
-        }),
-      ).subscribe({
-        next: (e) => events.push(e),
-        error: (err) => resolve({ events, error: err, completed }),
-        complete: () => {
-          completed = true;
-          resolve({ events, error: null, completed });
-        },
-      });
-    });
-  }
-
   it("denies a foreign-org run on an existing thread — no run_state write, no history append", async (ctx) => {
     ctx.skip(!pgStarted, "Real Postgres (Docker) unavailable");
     await seedThread(runner, "t-victim", "agent-a", "Victim chat", "user-1");
 
-    const result = await runAs(user3, "t-victim", "run-attack");
+    const result = await runAs(runner, user3, "t-victim", "run-attack");
     expect((result.error as Error).message).toBe("Thread not found");
 
     // The guard fires BEFORE any state change: no "running" marker was
@@ -724,7 +730,7 @@ describe("PostgresAgentRunner — run/connect cross-tenant guards", () => {
     ctx.skip(!pgStarted, "Real Postgres (Docker) unavailable");
     await seedThread(runner, "t-mate", "agent-a", "Alice's chat", "user-1");
 
-    const result = await runAs(user2, "t-mate", "run-mate");
+    const result = await runAs(runner, user2, "t-mate", "run-mate");
     expect((result.error as Error).message).toBe("Thread not found");
   });
 
@@ -732,7 +738,7 @@ describe("PostgresAgentRunner — run/connect cross-tenant guards", () => {
     ctx.skip(!pgStarted, "Real Postgres (Docker) unavailable");
     await seedThread(runner, "t-own", "agent-a", "Alice's chat", "user-1");
 
-    const result = await runAs(user1, "t-own", "run-own");
+    const result = await runAs(runner, user1, "t-own", "run-own");
     expect(result.error).toBeNull();
     expect(result.completed).toBe(true);
     expect(result.events.some((e) => e.type === EventType.RUN_STARTED)).toBe(true);
@@ -743,7 +749,7 @@ describe("PostgresAgentRunner — run/connect cross-tenant guards", () => {
     // A new chat is a cache miss AND has no PG row — the fail-closed
     // deny-on-unknown rule must apply only to threads that EXIST. The
     // creator becomes the owner via captureThreadData on first run.
-    const result = await runAs(user1, "t-fresh", "run-fresh");
+    const result = await runAs(runner, user1, "t-fresh", "run-fresh");
     expect(result.error).toBeNull();
     expect(result.completed).toBe(true);
 
@@ -806,6 +812,221 @@ describe("PostgresAgentRunner — run/connect cross-tenant guards", () => {
       });
     });
     expect(received.some((e) => e.type === EventType.STATE_SNAPSHOT)).toBe(true);
+  });
+});
+
+describe("PostgresAgentRunner — run lock + teardown lifecycle", () => {
+  // The run lock (run_state.is_running) and the ACTIVE_CONNECTIONS entry
+  // must survive every failure mode: a crash, a pre-run DB failure, a
+  // mid-run persistence failure, and — the subtle one — an aborted run's
+  // teardown racing a replacement run that reused the thread. Real
+  // Postgres: the lock is a conditional SQL upsert, same skip discipline
+  // as the suites above.
+  let runner: PostgresAgentRunner;
+
+  beforeEach(async () => {
+    runner = makeRunner();
+    await runner.awaitRefreshed();
+    runner.clearThreads();
+  });
+
+  let pgStarted = false;
+  let restorePg: (() => void) | null = null;
+
+  beforeAll(async () => {
+    restorePg = await useRealPostgres();
+    pgStarted = restorePg !== null;
+  });
+
+  afterAll(() => {
+    restorePg?.();
+    restorePg = null;
+  });
+
+  // An agent that emits RUN_STARTED and then hangs on a blocker the test
+  // controls. abortRun releases the blocker only when `abortReleases` —
+  // tests that need the teardown to happen LATER (after a replacement run
+  // started) pass false and fire `release()` manually.
+  function controlledAgent(
+    threadId: string,
+    runId: string,
+    opts: { throwOnRelease?: boolean; abortReleases?: boolean } = {},
+  ) {
+    let release!: () => void;
+    const blocker = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const abortRun = vi.fn(() => {
+      if (opts.abortReleases) release();
+    });
+    const agent = {
+      agentId: "agent-a",
+      agentName: "A",
+      abortRun,
+      runAgent: async (
+        _input: unknown,
+        hooks: { onEvent: (e: { event: BaseEvent }) => void },
+      ) => {
+        hooks.onEvent({
+          event: { type: EventType.RUN_STARTED, threadId, runId } as unknown as BaseEvent,
+        });
+        await blocker;
+        if (opts.throwOnRelease) {
+          throw new Error("model exploded");
+        }
+        hooks.onEvent({
+          event: { type: EventType.RUN_FINISHED, threadId, runId } as unknown as BaseEvent,
+        });
+      },
+    } as unknown as AbstractAgent;
+    return { agent, release, abortRun };
+  }
+
+  function startControlled(
+    threadId: string,
+    runId: string,
+    opts: { throwOnRelease?: boolean; abortReleases?: boolean } = {},
+  ) {
+    const { agent, release, abortRun } = controlledAgent(threadId, runId, opts);
+    const events: BaseEvent[] = [];
+    let startedResolve!: () => void;
+    let settledResolve!: () => void;
+    const started = new Promise<void>((r) => (startedResolve = r));
+    const settled = new Promise<void>((r) => (settledResolve = r));
+    // Inside the runner ALS for user1 — the guard and the provisional
+    // cache seed read the runner user from here.
+    const observable = runWithUser(user1, () =>
+      runner.run({ threadId, agent, input: runInput(threadId, runId) }),
+    );
+    observable.subscribe({
+      next: (event) => {
+        events.push(event);
+        if (event.type === EventType.RUN_STARTED) startedResolve();
+      },
+      complete: () => settledResolve(),
+      error: () => settledResolve(),
+    });
+    return { events, started, settled, release, abortRun };
+  }
+
+  it("only one of two concurrent claims on a thread wins the lock", async (ctx) => {
+    ctx.skip(!pgStarted, "Real Postgres (Docker) unavailable");
+    // The atomic upsert directly: two concurrent claims on the SAME
+    // thread race the conditional INSERT .. ON CONFLICT .. WHERE — the
+    // loser's UPDATE matches zero rows (the winner's is_running=true
+    // fails the WHERE), so exactly one RETURNING row comes back. The old
+    // check-then-act pair (getRunState → setRunState) let both through.
+    const acquire = (runId: string) =>
+      (
+        runner as unknown as {
+          acquireRunState: (t: string, r: string) => Promise<boolean>;
+        }
+      ).acquireRunState("t-lockrace", runId);
+    const [first, second] = await Promise.all([
+      acquire("run-C1"),
+      acquire("run-C2"),
+    ]);
+    expect([first, second].filter(Boolean)).toHaveLength(1);
+  });
+
+  it("a sequential second run while the first is in flight is still refused", async (ctx) => {
+    ctx.skip(!pgStarted, "Real Postgres (Docker) unavailable");
+    const first = startControlled("t-lock", "run-1", { abortReleases: true });
+    await first.started;
+
+    const second = await runAs(runner, user1, "t-lock", "run-2");
+    expect((second.error as Error).message).toBe("Thread already running");
+
+    // Clean up: stop releases the lock and lets the first run finish.
+    await runWithUser(user1, () => runner.stop({ threadId: "t-lock" }));
+    await first.settled;
+  });
+
+  it("an aborted run's teardown leaves a replacement run's lock and connection intact", async (ctx) => {
+    ctx.skip(!pgStarted, "Real Postgres (Docker) unavailable");
+    // A: hangs; stop() does NOT end it (abortReleases: false) — its
+    // teardown stays pending until the test releases it.
+    const a = startControlled("t-race", "run-A", { throwOnRelease: true });
+    await a.started;
+
+    // Stop A: the lock is released, A's teardown has NOT run yet.
+    const stopped = await runWithUser(user1, () =>
+      runner.stop({ threadId: "t-race" }),
+    );
+    expect(stopped).toBe(true);
+
+    // B claims the freed lock and overwrites the map entry while A's
+    // teardown is still pending.
+    const b = startControlled("t-race", "run-B", { abortReleases: true });
+    await b.started;
+
+    // NOW fail A: its catch-path teardown runs while B is live.
+    a.release();
+    await a.settled;
+
+    // B's lock survived A's teardown — the old teardown unconditionally
+    // wrote is_running=false here, which would let a THIRD run interleave
+    // with B.
+    const state = await query<{
+      is_running: boolean;
+      current_run_id: string | null;
+    }>(`SELECT is_running, current_run_id FROM run_state WHERE thread_id = 't-race'`);
+    expect(state.rows[0]?.is_running).toBe(true);
+    expect(state.rows[0]?.current_run_id).toBe("run-B");
+
+    // B's connection entry survived too — the owner can still stop it,
+    // and the abort reaches B's agent (the old teardown cleared the
+    // entry's agent reference and deleted it).
+    const stopB = await runWithUser(user1, () => runner.stop({ threadId: "t-race" }));
+    expect(stopB).toBe(true);
+    expect(b.abortRun).toHaveBeenCalledTimes(1);
+    await b.settled;
+  });
+
+  it("a pre-run failure errors the stream and releases the lock", async (ctx) => {
+    ctx.skip(!pgStarted, "Real Postgres (Docker) unavailable");
+    const spy = vi
+      .spyOn(
+        runner as unknown as { getLatestRunId: () => Promise<string | null> },
+        "getLatestRunId",
+      )
+      .mockRejectedValue(new Error("db down"));
+
+    const result = await runAs(runner, user1, "t-pretry", "run-P");
+    expect((result.error as Error).message).toBe("db down");
+
+    // The lock was released — the thread is runnable again (the old code
+    // abandoned the run here: stuck is_running, client hung).
+    const state = await query<{ is_running: boolean }>(
+      `SELECT is_running FROM run_state WHERE thread_id = 't-pretry'`,
+    );
+    expect(state.rows[0]?.is_running).toBe(false);
+    spy.mockRestore();
+  });
+
+  it("a mid-run persistence failure still completes the stream and releases the lock", async (ctx) => {
+    ctx.skip(!pgStarted, "Real Postgres (Docker) unavailable");
+    // The agent fails mid-run (throw-on-release) AND storeRun fails in
+    // the catch path — the teardown must survive both and finish.
+    const spy = vi
+      .spyOn(
+        runner as unknown as {
+          storeRun: (...args: unknown[]) => Promise<void>;
+        },
+        "storeRun",
+      )
+      .mockRejectedValue(new Error("persist down"));
+
+    const a = startControlled("t-persist", "run-X", { throwOnRelease: true });
+    await a.started;
+    a.release();
+    await a.settled;
+
+    const state = await query<{ is_running: boolean }>(
+      `SELECT is_running FROM run_state WHERE thread_id = 't-persist'`,
+    );
+    expect(state.rows[0]?.is_running).toBe(false);
+    spy.mockRestore();
   });
 });
 

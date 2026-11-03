@@ -4,6 +4,30 @@ All notable changes to this project will be documented in this file. The format 
 
 ## [Unreleased]
 
+- **Runner can no longer deadlock a thread (security audit, Phase B).** A
+  pre-run DB failure (history read / parent-run resolution) previously
+  escaped the error handling: `is_running` stayed true forever (the thread
+  became permanently unrunnable) and the SSE subjects never completed (the
+  client hung). Every exit path now runs through a shared teardown that
+  releases the run lock only while this run still owns it and removes the
+  connection entry only while it's still this run's object — so an aborted
+  run's teardown can no longer clobber a replacement run's lock or stop
+  button. The running check is now a single atomic conditional upsert
+  (two concurrent runs can no longer both pass the "not running" check), a
+  mid-run persistence failure can no longer skip the rest of the teardown,
+  and stale `is_running = true` rows are reset at boot, so a crash no longer
+  leaves threads permanently "already running".
+- **Builder connector requirements are id-snapshotted; undecryptable
+  connector tokens now 402.** The requirements snapshot stores connector
+  refs as `{id, name}` instead of bare names: a connector that is deleted
+  and re-created keeps its name but gets a new id, so the run gate now
+  resolves by id and 402s (with a re-save remedy) instead of delivering a
+  token the stored config's dispatcher will refuse mid-run. The PATCH route
+  blocks a preserved connector whose id no longer resolves (409 with
+  "include connectors" remedy). And a connector whose saved token can no
+  longer be decrypted (key rotation, corrupted row) is now a hard blocker —
+  `tokenUndecryptable` on the store record — rather than being delivered as
+  an empty bearer token that fails the run mid-stream.
 - **Cross-tenant guards on the run and connect paths (security audit).**
   Three holes closed, each pinned by tests: `startRun` now resolves the
   target thread's existence and ownership from Postgres before any state

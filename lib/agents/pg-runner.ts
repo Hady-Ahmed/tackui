@@ -217,45 +217,41 @@ export class PostgresAgentRunner extends AgentRunner {
       }
     }
 
-    // Check + mark running atomically (avoids race where two concurrent runs
-    // both see "not running" and both proceed).
-    const runState = await this.getRunState(request.threadId);
-    if (runState.isRunning) {
+    // Claim the run lock ATOMICALLY: the conditional upsert only takes the
+    // lock when the stored state says not-running, and RETURNING tells
+    // whether THIS call won it. The old check-then-act pair (getRunState →
+    // setRunState) let two concurrent runs on the same thread both observe
+    // "not running" and both proceed — interleaving both runs' events into
+    // one persisted history.
+    const acquired = await this.acquireRunState(
+      request.threadId,
+      request.input.runId,
+    );
+    if (!acquired) {
       throw new Error("Thread already running");
     }
-    await this.setRunState(request.threadId, true, request.input.runId);
 
     const seenMessageIds = new Set<string>();
     const currentRunEvents: BaseEvent[] = [];
-
-    const historicRuns = await this.getHistoricRuns(request.threadId);
-    const historicMessageIds = new Set<string>();
-    for (const run of historicRuns) {
-      for (const event of run.events) {
-        if ("messageId" in event && typeof event.messageId === "string") {
-          historicMessageIds.add(event.messageId);
-        }
-        if (event.type === EventType.RUN_STARTED) {
-          const runStarted = event as RunStartedEvent;
-          const messages = runStarted.input?.messages ?? [];
-          for (const message of messages) {
-            historicMessageIds.add(message.id);
-          }
-        }
-      }
-    }
 
     const nextSubject = new ReplaySubject<BaseEvent>(Infinity);
     const prevConnection = ACTIVE_CONNECTIONS.get(request.threadId);
     const prevSubject = prevConnection?.subject;
 
-    ACTIVE_CONNECTIONS.set(request.threadId, {
+    // THIS run's connection object — captured by identity so the teardown
+    // below can tell "still mine" from "a replacement run overwrote the
+    // map entry" (an aborted run's teardown must not touch the
+    // replacement's entry: its stop button and event routing depend on
+    // the agent/subject references this teardown used to clear).
+    const myConnection: ActiveConnectionContext = {
       subject: nextSubject,
       agent: request.agent,
       runSubject,
       currentEvents: currentRunEvents,
       stopRequested: false,
-    });
+    };
+
+    ACTIVE_CONNECTIONS.set(request.threadId, myConnection);
 
     // Seed the thread cache NOW, not at run end. The ownership gate in
     // stop() (and every sync runner read) consults this cache, and it was
@@ -280,13 +276,47 @@ export class PostgresAgentRunner extends AgentRunner {
     }
 
     const runAgent = async () => {
-      const parentRunId = await this.getLatestRunId(request.threadId);
       // The live stream is redacted with the SAME rule as persistence
       // (storeRun below). Captured here — inside the runner ALS scope,
       // which spans this whole async chain — so the redaction never
       // depends on where a callback happens to run.
       const liveReserved = new Set([...getReservedDepKeys(), "mcp_connectors"]);
+      // OUTER safety net: everything after the lock claim runs inside this
+      // try. A throw from the historic read or the pre-run parent
+      // resolution previously escaped the fire-and-forget wrapper entirely
+      // (logged and abandoned): is_running stayed true forever — the
+      // thread became unrunnable — and the SSE subjects never completed,
+      // hanging the client. The `preRun` flag splits the two failure
+      // contracts: a pre-run failure releases the lock + map entry and
+      // RETHROWS (the run stream errors, as it always did); a mid-run
+      // failure persists what it has, releases, and completes (as it
+      // always did). Either way the thread never stays locked.
+      let preRun = true;
+      // Declared outside the try so the mid-run failure path can persist
+      // the partial run with the correct parent linkage.
+      let parentRunId: string | null = null;
       try {
+        const historicRuns = await this.getHistoricRuns(request.threadId);
+        const historicMessageIds = new Set<string>();
+        for (const run of historicRuns) {
+          for (const event of run.events) {
+            if ("messageId" in event && typeof event.messageId === "string") {
+              historicMessageIds.add(event.messageId);
+            }
+            if (event.type === EventType.RUN_STARTED) {
+              const runStarted = event as RunStartedEvent;
+              const messages = runStarted.input?.messages ?? [];
+              for (const message of messages) {
+                historicMessageIds.add(message.id);
+              }
+            }
+          }
+        }
+
+        const parentRunIdResolved = await this.getLatestRunId(request.threadId);
+        parentRunId = parentRunIdResolved;
+        preRun = false;
+
         await request.agent.runAgent(request.input, {
           onEvent: ({ event }) => {
             let processedEvent: BaseEvent = event;
@@ -341,9 +371,8 @@ export class PostgresAgentRunner extends AgentRunner {
           },
         });
 
-        const connection = ACTIVE_CONNECTIONS.get(request.threadId);
         const appendedEvents = finalizeRunEvents(currentRunEvents, {
-          stopRequested: connection?.stopRequested ?? false,
+          stopRequested: myConnection.stopRequested ?? false,
         });
         for (const event of appendedEvents) {
           runSubject.next(event);
@@ -357,21 +386,26 @@ export class PostgresAgentRunner extends AgentRunner {
           request.input,
           parentRunId,
         );
-        await this.setRunState(request.threadId, false);
 
+        // Snapshot capture BEFORE releasing the lock: a replacement run
+        // can only start once the lock is gone, so this ordering
+        // guarantees the thread_messages/metadata write this run performs
+        // can't clobber — or be clobbered by — the next run's snapshot.
         await this.captureThreadData(request);
 
-        if (connection) {
-          connection.agent = undefined;
-          connection.runSubject = undefined;
-          connection.currentEvents = undefined;
-          connection.stopRequested = false;
-        }
+        await this.teardownRun(request.threadId, myConnection, request.input.runId);
 
         runSubject.complete();
         nextSubject.complete();
-        ACTIVE_CONNECTIONS.delete(request.threadId);
       } catch (err) {
+        if (preRun) {
+          // Pre-run failure (historic read / parent resolution): nothing
+          // was persisted — release the lock + map entry, then rethrow so
+          // the run stream ERRORS (the pre-run client contract) instead
+          // of completing silently.
+          await this.teardownRun(request.threadId, myConnection, request.input.runId);
+          throw err;
+        }
         console.error("[runner] run failed", {
           agentId: request.agent.agentId ?? "default",
           threadId: request.threadId,
@@ -379,41 +413,48 @@ export class PostgresAgentRunner extends AgentRunner {
           error: err instanceof Error ? err.message : String(err),
         });
 
-        const connection = ACTIVE_CONNECTIONS.get(request.threadId);
         const appendedEvents = finalizeRunEvents(currentRunEvents, {
-          stopRequested: connection?.stopRequested ?? false,
+          stopRequested: myConnection.stopRequested ?? false,
         });
         for (const event of appendedEvents) {
           runSubject.next(event);
           nextSubject.next(event);
         }
 
-        if (currentRunEvents.length > 0) {
-          await this.storeRun(
-            request.threadId,
-            request.input.runId,
-            currentRunEvents,
-            request.input,
-            parentRunId,
-          );
+        // Teardown must survive its own failures: a storeRun or
+        // captureThreadData throw here previously skipped the rest of the
+        // teardown — is_running stayed true forever (the thread became
+        // unrunnable until a boot reset) and the SSE subjects never
+        // completed (the client hung). Persist what we have, log what
+        // failed, and always finish the teardown.
+        try {
+          if (currentRunEvents.length > 0) {
+            await this.storeRun(
+              request.threadId,
+              request.input.runId,
+              currentRunEvents,
+              request.input,
+              parentRunId,
+            );
+          }
+          // Even on failure, capture the thread snapshot so the
+          // conversation is still readable on reconnect (the connect()
+          // smart replay filters out RUN_ERROR events before replaying).
+          // BEFORE the lock release — same clobber argument as the
+          // success path.
+          await this.captureThreadData(request);
+        } catch (persistErr) {
+          console.error("[runner] run-failure persistence failed", {
+            threadId: request.threadId,
+            runId: request.input?.runId,
+            error: persistErr instanceof Error ? persistErr.message : String(persistErr),
+          });
         }
-        await this.setRunState(request.threadId, false);
 
-        // Even on failure, capture the thread snapshot so the conversation
-        // is still readable on reconnect (the connect() smart replay filters
-        // out RUN_ERROR events before replaying).
-        await this.captureThreadData(request);
-
-        if (connection) {
-          connection.agent = undefined;
-          connection.runSubject = undefined;
-          connection.currentEvents = undefined;
-          connection.stopRequested = false;
-        }
+        await this.teardownRun(request.threadId, myConnection, request.input.runId);
 
         runSubject.complete();
         nextSubject.complete();
-        ACTIVE_CONNECTIONS.delete(request.threadId);
       }
     };
 
@@ -429,12 +470,16 @@ export class PostgresAgentRunner extends AgentRunner {
       });
     }
 
-    // Fire-and-forget. Errors are caught internally and logged.
+    // Fire-and-forget. The catch logs AND errors the subject: a rethrow
+    // from runAgent (e.g. a pre-run DB failure the inner handling didn't
+    // cover) must reach the client as a failed run — a log-only catch
+    // left the SSE stream open forever with the lock held.
     runAgent().catch((err) => {
       console.error("[runner] runAgent unexpected error", {
         threadId: request.threadId,
         error: err instanceof Error ? err.message : String(err),
       });
+      runSubject.error(err);
     });
   }
 
@@ -930,6 +975,72 @@ export class PostgresAgentRunner extends AgentRunner {
       isRunning: result.rows[0]?.is_running ?? false,
       currentRunId: result.rows[0]?.current_run_id ?? null,
     };
+  }
+
+  /**
+   * Atomically claim the run lock for a thread. The conditional upsert
+   * only takes the lock when the stored state says not-running (the
+   * ON CONFLICT ... WHERE guard), and RETURNING tells whether THIS call
+   * won it — false means another run holds the lock (or won the race).
+   */
+  private async acquireRunState(
+    threadId: string,
+    runId: string,
+  ): Promise<boolean> {
+    const result = await query<{ is_running: boolean }>(
+      `INSERT INTO run_state (thread_id, is_running, current_run_id, updated_at)
+       VALUES ($1, true, $2, now())
+       ON CONFLICT (thread_id) DO UPDATE SET
+         is_running = true,
+         current_run_id = EXCLUDED.current_run_id,
+         updated_at = now()
+       WHERE run_state.is_running = false
+       RETURNING is_running`,
+      [threadId, runId],
+    );
+    return result.rows.length > 0;
+  }
+
+  /**
+   * Shared end-of-run cleanup — called on EVERY exit path (success,
+   * mid-run failure, pre-run failure). Two guarded steps:
+   *
+   * 1. Release the run lock only when THIS run still owns it: the
+   *    `current_run_id` match fails after stop() cleared the state and a
+   *    replacement run re-claimed it — an aborted run's teardown must
+   *    not release the REPLACEMENT's lock (that would let a third run
+   *    interleave with the replacement).
+   * 2. Remove the map entry only while it is still this run's OBJECT
+   *    (identity check against the captured connection): a replacement
+   *    run's entry keeps its agent/subject references — its stop button
+   *    and event routing depend on them.
+   *
+   * Best-effort: the state step is individually guarded so a transient
+   * DB failure can't skip the map cleanup (and vice versa).
+   */
+  private async teardownRun(
+    threadId: string,
+    connection: ActiveConnectionContext,
+    runId: string,
+  ): Promise<void> {
+    try {
+      const state = await this.getRunState(threadId);
+      if (state.currentRunId === runId) {
+        await this.setRunState(threadId, false);
+      }
+    } catch (err) {
+      console.error("[runner] run-state release failed", {
+        threadId,
+        runId,
+        error: err instanceof Error ? err.message : String(err),
+      });
+    }
+    if (ACTIVE_CONNECTIONS.get(threadId) === connection) {
+      connection.agent = undefined;
+      connection.runSubject = undefined;
+      connection.currentEvents = undefined;
+      ACTIVE_CONNECTIONS.delete(threadId);
+    }
   }
 
   /**

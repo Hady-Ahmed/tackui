@@ -38,7 +38,7 @@ import {
   prettifyProviderLabel,
   providerForDepKey,
 } from "@/lib/credentials/catalog";
-import { getConnectorsByNames } from "@/lib/connectors/connector-store";
+import { getConnectorsByIds } from "@/lib/connectors/connector-store";
 import { consumePlatformKeyQuota } from "@/lib/ratelimit/platform-quota";
 import { getEnforcementLimits, formatCountdown } from "@/lib/plans/enforcement";
 import { SAAS_MODE } from "@/lib/config/saas";
@@ -214,18 +214,36 @@ export async function checkBuilderRunGate(
 
   // --- Connectors: org-level MCP config; missing = always a blocker
   // (there is no platform fallback for connector credentials in any mode).
+  // Resolution is BY ID: the snapshot carries {id, name} pairs captured at
+  // builder save time, and the stored platform config declares those same
+  // ids. A deleted-and-recreated connector keeps its NAME but gets a NEW
+  // id — a name lookup would silently satisfy the gate and deliver a
+  // token the dispatcher refuses (the stored config still declares the
+  // old id): a mid-run failure instead of the pre-run 402 this gate
+  // exists to produce.
   if (requirements.connectors.length > 0) {
-    const connectors = await getConnectorsByNames(
+    const connectors = await getConnectorsByIds(
       user.orgId,
-      requirements.connectors,
+      requirements.connectors.map((c) => c.id),
     );
-    const missing = requirements.connectors.filter((n) => !connectors.has(n));
+    const missing = requirements.connectors.filter((c) => !connectors.has(c.id));
     if (missing.length > 0) {
+      const names = missing.map((c) => c.name);
       blockers.push(
-        `This agent uses the ${missing.join(" and ")} connector${missing.length === 1 ? "" : "s"} — an org admin needs to add ${missing.length === 1 ? "it" : "them"} before it can run.`,
+        `This agent uses the ${names.join(" and ")} connector${missing.length === 1 ? "" : "s"} — an org admin needs to add it and re-save this agent in the agent builder before it can run.`,
       );
     }
-    if (connectors.size > 0) {
+    // An undecryptable stored token is NOT "no auth": the run would attach
+    // an empty bearer token and fail mid-run. 402 with the re-entry
+    // remedy instead.
+    const unreadable = [...connectors.values()].filter((c) => c.tokenUndecryptable);
+    if (unreadable.length > 0) {
+      const names = unreadable.map((c) => c.name);
+      blockers.push(
+        `The ${names.join(" and ")} connector${unreadable.length === 1 ? "'s saved token can't be read" : "s' saved tokens can't be read"} — an org admin needs to re-enter ${unreadable.length === 1 ? "it" : "them"} before the agent can run.`,
+      );
+    }
+    if (connectors.size > 0 && unreadable.length === 0 && missing.length === 0) {
       // Keyed by the connector's stable ID, and deliberately carrying NO
       // URL: the platform resolves attach URLs from its connector registry
       // (push-first-synced by this server at connector save) and ignores

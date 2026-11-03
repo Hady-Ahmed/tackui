@@ -38,7 +38,11 @@ import {
 import type { AgentRequirements } from "@/lib/agents/agents.config";
 import { getCurrentUser } from "@/lib/auth/context";
 import { checkUserLimit } from "@/lib/ratelimit/middleware";
-import { getConnectorsByNames, listConnectors } from "@/lib/connectors/connector-store";
+import {
+  getConnectorsByIds,
+  getConnectorsByNames,
+  listConnectors,
+} from "@/lib/connectors/connector-store";
 import { ensurePlatformConnectors } from "@/lib/connectors/platform-sync";
 import type { UpdateBuilderAgentInput } from "@/lib/agents/agent-store";
 import { agentosErrorResponse } from "@/lib/agents/builder";
@@ -213,37 +217,62 @@ export async function PATCH(
     // Reaching here with no snapshot means the patch supplied the full
     // config — the `?? []` fallbacks can no longer fire.
     const tools = patch.tools ?? existing.requirements?.tools.map((t) => ({ name: t.name })) ?? [];
-    const connectors = patch.connectors ?? existing.requirements?.connectors ?? [];
 
-    // The stored config references connector IDS (the platform registry's
-    // keys), so the whole EFFECTIVE set — patched or preserved from the
-    // snapshot — must resolve against the org's connector store. A
-    // preserved name whose connector was deleted since the agent was
-    // created now blocks the update: we can't publish an id we can't
-    // resolve, and silently dropping it would publish a config that
-    // silently loses the agent's connectors.
-    const orgConnectors = await getConnectorsByNames(user.orgId, connectors);
-    if (connectors.length) {
-      const missing = connectors.filter((name) => !orgConnectors.has(name));
+    // Effective connector refs. Two sources with different shapes: a
+    // PATCHED connector list arrives as org-facing NAMES (resolve against
+    // the org's store); a preserved list comes from the snapshot as
+    // {id, name} pairs and is verified BY ID — a deleted-and-recreated
+    // connector keeps its name but gets a NEW id, and the stored config
+    // declares the old one. Silently delivering the new connector's token
+    // under the preserved name would publish a config the dispatcher
+    // refuses at run time; blocking the update makes the re-link
+    // explicit.
+    let connectorRefs: Array<{ id: string; name: string }> = [];
+    if (patch.connectors !== undefined) {
+      const orgConnectors = await getConnectorsByNames(user.orgId, patch.connectors);
+      const missing = patch.connectors.filter((name) => !orgConnectors.has(name));
       if (missing.length) {
         return NextResponse.json(
           { error: `Unknown connector${missing.length > 1 ? "s" : ""}: ${missing.join(", ")}` },
           { status: 400 },
         );
       }
+      connectorRefs = patch.connectors.map((name) => {
+        const row = orgConnectors.get(name)!;
+        return { id: row.id, name: row.name };
+      });
+      referencedConnectors = patch.connectors.map((name) => {
+        const row = orgConnectors.get(name)!;
+        return { id: row.id, url: row.url, name: row.name };
+      });
+    } else {
+      const preserved = existing.requirements?.connectors ?? [];
+      const orgConnectors = await getConnectorsByIds(
+        user.orgId,
+        preserved.map((c) => c.id),
+      );
+      const missing = preserved.filter((c) => !orgConnectors.has(c.id));
+      if (missing.length) {
+        return NextResponse.json(
+          {
+            error: `This agent's ${missing.map((c) => c.name).join(" and ")} connector${missing.length > 1 ? "s were" : " was"} deleted or re-created since it was saved — include connectors in this update to re-link ${missing.length > 1 ? "them" : "it"}.`,
+          },
+          { status: 409 },
+        );
+      }
+      connectorRefs = preserved;
+      referencedConnectors = preserved.map((c) => {
+        const row = orgConnectors.get(c.id)!;
+        return { id: row.id, url: row.url, name: row.name };
+      });
     }
-    const connectorRows = connectors.map((name) => {
-      const row = orgConnectors.get(name)!;
-      return { id: row.id, url: row.url, name: row.name };
-    });
-    referencedConnectors = connectorRows;
-    const connectorIds = connectorRows.map((row) => row.id);
+    const connectorIds = referencedConnectors.map((row) => row.id);
 
     const spec = {
       name: nextLocal.name,
       instructions: resolvedInstructions,
       tools,
-      connectors,
+      connectors: connectorRefs,
     };
     try {
       nextConfig = buildComponentConfig(

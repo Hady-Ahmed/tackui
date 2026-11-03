@@ -3,6 +3,7 @@ import {
   upsertConnector,
   listConnectors,
   getConnectorsByNames,
+  getConnectorsByIds,
   deleteConnector,
   toPublicConnector,
 } from "./connector-store";
@@ -189,6 +190,77 @@ describe("listConnectors / getConnectorsByNames", () => {
   it("getConnectorsByNames skips names that don't exist", async () => {
     const map = await getConnectorsByNames(ORG, ["nope"]);
     expect(map.size).toBe(0);
+  });
+});
+
+describe("getConnectorsByIds", () => {
+  it("resolves the requested ids in-org", async () => {
+    const a = await upsertConnector({
+      orgId: ORG,
+      name: "a-mcp",
+      url: "https://a.example.com",
+      token: "tok-a",
+    });
+    await upsertConnector({ orgId: ORG, name: "b-mcp", url: "https://b.example.com" });
+    await upsertConnector({ orgId: OTHER_ORG, name: "a-mcp", url: "https://foreign.example.com" });
+
+    const map = await getConnectorsByIds(ORG, [a.id]);
+    expect(map.size).toBe(1);
+    expect(map.get(a.id)?.name).toBe("a-mcp");
+    expect(map.get(a.id)?.token).toBe("tok-a");
+  });
+
+  it("returns an empty map for an empty list", async () => {
+    expect((await getConnectorsByIds(ORG, [])).size).toBe(0);
+  });
+
+  it("skips ids that are foreign-org or missing (delete-and-recreate gets a NEW id)", async () => {
+    const foreign = await upsertConnector({
+      orgId: OTHER_ORG,
+      name: "a-mcp",
+      url: "https://foreign.example.com",
+    });
+    const map = await getConnectorsByIds(ORG, [
+      foreign.id,
+      "00000000-0000-0000-0000-000000000000",
+    ]);
+    expect(map.size).toBe(0);
+  });
+});
+
+describe("tokenUndecryptable", () => {
+  it("flags a row whose ciphertext can't be decrypted (NOT treated as no-auth)", async () => {
+    const errSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    await upsertConnector({
+      orgId: ORG,
+      name: "github-mcp",
+      url: "https://g.example.com",
+      token: "good-token",
+    });
+    // Corrupt the stored ciphertext: valid `enc:v1:` prefix (so it's NOT
+    // legacy plaintext passthrough) but the auth tag won't verify →
+    // decryptSecret throws → flagged instead of silently serving "".
+    await query(
+      `UPDATE connectors SET token = 'enc:v1:AAAAAAAAAAAAAAAA:AAAA:AAAAAAAAAAAAAAAAAAAAAA==' WHERE org_id = $1 AND name = 'github-mcp'`,
+      [ORG],
+    );
+    const [c] = await listConnectors(ORG);
+    expect(c.tokenUndecryptable).toBe(true);
+    expect(c.token).toBe("");
+    // The public shape surfaces it too — the admin UI can badge the row.
+    const pub = toPublicConnector(c);
+    expect(pub.tokenUndecryptable).toBe(true);
+    expect(pub.hasToken).toBe(false);
+    expect(errSpy).toHaveBeenCalled();
+    errSpy.mockRestore();
+  });
+
+  it("is false for a healthy encrypted token and for a tokenless connector", async () => {
+    await upsertConnector({ orgId: ORG, name: "a-mcp", url: "https://a.example.com", token: "tok" });
+    await upsertConnector({ orgId: ORG, name: "b-mcp", url: "https://b.example.com" });
+    const rows = await listConnectors(ORG);
+    expect(rows.find((c) => c.name === "a-mcp")?.tokenUndecryptable).toBe(false);
+    expect(rows.find((c) => c.name === "b-mcp")?.tokenUndecryptable).toBe(false);
   });
 });
 

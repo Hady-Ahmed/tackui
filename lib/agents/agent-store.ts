@@ -69,7 +69,14 @@ export const requirementsSchema = z.object({
       platformFallback: z.boolean().default(false),
     }),
   ),
-  connectors: z.array(z.string().min(1)),
+  // Connector refs: the stable ID (what the stored AgentOS config
+  // declares — a delete-and-recreate gets a NEW id, which the id-based
+  // snapshot makes visible to the run gate) + the org-facing name for
+  // copy. Pre-id snapshots (bare name strings) fail this schema and drop
+  // the whole blob — fail-closed, the run gate then demands a re-save.
+  connectors: z.array(
+    z.object({ id: z.string().min(1), name: z.string().min(1) }),
+  ),
 });
 
 // Shared field definitions — used by the create + update input schemas

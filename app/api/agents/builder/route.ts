@@ -127,8 +127,18 @@ export async function POST(request: Request) {
     config = buildComponentConfig(remoteAgentId, { ...spec, connectorIds }, model, platformTools);
     // Same tool validation as buildComponentConfig — guarded too so a
     // stale tool name can never escape as a raw 500. buildRequirements
-    // keeps the org-facing NAMES (the local snapshot renders them).
-    requirements = buildRequirements(spec, model, platformTools);
+    // carries the connector refs as {id, name}: the id is the stable
+    // reference (stored config + dispatcher wire contract — a recreated
+    // connector's new id must be visible to the run gate), the name is
+    // for gate copy.
+    requirements = buildRequirements(
+      {
+        ...spec,
+        connectors: referencedConnectors.map((row) => ({ id: row.id, name: row.name })),
+      },
+      model,
+      platformTools,
+    );
   } catch (err) {
     if (err instanceof BuilderValidationError) {
       return NextResponse.json({ error: err.message }, { status: 400 });
