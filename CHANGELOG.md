@@ -321,6 +321,329 @@ All notable changes to this project will be documented in this file. The format 
 - **Malformed percent-encoding in a run path no longer 500s** — extracting the agent id from `/api/copilotkit/agent/{id}/run` called `decodeURIComponent` unguarded; a path segment like `%%` throws URIError and would surface as a 500 on the run path. Malformed encodings now return null (the request is treated as no agent — 404-shaped), keeping the failure contained.
 - **Run-failure banners no longer mislabel a paywall or a removed agent as "too many requests"** — the chat shell's fallback copy for bare 402/410 failures said "Too many requests. Try again shortly." (the server's own message usually wins; the fallback is now status-specific: "This agent can't run right now." / "This agent is no longer available."). Small copy/a11y tidy-ups alongside: the dismiss glyph matches the ✕ used elsewhere, the inline key-form inputs have accessible names, the catalog Test buttons announce which model they test, the "Your agents" list degrades silently on a network failure like every other loader, key inputs on the credentials page have accessible names, save/delete there disable each other (and Delete agent during a save), and the sidebar no longer carries its own drifting copy of the reachability-probe helpers.
 
+### agent-builder service (history imported from the agent-warehouse
+monorepo, where this service lived as `agents/platform-os` until the
+move above)
+
+- **The MCP cleanup close is capped like the attach.** When a connector
+  handshake times out, the best-effort close of the in-flight session
+  ran `__aexit__` with no timeout — a hung endpoint can hang the CLOSE
+  just as it hung the open, reintroducing the eternal-spinner /
+  occupied-slot failure the attach timeout exists to prevent. The
+  cleanup now gets its own `wait_for` (same `MCP_ATTACH_TIMEOUT_SECONDS`
+  cap); a cancelled cleanup never masks the original failure. Pinned by
+  test (a connector that hangs on both enter and exit still lets the
+  run start). The attach timeout env var is also parsed defensively now
+  — a typo'd value falls back to 20s instead of crashing the service at
+  import — and is documented in `.env.example`.
+
+- **Upgrade note for pre-registry deployments:** components created
+  before the connector registry carry connector NAMES in their stored
+  config; the wire now carries ids and the dispatcher filters against
+  the declared list — such agents silently run without their connectors
+  until re-saved in the agent builder. Fresh deployments are unaffected
+  (nothing to migrate). See the builder docs' connectors section.
+
+- **Nit sweep:** the tool-function index now WARNS when two different
+  toolkits expose the same function name (the index is last-writer-wins
+  while registry rehydration is first-instance-wins — a future toolkit
+  overlap must be a decision, not a silent shadow); `main.py` no longer
+  builds the whole app at module level (importing the module for tooling
+  no longer opens DB connections — the `__main__` entry passes the app
+  object to uvicorn directly instead of an import string); and the
+  per-agent thread-id contract is documented in the run client's
+  architecture doc (`assert_session_writable` matches on
+  `(user_id, thread_id)` — component match is parity with the stock
+  router, so the frontend's per-agent keying is the guarantee).
+
+- **The event loop is no longer the bottleneck for blocking catalog work.**
+  The dispatcher's pre-stream section (`ensure_current` — a DB round-trip,
+  and under a revision bump a FULL registry rebuild under the rebuild lock —
+  plus agent construction) now runs on `anyio.to_thread`, and the
+  `/platform/models` + `/platform/tools` routes are sync `def` (FastAPI
+  threadpool). Previously every catalog request paid a blocking round-trip
+  on the event loop, and a rebuild stalled EVERY concurrently streaming run
+  for its whole duration; under >8 concurrent DB touchers the pool's 30s
+  default acquire wait could pile requests up silently. The pool now bounds
+  its acquire wait at 10s and fails fast with a clear `PoolTimeout` instead.
+- **Each MCP connector handshake is capped** (`MCP_ATTACH_TIMEOUT_SECONDS`,
+  default 20s, env-overridable): a hung connector endpoint (unreachable
+  host, silent drop) no longer holds the run start indefinitely — the
+  in-flight session is closed and the run proceeds without the connector,
+  same skip-with-warning posture as any other failed handshake. Pinned by
+  test alongside the cancellation-leak test.
+- **The platform catalog refuses a version-mismatched database at boot.**
+  `platform_catalog_version` carries a `schema_version` marker (column
+  added idempotently): a fresh database is stamped with the code's version,
+  and a mismatch (code deployed against newer tables, or stale tables under
+  new code) fails the boot with the remediation in the error instead of
+  serving rows it misreads.
+- **CORS is now actually absent, not just unconfigured.** Agno's AgentOS
+  unconditionally installs CORSMiddleware with its own default allowlist
+  (localhost:3000, agno.com domains) — and passing `cors_allowed_origins=[]`
+  does NOT help: agno's `resolve_origins` treats an empty list as falsy and
+  falls back to those defaults anyway. `build_app` now strips the middleware
+  entirely; a test pins that no `Access-Control-Allow-Origin` header is ever
+  emitted, even on Origin-bearing requests (the service is
+  private-network-only; its only browser-adjacent client proxies
+  server-to-server).
+- **The smoke test's destructive-boot guard no longer trusts single-label
+  hostnames.** A bare hostname (`db`, `postgres`) is NOT proof of a
+  container — Railway-style private networks name REAL production databases
+  that way, and the old clause let the smoke test's destructive boot run
+  against them with no override. Local compose targets now need
+  `SMOKE_ALLOW_DESTROY` (testcontainers fixtures are loopback anyway).
+- **Deployable as a Railway service**: `agents/platform-os/Dockerfile`
+  (same two-stage uv workspace pattern as the sibling agents), and AGENTS.md
+  documents the service's Dockerfile path + watch paths.
+- **Optional Sentry, env-driven**: `SENTRY_DSN` initializes the FastAPI
+  integration at boot (no-op when unset); traces stay off (provider
+  streaming dominates latency — request spans are noise at chat volume).
+  Documented in `.env.example`.
+- **Platform env-key dormancy is now written down where the operator
+  reads it**: `.env.example` carries the Tavily-style discipline on
+  `OPENAI_API_KEY`/`OPENROUTER_API_KEY` — SaaS leaves them UNSET (the run
+  gate 402s without a runner key), because an env key here lets any run
+  silently spend the platform's money. The stale "Duplicate model ids"
+  CHANGELOG bullet — which described a uniqueness rule the same unreleased
+  series later replaced (per-provider ids, same-id doors, binding-pair
+  uniqueness) — is removed rather than left contradicting the doors
+  bullet.
+
+- **Model bindings refuse to fall back, and the picker can't offer a dead
+  row.** The dispatcher now REFUSES a run whose model binding doesn't
+  resolve to a live registry instance — an identity check (`is`) against
+  `registry.models`, not equality, so it holds regardless of how agno's
+  resolution order evolves. The fallback it prevents: agno's
+  `resolve_model` rebuilds a keyless model from the serialized dict when
+  the registry misses, which then rides THIS deployment's platform env
+  key — silently converting a BYOK run into a platform-funded one
+  (observed live during the wrapper-cache incident). The refusal runs
+  before anything starts (no credentials installed, no MCP sessions
+  opened) and surfaces the AG-UI contract's terminal `RUN_ERROR` with an
+  actionable, member-safe message. Feeding that path, the model index —
+  the builder-facing picker (`GET /platform/models`) — is now built
+  INSIDE `_build_registry` from the same accepted-rows loop (the function
+  returns `(registry, model_index)`; `_rebuild_indexes` is now
+  `_rebuild_tool_index`, fn_index only): the old separate rebuild
+  recomputed the index from the raw snapshot WITHOUT the construct
+  checks, so a row the registry skipped stayed pickable, agents got saved
+  against it, and their runs hit the fallback above.
+- **MCP connector URLs resolve from a platform-side registry, never the
+  wire.** New `platform_connector` table (id → url/label, no tokens —
+  they stay per-run deliveries) + admin endpoints
+  `GET/PUT/DELETE /platform/connectors[/{connector_id}]` (admin-JWT
+  guarded, pinned in the route-inventory test; URL shape validated),
+  written only by the run client's server push-first. The dispatcher
+  attaches MCP toolkits using the registry's URL for the wire's connector
+  id; any URL arriving on the wire is IGNORED outright (a wire URL was an
+  SSRF primitive — this service connecting to attacker-chosen addresses
+  with org tokens attached), and an unregistered connector id is skipped
+  loudly (the run proceeds without it — same posture as a failed
+  handshake; the client's pre-run gate is the primary guard). Connector
+  rows ride the catalog's revision-stamped snapshot
+  (`CatalogSnapshot.connectors` → `CatalogState.connector_index`), so a
+  push swaps the attach index atomically with the registry rebuild.
+- **Review-pass hardening for the doors feature.** Discovery now accepts
+  single-file model modules (`agno/models/foo.py` defining `Model`
+  subclasses directly) — the export filter only matched the package
+  layout, silently dropping such modules with no skip line; the docstring
+  examples that claimed single-file support while the filter contradicted
+  it are aligned. The PUT now ENFORCES the registry binding invariant the
+  code only asserted in comments: two rows sharing BOTH a model id and an
+  effective binding name (a hand-set `name=` attribute, or two
+  same-named classes across modules) are rejected with the collision
+  named — `get_model(id, name)` must always resolve to exactly one
+  instance. New tests: the binding-collision rejection, the dead-provider
+  admin rendering, `/platform/available`'s `dep_key` shape, the
+  wrapper-cache reuse (identity across rebuilds), and the loud
+  slug-collision skip for two classes in one file.
+
+- **The per-provider model wrapper cache keys on the provider CLASS, not
+  the module** — a REGRESSION the doors rewrite exposed: the cache key
+  `(module, dep_key, env)` is identical for every door of one vendor, so
+  the `openai-responses` row was built as a `PlatformOpenAIChat` wrapper.
+  The registry then held two same-named chat instances for one id: a chat
+  run bound the mis-wrapped instance and silently lost the row's attrs
+  (the `reasoning_effort=none` fix gone — every tool run on the chat door
+  400'd again), while a responses run matched nothing by name and fell
+  back to agno's from-dict rebuild — a plain instance on the PLATFORM's
+  env key, a silent BYOK bypass. The cache now keys on the provider
+  class; a regression test pins that same-id doors produce one wrapper
+  per class and that `registry.get_model(id, name)` resolves each door to
+  exactly its instance.
+
+- **Model discovery offers every class a module defines — no canonical
+  picks.** The old `_CANONICAL_MODEL_CLASS` map (which silently skipped
+  multi-class modules without a hand-written entry) is gone. Every
+  concrete `Model` subclass an agno module exports is now an offering
+  with its own slug, a pure function of where agno defines the class:
+  the module's own file keeps the bare module slug (`openrouter`,
+  `xai`, `deepseek`), any other file gets
+  `<module>-<defining-submodule>` — `openai-chat`, `openai-responses`,
+  `openai-like`, `openai-open-responses`, `openrouter-responses`,
+  `xai-responses`, `azure-openai-chat`, `azure-openai-responses`.
+  Nothing is hand-picked and no heuristic remains; note a slug still
+  changes if agno itself reorganizes its files — that lands as a
+  fail-closed dead row the admin re-enables, never a silent redirect.
+  Only what a module DEFINES counts (a pure
+  re-export is the defining module's offering). One vendor's doors share
+  the vendor's single credential: `ModelProvider` gains `slug` and
+  `dep_key` derives from the agno module, not the slug. The model index
+  keys by `(provider_slug, id)` instead of id alone (same model id under
+  two doors is the feature, not a shadowing hazard — the registry binds
+  component configs by `(id, effective class name)` via agno's
+  `registry.get_model`, and the PUT enforces that binding pair's
+  uniqueness across providers), so the admin API's duplicate-id rule
+  relaxes from global to per-provider. `GET /platform/models` rows carry the
+  slug as `provider` plus the binding `name` and `dep_key`;
+  `/platform/available` and `/platform/catalog/models` declare `dep_key`
+  too. The `PlatformOpenAIChat` test seam moved from `models.py` into the
+  test that uses it (production code stays generic).
+- **UPGRADE NOTE (slug renames):** deployments with saved catalog rows
+  under the old bare slugs (`openai`, `azure`) now have dead rows — the
+  rebuild skips them with a warning and the admin page lists them as
+  "No longer available" (their checkbox is disabled). Re-enable the same
+  models under the new slugs (`openai-chat`, `azure-openai-chat`); any
+  per-model attributes (e.g. `reasoning_effort=none`) must be re-entered.
+  Nothing runs broken in the meantime: a dead row serves nothing and
+  agents bound to it fail closed at run time.
+- **Smoke test can no longer destroy prod data:** `smoke_test.py` used to
+  blanket-merge `../personal/.env` into the environment — pulling in
+  personal's PROD Neon `DATABASE_URL`, which satisfied the boot check and
+  was then DROPped by the destructive boot (catalog tables + the agno
+  `ai` schema, i.e. sessions, memories and learnings). Personal's .env is
+  now read key-only (OPENROUTER/TAVILY); `DATABASE_URL` can only come from
+  platform-os's own .env or the shell. And the destructive boot refuses
+  non-throwaway targets — loopback/container hosts only — unless
+  `SMOKE_ALLOW_DESTROY=1` is set; the same guard function is re-asserted
+  immediately before the DROPs so the check and the drops cannot drift.
+  The guard is pinned by unit tests (`tests/test_smoke_guard.py`).
+- **The catalog runs on a connection pool:** every `catalog.py` operation
+  — including each run's revision check — used a full TCP/TLS
+  connect+close per call; a lazily-created `psycopg_pool.ConnectionPool`
+  (one per DSN, min 1 / max 8, 5s connect timeout, created on first
+  CatalogDB use — never at import) serves them all now, with identical
+  context-manager semantics. The dep is `psycopg[binary,pool]`, and the
+  dead `psycopg2-binary` is removed (agno rewrites `postgresql://` to the
+  psycopg3 `postgresql+psycopg` dialect — no psycopg2 anywhere).
+- **Rebuild stamps the revision it snapshotted:** the registry rebuild
+  read the revision AFTER the row reads (spanning several connections), so
+  a write committing in between was stamped as "already built" — a
+  non-self writer's change then never triggered a rebuild until the NEXT
+  write (permanent staleness). The rebuild now reads revision + rows over
+  ONE transaction (`CatalogDB.snapshot`) and stamps that captured
+  revision; a regression test interposes a concurrent write and asserts
+  the next `ensure_current` rebuilds. The in-place registry swap also
+  builds its fresh lists first and bulk-assigns (readers are still not
+  serialized — only writers hold the lock — but the residual window is
+  two list assignments, one-request transient at worst).
+- **MCP attach no longer leaks sessions on client disconnect:** a
+  cancellation during the attach phase (disconnect before the first byte
+  streams) escaped the old `except Exception` (CancelledError is a
+  BaseException) without closing the in-flight toolkit, and the partial
+  attach progress was lost with the local list. `_attach_mcp_connectors`
+  now appends every opened toolkit to a CALLER-OWNED list immediately
+  after its handshake (survives the raise; the generator's shielded
+  teardown closes them) and closes the in-flight toolkit best-effort
+  before re-raising. Regression test cancels the task mid-attach and
+  asserts both closes happen.
+- **Smaller fixes:** the model env scan matches only assignment-shaped
+  lines (a docstring merely mentioning another `*_API_KEY` can no longer
+  misderive `platform_env_key`; all 36 shipped providers derive the same
+  keys, pinned by test); `_coerce` rejects non-finite floats (nan/inf)
+  with the standard error; a credential value that json-decoded into a
+  non-string (extract_context turns `"12345"` into an int) logs "was sent
+  but is not a string — treating as missing" through the single funnel
+  (`credentials.resolve_from_deps`, shared by the run-context path and the
+  dispatcher's pre-context toolkit build) instead of being silently
+  dropped; and the `.env.example` admin-page path is corrected to
+  the frontend's `/admin/platform`.
+- **SQLite → Postgres:** the whole service now runs on the owner's
+  `DATABASE_URL` Postgres (Neon for prod, local Postgres for dev — same
+  pattern as the sibling chat agents). Agno's `SqliteDb` (components/sessions) is
+  replaced by `PostgresDb` (auto-creates its `ai` schema + tables), and the
+  catalog store (`catalog.py`) is rewritten from `sqlite3` to `psycopg`
+  (`ON CONFLICT` upsert, native `BOOLEAN`); the
+  `PLATFORM_OS_DB_FILE` / `PLATFORM_CATALOG_DB_FILE` env vars are gone.
+  Model `attrs` moved to a native JSONB column — malformed JSON is
+  rejected by the database at write time, which subsumes the earlier
+  corrupt-row fix: a row whose TEXT-stored `attrs` failed to decode used
+  to brick `GET /platform/catalog/models`, `GET /platform/models` and the
+  `ensure_current` rebuild (i.e. every run request) until the row was
+  hand-edited, and a skip-on-read guard was added for it; that guard (and
+  its test) are removed because JSONB makes an unparseable row
+  structurally impossible — a stronger guarantee than skip-on-read. The
+  rebuild-time fail-closed skips for unconstructible/credential-bearing
+  rows are unchanged. Tests run against
+  a session-scoped testcontainers Postgres (Docker required; per-test
+  truncation keeps runs hermetic), and `build_app` now takes
+  `db_url=` as its test seam.
+- **Model-entry grammar guard:** a `key=value` token that is not trailing —
+  e.g. `openrouter:…:max_tokens=100:free`, an attribute typed before the
+  `:free` suffix — is now rejected with a 400 instead of being glued into
+  the model id. The old parse persisted a bogus `…:max_tokens=100` id that
+  construct-checked fine and silently mutated into a different row on the
+  next admin save (the client's round-trip drops the token).
+- **Credential-attribute rejection re-applied at rebuild:** the
+  rebuild-time re-validation of stored rows (`_validate_attrs`) now also
+  rejects credential-shaped attrs, so a row hand-inserted with
+  `attrs = {"api_key": …}` (direct DB edit or downgrade) is skipped with a
+  warning instead of being served as a shared platform fallback key.
+- **More grammar guards:** a mid-id `tier` token
+  (`openai:model:tier:free`) and empty segments (`openai::gpt-4o`) are now
+  rejected with a clear 400 instead of being silently glued into the id /
+  silently filtered. The old parse persisted a bogus id with the tier flag
+  dropped, and let a doubled colon change nothing while the admin thought
+  it saved. Legit trailing orders (`provider:id:tier`,
+  `provider:id:k=v`, either order) and colon-bearing ids (OpenRouter
+  `:free` variants, `ft:gpt-4o-mini:org:suffix:ab12`) still parse.
+- **Model-test probe is capped:** `POST /platform/test/model` now sends a
+  30s timeout and a small `max_tokens` budget (64, explicit attrs win)
+  whenever the model class accepts them — previously a class without a
+  typed timeout fell back to the OpenAI SDK's ~10-minute default, and no
+  token cap existed at all, while the client's proxy times out at 10s.
+- **Dependencies:** the package now declares `agno[mcp,…]` (the
+  dispatcher's MCP connectors import `agno.tools.mcp` — previously
+  resolved only via a sibling workspace package, so a fresh
+  `uv sync --package agents-platform-os` yielded a broken MCP feature) and
+  `fastmcp` as a dev dependency (the test suite imports it directly).
+- **Same-module toolkit collisions are surfaced:** two Toolkit subclasses
+  in one agno module with different function sets silently overwrote each
+  other in the discovery map; the overwrite is now logged like the
+  cross-module dedupe (which one wins is unchanged). Plus dead-code
+  removal (`models.py` unreferenced OpenAI client imports, a never-true
+  `origin is Optional` check in `discovery.py`) and a `.env.example` for
+  the service (default port documented as 7778).
+- **Registry rebuild is swap-lock-protected:** `CatalogState.ensure_current`
+  / `refresh` now hold a `threading.Lock` around the
+  staleness-check → rebuild → registry-swap sequence (double-checked inside
+  the lock). FastAPI's sync endpoints run in a threadpool, so two
+  concurrent requests could both see a stale revision, both rebuild, and
+  race the in-place swap — wasted rebuilds at best, an interleaved
+  registry at worst. The common current-registry path stays lock-free.
+- **Attribute values cannot contain `:` — rejected honestly:** a value
+  like `base_url=http://localhost:11434` is tokenized at every colon and
+  the tail lands in the model id; the entry is now rejected with a 400
+  naming the attribute and stating the delimiter rule (nothing truncated
+  is ever stored; the misplaced-attribute typo keeps its generic message).
+  Related fix: `_coerce` now tries each member of a multi-member `Union`
+  (e.g. `base_url: Union[str, httpx.URL, None]`) instead of falling through
+  to `json.loads`, so union-typed attributes accept plain strings at all —
+  previously every string value failed with an opaque "expects Union".
+  Documented in the README's Known limitations.
+- **Anonymous-401 pinned per `/platform` route:** every admin/builder
+  `/platform/*` route is now pinned to answer 401 with no Authorization
+  header (and 401 — not 403 — for a present-but-invalid token), with an
+  inventory test that fails when a new platform route ships unpinned.
+- **Silent drops now warn:** disabling a provider the deployment can no
+  longer produce clears its dead row, and the save response's `warnings`
+  now says so (previously the provider vanished from the catalog with no
+  record of why). The disabled-provider-with-ids warning path is now
+  asserted by test, and the model-test endpoint re-raises deliberate
+  `HTTPException`s instead of re-wrapping them into "test failed: …" /
+  "does not construct (HTTPException: …)" noise.
+
 ## [2.0.0] — 2026-10-17
 
 ### Added
