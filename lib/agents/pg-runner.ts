@@ -39,6 +39,17 @@ interface ActiveConnectionContext {
   stopRequested?: boolean;
   /** This run's id — lets connect() detect "replay already covers this run". */
   runId?: string;
+  /**
+   * Set by deleteThread when the thread was deleted while this run was
+   * still in flight. The run's persistence window (storeRun +
+   * captureThreadData) checks this and skips writing: without it, the
+   * finishing run would resurrect the deleted thread — fresh agent_runs,
+   * thread_messages and thread_metadata rows (plus a re-seeded sidebar
+   * cache) containing only the in-flight run's data, silently undoing
+   * the deletion. The flag dies with the connection object at teardown,
+   * so a later run on a re-created thread (same id) persists normally.
+   */
+  threadDeleted?: boolean;
 }
 
 // Active connections for streaming events and stop support. Owned by this
@@ -48,6 +59,18 @@ interface ActiveConnectionContext {
 const ACTIVE_CONNECTIONS = new Map<string, ActiveConnectionContext>();
 
 const SCHEMA_VERSION = 1;
+
+/**
+ * How long a run_state row whose current_run_id has NO live
+ * ACTIVE_CONNECTIONS entry must age before acquireRunState treats it as a
+ * stale lock and steals it. A genuine holder registers its map entry
+ * synchronously right after the acquire returns (no await in between), so
+ * any map-absent row younger than this is a winner still mid-registration
+ * in a concurrent race — not an orphan. The value only bounds how long a
+ * transient release failure wedges the thread (teardownRun's release is
+ * best-effort); it is not a run timeout.
+ */
+const STALE_LOCK_GRACE_MS = 10_000;
 
 /**
  * Defense in depth against secret persistence: the AG-UI schema allows
@@ -94,21 +117,66 @@ export function redactReservedEvent<E extends object>(
 
 /**
  * Build a verifier-safe replay stream from raw persisted events:
- * RUN_ERROR events are removed (the documented replay filter) and any run
- * left WITHOUT a terminal event gets a synthetic RUN_FINISHED. Without the
- * synthesis the next run's RUN_STARTED trips the AG-UI verifier ("Cannot
- * send 'RUN_STARTED' while a run is still active") and the whole connect
- * replay is rejected — the conversation renders only the pre-failure
- * history on every reconnect of a thread with a failed run followed by a
- * retry.
+ *
+ * - RUN_ERROR events are removed (the documented replay filter — AG-UI's
+ *   verifier locks on a replayed RUN_ERROR mid-stream, making failed-run
+ *   threads permanently unreadable on reconnect).
+ * - An unterminated run is closed with a synthetic RUN_FINISHED **only
+ *   when a later RUN_STARTED follows it in the same history** — the next
+ *   run's RUN_STARTED would otherwise trip the verifier ("Cannot send
+ *   'RUN_STARTED' while a run is still active") and the whole connect
+ *   replay would be rejected. Before the terminator, any message or
+ *   tool-call sequence the errored run left open is CLOSED first: AG-UI
+ *   requires a producer to close what it opened before RUN_FINISHED, and
+ *   @copilotkit/shared's finalizeRunEvents deliberately skips closure
+ *   when a RUN_ERROR is present — so persisted errored runs keep open
+ *   sequences that a bare synthetic terminator would leave dangling
+ *   (permanently-spinning tool calls on reconnect).
+ * - A run left unterminated at the END of the history is left
+ *   unresolved: the spec makes resolving a truncated final run the
+ *   consumer's business, and re-presenting a failed run with a success
+ *   terminator would erase the failure the live client actually saw.
+ *
+ * The failure flavor is preserved in the synthesized tool-call results
+ * (status "error") so replayed history reads as failed, not completed.
  */
 function buildReplayEvents(events: BaseEvent[]): BaseEvent[] {
   const out: BaseEvent[] = [];
   let openRun: { threadId: string; runId: string } | null = null;
+  const openMessageIds = new Set<string>();
+  const openToolCalls = new Map<string, { hasEnd: boolean; hasResult: boolean }>();
+
+  const closeOpenSequences = (): void => {
+    for (const messageId of openMessageIds) {
+      out.push({ type: EventType.TEXT_MESSAGE_END, messageId } as unknown as BaseEvent);
+    }
+    for (const [toolCallId, info] of openToolCalls) {
+      if (!info.hasEnd) {
+        out.push({ type: EventType.TOOL_CALL_END, toolCallId } as unknown as BaseEvent);
+      }
+      if (!info.hasResult) {
+        out.push({
+          type: EventType.TOOL_CALL_RESULT,
+          toolCallId,
+          messageId: `${toolCallId}-result`,
+          role: "tool",
+          content: JSON.stringify({
+            status: "error",
+            reason: "run_error",
+            message: "The agent run failed. Please try again.",
+          }),
+        } as unknown as BaseEvent);
+      }
+    }
+    openMessageIds.clear();
+    openToolCalls.clear();
+  };
+
   for (const event of events) {
     if (event.type === EventType.RUN_ERROR) continue;
     if (event.type === EventType.RUN_STARTED) {
       if (openRun) {
+        closeOpenSequences();
         out.push(syntheticRunFinished(openRun));
       }
       const started = event as { threadId?: string; runId?: string };
@@ -118,10 +186,30 @@ function buildReplayEvents(events: BaseEvent[]): BaseEvent[] {
           : null;
     } else if (event.type === EventType.RUN_FINISHED) {
       openRun = null;
+      openMessageIds.clear();
+      openToolCalls.clear();
+    } else if (event.type === EventType.TEXT_MESSAGE_START) {
+      const id = (event as { messageId?: unknown }).messageId;
+      if (typeof id === "string") openMessageIds.add(id);
+    } else if (event.type === EventType.TEXT_MESSAGE_END) {
+      const id = (event as { messageId?: unknown }).messageId;
+      if (typeof id === "string") openMessageIds.delete(id);
+    } else if (event.type === EventType.TOOL_CALL_START) {
+      const id = (event as { toolCallId?: unknown }).toolCallId;
+      if (typeof id === "string") openToolCalls.set(id, { hasEnd: false, hasResult: false });
+    } else if (event.type === EventType.TOOL_CALL_END) {
+      const id = (event as { toolCallId?: unknown }).toolCallId;
+      const info = typeof id === "string" ? openToolCalls.get(id) : undefined;
+      if (info) info.hasEnd = true;
+    } else if (event.type === EventType.TOOL_CALL_RESULT) {
+      const id = (event as { toolCallId?: unknown }).toolCallId;
+      const info = typeof id === "string" ? openToolCalls.get(id) : undefined;
+      if (info) info.hasResult = true;
     }
     out.push(event);
   }
-  if (openRun) out.push(syntheticRunFinished(openRun));
+  // End of history with an open run: intentionally unresolved — no
+  // synthetic terminator (see the docstring).
   return out;
 }
 
@@ -583,15 +671,27 @@ export class PostgresAgentRunner extends AgentRunner {
         allHistoricEvents.push(event);
       }
     }
-    // Filter RUN_ERROR + close any run the filter left unterminated (see
-    // buildReplayEvents) BEFORE compacting.
+    // Filter RUN_ERROR + verifier-safe replay shaping (conditional
+    // synthetic terminator, closure of sequences the errored run left
+    // open — see buildReplayEvents) BEFORE compacting.
     const compactedEvents = compactEvents(buildReplayEvents(allHistoricEvents));
 
     // ─── Read-through: populate caches from the PG fetch ──────────────
     // The sync LocalThreadEndpointRunner methods (getThreadEvents,
     // getThreadState) read from these caches. Future calls within the
     // same process get sync access to the historic event stream.
-    this.eventsCache.set(request.threadId, compactedEvents);
+    // NEVER clobber a fresher storeRun merge: a run committing between
+    // our getHistoricRuns snapshot (a PG statement snapshot) and this
+    // synchronous write has already merged its events into the cache —
+    // overwriting with the older snapshot would regress the sync
+    // readers to pre-run history (and getThreadState to the pre-run
+    // STATE_SNAPSHOT) until the next write on the thread. A cache
+    // holding a runId absent from the snapshot proves a newer write
+    // landed: skip and let the newer value stand.
+    const snapshotRunIds = new Set(historicRuns.map((run) => run.run_id));
+    if (!this.cacheHoldsRunOutsideSnapshot(request.threadId, snapshotRunIds)) {
+      this.eventsCache.set(request.threadId, compactedEvents);
+    }
     const messages = await this.fetchThreadMessages(request.threadId);
     if (messages.length > 0) this.messageCache.set(request.threadId, messages);
 
@@ -621,11 +721,10 @@ export class PostgresAgentRunner extends AgentRunner {
     // bridge supplies it exactly once, and no duplication is possible —
     // both orderings are covered by checking the SAME snapshot we
     // replayed from.)
-    const persistedRunIds = new Set(historicRuns.map((run) => run.run_id));
     const replayCoversActiveRun =
       activeConnection != null &&
       activeConnection.runId != null &&
-      persistedRunIds.has(activeConnection.runId);
+      snapshotRunIds.has(activeConnection.runId);
 
     if (
       activeConnection &&
@@ -930,13 +1029,28 @@ export class PostgresAgentRunner extends AgentRunner {
       deleted = (r1.rowCount ?? 0) > 0 || (r4.rowCount ?? 0) > 0;
     });
 
-    // Write-through: PG delete succeeded, now update the cache.
-    if (deleted) {
-      this.threadCache.delete(threadId);
-      this.messageCache.delete(threadId);
-      this.eventsCache.delete(threadId);
-    }
-    return deleted;
+    // Write-through: PG delete succeeded, now update the cache. The cache
+    // clears and the resurrection marker happen REGARDLESS of the row
+    // counts: a thread whose only existence is an in-flight FIRST run has
+    // no persisted rows yet (the seed is in-memory; DB rows are written
+    // by captureThreadData at run end), but it is still user-visible in
+    // the sidebar and must not be resurrected by that run's final write.
+    this.threadCache.delete(threadId);
+    this.messageCache.delete(threadId);
+    this.eventsCache.delete(threadId);
+    // A run still streaming on this thread would otherwise resurrect it:
+    // its final storeRun + captureThreadData re-insert the rows and
+    // re-seed the sidebar cache (the run started before the delete, so
+    // nothing else distinguishes its writes from a live thread's).
+    // Mark the live connection — the run's persistence window checks
+    // the flag and skips writing; the flag dies with the connection at
+    // teardown, so a later run on a re-created thread id persists
+    // normally. (In-process signal: on a multi-instance deploy a run
+    // streaming on another instance would still resurrect — the same
+    // single-instance assumption as the run-state boot reset.)
+    const active = ACTIVE_CONNECTIONS.get(threadId);
+    if (active) active.threadDeleted = true;
+    return deleted || active != null;
   }
 
   async renameThread(
@@ -983,6 +1097,13 @@ export class PostgresAgentRunner extends AgentRunner {
     input: RunAgentInput,
     parentRunId?: string | null,
   ): Promise<void> {
+    // Deleted-mid-run guard: the thread was deleted while this run was
+    // streaming (deleteThread marks the live connection). Persisting now
+    // would resurrect it — fresh agent_runs rows (and, via
+    // captureThreadData, messages/metadata/cache) holding only this
+    // run's data, silently undoing the user's deletion.
+    if (ACTIVE_CONNECTIONS.get(threadId)?.threadDeleted) return;
+
     // Reserved dep keys (this run's injected secrets) come from the
     // runner ALS — storeRun only ever runs inside that scope. The
     // non-contract key is added unconditionally so the redaction never
@@ -1094,6 +1215,27 @@ export class PostgresAgentRunner extends AgentRunner {
    * ON CONFLICT ... WHERE guard), and RETURNING tells whether THIS call
    * won it — false means another run holds the lock (or won the race).
    */
+  /**
+   * Whether the events cache contains a runId the given snapshot lacks —
+   * i.e. a storeRun merged a run committed AFTER the snapshot was read,
+   * so the snapshot is stale and must not overwrite the cache (see the
+   * startConnect read-through comment).
+   */
+  private cacheHoldsRunOutsideSnapshot(
+    threadId: string,
+    snapshotRunIds: Set<string>,
+  ): boolean {
+    const cached = this.eventsCache.get(threadId);
+    if (!cached) return false;
+    for (const event of cached) {
+      const runId = (event as { runId?: unknown }).runId;
+      if (typeof runId === "string" && runId !== "" && !snapshotRunIds.has(runId)) {
+        return true;
+      }
+    }
+    return false;
+  }
+
   private async acquireRunState(
     threadId: string,
     runId: string,
@@ -1109,7 +1251,69 @@ export class PostgresAgentRunner extends AgentRunner {
        RETURNING is_running`,
       [threadId, runId],
     );
-    return result.rows.length > 0;
+    if (result.rows.length > 0) return true;
+
+    // The lock is held. Distinguish a LIVE holder from a STALE row: this
+    // process knows exactly which runs are actually active
+    // (ACTIVE_CONNECTIONS — registered synchronously right after a
+    // successful acquire, so no await can interleave between the two).
+    // A row whose current_run_id has no live map entry was left behind by
+    // a teardown whose release hit a transient DB failure (teardownRun is
+    // best-effort) — without this recovery the thread stays wedged with
+    // "Thread already running" until the next process restart. Steal it,
+    // conditional on the SAME row we inspected so a concurrent legitimate
+    // release/re-acquire between the read and the write can't be
+    // clobbered (0 rows updated → someone else changed the state → not
+    // ours to take).
+    //
+    // The liveness check is in-process by design: run_state is shared PG,
+    // but a multi-instance deploy would need shared state for this (see
+    // the class doc on the future Redis migration) — today the app is
+    // single-instance, the same assumption the boot-time run-state reset
+    // already makes.
+    // The liveness check is in-process by design: run_state is shared PG,
+    // but a multi-instance deploy would need shared state for this (see
+    // the class doc on the future Redis migration) — today the app is
+    // single-instance, the same assumption the boot-time run-state reset
+    // already makes.
+    //
+    // Grace window: any genuine holder registers its connection
+    // synchronously after acquiring, so a map-absent row YOUNGER than the
+    // grace cannot be stale — only a row that has been map-orphaned for
+    // at least this long is stolen.
+    const held = await query<{ current_run_id: string | null; updated_at: Date }>(
+      `SELECT current_run_id, updated_at FROM run_state WHERE thread_id = $1`,
+      [threadId],
+    );
+    const heldRow = held.rows[0];
+    const heldRunId = heldRow?.current_run_id ?? null;
+    const connection = ACTIVE_CONNECTIONS.get(threadId);
+    if (connection && connection.runId != null && connection.runId === heldRunId) {
+      return false; // genuinely running in this process
+    }
+    // Grace: a just-acquired lock registers its map entry SYNCHRONOUSLY
+    // after the acquire returns (no await in between), so a map-absent
+    // row younger than the grace is a winner still mid-registration in a
+    // concurrent race — refuse it normally instead of stealing.
+    const updatedAt = heldRow?.updated_at ? new Date(heldRow.updated_at).getTime() : NaN;
+    const ageMs = Number.isFinite(updatedAt) ? Date.now() - updatedAt : Infinity;
+    if (ageMs < STALE_LOCK_GRACE_MS) return false;
+    const steal = await query<{ is_running: boolean }>(
+      `UPDATE run_state SET is_running = true, current_run_id = $2, updated_at = now()
+       WHERE thread_id = $1 AND is_running = true
+         AND current_run_id IS NOT DISTINCT FROM $3
+       RETURNING is_running`,
+      [threadId, runId, heldRunId],
+    );
+    if (steal.rows.length > 0) {
+      console.warn("[runner] stole a stale run lock (previous release failed)", {
+        threadId,
+        staleRunId: heldRunId,
+        newRunId: runId,
+      });
+      return true;
+    }
+    return false;
   }
 
   /**
@@ -1128,7 +1332,11 @@ export class PostgresAgentRunner extends AgentRunner {
    *    and event routing depend on them.
    *
    * Best-effort: the state step is individually guarded so a transient
-   * DB failure can't skip the map cleanup (and vice versa).
+   * DB failure can't skip the map cleanup (and vice versa). A release
+   * that fails on a transient DB error does NOT wedge the thread
+   * permanently: acquireRunState detects the stale row (current_run_id
+   * with no live ACTIVE_CONNECTIONS entry) and steals it on the next
+   * run attempt.
    */
   private async teardownRun(
     threadId: string,
@@ -1194,6 +1402,10 @@ export class PostgresAgentRunner extends AgentRunner {
   // ─── Thread snapshot capture (preserved from PersistentAgentRunner) ────
 
   private async captureThreadData(request: AgentRunnerRunRequest): Promise<void> {
+    // Deleted-mid-run guard (see storeRun): a thread deleted while this
+    // run streamed must not be resurrected by the run's final write.
+    if (ACTIVE_CONNECTIONS.get(request.threadId)?.threadDeleted) return;
+
     const agentId = request.agent.agentId ?? "default";
     const messages = (request.agent as unknown as { messages?: Message[] }).messages;
     const userId = getRunnerUser()?.id ?? null;

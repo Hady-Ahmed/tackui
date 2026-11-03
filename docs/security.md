@@ -303,8 +303,13 @@ Sign-in: 10/min per IP. Sign-up: 5/min per IP. Configured via
 
 The `/api/copilotkit` route tracks in-flight **run** streams per user (not
 connect/info/stop streams). The `isRunRequest` check in the route handler
-distinguishes runs from control requests: a POST is a run only if it is NOT
-to a `/connect` or `/stop/` sub-path. Only runs count toward the rate limit
+distinguishes runs from control requests **run-shaped first**: a POST whose
+path parses as a run (`/agent/<id>/run` or `/agent/<id>/suggest`, agent id
+decodable) is a run — even when it ends in `/connect` or `/stop/`, which
+are only exempt on non-run-shaped paths (`/agent/<id>/connect`,
+`/agent/<id>/stop/<threadId>`). A run-shaped path that doesn't parse fails
+closed with a 404 rather than being reclassified as exempt control
+traffic. Only runs count toward the rate limit
 (20/min) and the concurrent cap (3). Connect streams (POST
 `/agent/*/connect`), stop requests (POST `/agent/*/stop/<threadId>`), info
 fetches (GET `/info`), and thread listing (GET `/threads`) are exempt. Stop

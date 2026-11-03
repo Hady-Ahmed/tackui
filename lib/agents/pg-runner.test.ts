@@ -947,6 +947,67 @@ describe("PostgresAgentRunner — run lock + teardown lifecycle", () => {
     await first.settled;
   });
 
+  it("a stale lock row (a release that hit a transient DB failure) is stolen by the next run", async (ctx) => {
+    ctx.skip(!pgStarted, "Real Postgres (Docker) unavailable");
+    // teardownRun's release is best-effort — a transient DB failure used
+    // to leave is_running=true forever (no TTL, no runtime recovery):
+    // every subsequent run was refused with "Thread already running"
+    // until the next process restart. acquireRunState now detects the
+    // stale row (current_run_id with no live ACTIVE_CONNECTIONS entry in
+    // this process) and steals it. The row is aged past the grace window
+    // — a fresh row is indistinguishable from a winner still
+    // mid-registration (the grace is what makes the steal safe against
+    // the concurrent-claims race).
+    await query(
+      `INSERT INTO run_state (thread_id, is_running, current_run_id, updated_at)
+       VALUES ('t-stale', true, 'run-ghost', now() - interval '60 seconds')`,
+    );
+    const outcome = await runAs(runner, user1, "t-stale", "run-live");
+    expect(outcome.completed).toBe(true);
+    const state = await query<{ is_running: boolean }>(
+      `SELECT is_running FROM run_state WHERE thread_id = 't-stale'`,
+    );
+    // The stealing run ran AND released normally afterwards.
+    expect(state.rows[0]?.is_running).toBe(false);
+  });
+
+  it("a LIVE lock holder is never stolen", async (ctx) => {
+    ctx.skip(!pgStarted, "Real Postgres (Docker) unavailable");
+    // The stale-lock steal keys on the in-memory connection: an in-flight
+    // run holds BOTH the row and a live map entry — a concurrent acquire
+    // must still be refused (the steal exists only for rows whose run is
+    // gone from this process).
+    const first = startControlled("t-livelock", "run-1", { abortReleases: true });
+    await first.started;
+    const second = await runAs(runner, user1, "t-livelock", "run-2");
+    expect((second.error as Error).message).toBe("Thread already running");
+    await runWithUser(user1, () => runner.stop({ threadId: "t-livelock" }));
+    await first.settled;
+  });
+
+  it("a thread deleted mid-run is not resurrected by the run's persistence", async (ctx) => {
+    ctx.skip(!pgStarted, "Real Postgres (Docker) unavailable");
+    // The user deletes a thread from the sidebar while its run is still
+    // streaming. The finishing run's storeRun + captureThreadData used to
+    // re-insert agent_runs/thread_messages/thread_metadata rows and
+    // re-seed the sidebar cache — silently undoing the deletion with a
+    // thread holding only the in-flight run's data. deleteThread now
+    // marks the live connection; the persistence window skips writes.
+    const a = startControlled("t-del", "run-del", { abortReleases: true });
+    await a.started;
+    const deleted = await runner.deleteThread("t-del", user1.id, user1.orgId);
+    expect(deleted).toBe(true);
+    a.release();
+    await a.settled;
+
+    const runs = await query<{ run_id: string }>(
+      `SELECT run_id FROM agent_runs WHERE thread_id = 't-del'`,
+    );
+    expect(runs.rows).toEqual([]);
+    expect(runner.getThreadMessages("t-del")).toEqual([]);
+    expect(runner.getThreadEvents("t-del")).toEqual([]);
+  });
+
   it("stop() defers the lock release to the aborted run's own teardown", async (ctx) => {
     ctx.skip(!pgStarted, "Real Postgres (Docker) unavailable");
     // A: hangs; stop() does NOT end it (throwOnRelease → its catch path
@@ -1220,6 +1281,146 @@ describe("PostgresAgentRunner — run lock + teardown lifecycle", () => {
     // ...but the replay cache filters it, keeping the rest.
     const cached = runner.getThreadEvents("t-cache-err");
     expect(cached.some((e) => e.type === EventType.RUN_ERROR)).toBe(false);
+    expect(cached.some((e) => e.type === EventType.RUN_STARTED)).toBe(true);
+  });
+
+  it("a failed run followed by a retry: replay closes the open sequences, then terminates the failed run", async (ctx) => {
+    ctx.skip(!pgStarted, "Real Postgres (Docker) unavailable");
+    // The spec requires a producer to close what a run opened BEFORE
+    // RUN_FINISHED — and @copilotkit/shared's finalizeRunEvents skips
+    // closure when a RUN_ERROR is present, so a persisted errored run
+    // keeps its message/tool-call sequences open. The replay's synthetic
+    // terminator must therefore close them first, or the reconnect
+    // renders a permanently-spinning tool call under a finished run.
+    const failingAgent = {
+      agentId: "agent-a",
+      agentName: "A",
+      abortRun: vi.fn(),
+      runAgent: async (
+        _input: unknown,
+        hooks: { onEvent: (e: { event: BaseEvent }) => void },
+      ) => {
+        hooks.onEvent({
+          event: { type: EventType.RUN_STARTED, threadId: "t-close", runId: "run-fail-1" } as unknown as BaseEvent,
+        });
+        hooks.onEvent({
+          event: { type: EventType.TEXT_MESSAGE_START, messageId: "m1", role: "assistant" } as unknown as BaseEvent,
+        });
+        hooks.onEvent({
+          event: { type: EventType.TEXT_MESSAGE_CONTENT, messageId: "m1", delta: "partial " } as unknown as BaseEvent,
+        });
+        hooks.onEvent({
+          event: {
+            type: EventType.TOOL_CALL_START,
+            toolCallId: "tc1",
+            toolCallName: "search",
+            parentMessageId: "m1",
+          } as unknown as BaseEvent,
+        });
+        hooks.onEvent({
+          event: { type: EventType.TOOL_CALL_ARGS, toolCallId: "tc1", delta: "{}" } as unknown as BaseEvent,
+        });
+        hooks.onEvent({
+          event: { type: EventType.RUN_ERROR, message: "boom" } as unknown as BaseEvent,
+        });
+      },
+    } as unknown as AbstractAgent;
+
+    await new Promise<void>((resolve) => {
+      runWithUser(user1, () =>
+        runner.run({
+          threadId: "t-close",
+          agent: failingAgent,
+          input: runInput("t-close", "run-fail-1"),
+        }),
+      ).subscribe({ complete: () => resolve(), error: () => resolve() });
+    });
+
+    // A retry run follows in the same history — this is the case the
+    // synthetic terminator exists for (the retry's RUN_STARTED must not
+    // trip the verifier's "run still active" lock).
+    const retry = await runAs(runner, user1, "t-close", "run-retry");
+    expect(retry.completed).toBe(true);
+
+    const cached = runner.getThreadEvents("t-close");
+    const syntheticFinishIdx = cached.findIndex(
+      (e) =>
+        e.type === EventType.RUN_FINISHED &&
+        (e as { runId?: string }).runId === "run-fail-1",
+    );
+    const retryStartIdx = cached.findIndex(
+      (e) =>
+        e.type === EventType.RUN_STARTED &&
+        (e as { runId?: string }).runId === "run-retry",
+    );
+    expect(syntheticFinishIdx).toBeGreaterThanOrEqual(0);
+    expect(retryStartIdx).toBeGreaterThan(syntheticFinishIdx);
+
+    // The failed run's open sequences are closed BEFORE the terminator…
+    const msgEndIdx = cached.findIndex(
+      (e) =>
+        e.type === EventType.TEXT_MESSAGE_END &&
+        (e as { messageId?: string }).messageId === "m1",
+    );
+    const toolEndIdx = cached.findIndex(
+      (e) =>
+        e.type === EventType.TOOL_CALL_END &&
+        (e as { toolCallId?: string }).toolCallId === "tc1",
+    );
+    const toolResultIdx = cached.findIndex(
+      (e) =>
+        e.type === EventType.TOOL_CALL_RESULT &&
+        (e as { toolCallId?: string }).toolCallId === "tc1",
+    );
+    for (const idx of [msgEndIdx, toolEndIdx, toolResultIdx]) {
+      expect(idx).toBeGreaterThanOrEqual(0);
+      expect(idx).toBeLessThan(syntheticFinishIdx);
+    }
+    // …and the synthesized tool result carries the failure flavor — the
+    // replayed history must not read as a successful turn.
+    const result = cached[toolResultIdx] as { content?: string };
+    expect(JSON.parse(result.content ?? "{}")).toMatchObject({ status: "error" });
+  });
+
+  it("a failed run at the END of history stays unresolved (no synthetic success terminator)", async (ctx) => {
+    ctx.skip(!pgStarted, "Real Postgres (Docker) unavailable");
+    // AG-UI makes resolving a truncated FINAL run the consumer's
+    // business — synthesizing RUN_FINISHED for it would re-present the
+    // failure the live client watched as a completed turn.
+    const failingAgent = {
+      agentId: "agent-a",
+      agentName: "A",
+      abortRun: vi.fn(),
+      runAgent: async (
+        _input: unknown,
+        hooks: { onEvent: (e: { event: BaseEvent }) => void },
+      ) => {
+        hooks.onEvent({
+          event: { type: EventType.RUN_STARTED, threadId: "t-unres", runId: "run-fail" } as unknown as BaseEvent,
+        });
+        hooks.onEvent({
+          event: { type: EventType.TEXT_MESSAGE_START, messageId: "m1", role: "assistant" } as unknown as BaseEvent,
+        });
+        hooks.onEvent({
+          event: { type: EventType.RUN_ERROR, message: "boom" } as unknown as BaseEvent,
+        });
+      },
+    } as unknown as AbstractAgent;
+
+    await new Promise<void>((resolve) => {
+      runWithUser(user1, () =>
+        runner.run({
+          threadId: "t-unres",
+          agent: failingAgent,
+          input: runInput("t-unres", "run-fail"),
+        }),
+      ).subscribe({ complete: () => resolve(), error: () => resolve() });
+    });
+
+    const cached = runner.getThreadEvents("t-unres");
+    expect(cached.some((e) => e.type === EventType.RUN_ERROR)).toBe(false);
+    // No terminator: the run stays visibly incomplete.
+    expect(cached.some((e) => e.type === EventType.RUN_FINISHED)).toBe(false);
     expect(cached.some((e) => e.type === EventType.RUN_STARTED)).toBe(true);
   });
 });

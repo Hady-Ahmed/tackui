@@ -4,6 +4,52 @@ All notable changes to this project will be documented in this file. The format 
 
 ## [Unreleased]
 
+- **Replay history is verifier-safe without lying about failures.** The
+  connect() replay filters persisted `RUN_ERROR` events (the AG-UI verifier
+  locks on them mid-stream, making failed-run threads permanently unreadable
+  on reconnect) — but a run left without a terminal event previously got a
+  synthetic `RUN_FINISHED` unconditionally, which violated the AG-UI rule
+  against synthesizing terminators for truncated streams and re-presented
+  the failed run as a completed turn, with the errored run's message and
+  tool-call sequences left open under a "finished" run (permanently-spinning
+  tool calls on reconnect). The synthesis is now conditional and properly
+  closed: a synthetic `RUN_FINISHED` is appended ONLY when a later
+  `RUN_STARTED` follows in the same history (the next run's start would
+  otherwise trip the verifier's "run still active" lock), any open message
+  or tool-call sequence is closed first with an error-flavored tool result,
+  and a run unterminated at the END of the history stays unresolved —
+  the spec makes resolving a truncated final run the consumer's business.
+- **Deleting a thread mid-run can no longer resurrect it.** A thread deleted
+  from the sidebar while its run was still streaming came back on run
+  completion: the finishing run's persistence re-inserted the run/message/
+  metadata rows and re-seeded the sidebar cache — for a FIRST in-flight run
+  the delete even reported success-as-failure (no rows existed yet to
+  delete, so the cache entry survived too). The delete now always clears the
+  thread's caches and marks the in-flight run; the run's persistence window
+  (storeRun + captureThreadData) skips writes for the marked thread and the
+  marker dies with the connection at teardown.
+- **A transient DB failure during a run's lock release no longer wedges the
+  thread forever.** The release in end-of-run cleanup is best-effort; when
+  it failed, the thread's run_state stayed `is_running` with no runtime
+  recovery — every subsequent run was refused with "Thread already running"
+  until the next process restart. Run acquisition now detects the stale
+  lock (a `current_run_id` with no live in-process connection, aged past a
+  grace window so a just-acquired lock in a concurrent race is never
+  mistaken for an orphan) and steals it, logging loudly.
+- **Connect-vs-completion race no longer regresses the event cache.** A run
+  committing while a connect()'s history read was in flight could be
+  clobbered: connect's read-through write (from the older snapshot) landed
+  after the run's cache merge, regressing the sync readers to pre-run
+  history until the next write on the thread. The read-through write is now
+  skipped when the cache already holds a run the snapshot doesn't.
+- **Run-shaped paths are classified as runs first.** A POST to
+  `/agent/<id>/run/connect` used to match the control-path substring check
+  and skip the per-user run limit and concurrent cap; run attribution now
+  wins over the control-path check, so a run-shaped path that doesn't parse
+  (trailing segments, undecodable agent id) fails closed with a 404 instead
+  of being treated as exempt control traffic, and the `threads/clear` guard
+  is decode- and trailing-slash-tolerant (`%63lear` and a trailing slash can
+  no longer smuggle past it).
 - **Concurrent catalog installs can no longer create duplicate agents.**
   Two installs of the same template landing at the same moment could
   both pass the existence check and insert duplicate installed-agent
@@ -191,8 +237,8 @@ All notable changes to this project will be documented in this file. The format 
   (AGENTOS_BASE_URL, typically a private-network address under SaaS
   mode), not a tenant-supplied URL — wrapping it in the guard refused
   every builder run under `SAAS_MODE=true` (`UnsafeUrlError: hostname
-  resolves to a private address`), including against the private-network
-  warehouse planned for production.
+  resolves to a private address`), including against the agent builder's
+  private-network backend service planned for production.
 - **The CopilotKit runtime's global thread-wipe endpoint is unreachable** — `POST /api/copilotkit/threads/clear` is classified as a run by the copilotkit route (POST, not connect/stop), fell through to the runner's `clearThreads()`, which deletes EVERY tenant's runs, run states, messages and metadata with no caller identity to scope by (the runner is server-side). Nothing in the app calls it; the route now refuses it unconditionally, before auth and before any rate-limit accounting could burn a slot on it.
 - **The live run stream is redacted with the same rule as persistence** — the `RUN_STARTED` fill (emitted when the backend doesn't echo the input) copies `request.input`, whose context carries the gate-injected secrets (model keys + MCP connector tokens): those streamed to every subscriber while `storeRun` redacted only the persisted copy. Every live event now passes the same `redactReservedEvent` rule before any subscriber sees it, with the reserved set captured inside the runner ALS scope so the redaction never depends on callback timing.
 - **Closed the default-plan fallback that handed out the self-host sentinel** — `defaultPlan()` keyed on `BILLING_ENABLED`, so a SaaS deploy without Stripe wired (the exact state a launch passes through) fell back to the unlimited self-host plan for every org. It keys on `SAAS_MODE`: the hosted product's no-subscription default is free, always; `BILLING_ENABLED` only gates checkout.

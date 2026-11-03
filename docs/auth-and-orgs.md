@@ -93,7 +93,9 @@ providers are exposed to the login UI via `GET /api/auth/config`
 - **Org owner/admin** (from the `organization` plugin's `member` table): Can
   manage agents (create/edit/delete) in their own org. Can use all agents and
   see their own threads in the org. Cannot manage users (platform-level).
-- **Org member**: Can use agents and their own threads. Cannot manage agents.
+- **Org member**: Can use agents and their own threads, and can build and
+  manage their own agents with the agent builder. Cannot connect their own
+  backend URLs or manage other users' agents.
 - **Agent management authorization:** `canManageAgents(user)` in
   `lib/auth/context.ts` — returns true for platform admins (short-circuit) or
   org owners/admins (via `member` table lookup). Used by POST/PATCH/DELETE

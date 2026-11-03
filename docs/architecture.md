@@ -95,8 +95,19 @@ strategy it uses so users know whether server-side session storage is required.
 
 `lib/agents/pg-runner.ts` — `PostgresAgentRunner` extends `AgentRunner` from
 `@copilotkit/runtime/v2`, owns its `ACTIVE_CONNECTIONS` Map for live-bridging,
-and its smart-replay `connect()` filters `RUN_ERROR` events before
-`compactEvents` to avoid the AG-UI verifier lock bug. It exposes
+and shapes replay through `buildReplayEvents`: persisted `RUN_ERROR` events
+are filtered out (the AG-UI verifier locks on them mid-stream, making
+failed-run threads permanently unreadable on reconnect), and an unterminated
+run is closed with a synthetic `RUN_FINISHED` — closing any message/tool-call
+sequences the errored run left open first — ONLY when a later `RUN_STARTED`
+follows it in the same history (the next run's `RUN_STARTED` would otherwise
+trip the verifier's "run still active" lock and reject the whole replay). A
+run left unterminated at the END of the history stays unresolved: the spec
+makes resolving a truncated final run the consumer's business, and
+re-presenting the failure as a completed turn would erase what the live
+client actually watched. The same shaping applies when a run is merged into
+the events cache, so sync reads (`/threads/:id/events`) get identical
+history. It exposes
 `renameThread`/`deleteThread`, used by `PATCH/DELETE /api/threads/[id]` — the
 local SSE runner doesn't support CopilotKit's Intelligence-platform-only
 `useThreads` mutations.
