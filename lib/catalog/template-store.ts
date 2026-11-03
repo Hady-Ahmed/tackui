@@ -1,4 +1,4 @@
-import { query } from "@/lib/db/pg";
+import { query, withTransaction } from "@/lib/db/pg";
 import { decryptSecret, encryptSecret } from "@/lib/crypto/encrypt";
 import { generateAgentId, getAgent, toPublicAgent } from "@/lib/agents/agent-store";
 import { z } from "zod";
@@ -474,17 +474,22 @@ export async function updateTemplate(
  * Callers should surface the blast radius first via countTemplateInstalls.
  */
 export async function deleteTemplate(id: string): Promise<boolean> {
-  const result = await query(
-    `DELETE FROM agent_templates WHERE id = $1`,
-    [id],
-  );
-  const deleted = (result.rowCount ?? 0) > 0;
-  if (deleted) {
-    await query(
-      `UPDATE agents SET template_deleted_at = now() WHERE source_template_id = $1 AND template_deleted_at IS NULL`,
-      [id],
-    );
-  }
+  // Both steps in ONE transaction: a failure (or crash) between the
+  // template DELETE and the tombstone UPDATE would leave installed copies
+  // referencing a missing template with NO tombstone — the 410 run gate
+  // never fires and the registry keeps serving the last-synced snapshot,
+  // so the curator's delete silently never took effect.
+  let deleted = false;
+  await withTransaction(async (client) => {
+    const result = await client.query(`DELETE FROM agent_templates WHERE id = $1`, [id]);
+    deleted = (result.rowCount ?? 0) > 0;
+    if (deleted) {
+      await client.query(
+        `UPDATE agents SET template_deleted_at = now() WHERE source_template_id = $1 AND template_deleted_at IS NULL`,
+        [id],
+      );
+    }
+  });
   return deleted;
 }
 

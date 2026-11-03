@@ -124,7 +124,16 @@ export async function register() {
     );
   }
 
-  const authOk = await retryPg("auth", () => ensureAuthTables());
+  // ensureAuthTables reports success as a boolean (it swallows its own
+  // errors to keep the per-request lazy callers non-throwing), so the
+  // retry wrapper rethrows on false — otherwise retryPg could never retry
+  // an auth failure and success/failure would be indistinguishable (a
+  // plain `if (!result)` on a void return exits non-zero on EVERY boot).
+  const authOk = await retryPg("auth", async () => {
+    const ok = await ensureAuthTables();
+    if (!ok) throw new Error("auth tables not ensured yet");
+    return ok;
+  });
   if (!authOk) failFast("auth tables");
   console.log("[auth] tables ensured");
 

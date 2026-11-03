@@ -30,14 +30,38 @@ export const TRUSTED_PROXY_HOPS = Math.max(
 );
 
 /**
+ * Whether `CF-Connecting-IP` may be trusted as the client-IP source.
+ *
+ * The header is client-suppliable on any deployment WITHOUT Cloudflare in
+ * front: an attacker hitting the origin directly can rotate it per request
+ * and get a fresh bucket in every IP-keyed limiter (global flood cap, the
+ * deep health probe, Better Auth's sign-in limiter — unbounded credential
+ * stuffing). So it is honored only when the topology is known to include
+ * Cloudflare: SAAS_MODE (the operator's documented CF → Traefik topology)
+ * or an explicit TRUST_CF_CONNECTING_IP=true opt-in for non-SaaS CF
+ * deploys. Everywhere else the resolver falls through to X-Forwarded-For
+ * with TRUSTED_PROXY_HOPS, which a trusted proxy always appends the real
+ * IP to. Mirror the same order in Better Auth's `ipAddressHeaders`
+ * (lib/auth/auth.ts) — a mismatch would reintroduce the bypass there.
+ */
+export const TRUST_CF_CONNECTING_IP = process.env.TRUST_CF_CONNECTING_IP
+  ? process.env.TRUST_CF_CONNECTING_IP === "true"
+  : process.env.SAAS_MODE === "true";
+
+/**
  * Extract the client IP from a request's forwarding headers. Accepts the
  * minimal header surface (`get(name)`) so both NextRequest and plain
  * `Request` objects work.
  */
 export function getClientIp(getHeader: (name: string) => string | null): string {
-  // Cloudflare sets this to the real client IP — check it first.
-  const cfIp = getHeader("cf-connecting-ip");
-  if (cfIp) return cfIp.trim();
+  // Cloudflare sets this to the real client IP — check it first, but only
+  // when the topology is known to include Cloudflare (see the flag's doc):
+  // on a non-CF deployment the header is client-suppliable and rotating it
+  // would reset every IP-keyed limiter bucket.
+  if (TRUST_CF_CONNECTING_IP) {
+    const cfIp = getHeader("cf-connecting-ip");
+    if (cfIp) return cfIp.trim();
+  }
 
   // Fallback: X-Forwarded-For with trusted-proxy-hop counting.
   const xff = getHeader("x-forwarded-for");

@@ -108,7 +108,7 @@ The first user to sign up becomes the admin.
 
 > **Env changes require a restart.** Next.js reads `.env.local` at boot and does not hot-reload env vars. After editing `.env.local`, stop the dev server (`Ctrl+C`) and run `npm run dev` again.
 
-> **No agents configured?** Click the **+** icon next to "Agents" in the chat sidebar (or visit `/agents`) to add your first agent backend. Only admins see the + icon.
+> **No agents configured?** Click the **+** icon next to "Agents" in the chat sidebar (or visit `/agents`) to add your first agent backend. The + icon is visible to every signed-in user — agents built through the agent builder are member-accessible; only the connect-your-own-backend form is admin-only.
 
 ## Self-hosting with Docker
 
@@ -216,8 +216,8 @@ OAuth callback URLs follow the pattern `{BETTER_AUTH_URL}/api/auth/callback/{pro
 
 ### Roles
 
-- **Admin** — can add/edit/delete agents, test connections, manage users (set roles, ban/unban). First user to sign up is automatically promoted to admin.
-- **User** — can chat with all agents and manage their own conversations. Cannot manage agents.
+- **Admin** — can add/edit/delete agents, connect their own agent backends, test connections, manage users (set roles, ban/unban). First user to sign up is automatically promoted to admin.
+- **User** — can chat with all agents and manage their own conversations, and can build and manage their own agents with the agent builder. Cannot connect their own backend URLs or manage other users' agents.
 - Existing admins can promote users via the **user management** panel on the `/agents` page (set role, ban/unban). To bootstrap an admin on a fresh database before the UI is accessible, use the CLI: `npm run create-admin <email> <password> [name]`.
 
 ### Account linking
@@ -310,8 +310,8 @@ See [`.env.example`](.env.example) for the full list with comments.
 | Variable | Required? | Description |
 | --- | --- | --- |
 | `DATABASE_URL` | Yes | Postgres connection string (e.g. `postgres://user:pass@localhost:5432/dbname`) |
-| `AGENTOS_BASE_URL` | No | Base URL of the AgentOS platform service (e.g. `http://agent-os:7778`) that powers the agent builder. Required together with `AGENTOS_JWT_SECRET` for the builder to activate; when unset the builder is disabled (builder routes return 503 and the UI shows a disabled state). No trailing slash. |
-| `AGENTOS_JWT_SECRET` | No | JWT secret shared with the AgentOS dispatcher (HS256). Required whenever `AGENTOS_BASE_URL` is set — without it every builder run fails auth at the dispatcher (a boot warning is logged). |
+| `AGENTOS_BASE_URL` | No | Base URL of the AgentOS platform service (e.g. `http://agent-os:7778`) that powers the agent builder. Setting this alone activates the builder; when unset the builder is disabled (builder routes return 503 and the UI shows a disabled state). No trailing slash. |
+| `AGENTOS_JWT_SECRET` | No | JWT secret shared with the AgentOS dispatcher (HS256). Required whenever `AGENTOS_BASE_URL` is set — the builder UI works without it, but every run fails auth at the dispatcher until the secret is configured (a boot warning is logged). |
 | `BETTER_AUTH_SECRET` | Yes (unless `AUTH_DISABLED=true`) | Secret for signing session cookies. Generate with `openssl rand -hex 32`. The app refuses to boot without it when auth is enabled. |
 | `BETTER_AUTH_URL` | Yes (unless `AUTH_DISABLED=true`) | Public base URL of the app (e.g. `http://localhost:3000`) |
 | `AUTH_DISABLED` | No | Set to `true` to skip login (solo mode). **Never use this in any deployment exposed to the internet or shared users.** |

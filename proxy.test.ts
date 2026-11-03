@@ -14,10 +14,10 @@ import { _resetForTests } from "@/lib/ratelimit/store";
 
 function makeRequest(
   pathname: string,
-  opts: { ip?: string; cookie?: string } = {},
+  opts: { ip?: string; cookie?: string; headers?: Record<string, string> } = {},
 ) {
   const url = `http://localhost${pathname}`;
-  const headers = new Headers();
+  const headers = new Headers(opts.headers);
   if (opts.ip) headers.set("x-forwarded-for", opts.ip);
   if (opts.cookie) headers.set("cookie", opts.cookie);
   return new NextRequest(url, { headers });
@@ -122,8 +122,9 @@ describe("proxy — per-IP rate limiting (AUTH_DISABLED=false)", () => {
     expect(res.status).toBe(200);
   });
 
-  it("extracts IP from X-Forwarded-For (first hop)", async () => {
-    // Send 300 requests with a multi-hop X-Forwarded-For
+  it("extracts IP from X-Forwarded-For as the trusted rightmost hop", async () => {
+    // TRUSTED_PROXY_HOPS defaults to 1: the bucket key is the LAST entry
+    // (10.0.0.2 — the IP your proxy appended), not the first.
     for (let i = 0; i < 300; i++) {
       await proxy(
         makeRequest("/api/agents", {
@@ -131,13 +132,99 @@ describe("proxy — per-IP rate limiting (AUTH_DISABLED=false)", () => {
         }),
       );
     }
-    // The first IP (1.2.3.4) should be the one limited
+    // Same trusted entry → same bucket → limited.
     const res = await proxy(
       makeRequest("/api/agents", {
-        ip: "1.2.3.4, 10.0.0.1, 10.0.0.2",
+        ip: "9.9.9.9, 10.0.0.1, 10.0.0.2",
       }),
     );
     expect(res.status).toBe(429);
+  });
+
+  it("leftmost X-Forwarded-For rotation cannot evade the bucket (spoof defense)", async () => {
+    // A client appendable header: the attacker prepends a fresh fake IP
+    // per request while the trusted proxy keeps appending the SAME real
+    // IP. Leftmost-taking would give each request a new bucket; the
+    // rightmost-trusted-hop key stays fixed and the flood is capped.
+    mockGetSessionCookie.mockReturnValue("session=stubbed");
+    try {
+      for (let i = 0; i < 300; i++) {
+        const res = await proxy(
+          makeRequest("/api/agents", {
+            cookie: "better-auth.session=stubbed",
+            ip: `10.9.9.${i % 250}, 10.9.9.${(i + 1) % 250}, 203.0.113.99`,
+          }),
+        );
+        expect(res.status).toBe(200);
+      }
+      const res = await proxy(
+        makeRequest("/api/agents", {
+          cookie: "better-auth.session=stubbed",
+          ip: "anything, 203.0.113.99",
+        }),
+      );
+      expect(res.status).toBe(429);
+    } finally {
+      mockGetSessionCookie.mockReturnValue(null);
+    }
+  });
+
+  it("ignores CF-Connecting-IP when Cloudflare trust is off (default outside SaaS mode)", async () => {
+    // Without SAAS_MODE or TRUST_CF_CONNECTING_IP, the header is treated
+    // as client-suppliable: a spoofed value must NOT open a fresh bucket.
+    // Exhaust the XFF-derived bucket, then send a request carrying both a
+    // spoofed CF header and the same XFF — it must land in the SAME
+    // (exhausted) bucket, proving the CF header was ignored.
+    for (let i = 0; i < 300; i++) {
+      await proxy(makeRequest("/api/agents", { ip: "203.0.113.50" }));
+    }
+    const res = await proxy(
+      makeRequest("/api/agents", {
+        ip: "203.0.113.50",
+        headers: { "cf-connecting-ip": "1.1.1.1" },
+      }),
+    );
+    expect(res.status).toBe(429);
+  });
+
+  it("honors CF-Connecting-IP when TRUST_CF_CONNECTING_IP=true (CF-fronted self-host)", async () => {
+    // importProxy() re-evaluates the module consts, so BOTH env vars must
+    // be pinned for the re-import (AUTH_DISABLED=false restored by the
+    // beforeEach would otherwise bypass the limiter entirely).
+    const origAuth = process.env.AUTH_DISABLED;
+    process.env.TRUST_CF_CONNECTING_IP = "true";
+    process.env.AUTH_DISABLED = "false";
+    try {
+      proxy = await importProxy();
+      for (let i = 0; i < 300; i++) {
+        await proxy(
+          makeRequest("/api/agents", {
+            headers: { "cf-connecting-ip": "198.51.100.77" },
+          }),
+        );
+      }
+      const res = await proxy(
+        makeRequest("/api/agents", {
+          headers: { "cf-connecting-ip": "198.51.100.77" },
+        }),
+      );
+      expect(res.status).toBe(429);
+      // And the XFF path is a DIFFERENT bucket — the CF trust didn't
+      // collapse the two resolution orders into one key. (The CF-side
+      // requests above exhaust the limiter BEFORE the cookie gate, so
+      // they don't need a session — this request must pass the gate.)
+      mockGetSessionCookie.mockReturnValue("session=stubbed");
+      const other = await proxy(
+        makeRequest("/api/agents", {
+          cookie: "better-auth.session=stubbed",
+          ip: "203.0.113.200",
+        }),
+      );
+      expect(other.status).toBe(200);
+    } finally {
+      delete process.env.TRUST_CF_CONNECTING_IP;
+      process.env.AUTH_DISABLED = origAuth;
+    }
   });
 
   it("non-API routes are not rate limited by the IP layer", async () => {

@@ -255,13 +255,21 @@ Two-layer rate limiting protects the server from abuse and floods.
 
 - 300 requests/min per IP on all `/api/*` routes (except `/api/health` which
   is unlimited, and `/api/auth/*` which has its own Better Auth limiter).
-- Enforced in the proxy (pre-auth). IP resolution checks `CF-Connecting-IP`
-  first (set by Cloudflare to the real client IP — Traefik/Coolify overwrites
+- Enforced in the proxy (pre-auth). IP resolution honors `CF-Connecting-IP`
+  (set by Cloudflare to the real client IP — Traefik/Coolify overwrites
   `X-Forwarded-For` with the Cloudflare edge IP, splitting the counter across
-  multiple edge IPs), then falls back to `X-Forwarded-For` with
-  `TRUSTED_PROXY_HOPS` for self-hosters not behind Cloudflare. Without the
-  right hop count, a malicious client can prepend a fake IP to
-  `X-Forwarded-For` and bypass the per-IP limit entirely.
+  multiple edge IPs) ONLY when the topology is known to include Cloudflare:
+  `SAAS_MODE=true`, or an explicit `TRUST_CF_CONNECTING_IP=true` for non-SaaS
+  CF-fronted deploys. On any deployment without Cloudflare in front, the
+  header is client-suppliable — an attacker hitting the origin directly could
+  rotate it per request and get a fresh bucket in every IP-keyed limiter
+  (flood cap, deep health probe, Better Auth's sign-in limiter) — so it is
+  ignored there and resolution falls back to `X-Forwarded-For` with
+  `TRUSTED_PROXY_HOPS` (the Nth-from-right entry, which a trusted proxy
+  always appends the real IP to). Without the right hop count, a malicious
+  client can prepend a fake IP to `X-Forwarded-For` and bypass the per-IP
+  limit entirely. Better Auth's `ipAddressHeaders` mirrors the same
+  conditional CF trust, so its sign-in limiter keys on the same resolved IP.
 - Proxy runtime pinned to `nodejs` — the in-memory `Map` requires it.
 
 ### Layer 2 — Per-user route-level limits (`lib/ratelimit/`)

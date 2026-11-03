@@ -92,12 +92,39 @@ describe("GET /api/health", () => {
       );
     }
     // A different client IP (e.g. the real orchestrator) is unaffected.
+    // CF-Connecting-IP is NOT trusted outside SaaS mode / an explicit flag
+    // (client-suppliable there), so the distinct client is keyed by XFF.
     const res = await GET(
       new Request("http://localhost:3000/api/health?deep=true", {
-        headers: { "cf-connecting-ip": "198.51.100.9" },
+        headers: { "x-forwarded-for": "198.51.100.9" },
       }),
     );
     expect(res.status).toBe(200);
+  });
+
+  it("deep probe: a spoofed CF-Connecting-IP does not open a fresh bucket", async () => {
+    // Same defense the proxy flood limiter pins: without CF trust, a
+    // rotating/spoofed CF-Connecting-IP must not reset the counter — the
+    // request with the same XFF still lands in the exhausted bucket.
+    mockQuery.mockResolvedValue({ rows: [{ applied: 13 }] });
+    for (let i = 0; i < 30; i++) {
+      await GET(
+        new Request("http://localhost:3000/api/health?deep=true", {
+          headers: { "x-forwarded-for": "203.0.113.42" },
+        }),
+      );
+    }
+    const spoofed = await GET(
+      new Request("http://localhost:3000/api/health?deep=true", {
+        headers: {
+          "x-forwarded-for": "203.0.113.42",
+          "cf-connecting-ip": "10.9.9.1",
+        },
+      }),
+    );
+    expect(spoofed.status).toBe(429);
+    // The spoofed probe never reached the DB.
+    expect(mockQuery).toHaveBeenCalledTimes(30);
   });
 
   it("plain liveness stays unlimited — the flood cap only guards the deep branch", async () => {

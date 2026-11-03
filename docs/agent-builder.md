@@ -19,7 +19,7 @@ credentials — at run time, never stored in the definition.**
 A builder agent's definition carries only *what it needs*: a model
 (provider + id + platform tier + declared dep key + registry binding
 name), tool names with their credential requirements, and connector
-names. Keys and tokens are never written into the definition. At run
+ids. Keys and tokens are never written into the definition. At run
 time the runner's own BYOK keys (per-user `credentials` table) and the
 org's connector config (`connectors` table) are resolved fresh and
 delivered per-run as AG-UI context items. Nothing is cached agent-side,
@@ -651,7 +651,8 @@ deletable.
 
 The org-level MCP server registry ("connect an MCP server"). Admins
 configure once per org; builder agents reference connectors **by stable
-id** (`AgentRequirements.connectors` holds `connectorIds: string[]`), and
+id** (`AgentRequirements.connectors` holds `{id, name}` pairs — the id is
+the stable reference, the name is display-only), and
 the run path delivers `{connector_id: {token}}` per-run as the
 `mcp_connectors` context item — **no URLs on the wire**. Attach URLs
 resolve server-side from the platform's connector registry

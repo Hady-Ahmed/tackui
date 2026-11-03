@@ -93,6 +93,47 @@ export function redactReservedEvent<E extends object>(
 }
 
 /**
+ * Build a verifier-safe replay stream from raw persisted events:
+ * RUN_ERROR events are removed (the documented replay filter) and any run
+ * left WITHOUT a terminal event gets a synthetic RUN_FINISHED. Without the
+ * synthesis the next run's RUN_STARTED trips the AG-UI verifier ("Cannot
+ * send 'RUN_STARTED' while a run is still active") and the whole connect
+ * replay is rejected — the conversation renders only the pre-failure
+ * history on every reconnect of a thread with a failed run followed by a
+ * retry.
+ */
+function buildReplayEvents(events: BaseEvent[]): BaseEvent[] {
+  const out: BaseEvent[] = [];
+  let openRun: { threadId: string; runId: string } | null = null;
+  for (const event of events) {
+    if (event.type === EventType.RUN_ERROR) continue;
+    if (event.type === EventType.RUN_STARTED) {
+      if (openRun) {
+        out.push(syntheticRunFinished(openRun));
+      }
+      const started = event as { threadId?: string; runId?: string };
+      openRun =
+        started.threadId && started.runId
+          ? { threadId: started.threadId, runId: started.runId }
+          : null;
+    } else if (event.type === EventType.RUN_FINISHED) {
+      openRun = null;
+    }
+    out.push(event);
+  }
+  if (openRun) out.push(syntheticRunFinished(openRun));
+  return out;
+}
+
+function syntheticRunFinished(run: { threadId: string; runId: string }): BaseEvent {
+  return {
+    type: EventType.RUN_FINISHED,
+    threadId: run.threadId,
+    runId: run.runId,
+  } as unknown as BaseEvent;
+}
+
+/**
  * Postgres-backed AgentRunner. Replaces @copilotkit/sqlite-runner's
  * SqliteAgentRunner for this app — speaks to the same `pg.Pool` that
  * Better Auth and the agent store use (see lib/db/pg.ts).
@@ -405,8 +446,12 @@ export class PostgresAgentRunner extends AgentRunner {
           // Pre-run failure (historic read / parent resolution): nothing
           // was persisted — release the lock + map entry, then rethrow so
           // the run stream ERRORS (the pre-run client contract) instead
-          // of completing silently.
+          // of completing silently. nextSubject must also be terminated:
+          // a connect() that bridged to it during the acquire→read window
+          // (is_running was already true) would otherwise never receive a
+          // terminal event and hang forever.
           await this.teardownRun(request.threadId, myConnection, request.input.runId);
+          nextSubject.error(err);
           throw err;
         }
         console.error("[runner] run failed", {
@@ -483,6 +528,9 @@ export class PostgresAgentRunner extends AgentRunner {
         error: err instanceof Error ? err.message : String(err),
       });
       runSubject.error(err);
+      // Mirror to nextSubject so a bridged connect() stream terminates too
+      // (a no-op when the subject already completed).
+      nextSubject.error(err);
     });
   }
 
@@ -532,11 +580,12 @@ export class PostgresAgentRunner extends AgentRunner {
     const allHistoricEvents: BaseEvent[] = [];
     for (const run of historicRuns) {
       for (const event of run.events) {
-        if (event.type === EventType.RUN_ERROR) continue;
         allHistoricEvents.push(event);
       }
     }
-    const compactedEvents = compactEvents(allHistoricEvents);
+    // Filter RUN_ERROR + close any run the filter left unterminated (see
+    // buildReplayEvents) BEFORE compacting.
+    const compactedEvents = compactEvents(buildReplayEvents(allHistoricEvents));
 
     // ─── Read-through: populate caches from the PG fetch ──────────────
     // The sync LocalThreadEndpointRunner methods (getThreadEvents,
@@ -606,6 +655,15 @@ export class PostgresAgentRunner extends AgentRunner {
   async isRunning(
     request: AgentRunnerIsRunningRequest,
   ): Promise<boolean> {
+    // Same visibility rule as every other thread path: without this,
+    // knowing a foreign thread id yields a free "exists and is mid-run"
+    // oracle (the sync readers deny unknown/foreign threads with an
+    // indistinguishable empty/false response — this path must match).
+    const user = getRunnerUser();
+    if (user) {
+      const cached = this.threadCache.get(request.threadId);
+      if (!cached || !this.threadVisible(cached, user)) return false;
+    }
     const runState = await this.getRunState(request.threadId);
     return runState.isRunning;
   }
@@ -950,17 +1008,16 @@ export class PostgresAgentRunner extends AgentRunner {
     // /threads/:id/events and /threads/:id/state backed by the caches) used
     // to serve the PRE-RUN history after a run — eventsCache was only ever
     // populated by connect(). Merge this run's persisted events into the
-    // cache (PG write succeeded → cache may follow), with the same
-    // RUN_ERROR filter connect() applies before replaying: AG-UI's
-    // verifier locks on a replayed RUN_ERROR mid-stream, so the replay
-    // surface must never carry one.
+    // cache with the same verifier-safe treatment connect() applies before
+    // replaying: RUN_ERROR filtered out, and any run left unterminated by
+    // that filter closed with a synthetic RUN_FINISHED (AG-UI's verifier
+    // locks on a replayed RUN_ERROR mid-stream AND on a RUN_STARTED that
+    // follows an unterminated run).
     const priorEvents = this.eventsCache.get(threadId) ?? [];
     this.eventsCache.set(
       threadId,
       compactEvents(
-        [...priorEvents, ...compactedEvents].filter(
-          (event) => event.type !== EventType.RUN_ERROR,
-        ),
+        buildReplayEvents([...priorEvents, ...compactedEvents]),
       ),
     );
   }

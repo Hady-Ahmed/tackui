@@ -4,6 +4,16 @@ All notable changes to this project will be documented in this file. The format 
 
 ## [Unreleased]
 
+- **Concurrent catalog installs can no longer create duplicate agents.**
+  Two installs of the same template landing at the same moment could
+  both pass the existence check and insert duplicate installed-agent
+  rows for the same org. A partial unique index (migration 0015) makes
+  the duplicate insert fail with a unique violation, which the installer
+  now catches and treats as "already installed" — the first install wins
+  and both callers end up with the same single agent. The (rarer)
+  agent-count-cap overshoot under concurrent different-template installs
+  remains a check-then-act window; it is accepted and documented in
+  docs/catalog.md.
 - **Completed runs now refresh the thread event cache.** The runner's
   sync event/state readers (CopilotKit's runtime exposes them as
   `/threads/:id/events` and `/threads/:id/state`) only ever saw the
@@ -23,7 +33,9 @@ All notable changes to this project will be documented in this file. The format 
   requests). The readiness probe (`?deep=true`) round-trips Postgres and
   counts the applied migrations, returning 503 with a generic error when
   the DB is unreachable — for orchestrator readiness gates and
-  post-deploy smoke checks. The plain probe is unchanged liveness.
+  post-deploy smoke checks. The plain probe is unchanged liveness. The
+  deep probe is itself rate-limited to 30/min per client IP and answers
+  429 beyond that, so it can't be turned into a free Postgres oracle.
 - **Credentials/template hardening + billing/org rate limits (security
   audit, Phase C).** Four closes: (1) a credentials UPDATE now intersects
   the stored row with the provider's current contract before merging, so

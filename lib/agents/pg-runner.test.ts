@@ -1432,12 +1432,16 @@ describe("PostgresAgentRunner — redaction chain integration (live ALS → stre
 
     // The run must start INSIDE the runner-context ALS — the same way
     // the copilotkit route wraps builder runs (user + stashed deps +
-    // reserved keys in one scope).
+    // reserved keys in one scope), and the WHOLE lifecycle is awaited
+    // inside that scope: a fire-and-forget scope here would let the ALS
+    // exit before the run finished, which is not how the route behaves.
     const events: BaseEvent[] = [];
-    const outcome = await new Promise<{ completed: boolean; error: unknown }>((resolve) => {
-      let observable!: ReturnType<PostgresAgentRunner["run"]>;
-      runWithRunnerContext(user1, contextItems, reservedDepKeys, async () => {
-        observable = runner.run({
+    const outcome = await runWithRunnerContext(
+      user1,
+      contextItems,
+      reservedDepKeys,
+      async () => {
+        const observable = runner.run({
           threadId: "t-redact",
           agent,
           input: {
@@ -1450,13 +1454,15 @@ describe("PostgresAgentRunner — redaction chain integration (live ALS → stre
             forwardedProps: {},
           },
         });
-      });
-      observable.subscribe({
-        next: (e) => events.push(e),
-        error: (err) => resolve({ completed: false, error: err }),
-        complete: () => resolve({ completed: true, error: null }),
-      });
-    });
+        return new Promise<{ completed: boolean; error: unknown }>((resolve) => {
+          observable.subscribe({
+            next: (e) => events.push(e),
+            error: (err) => resolve({ completed: false, error: err }),
+            complete: () => resolve({ completed: true, error: null }),
+          });
+        });
+      },
+    );
     expect(outcome.completed).toBe(true);
 
     // ── Live stream: the RUN_STARTED the browser would have seen ─────

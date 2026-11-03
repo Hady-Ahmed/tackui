@@ -105,8 +105,15 @@ async function handler(request: Request): Promise<Response> {
     // would otherwise slip past the gate regexes (`[^/]+` can't match the
     // empty segment) and execute the agent with every gate skipped.
     const pathname = url.pathname.replace(/\/{2,}/g, "/");
+    // Run-shaped paths are attributed as runs FIRST: the control check
+    // below is substring-based, so without this precedence a path like
+    // `/agent/<id>/run/connect` would classify as control — skipping the
+    // fail-closed 404, every gate, the rate limit and the concurrent slot
+    // before falling through to the inner handler.
+    const isRunShaped = /\/agent\/[^/]+\/(?:run|suggest)(?:\/|$)/.test(pathname);
     const isControlRequest =
-      pathname.includes("/connect") || pathname.includes("/stop/");
+      !isRunShaped &&
+      (pathname.includes("/connect") || pathname.includes("/stop/"));
 
     // Destructive runtime endpoints must never be reachable through this
     // proxy. POST /threads/clear is classified as a run below (POST, not
@@ -117,8 +124,24 @@ async function handler(request: Request): Promise<Response> {
     // this app calls it (per-thread cleanup happens server-side), so it
     // is refused unconditionally — before auth, before any rate-limit
     // accounting could burn a slot on it.
-    if (pathname.endsWith("/threads/clear")) {
-      return Response.json({ error: "Not available" }, { status: 403 });
+    //
+    // The guard is decode- and trailing-slash-tolerant on NON-run paths:
+    // a percent-encoded segment (`/threads/%63lear`) or a trailing slash
+    // would otherwise slip past a literal `endsWith` while the runtime's
+    // own segment matching could still resolve it to the clear endpoint.
+    // Run-shaped paths are excluded from the decoded check so a decoded
+    // `%2F` inside an agent id can't produce a false "threads/clear"
+    // refusal of a legitimate run.
+    if (!isRunShaped) {
+      let clearPath = pathname;
+      try {
+        clearPath = decodeURIComponent(clearPath);
+      } catch {
+        // Malformed encoding — the raw path already collapsed; keep it.
+      }
+      if (/\/threads\/clear\/?$/.test(clearPath)) {
+        return Response.json({ error: "Not available" }, { status: 403 });
+      }
     }
 
     const isRunRequest = request.method === "POST" && !isControlRequest;

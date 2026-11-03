@@ -66,6 +66,7 @@ import { NextResponse } from "next/server";
 import { getRequestUser, getSyntheticAdmin } from "@/lib/auth/context";
 import { isAuthDisabled } from "@/lib/auth/auth";
 import { acquireConcurrent, checkUserLimit } from "@/lib/ratelimit/middleware";
+import { wrapStreamWithRelease } from "@/lib/ratelimit/stream-wrap";
 import { checkBuilderRunGate, consumeBuilderRunQuota } from "@/lib/agents/run-gate";
 import {
   runWithRunnerContext,
@@ -164,6 +165,11 @@ describe("copilotkit route — builder run gate wiring", () => {
     const res = await POST(new Request(RUN_URL, { method: "POST" }));
 
     expect(res.status).toBe(200);
+    // And the slot genuinely moved to the stream wrapper: the response
+    // body must be wrapped so a client disconnect / cancel closes the
+    // stream and decrements the concurrent counter (otherwise an
+    // abandoned stream would leak the slot for the whole cap window).
+    expect(wrapStreamWithRelease).toHaveBeenCalledWith(res, release);
     expect(release).not.toHaveBeenCalled();
   });
 
@@ -257,11 +263,31 @@ describe("copilotkit route — run-shaped path fails closed", () => {
     // so these tests exercise the path-classification layer only.
     const { checkCatalogRunGates } = await import("@/lib/plans/enforcement");
     vi.mocked(checkCatalogRunGates).mockResolvedValue(null);
+    // Same leak discipline as the suggest describe: the solo-mode describe
+    // pins isAuthDisabled→true and clearAllMocks keeps implementations —
+    // these paths must exercise member (SaaS-mode) gate wiring.
+    vi.mocked(isAuthDisabled).mockReturnValue(false);
   });
 
   it("404s a POST to /agent/<id>/run/<extra> before the inner handler", async () => {
     const res = await POST(
       new Request("http://localhost:3000/api/copilotkit/agent/test-agent/run/extra", {
+        method: "POST",
+        body: JSON.stringify({}),
+      }),
+    );
+    expect(res.status).toBe(404);
+    expect(checkBuilderRunGate).not.toHaveBeenCalled();
+  });
+
+  it("404s POST /agent/<id>/run/connect (run-shape outranks control classification)", async () => {
+    // `/run/connect` collides with the substring-based control-path check:
+    // classified as control it would skip the fail-closed 404, every gate,
+    // and the rate limit before reaching the inner handler. Run-shape must
+    // win — the path is still a run request, and a run with a trailing
+    // segment fails closed.
+    const res = await POST(
+      new Request("http://localhost:3000/api/copilotkit/agent/test-agent/run/connect", {
         method: "POST",
         body: JSON.stringify({}),
       }),
@@ -411,6 +437,22 @@ describe("copilotkit route — /threads/clear refusal + run-classification exemp
     // (the same normalization the run gates rely on).
     const res = await POST(
       new Request("http://localhost:3000/api/copilotkit/threads//clear", {
+        method: "POST",
+        body: JSON.stringify({}),
+      }),
+    );
+    expect(res.status).toBe(403);
+    expect(await res.json()).toEqual({ error: "Not available" });
+  });
+
+  it("refuses the percent-encoded variant too (the guard decodes before matching)", async () => {
+    // `/threads/%63lear` percent-encodes the leading "c" — a literal
+    // `endsWith("/threads/clear")` check misses it while the runtime's
+    // own segment matching could still resolve it. The guard decodes the
+    // (non-run-shaped) pathname before matching, so encoding cannot
+    // smuggle the destructive endpoint past it.
+    const res = await POST(
+      new Request("http://localhost:3000/api/copilotkit/threads/%63lear", {
         method: "POST",
         body: JSON.stringify({}),
       }),
