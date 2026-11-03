@@ -271,3 +271,92 @@ describe("copilotkit route — run-shaped path fails closed", () => {
     expect(res.status).not.toBe(404);
   });
 });
+
+describe("copilotkit route — suggest path is gated like a run", () => {
+  beforeEach(async () => {
+    // The solo describe above pins isAuthDisabled→true and a 410 on the
+    // catalog gate — clearAllMocks keeps implementations, so both are
+    // reset here for the member-path (SaaS-mode) behavior under test.
+    vi.mocked(isAuthDisabled).mockReturnValue(false);
+    const { checkCatalogRunGates } = await import("@/lib/plans/enforcement");
+    vi.mocked(checkCatalogRunGates).mockResolvedValue(null);
+  });
+
+  // CopilotKit's runtime exposes POST /agent/:id/suggest as a stateless
+  // suggestion run that executes the provider agent DIRECTLY. Before the
+  // (run|suggest) attribution, a suggest request was classified as a run
+  // for rate limiting but skipped every gate (runAgentIdFromPath only
+  // matched /run) — a real agent execution with no plan gate, no builder
+  // gate, no credential requirements.
+  it("applies the builder gate to POST /agent/<id>/suggest", async () => {
+    await POST(
+      new Request("http://localhost:3000/api/copilotkit/agent/test-agent/suggest", {
+        method: "POST",
+        body: JSON.stringify({}),
+      }),
+    );
+    expect(checkBuilderRunGate).toHaveBeenCalledTimes(1);
+    expect(checkBuilderRunGate).toHaveBeenCalledWith(USER, "test-agent");
+  });
+
+  it("returns a gate refusal for a suggest path instead of running ungated", async () => {
+    vi.mocked(checkBuilderRunGate).mockResolvedValue(
+      resolution({ response: NextResponse.json({ error: "gated" }, { status: 402 }) }),
+    );
+
+    const res = await POST(
+      new Request("http://localhost:3000/api/copilotkit/agent/test-agent/suggest", {
+        method: "POST",
+        body: JSON.stringify({}),
+      }),
+    );
+
+    expect(res.status).toBe(402);
+  });
+
+  it("404s a suggest path with trailing segments before the inner handler", async () => {
+    const res = await POST(
+      new Request("http://localhost:3000/api/copilotkit/agent/test-agent/suggest/extra", {
+        method: "POST",
+        body: JSON.stringify({}),
+      }),
+    );
+    expect(res.status).toBe(404);
+    expect(checkBuilderRunGate).not.toHaveBeenCalled();
+  });
+});
+
+describe("copilotkit route — duplicate-slash run paths normalize into the gates", () => {
+  beforeEach(async () => {
+    // Same leak discipline as the suggest describe above.
+    vi.mocked(isAuthDisabled).mockReturnValue(false);
+    const { checkCatalogRunGates } = await import("@/lib/plans/enforcement");
+    vi.mocked(checkCatalogRunGates).mockResolvedValue(null);
+  });
+
+  // A `//run` path slipped past the gate regex (`[^/]+` can't match the
+  // empty segment between the double slashes) while still reaching the
+  // inner handler — the agent ran with every gate skipped. The handler
+  // now collapses duplicate slashes before attribution.
+  it("gates POST /agent/<id>//run instead of skipping attribution", async () => {
+    await POST(
+      new Request("http://localhost:3000/api/copilotkit/agent/test-agent//run", {
+        method: "POST",
+        body: JSON.stringify({}),
+      }),
+    );
+    expect(checkBuilderRunGate).toHaveBeenCalledTimes(1);
+    expect(checkBuilderRunGate).toHaveBeenCalledWith(USER, "test-agent");
+  });
+
+  it("404s a //run path with trailing segments (still fail-closed)", async () => {
+    const res = await POST(
+      new Request("http://localhost:3000/api/copilotkit/agent/test-agent//run/extra", {
+        method: "POST",
+        body: JSON.stringify({}),
+      }),
+    );
+    expect(res.status).toBe(404);
+    expect(checkBuilderRunGate).not.toHaveBeenCalled();
+  });
+});

@@ -290,6 +290,16 @@ tries to acquire a 4th slot and 429s, making the run unstoppable. The aborted
 run's own SSE stream close still fires `release()` via `wrapStreamWithRelease`,
 which is what actually decrements the counter.
 
+**Suggest counts as a run.** CopilotKit's runtime also exposes
+`POST /agent/:id/suggest` — a stateless suggestion run that executes the
+provider agent directly. Path attribution (`runAgentIdFromPath`) matches
+both `run` and `suggest`, so the rate limit, plan gates, builder gate and
+concurrent cap apply identically; a suggest path that skipped attribution
+would be a real agent execution with every gate bypassed. The handler also
+collapses duplicate slashes before attribution (`//run` would otherwise
+slip past the gate regexes), and run/suggest-shaped paths that don't parse
+(trailing segments, undecodable agent ids) fail closed with a 404.
+
 The `wrapStreamWithRelease()` helper (in `lib/ratelimit/stream-wrap.ts`)
 wraps the `Response` body `ReadableStream` so the concurrent-cap decrement
 fires automatically on stream completion, error, or client disconnect — no
@@ -339,7 +349,26 @@ the same.
 Every thread path — list (`listThreads`), reads
 (`getThreadMessages`/`getThreadEvents`/`getThreadState`), and mutations
 (`stop`, `deleteThread`, `renameThread`) — applies ONE rule
-(`PostgresAgentRunner.threadVisible`, lib/agents/pg-runner.ts):
+(`PostgresAgentRunner.threadVisible`, lib/agents/pg-runner.ts). The two
+async run paths enforce it too:
+
+- **`startRun` (the write path)** resolves the thread's existence and
+  ownership from PG (`getThreadOwnership` — `thread_metadata`, falling
+  back to "has runs" for ownerless legacy rows) BEFORE any state changes.
+  A thread that exists and is foreign is denied ("Thread not found" →
+  RUN_ERROR to the caller); a thread that exists nowhere is creatable —
+  the first runner becomes its owner. The thread cache can't arbitrate
+  this: a NEW chat is a cache miss by design. Without the PG check, a
+  caller who knew another tenant's thread id could mark it "running"
+  (denying the owner's real runs) and append their own messages to the
+  victim's persisted history.
+- **`startConnect` (the async replay path)** gates on the same
+  `threadVisible` rule as the sync readers — fail-closed on cache miss,
+  denial reads identically to an unknown thread (empty replay, immediate
+  complete) and fires BEFORE the history fetch, so a foreign thread's
+  events are never even read into this process's caches.
+
+The rule itself:
 
 - **Exact org match** — the thread's `organizationId` must equal the
   caller's. The old `organizationId === ""` tolerance made metadata rows

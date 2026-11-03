@@ -4,6 +4,21 @@ All notable changes to this project will be documented in this file. The format 
 
 ## [Unreleased]
 
+- **Cross-tenant guards on the run and connect paths (security audit).**
+  Three holes closed, each pinned by tests: `startRun` now resolves the
+  target thread's existence and ownership from Postgres before any state
+  change, so a caller who knows another tenant's thread id can no longer
+  mark it "running" (denying the owner's real runs) or append their own
+  messages to the victim's persisted history — a brand-new threadId stays
+  creatable (the first runner becomes its owner); `startConnect` applies
+  the same `threadVisible` rule as every sync read, so a known thread id
+  no longer replays a foreign thread's full event history (and the denial
+  fires before the history fetch, leaving the caches untouched); and the
+  CopilotKit route now gates CopilotKit's stateless `POST
+  /agent/:id/suggest` path exactly like a run (it executes the provider
+  agent directly — previously it skipped the rate limit, plan gates,
+  builder gate and concurrent cap), collapsing duplicate slashes before
+  attribution so a `//run` path can't slip past the gate regexes either.
 - **Saved API keys are editable.** Each row on the API keys page gains an
   Edit button (next to Delete) that opens the provider's form in place —
   blank inputs mean "keep the current value", so one field of a

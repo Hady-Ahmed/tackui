@@ -197,6 +197,26 @@ export class PostgresAgentRunner extends AgentRunner {
     request: AgentRunnerRunRequest,
     runSubject: ReplaySubject<BaseEvent>,
   ): Promise<void> {
+    // ─── Cross-tenant write guard ────────────────────────────────────────
+    // A caller who knows (or guesses) another tenant's thread id must not
+    // be able to write into it: without this check a foreign run marked
+    // the victim thread "running" (denying the owner's real runs with
+    // "Thread already running") and appended the attacker's messages and
+    // events to the victim's persisted history. The thread cache can't
+    // arbitrate this — a NEW chat is a cache miss by design — so existence
+    // is resolved from PG, the cross-process source of truth. A thread
+    // that exists and is foreign is denied before ANY state changes
+    // (run_state write, history read, cache seed); a thread that doesn't
+    // exist anywhere is creatable — its owner becomes the first runner
+    // (captureThreadData records user_id/org_id on first run).
+    const runnerUser = getRunnerUser();
+    if (runnerUser) {
+      const ownership = await this.getThreadOwnership(request.threadId);
+      if (ownership && !this.threadVisible(ownership, runnerUser)) {
+        throw new Error("Thread not found");
+      }
+    }
+
     // Check + mark running atomically (avoids race where two concurrent runs
     // both see "not running" and both proceed).
     const runState = await this.getRunState(request.threadId);
@@ -246,7 +266,6 @@ export class PostgresAgentRunner extends AgentRunner {
     // Seed only when absent: a cached thread keeps its real title and
     // createdAt (captureThreadData reconciles the row at run end).
     if (!this.threadCache.has(request.threadId)) {
-      const runnerUser = getRunnerUser();
       const nowIso = new Date().toISOString();
       this.threadCache.set(request.threadId, {
         id: request.threadId,
@@ -435,6 +454,25 @@ export class PostgresAgentRunner extends AgentRunner {
     request: AgentRunnerConnectRequest,
     connectionSubject: ReplaySubject<BaseEvent>,
   ): Promise<void> {
+    // ─── Cross-tenant read guard ─────────────────────────────────────────
+    // Same visibility rule as the sync readers (getThreadEvents et al):
+    // an authenticated caller is denied for a thread unknown to this
+    // process or foreign to their org — fail-closed on cache miss, and
+    // the denial reads identically to an unknown thread (empty replay,
+    // immediate complete; the sync contract's indistinguishable-empty
+    // pattern). Without this, knowing a thread id was enough to replay
+    // its FULL event history: every sync read path gates on
+    // threadVisible, but this async replay path didn't. The guard must
+    // run before getHistoricRuns — the PG read itself is the leak.
+    const runnerUser = getRunnerUser();
+    if (runnerUser) {
+      const cached = this.threadCache.get(request.threadId);
+      if (!cached || !this.threadVisible(cached, runnerUser)) {
+        connectionSubject.complete();
+        return;
+      }
+    }
+
     // ─── Smart replay: filter RUN_ERROR events before compacting ─────
     // AG-UI's verifier locks when it sees a RUN_ERROR mid-stream, which
     // makes failed-run threads permanently unreadable on reconnect (the
@@ -542,11 +580,12 @@ export class PostgresAgentRunner extends AgentRunner {
   // ─── Thread visibility ────────────────────────────────────────────────
   //
   // The single rule every thread path applies (list, messages, events,
-  // state, stop, delete, rename): the thread must belong to the caller's
-  // org AND be owned by them — or carry no recorded owner (legacy rows
-  // written when the runner ALS was absent are org-shared, matching the
-  // deleteThread org-mate semantics). Solo mode (no runner user) sees
-  // everything: one tenant, one operator.
+  // state, stop, delete, rename, and — via getThreadOwnership / the
+  // cache — the async run and connect paths): the thread must belong to
+  // the caller's org AND be owned by them — or carry no recorded owner
+  // (legacy rows written when the runner ALS was absent are org-shared,
+  // matching the deleteThread org-mate semantics). Solo mode (no runner
+  // user) sees everything: one tenant, one operator.
   //
   // Without this, a signed-in member of any org could read another
   // tenant's conversation messages/events/state — or kill another
@@ -891,6 +930,42 @@ export class PostgresAgentRunner extends AgentRunner {
       isRunning: result.rows[0]?.is_running ?? false,
       currentRunId: result.rows[0]?.current_run_id ?? null,
     };
+  }
+
+  /**
+   * Resolve a thread's ownership row from PG — the cross-process source of
+   * truth for whether a threadId exists and who owns it. thread_metadata
+   * carries the owner (null user/org on legacy rows → ""); a thread with
+   * runs but no metadata row is treated as ownerless (the same shape the
+   * cache refresh derives). Returns null when the thread doesn't exist at
+   * all — the caller decides what "absent" means (startRun: creatable;
+   * startConnect: nothing to replay). The thread cache deliberately isn't
+   * consulted here: it's per-process and empty right after boot, so a
+   * cache-missed EXISTING thread must still resolve its real owner.
+   */
+  private async getThreadOwnership(
+    threadId: string,
+  ): Promise<
+    Pick<LocalThreadEndpointRecord, "organizationId" | "createdById"> | null
+  > {
+    const meta = await query<{ user_id: string | null; org_id: string | null }>(
+      `SELECT user_id, org_id FROM thread_metadata WHERE thread_id = $1`,
+      [threadId],
+    );
+    if (meta.rows[0]) {
+      return {
+        organizationId: meta.rows[0].org_id ?? "",
+        createdById: meta.rows[0].user_id ?? "",
+      };
+    }
+    const runs = await query<{ has_runs: boolean }>(
+      `SELECT EXISTS(SELECT 1 FROM agent_runs WHERE thread_id = $1) AS has_runs`,
+      [threadId],
+    );
+    if (runs.rows[0]?.has_runs) {
+      return { organizationId: "", createdById: "" };
+    }
+    return null;
   }
 
   // ─── Thread snapshot capture (preserved from PersistentAgentRunner) ────

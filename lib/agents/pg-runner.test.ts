@@ -612,6 +612,203 @@ describe("PostgresAgentRunner — stop during a thread's FIRST in-flight run", (
   });
 });
 
+describe("PostgresAgentRunner — run/connect cross-tenant guards", () => {
+  // startRun writes runs keyed by threadId alone and startConnect replays
+  // history by threadId alone — both previously trusted the caller with
+  // only the sync-read gates policing reads. These tests pin the
+  // threadVisible enforcement on the two async paths. They need REAL
+  // Postgres: the guard resolves thread existence from PG (pg-mem can't
+  // parse the recursive CTE used by the replay path either), so the same
+  // skip discipline as the connect() suite applies.
+  let runner: PostgresAgentRunner;
+
+  beforeEach(async () => {
+    runner = makeRunner();
+    await runner.awaitRefreshed();
+    runner.clearThreads();
+  });
+
+  let pgStarted = false;
+  let restorePg: (() => void) | null = null;
+
+  beforeAll(async () => {
+    restorePg = await useRealPostgres();
+    pgStarted = restorePg !== null;
+  });
+
+  afterAll(() => {
+    restorePg?.();
+    restorePg = null;
+  });
+
+  // An agent that emits RUN_STARTED then RUN_FINISHED and returns — the
+  // run completes on its own, exercising the full startRun pipeline.
+  function finishingAgent(threadId: string, runId: string) {
+    const agent = {
+      agentId: "agent-a",
+      agentName: "A",
+      abortRun: vi.fn(),
+      runAgent: async (
+        _input: unknown,
+        hooks: { onEvent: (e: { event: BaseEvent }) => void },
+      ) => {
+        hooks.onEvent({
+          event: { type: EventType.RUN_STARTED, threadId, runId } as unknown as BaseEvent,
+        });
+        hooks.onEvent({
+          event: { type: EventType.RUN_FINISHED, threadId, runId } as unknown as BaseEvent,
+        });
+      },
+    } as unknown as AbstractAgent;
+    return agent;
+  }
+
+  function runInput(threadId: string, runId: string) {
+    return {
+      threadId,
+      runId,
+      messages: [{ id: "m1", role: "user" as const, content: "hello" }],
+      state: {},
+      tools: [],
+      context: [],
+      forwardedProps: {},
+    };
+  }
+
+  function runAs(user: RequestUser, threadId: string, runId: string) {
+    return new Promise<{
+      events: BaseEvent[];
+      error: unknown;
+      completed: boolean;
+    }>((resolve) => {
+      const events: BaseEvent[] = [];
+      let completed = false;
+      runWithUser(user, () =>
+        runner.run({
+          threadId,
+          agent: finishingAgent(threadId, runId),
+          input: runInput(threadId, runId),
+        }),
+      ).subscribe({
+        next: (e) => events.push(e),
+        error: (err) => resolve({ events, error: err, completed }),
+        complete: () => {
+          completed = true;
+          resolve({ events, error: null, completed });
+        },
+      });
+    });
+  }
+
+  it("denies a foreign-org run on an existing thread — no run_state write, no history append", async (ctx) => {
+    ctx.skip(!pgStarted, "Real Postgres (Docker) unavailable");
+    await seedThread(runner, "t-victim", "agent-a", "Victim chat", "user-1");
+
+    const result = await runAs(user3, "t-victim", "run-attack");
+    expect((result.error as Error).message).toBe("Thread not found");
+
+    // The guard fires BEFORE any state change: no "running" marker was
+    // written (the victim's next real run isn't blocked) and no attacker
+    // run row was appended to the victim's persisted history.
+    const state = await query<{ is_running: boolean }>(
+      `SELECT is_running FROM run_state WHERE thread_id = 't-victim'`,
+    );
+    expect(state.rows).toHaveLength(0);
+    const runs = await query<{ n: string }>(
+      `SELECT count(*)::text AS n FROM agent_runs WHERE thread_id = 't-victim'`,
+    );
+    expect(runs.rows[0]?.n).toBe("1");
+  });
+
+  it("denies a same-org NON-OWNER run on an existing thread (owner-or-empty-owner rule)", async (ctx) => {
+    ctx.skip(!pgStarted, "Real Postgres (Docker) unavailable");
+    await seedThread(runner, "t-mate", "agent-a", "Alice's chat", "user-1");
+
+    const result = await runAs(user2, "t-mate", "run-mate");
+    expect((result.error as Error).message).toBe("Thread not found");
+  });
+
+  it("still allows the OWNER to run an existing thread (regression guard)", async (ctx) => {
+    ctx.skip(!pgStarted, "Real Postgres (Docker) unavailable");
+    await seedThread(runner, "t-own", "agent-a", "Alice's chat", "user-1");
+
+    const result = await runAs(user1, "t-own", "run-own");
+    expect(result.error).toBeNull();
+    expect(result.completed).toBe(true);
+    expect(result.events.some((e) => e.type === EventType.RUN_STARTED)).toBe(true);
+  });
+
+  it("still allows a brand-new thread (cache miss + no PG row = creatable)", async (ctx) => {
+    ctx.skip(!pgStarted, "Real Postgres (Docker) unavailable");
+    // A new chat is a cache miss AND has no PG row — the fail-closed
+    // deny-on-unknown rule must apply only to threads that EXIST. The
+    // creator becomes the owner via captureThreadData on first run.
+    const result = await runAs(user1, "t-fresh", "run-fresh");
+    expect(result.error).toBeNull();
+    expect(result.completed).toBe(true);
+
+    const meta = await query<{ user_id: string | null; org_id: string | null }>(
+      `SELECT user_id, org_id FROM thread_metadata WHERE thread_id = 't-fresh'`,
+    );
+    expect(meta.rows[0]?.user_id).toBe("user-1");
+    expect(meta.rows[0]?.org_id).toBe("org-1");
+  });
+
+  it("connect() replays NOTHING for a foreign thread (and leaves the events cache untouched)", async (ctx) => {
+    ctx.skip(!pgStarted, "Real Postgres (Docker) unavailable");
+    await seedThread(runner, "t-victim", "agent-a", "Victim chat", "user-1");
+    const victimEvents: BaseEvent[] = [
+      { type: EventType.STATE_SNAPSHOT, snapshot: { secret: "victim data" } } as unknown as BaseEvent,
+    ];
+    await query(
+      `UPDATE agent_runs SET events = $1::jsonb WHERE thread_id = 't-victim'`,
+      [JSON.stringify(victimEvents)],
+    );
+
+    const received: BaseEvent[] = [];
+    let completed = false;
+    await new Promise<void>((resolve) => {
+      runWithUser(user3, () => runner.connect({ threadId: "t-victim" })).subscribe({
+        next: (e) => received.push(e),
+        error: () => resolve(),
+        complete: () => {
+          completed = true;
+          resolve();
+        },
+      });
+    });
+
+    // The denial reads identically to an unknown thread: empty replay,
+    // immediate complete — and it happens BEFORE the PG fetch, so the
+    // victim's events were never read into this process's caches.
+    expect(completed).toBe(true);
+    expect(received).toHaveLength(0);
+    expect(caches(runner).eventsCache.has("t-victim")).toBe(false);
+  });
+
+  it("connect() still replays for the OWNER (regression guard)", async (ctx) => {
+    ctx.skip(!pgStarted, "Real Postgres (Docker) unavailable");
+    await seedThread(runner, "t-own", "agent-a", "Alice's chat", "user-1");
+    const ownEvents: BaseEvent[] = [
+      { type: EventType.STATE_SNAPSHOT, snapshot: { step: 1 } } as unknown as BaseEvent,
+    ];
+    await query(
+      `UPDATE agent_runs SET events = $1::jsonb WHERE thread_id = 't-own'`,
+      [JSON.stringify(ownEvents)],
+    );
+
+    const received: BaseEvent[] = [];
+    await new Promise<void>((resolve) => {
+      runWithUser(user1, () => runner.connect({ threadId: "t-own" })).subscribe({
+        next: (e) => received.push(e),
+        error: () => resolve(),
+        complete: () => resolve(),
+      });
+    });
+    expect(received.some((e) => e.type === EventType.STATE_SNAPSHOT)).toBe(true);
+  });
+});
+
 describe("PostgresAgentRunner — sync cache reads (getThreadMessages / getThreadState)", () => {
   let runner: PostgresAgentRunner;
 

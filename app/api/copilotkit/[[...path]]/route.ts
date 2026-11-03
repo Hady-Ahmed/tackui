@@ -23,15 +23,20 @@ import {
 import { runWithRunnerContext } from "@/lib/auth/request-context";
 
 /**
- * Extract the agent id from a run request path, e.g.
- * `/api/copilotkit/agent/{agentId}/run` → `{agentId}`. Returns null for
- * any other path shape (control requests never reach the caller), and
- * for malformed percent-encoding — a path like `/agent/%%/run/` throws
- * URIError on decode, which must fail the run path (404-shaped) rather
- * than surface a 500.
+ * Extract the agent id from a run- or suggest-shaped request path, e.g.
+ * `/api/copilotkit/agent/{agentId}/run` or `.../suggest` → `{agentId}`.
+ * Suggest counts as a run for gating: CopilotKit's runtime exposes
+ * `POST /agent/:id/suggest` as a stateless suggestion run that executes
+ * the provider agent DIRECTLY (no runner persistence), so a suggest path
+ * that skipped attribution would bypass the rate limit, plan gates and
+ * the builder gate on a real agent execution. Returns null for any other
+ * path shape (control requests never reach the caller), and for malformed
+ * percent-encoding — a path like `/agent/%%/run/` throws URIError on
+ * decode, which must fail the run path (404-shaped) rather than surface
+ * a 500.
  */
 function runAgentIdFromPath(pathname: string): string | null {
-  const match = /\/agent\/([^/]+)\/run\/?$/.exec(pathname);
+  const match = /\/agent\/([^/]+)\/(run|suggest)\/?$/.exec(pathname);
   if (!match?.[1]) return null;
   try {
     return decodeURIComponent(match[1]);
@@ -41,19 +46,20 @@ function runAgentIdFromPath(pathname: string): string | null {
 }
 
 /**
- * True for a run-SHAPED path (/agent/<id>/run, or any path under
- * /agent/<id>/run/) whose agent id doesn't decode. Such a request is
- * classified as a run for rate limiting but the gate lookup would skip
- * it (runAgentIdFromPath returns null), so it must fail closed with a
- * 404 instead of falling through to the inner handler.
+ * True for a run/suggest-SHAPED path (/agent/<id>/run, /agent/<id>/suggest,
+ * or any path under either) whose agent id doesn't decode or that carries
+ * trailing segments. Such a request is classified as a run for rate
+ * limiting but the gate lookup would skip it (runAgentIdFromPath returns
+ * null), so it must fail closed with a 404 instead of falling through to
+ * the inner handler.
  */
 function isRunShapedButUnparseable(pathname: string): boolean {
-  const match = /\/agent\/([^/]+)\/run(\/|$)/.exec(pathname);
+  const match = /\/agent\/([^/]+)\/(run|suggest)(\/.+)?\/?$/.exec(pathname);
   if (!match?.[1]) return false;
-  // Trailing segments after /run/ never match the gate extraction regex
+  // Segments after the action never match the gate extraction regex
   // (anchored at the path end), so the gates would skip the request —
   // treat the path as unparseable and fail closed.
-  if (match[2] === "/") return true;
+  if (match[3]) return true;
   try {
     decodeURIComponent(match[1]);
     return false;
@@ -80,9 +86,9 @@ async function handler(request: Request): Promise<Response> {
     // connect/info/threads/stop request. Only runs count toward the rate
     // limit and concurrent cap.
     //
-    // CopilotKit POSTs to various sub-paths (e.g. /agent/my-agent/run),
-    // not just the base /api/copilotkit. The long-lived POSTs that
-    // AREN'T runs are:
+    // CopilotKit POSTs to various sub-paths (e.g. /agent/my-agent/run,
+    // /agent/my-agent/suggest), not just the base /api/copilotkit. The
+    // long-lived POSTs that AREN'T runs are:
     //   - connect streams (POST /agent/*/connect) — listen for events
     //     on an existing connection, no new backend call.
     //   - stop requests (POST /agent/*/stop/<threadId>) — teardown
@@ -95,8 +101,12 @@ async function handler(request: Request): Promise<Response> {
     // Non-run requests are still protected by the per-IP global
     // flood limit (300/min) in proxy.ts.
     const url = new URL(request.url);
+    // Collapse duplicate slashes before path attribution: a `//run` path
+    // would otherwise slip past the gate regexes (`[^/]+` can't match the
+    // empty segment) and execute the agent with every gate skipped.
+    const pathname = url.pathname.replace(/\/{2,}/g, "/");
     const isControlRequest =
-      url.pathname.includes("/connect") || url.pathname.includes("/stop/");
+      pathname.includes("/connect") || pathname.includes("/stop/");
 
     // Destructive runtime endpoints must never be reachable through this
     // proxy. POST /threads/clear is classified as a run below (POST, not
@@ -107,12 +117,12 @@ async function handler(request: Request): Promise<Response> {
     // this app calls it (per-thread cleanup happens server-side), so it
     // is refused unconditionally — before auth, before any rate-limit
     // accounting could burn a slot on it.
-    if (url.pathname.endsWith("/threads/clear")) {
+    if (pathname.endsWith("/threads/clear")) {
       return Response.json({ error: "Not available" }, { status: 403 });
     }
 
     const isRunRequest = request.method === "POST" && !isControlRequest;
-    if (isRunRequest && isRunShapedButUnparseable(url.pathname)) {
+    if (isRunRequest && isRunShapedButUnparseable(pathname)) {
       return Response.json({ error: "Not found" }, { status: 404 });
     }
 
@@ -152,7 +162,7 @@ async function handler(request: Request): Promise<Response> {
         // manually-added agents are never gated. This is a product
         // gate, not a flood guard, so it fires after the per-minute
         // rate limit above.
-        const runAgentId = runAgentIdFromPath(url.pathname);
+        const runAgentId = runAgentIdFromPath(pathname);
         if (runAgentId) {
           const gated = await checkCatalogRunGates(user, runAgentId, saasPlan);
           if (gated) return gated;
@@ -238,7 +248,7 @@ async function handler(request: Request): Promise<Response> {
     userId = syntheticUser.id;
     let builderRun = emptyBuilderRunResolution();
     if (isRunRequest) {
-      const runAgentId = runAgentIdFromPath(url.pathname);
+      const runAgentId = runAgentIdFromPath(pathname);
       if (runAgentId) {
         const gated = await checkCatalogRunGates(syntheticUser, runAgentId);
         if (gated) return gated;
