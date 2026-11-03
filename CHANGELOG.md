@@ -4,6 +4,13 @@ All notable changes to this project will be documented in this file. The format 
 
 ## [Unreleased]
 
+- **CopilotKit runtime telemetry is opt-out by default for new setups.**
+  `.env.example` now ships `COPILOTKIT_TELEMETRY_DISABLED=true` (the
+  runtime's anonymous usage telemetry is on by default; `DO_NOT_TRACK=1`
+  works too), so configurations copied from the example start
+  telemetry-off. Existing deployments are unaffected. Documented in the
+  README env table.
+
 - **Boot no longer spams an Edge-Runtime `process.exit` warning.** The
   fail-fast helper moved from `instrumentation.ts` into its own Node-only
   module (`lib/db/fail-fast.ts`) behind a dynamic import: instrumentation

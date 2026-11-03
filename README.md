@@ -326,6 +326,7 @@ See [`.env.example`](.env.example) for the full list with comments.
 | `NEXT_PUBLIC_SENTRY_TRACES_SAMPLE_RATE` | No | Client-side trace sampling rate, 0.0–1.0 (default: 0.1). Set to 0 to disable (public, exposed to browser). |
 | `NEXT_PUBLIC_UMAMI_URL` | No | Base URL of a self-hosted Umami analytics instance (e.g. `https://analytics.yourdomain.com`). No-op if unset. |
 | `NEXT_PUBLIC_UMAMI_WEBSITE_ID` | No | Umami website ID for page-view tracking. No-op if unset. |
+| `COPILOTKIT_TELEMETRY_DISABLED` | No | Set to `true` to disable the CopilotKit runtime's anonymous usage telemetry (it is on by default; the standard `DO_NOT_TRACK=1` is honored too). Shipped enabled in `.env.example` so copied configs start telemetry-off. |
 | `GOOGLE_CLIENT_ID` / `GOOGLE_CLIENT_SECRET` | No | Google OAuth provider |
 | `GITHUB_CLIENT_ID` / `GITHUB_CLIENT_SECRET` | No | GitHub OAuth provider |
 | `OIDC_CLIENT_ID` / `OIDC_CLIENT_SECRET` / `OIDC_ISSUER` | No | External OIDC SSO (Keycloak, Authentik, Okta, Entra, etc.) |
