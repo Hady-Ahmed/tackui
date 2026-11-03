@@ -3,6 +3,7 @@ import { getCurrentUser } from "@/lib/auth/context";
 import { BILLING_ENABLED } from "@/lib/config/saas";
 import { getOrgSubscription } from "@/lib/billing/subscription-store";
 import { getPlanLimits, type PlanId } from "@/lib/billing/plans";
+import { checkUserLimit } from "@/lib/ratelimit/middleware";
 
 /**
  * GET /api/billing/subscription — the current org's plan + limits. Read by
@@ -21,6 +22,9 @@ export async function GET() {
   if (!user) {
     return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
   }
+
+  const limited = checkUserLimit(user.id, "accountRead");
+  if (limited) return limited;
 
   const { plan, public: sub } = await getOrgSubscription(user.orgId);
   const limits = getPlanLimits(plan as PlanId);

@@ -36,6 +36,12 @@ export const LIMITS = {
   credentialMutate: { max: 20, windowMs: 60_000 },
   /** PUT/DELETE /api/connectors — org connector upserts/removals. */
   connectorMutate: { max: 20, windowMs: 60_000 },
+  /** POST /api/billing/checkout + /api/billing/portal — each creates an
+   *  outbound Stripe session. Tight: nothing legitimate bursts these. */
+  billingMutate: { max: 10, windowMs: 60_000 },
+  /** GET /api/billing/subscription + GET /api/org — account/org reads
+   *  that hit multiple DB tables (org also counts members per org). */
+  accountRead: { max: 60, windowMs: 60_000 },
 } as const;
 
 export type LimitName = keyof typeof LIMITS;

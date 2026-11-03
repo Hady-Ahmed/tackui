@@ -563,10 +563,18 @@ export async function installTemplate(
     // reflects whether this re-sync actually brought anything new.
     const previousSyncedAt =
       (await getAgent(existingId, orgId))?.installedTemplateUpdatedAt ?? null;
+    // jwt_secret/jwt_scopes are COALESCEd: the template row may carry no
+    // secret because the curator genuinely removed it — or because the
+    // stored ciphertext is UNDECRYPTABLE (key rotation/backup mismatch),
+    // which rowToTemplate downgrades to secret-less. Either way, nulling
+    // would wipe a previously-synced working secret from the agent row
+    // (the tombstone fallback would lose its auth). Preserve what the
+    // row already has unless the template actually brings a secret.
     await query(
       `UPDATE agents
        SET name = $1, description = $2, endpoint = $3, auth_mode = $4,
-           jwt_secret = $5, jwt_scopes = $6,
+           jwt_secret = COALESCE($5, agents.jwt_secret),
+           jwt_scopes = COALESCE($6, agents.jwt_scopes),
            installed_template_updated_at = $7, updated_at = now()
        WHERE id = $8 AND org_id = $9`,
       [

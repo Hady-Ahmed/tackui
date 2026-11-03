@@ -689,8 +689,12 @@ describe("PostgresAgentRunner — run/connect cross-tenant guards", () => {
 
   beforeEach(async () => {
     runner = makeRunner();
+    // No runner.clearThreads() here: it's fire-and-forget async DB work
+    // that can land AFTER this test's seeded rows and wipe them (source
+    // of a rare flake). The file-level beforeEach already clears every
+    // table with awaited deletes, and the fresh runner's refresh sees an
+    // empty DB.
     await runner.awaitRefreshed();
-    runner.clearThreads();
   });
 
   let pgStarted = false;
@@ -826,8 +830,9 @@ describe("PostgresAgentRunner — run lock + teardown lifecycle", () => {
 
   beforeEach(async () => {
     runner = makeRunner();
+    // No fire-and-forget clearThreads() — same flake reasoning as the
+    // cross-tenant guards suite above.
     await runner.awaitRefreshed();
-    runner.clearThreads();
   });
 
   let pgStarted = false;

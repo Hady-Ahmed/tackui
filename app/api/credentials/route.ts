@@ -160,9 +160,16 @@ export async function PUT(request: NextRequest) {
 
   // Position-aware completeness: a NEW provider must carry the full
   // contract; an UPDATE merges the submitted values over the stored ones
-  // and only the merged map must cover the contract.
+  // and only the merged map must cover the contract. The merge base is
+  // INTERSECTED with the current contract: fields the stored row carries
+  // that the provider's contract no longer declares (catalog changed,
+  // stale row) must not ride along into the new write — the saved row
+  // should never accumulate fields outside the contract.
   const stored = await getCredentialDecrypted(user.id, parsed.data.provider);
-  const fields = { ...(stored ?? {}), ...provided };
+  const storedInContract = Object.fromEntries(
+    Object.entries(stored ?? {}).filter(([k]) => contractKeys.includes(k)),
+  );
+  const fields = { ...storedInContract, ...provided };
   const absent = contractKeys.filter((k) => !(k in fields));
   if (absent.length > 0) {
     const labels = entry.fields

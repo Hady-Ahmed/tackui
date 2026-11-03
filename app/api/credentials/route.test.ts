@@ -289,6 +289,38 @@ describe("PUT /api/credentials", () => {
     });
   });
 
+  it("update: stored fields OUTSIDE the current contract are dropped, not carried along", async () => {
+    // Stored directly: a field the catalog no longer declares (catalog
+    // changed / stale row). The merge base is intersected with the
+    // contract, so the junk field must not ride along into the new write.
+    await setCredential({
+      userId: USER_ID,
+      provider: "openai",
+      kind: "llm",
+      fields: { api_key: "sk-good", legacy_field: "junk" },
+    });
+    const res = await put({ provider: "openai", fields: { api_key: "sk-rotated" } });
+    expect(res.status).toBe(200);
+    expect((await getCredentialSecrets(USER_ID)).openai).toEqual({
+      api_key: "sk-rotated",
+    });
+  });
+
+  it("update: dropping out-of-contract stored fields can expose a missing contract field (400)", async () => {
+    // Stored row has junk + one contract field; user submits a DIFFERENT
+    // contract field. After intersecting the stored base with the
+    // contract, the merged map is incomplete → rejected, not saved half.
+    await setCredential({
+      userId: USER_ID,
+      provider: "x",
+      kind: "tool",
+      fields: { legacy_field: "junk", consumer_key: "ck" },
+    });
+    const res = await put({ provider: "x", fields: { consumer_secret: "cs" } });
+    expect(res.status).toBe(400);
+    expect((await res.json()).error).toContain("all of its fields");
+  });
+
   it("update: a wholly-blank submission is rejected (no silent no-op writes)", async () => {
     await put({ provider: "openai", fields: { api_key: "sk-first" } });
     const res = await put({ provider: "openai", fields: { api_key: "   " } });

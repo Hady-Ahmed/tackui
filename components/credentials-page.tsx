@@ -28,6 +28,12 @@
  * the PUT body — GET responses carry field NAMES only. Editing works the
  * same way: the Edit button opens the contract's form in place inside
  * "Saved keys", with blank inputs meaning "keep the current value".
+ *
+ * A provider that already has a saved key never gets a second form in
+ * "Connect a key" — its row in "Saved keys" is the one place to rotate or
+ * complete it. A saved row that no longer covers the contract (the platform
+ * added a field) is flagged "Incomplete" on the row itself; Edit is how the
+ * missing fields get filled in.
  */
 
 import { useCallback, useEffect, useState } from "react";
@@ -231,9 +237,10 @@ export function CredentialsPage() {
   };
 
   const saved = credentials ?? [];
-  // Add rows: catalog providers the runner hasn't fully connected — either
-  // nothing saved, or a saved set that no longer covers the contract (the
-  // platform added a field; re-connecting upserts the whole map).
+  // True when a saved row is missing fields the live contract now requires
+  // (e.g. the platform added a field after the key was saved). Drives the
+  // "Incomplete" hint on the row — completing happens via Edit, which
+  // upserts the full map (blank = keep the stored value).
   const coversContract = (provider: string) => {
     const row = saved.find((c) => c.provider === provider);
     if (!row) return false;
@@ -241,9 +248,14 @@ export function CredentialsPage() {
     if (!meta) return true; // not in the live catalog — nothing to complete
     return meta.fields.every((f) => row.fields.includes(f.key));
   };
+  // Add rows: only providers with NO saved row. A provider that already
+  // has a key never gets a second form — its row in "Saved keys" is the
+  // one place to rotate or complete it (Edit), so the same provider can't
+  // appear in two forms with two different "what happens on save" rules.
+  const savedProviders = new Set(saved.map((c) => c.provider));
   const addRows = catalog
     ? Object.entries(catalog)
-        .filter(([provider]) => !coversContract(provider))
+        .filter(([provider]) => !savedProviders.has(provider))
         .map(([provider, meta]) => ({ provider, meta }))
     : [];
   // Saved rows that the catalog no longer declares.
@@ -327,6 +339,11 @@ export function CredentialsPage() {
                   const editFilled = editInputs.some(
                     (f) => (editValues[f.key] ?? "").trim().length > 0,
                   );
+                  // Incomplete vs the live contract: the run gate 402s runs
+                  // that need this provider until the missing fields are
+                  // filled in via Edit (blanks keep the stored values).
+                  const incomplete =
+                    known === true && meta != null && !coversContract(c.provider);
                   return (
                     <li key={c.provider} className="py-3">
                       <div className="flex items-center justify-between gap-3">
@@ -348,6 +365,14 @@ export function CredentialsPage() {
                           {known === false && (
                             <span className="rounded-full bg-amber-100 px-2 py-0.5 text-[10px] font-medium text-amber-700 dark:bg-amber-950 dark:text-amber-300">
                               No longer supported
+                            </span>
+                          )}
+                          {/* incomplete implies known === true (it's part of
+                              its definition), so the two badges can't both
+                              show. */}
+                          {incomplete && (
+                            <span className="rounded-full bg-amber-100 px-2 py-0.5 text-[10px] font-medium text-amber-700 dark:bg-amber-950 dark:text-amber-300">
+                              Incomplete — edit to add the missing fields
                             </span>
                           )}
                           {!editing && meta && (
@@ -447,8 +472,8 @@ export function CredentialsPage() {
             </h2>
             {/* The model/tool distinction, said ONCE here — it used to be
                 repeated on every provider row, which was filler by the
-                third entry. Per-row text now appears only when it carries
-                state (the "incomplete" note below). */}
+                third entry. Add rows are unsaved providers only, so they
+                need no per-row state text. */}
             <p className="mb-3 text-xs text-zinc-500 dark:text-zinc-400">
               Model keys run the agent; tool keys power its tool calls.
             </p>
@@ -473,7 +498,6 @@ export function CredentialsPage() {
                     meta.fields.length > 0 ? meta.fields : [{ key: "api_key", label: "API key" }];
                   const values = newFields[provider] ?? {};
                   const complete = fields.every((f) => (values[f.key] ?? "").trim().length > 0);
-                  const isUpdate = saved.some((c) => c.provider === provider);
                   return (
                     <li
                       key={provider}
@@ -486,11 +510,6 @@ export function CredentialsPage() {
                               static kind description ("Model key — the agent
                               runs on it") lived here once per provider and
                               moved to the one-line explainer above. */}
-                          {isUpdate && (
-                            <p className="text-xs text-amber-600 dark:text-amber-400">
-                              Incomplete — add the missing fields
-                            </p>
-                          )}
                         </div>
                       </div>
                       <div className="mt-2 space-y-2">

@@ -15,6 +15,12 @@ vi.mock("@/lib/billing/plans", () => ({
   getPlanLimits: (...a: unknown[]) => mockGetPlanLimits(...a),
 }));
 
+// Rate limiting is mocked (the store has its own suite).
+const mockCheckUserLimit = vi.fn().mockReturnValue(null);
+vi.mock("@/lib/ratelimit/middleware", () => ({
+  checkUserLimit: (...a: unknown[]) => mockCheckUserLimit(...a),
+}));
+
 import { GET } from "./route";
 
 const user = () => ({ id: "u1", role: "user", email: "t@e.com", orgId: "org-1" });
@@ -31,6 +37,7 @@ describe("GET /api/billing/subscription", () => {
     mockGetCurrentUser.mockReset();
     mockGetOrgSubscription.mockReset();
     mockGetPlanLimits.mockReset();
+    mockCheckUserLimit.mockReset().mockReturnValue(null);
   });
   afterEach(() => {
     delete process.env.SAAS_MODE;
@@ -65,5 +72,17 @@ describe("GET /api/billing/subscription", () => {
     expect(data.status).toBe("active");
     expect(data.limits.maxAgents).toBeNull();
     expect(mockGetOrgSubscription).toHaveBeenCalledWith("org-1");
+  });
+
+  it("enforces the accountRead rate limit", async () => {
+    const { GET: G } = await loadSaaS();
+    mockGetCurrentUser.mockResolvedValue(user());
+    mockCheckUserLimit.mockReturnValueOnce(
+      new Response("Rate limited", { status: 429 }) as never,
+    );
+    const res = await G();
+    expect(res.status).toBe(429);
+    expect(mockCheckUserLimit).toHaveBeenCalledWith("u1", "accountRead");
+    expect(mockGetOrgSubscription).not.toHaveBeenCalled();
   });
 });

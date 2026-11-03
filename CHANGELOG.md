@@ -4,6 +4,23 @@ All notable changes to this project will be documented in this file. The format 
 
 ## [Unreleased]
 
+- **Credentials/template hardening + billing/org rate limits (security
+  audit, Phase C).** Four closes: (1) a credentials UPDATE now intersects
+  the stored row with the provider's current contract before merging, so
+  fields the catalog no longer declares (stale rows, catalog changes) can't
+  ride along into new writes — and dropping them can surface a genuinely
+  incomplete map, which is rejected rather than half-saved; (2) a template
+  re-sync whose stored `jwt_secret` is undecryptable no longer nulls the
+  installed agent's previously-synced working secret (the COALESCE keeps
+  the row's fallback auth intact); (3) the Stripe checkout/portal routes
+  get a per-user `billingMutate` limit (10/min — each call creates an
+  outbound Stripe session) and the subscription/org reads share an
+  `accountRead` limit (60/min); (4) the API-keys page no longer offers a
+  second form for a provider that already has a saved key — the saved row
+  (with an "Incomplete" flag when the contract grew) is the one place to
+  rotate or complete it. Also: `docker-compose.yml` now passes
+  `DB_ENCRYPTION_KEY` and the `AGENTOS_*` builder vars through, and
+  `.env.example` documents the SaaS-mode/Stripe variables.
 - **Runner can no longer deadlock a thread (security audit, Phase B).** A
   pre-run DB failure (history read / parent-run resolution) previously
   escaped the error handling: `is_running` stayed true forever (the thread

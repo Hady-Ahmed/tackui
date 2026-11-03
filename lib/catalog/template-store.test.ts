@@ -570,6 +570,35 @@ describe("installTemplate (idempotent upsert)", () => {
     expect(await listAgents(TEST_ORG)).toHaveLength(1);
   });
 
+  it("re-sync with an UNDECRYPTABLE template jwt_secret preserves the agent's existing secret", async () => {
+    // Template created WITH a secret; the template row's ciphertext is
+    // then corrupted (key rotation / backup mismatch). rowToTemplate
+    // downgrades that to secret-less — but the re-sync must not null the
+    // agent row's previously-synced working secret (the tombstone
+    // fallback would lose its auth).
+    const errSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    const template = await createTemplate({
+      ...validInput,
+      authMode: "jwt",
+      jwtSecret: "s".repeat(32),
+    });
+    const first = await installTemplate(template, TEST_ORG);
+    expect(first.agent.jwtSecret).toBe("s".repeat(32));
+
+    await query(
+      `UPDATE agent_templates SET jwt_secret = 'enc:v1:AAAAAAAAAAAAAAAA:AAAA:AAAAAAAAAAAAAAAAAAAAAA==' WHERE id = $1`,
+      [template.id],
+    );
+    const reread = await getTemplate(template.id);
+    expect(reread?.jwtSecret).toBeUndefined();
+
+    const second = await installTemplate(reread!, TEST_ORG);
+    expect(second.installed).toBe(false);
+    expect(second.agent.jwtSecret).toBe("s".repeat(32));
+    expect(second.agent.authMode).toBe("jwt");
+    errSpy.mockRestore();
+  });
+
   it("re-install with no template change reports updated: false", async () => {
     const template = await createTemplate(validInput);
     await installTemplate(template, TEST_ORG);

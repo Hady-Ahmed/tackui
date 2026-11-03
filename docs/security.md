@@ -267,6 +267,11 @@ Enforced in route handlers, post-auth, keyed by `user.id`. Limits (see
 | `/api/agents` GET + `/api/agents/[id]` GET | 60/min per user | — |
 | `/api/threads/[id]` PATCH/DELETE | 30/min per user | — |
 | `/api/auth/can-manage-agents` GET | 60/min per user (shares `agentRead` bucket) | — |
+| `/api/credentials` GET + `/api/connectors` GET | 60/min per user (shares `agentRead` bucket) | — |
+| `/api/credentials` PUT/DELETE | 20/min per user (`credentialMutate`) | — |
+| `/api/connectors` PUT/DELETE | 20/min per user (`connectorMutate`) | — |
+| `/api/billing/checkout` POST + `/api/billing/portal` POST | 10/min per user (`billingMutate`) — each creates an outbound Stripe session | — |
+| `/api/billing/subscription` GET + `/api/org` GET | 60/min per user (`accountRead`) | — |
 
 Under SaaS mode the copilotkit route derives per-plan caps instead of the
 static presets (exact caps: [saas-mode.md](./saas-mode.md#plan-enforcement-saas-only)).
