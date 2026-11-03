@@ -38,6 +38,7 @@
 
 import { useCallback, useEffect, useState } from "react";
 import { BackToChat } from "@/components/back-to-chat";
+import { prettifyProviderLabel } from "@/lib/credentials/label";
 
 /** One saved row from GET /api/credentials. */
 interface SavedCredential {
@@ -65,15 +66,9 @@ interface CredentialsResponse {
   error?: string;
 }
 
-/** Display label derived from a provider slug — mirrors the catalog's
- * prettifyProviderLabel (that module is server-side, so the client keeps
- * a local copy of the same convention). */
-function providerLabel(provider: string): string {
-  return provider
-    .split(/[-_]/)
-    .map((word) => word.charAt(0).toUpperCase() + word.slice(1))
-    .join(" ");
-}
+/** Display label derived from a provider slug — the shared acronym-
+ * correcting prettifier (lib/credentials/label.ts), same function the
+ * catalog derives its labels with. */
 
 export function CredentialsPage() {
   const [credentials, setCredentials] = useState<SavedCredential[] | null>(null);
@@ -149,7 +144,7 @@ export function CredentialsPage() {
         );
         return;
       }
-      setNotice(`${providerLabel(provider)} key saved.`);
+      setNotice(`${prettifyProviderLabel(provider)} key saved.`);
       setNewFields((prev) => ({ ...prev, [provider]: {} }));
       await load();
     } catch {
@@ -198,7 +193,7 @@ export function CredentialsPage() {
         );
         return;
       }
-      setNotice(`${providerLabel(provider)} key updated.`);
+      setNotice(`${prettifyProviderLabel(provider)} key updated.`);
       setEditingProvider(null);
       setEditFields((prev) => ({ ...prev, [provider]: {} }));
       await load();
@@ -210,7 +205,7 @@ export function CredentialsPage() {
   };
 
   const onDelete = async (provider: string) => {
-    if (!confirm(`Delete your ${providerLabel(provider)} key? Agents using it will stop until you add a new one.`)) {
+    if (!confirm(`Delete your ${prettifyProviderLabel(provider)} key? Agents using it will stop until you add a new one.`)) {
       return;
     }
     setDeletingProvider(provider);
@@ -227,7 +222,7 @@ export function CredentialsPage() {
         );
         return;
       }
-      setNotice(`${providerLabel(provider)} key deleted.`);
+      setNotice(`${prettifyProviderLabel(provider)} key deleted.`);
       await load();
     } catch {
       setError("Couldn't reach the server — please try again.");
@@ -327,7 +322,7 @@ export function CredentialsPage() {
                 {saved.map((c) => {
                   const known = catalogHas(c.provider);
                   const meta = known ? catalog![c.provider] : null;
-                  const label = meta?.label ?? providerLabel(c.provider);
+                  const label = meta?.label ?? prettifyProviderLabel(c.provider);
                   const editing = editingProvider === c.provider;
                   // Same shape as the add rows: an empty contract falls
                   // back to the single api_key field.

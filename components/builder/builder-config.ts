@@ -207,18 +207,12 @@ export function staleModelCopy(
   return `The agent's saved model (${model.provider}:${model.id}) is no longer offered by the agent builder. Pick a different one to replace it — saving other changes keeps the old model.`;
 }
 
-/** Display label derived from a provider/toolkit slug — mirrors the
- * catalog's prettifyProviderLabel convention (credentials-page.tsx keeps
- * the same local copy). Used as the fallback when the credentials catalog
- * is unavailable or a slug drifted: members must never see a raw dep key
- * like "tavily_api_key" in a badge. */
-export function prettySlug(slug: string): string {
-  return slug
-    .split(/[-_]/)
-    .filter(Boolean)
-    .map((word) => word.charAt(0).toUpperCase() + word.slice(1))
-    .join(" ");
-}
+/** Display label derived from a provider slug — the shared, acronym-
+ * correcting prettifier (lib/credentials/label.ts is client-safe, so the
+ * fallback matches the catalog's labels exactly, "openai" → "OpenAI"
+ * included). */
+export { prettifyProviderLabel as prettySlug } from "@/lib/credentials/label";
+import { prettifyProviderLabel as prettySlug } from "@/lib/credentials/label";
 
 export function providerMeta(
   catalog: CredentialCatalog,

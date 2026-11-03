@@ -38,8 +38,10 @@ server-to-server, signature-verified).
   `getPlanLimits(plan)` (returns the unlimited sentinel for self-host) +
   `planIdFromPriceId` (maps a Stripe Price ID → plan; the dollar amounts
   live in Stripe, only the price IDs are env-configured) +
-  `priceIdForPlan` + `defaultPlan` (free when billing is enabled,
-  self-host otherwise). `SAAS_PLANS` exported for the pricing page.
+  `priceIdForPlan` + `defaultPlan` (free under SaaS mode, self-host
+  otherwise — keyed on `SAAS_MODE`, not `BILLING_ENABLED`: a SaaS deploy
+  without Stripe still puts every org on the Free plan). `SAAS_PLANS`
+  exported for the pricing page.
 - `lib/billing/stripe.ts` — Stripe SDK singleton (null when
   `!BILLING_ENABLED`). `getStripe()` + `getWebhookSecret()` (empty-string
   `STRIPE_WEBHOOK_SECRET` is treated as `null` — a blank secret would

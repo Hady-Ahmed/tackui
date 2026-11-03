@@ -296,7 +296,7 @@ describe("modelKeyState", () => {
       credentialsState([]),
     );
     if (!state || state.status !== "missing") throw new Error("expected a missing state");
-    expect(state.providerLabel).toBe("Openai Responses");
+    expect(state.providerLabel).toBe("OpenAI Responses");
     expect(state.provider).toBeNull();
   });
 
@@ -315,7 +315,7 @@ describe("modelKeyState", () => {
       null,
     );
     if (!state || state.status !== "missing") throw new Error("expected a missing state");
-    expect(state.providerLabel).toBe("Openai Responses"); // no catalog → prettified slug fallback
+    expect(state.providerLabel).toBe("OpenAI Responses"); // no catalog → prettified slug fallback
     expect(state.provider).toBeNull(); // no catalog → no connect form to point at
   });
 });
@@ -362,7 +362,7 @@ describe("toolKeyState", () => {
     const unknown = { ...TOOLS[2], toolkit: "", requiresKey: "mystery_api_key" };
     expect(toolKeyState(unknown, credentialsState(["tavily"]))).toEqual({
       status: "missing",
-      providerLabel: "Mystery Api Key", // dep key prettified, never raw
+      providerLabel: "Mystery API Key", // dep key prettified, never raw
       provider: null,
     });
   });

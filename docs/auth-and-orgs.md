@@ -107,8 +107,12 @@ providers are exposed to the login UI via `GET /api/auth/config`
   the user's active org. No bypass for any role.
 - **Thread scoping:** Threads are scoped per user + per org. `listThreads`
   filters by `createdById === userId && organizationId === orgId` via ALS.
-  `deleteThread`/`renameThread` check ownership (owner or org-mate). No
-  bypass for any role.
+  `deleteThread`/`renameThread` check ownership (owner or org-mate). The
+  same `threadVisible` rule also guards the run and connect paths
+  (`startRun` resolves existence + ownership from Postgres; `startConnect`
+  fails closed on cache miss) — see
+  [security.md](./security.md#thread-visibility-cross-tenant-isolation)
+  for the authoritative rule. No bypass for any role.
 
 ## Org switcher, invitations, member management
 
