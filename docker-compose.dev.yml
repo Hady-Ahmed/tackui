@@ -94,12 +94,6 @@ services:
       AGENT_OS_HOST: 0.0.0.0
       AGENT_OS_PORT: "7778"
       SENTRY_DSN: ${AGENTOS_SENTRY_DSN:-}
-      # Platform fallback keys. Under SaaS mode these stay unset (agents
-      # bring their own credentials via the run gate); self-hosts may set
-      # them in .env to give every agent platform-side keys.
-      OPENAI_API_KEY: ${OPENAI_API_KEY:-}
-      OPENROUTER_API_KEY: ${OPENROUTER_API_KEY:-}
-      TAVILY_API_KEY: ${TAVILY_API_KEY:-}
     depends_on:
       db-builder:
         condition: service_healthy
