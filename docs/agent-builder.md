@@ -1,18 +1,20 @@
 # Agent Builder
 
-> **Where the service lives:** the AgentOS service's source is in THIS
-> repo, under `agent-builder/` at the root (a Python/uv project, moved
-> out of the old agent-warehouse monorepo — a location-only move, no
-> functional change). Set up its venv with `cd agent-builder && uv sync
-> --all-groups`, run its tests with `uv run pytest` (a Docker daemon is
-> required — testcontainers Postgres), and deploy it as its own service
-> (see the Dockerfile in that folder).
+> **Where the service lives:** the agent builder service's source is in
+> THIS repo, under `agent-builder/` at the root (a Python/uv project,
+> moved out of the old agent-warehouse monorepo — a location-only move,
+> no functional change). Set up its venv with `cd agent-builder && uv
+> sync --all-groups`, run its tests with `uv run pytest` (a Docker daemon
+> is required — testcontainers Postgres), and deploy it as its own
+> service (see the Dockerfile in that folder). The compose stacks run it
+> as the `agent-builder` service with its own `db-builder` Postgres —
+> both network-internal; the app is the only host-facing interface.
 
 Phase 1 "create your own agents" — any signed-in org member can build an
-agent on the platform AgentOS service (identity/name, model picker, tool
+agent on the agent builder service (identity/name, model picker, tool
 palette, MCP connectors) without touching the admin `/agents` page. The
-definition lives on the shared multi-tenant AgentOS; tackui keeps a normal
-agent row that resolves to it at run time. This doc covers the builder
+definition lives in the builder's shared multi-tenant store; tackui keeps
+a normal agent row that resolves to it at run time. This doc covers the builder
 subsystem: the two-place agent shape, the create/update flows, the run
 gate, per-run dependency delivery, and the BYOK credentials + connector
 stores. For the general registry mechanics see
@@ -60,7 +62,7 @@ Boot-time consts (restart after env changes):
   disabled: builder create/update routes return 503 and the UI shows a
   disabled state (see below). Stale builder agents (a self-hoster who
   removed the env) resolve to nothing rather than half-running.
-- `AGENTOS_BASE_URL` — the platform-os deployment, no trailing slash.
+- `AGENTOS_BASE_URL` — the agent builder deployment, no trailing slash.
 - `AGENTOS_JWT_SECRET` — the shared HS256 secret both tackui (minting)
   and the AgentOS dispatcher (verifying) use. Required when the URL is
   set; the mismatch (`AGENTOS_MISCONFIGURED`) is surfaced as a loud boot
@@ -142,7 +144,7 @@ An unknown model (`provider:id` not in the catalog) is a
 `BuilderValidationError` → 400. The picker is populated from the same
 endpoint, so a mismatch means a stale client or tampering.
 
-## Wire contract with the AgentOS
+## Wire contract with the agent builder
 
 JWT (HS256, proven in the phase-0 spike):
 
@@ -573,7 +575,7 @@ where the "one rule" is satisfied: agent definitions declare
 requirements; runners keep their keys here.
 
 - **Catalog — derived, never hardcoded** (`lib/credentials/
-  catalog.ts`): the provider list comes from the AgentOS platform at
+  catalog.ts`): the provider list comes from the agent builder service at
   request time. LLM providers are the distinct `provider`s in
   `GET /platform/models` (keyless providers like ollama are skipped —
   nothing to save); tool providers come from the tools catalog's

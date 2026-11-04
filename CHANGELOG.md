@@ -12,6 +12,18 @@ All notable changes to this project will be documented in this file. The format 
   exact versions the warehouse lock had tested (the `agents_shared.auth`
   module it used is vendored into the folder).
 
+- **The Docker compose stacks now include the agent builder.** Both
+  `docker-compose.yml` and `docker-compose.dev.yml` gain a `db-builder`
+  Postgres (own volume, distinct user/db) and an `agent-builder` service —
+  both network-internal with no published ports, so the app stays the
+  sole host-facing interface. The app's `AGENTOS_BASE_URL` defaults to
+  the compose service (`http://agent-builder:7778`), the shared
+  `AGENTOS_JWT_SECRET` feeds the builder's `JWT_SECRET`, and the builder
+  exposes `AGENTOS_DB_PASSWORD` / `AGENTOS_SENTRY_DSN` as compose-only
+  variables. A new `agent-builder/.dockerignore` keeps the host's
+  `.venv` out of the image build context (it previously clobbered the
+  venv baked by the Dockerfile) and keeps `.env` secrets out of images.
+
 - **CopilotKit runtime telemetry is opt-out by default for new setups.**
   `.env.example` now ships `COPILOTKIT_TELEMETRY_DISABLED=true` (the
   runtime's anonymous usage telemetry is on by default; `DO_NOT_TRACK=1`
@@ -282,7 +294,7 @@ All notable changes to this project will be documented in this file. The format 
 - **Real-Postgres test coverage via testcontainers** — the five tests that were permanently skipped (pg-mem can't parse `WITH RECURSIVE` CTEs, do cross-statement ROLLBACK, or expose pg_catalog index metadata — the `pg-runner` connect() suite, the `withTransaction` rollback test, the migration index test) now run against a throwaway Postgres container (`lib/db/test-postgres.ts`); they skip with a console note when Docker isn't running, so Docker-less environments stay green.
 - **Agent builder (create your own agents)** — members can create and edit agents on the platform AgentOS service (identity, model picker, tool palette, connectors) with BYOK credentials, per-run dependency delivery, run-gate 402s, and a platform-key daily quota.
 - **DB-backed, discovery-driven models & tools admin (`/admin/platform`)** — what the agent builder offers is now a deployment decision made by ticking checkboxes: the platform-os scans its installed agno modules at boot and the platform admin enables model providers (with per-provider model-id lists), toolkits, and per-model attributes on the new admin page. Only the admin's decisions are stored (a separate `platform_catalog.db` on the AgentOS; tables start empty — the admin re-ticks boxes once after deploy); everything else (model classes, credential contracts, function lists) is derived from the discovery scan and rendered read-only. Adding a model or tool = an agno import + one checkbox — no code, no env, no redeploy (the AgentOS registry rebuilds on the next request). tackui proxies the AgentOS admin API (`GET/PUT /api/admin/platform/catalog`, `POST /api/admin/platform/test-model`) so the platform's JWT secret never reaches the browser; model-entry validation and 400s belong to the platform — their validation text surfaces to the admin as a clean detail line (member surfaces only ever see sanitized copy), and a Test button probes one model entry with a single completion through the platform's own env key. Gated to platform admins only (`role === "admin"`, same as `/admin` — the catalog is global, so its editors must be) + the usual rate-limit buckets; linked from the builder (admin-only) and `/admin`.
-- **AgentOS as the single source of truth for the builder** — the tool palette and the BYOK provider catalog are derived live from the AgentOS platform (`GET /platform/tools`, `GET /platform/models`); adding a tool or model provider to the platform is an AgentOS-side change with zero tackui code (not even env). The `BUILDER_TOOLS`/`CREDENTIAL_PROVIDERS` hardcodes are gone; the run gate is driven by the per-agent requirements snapshot captured at create/update time, and the builder's model/provider key-state badges derive from the same catalogs.
+- **The agent builder as the single source of truth for the builder** — the tool palette and the BYOK provider catalog are derived live from the agent builder service (`GET /platform/tools`, `GET /platform/models`); adding a tool or model provider is a builder-side change with zero tackui code (not even env). The `BUILDER_TOOLS`/`CREDENTIAL_PROVIDERS` hardcodes are gone; the run gate is driven by the per-agent requirements snapshot captured at create/update time, and the builder's model/provider key-state badges derive from the same catalogs.
 - **API keys page (`/app/credentials`)** — a dedicated BYOK credentials page linked from the account menu (the builder's inline connect forms stay as contextual shortcuts). Saved rows always render from the local DB; add-rows come from the live platform catalog per request (no cache). When the platform is unreachable, a banner explains that saved keys are unaffected and only new keys can't be added — `PUT` is fail-closed against the live catalog, while `DELETE` accepts any saved provider (a provider removed from the catalog shows "No longer supported" and stays deletable).
 
 ### Changed

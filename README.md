@@ -112,9 +112,11 @@ The first user to sign up becomes the admin.
 
 ## Self-hosting with Docker
 
-The bundled `docker-compose.yml` runs the app + Postgres with one command.
-Migrations run automatically on boot (via `instrumentation.ts`) — no manual
-step needed.
+The bundled `docker-compose.yml` runs the app + Postgres + the agent
+builder (with its own separate Postgres) with one command. Migrations run
+automatically on boot (via `instrumentation.ts`) — no manual step needed.
+The builder is part of the default stack and reachable only from inside
+the compose network — the app is the sole host-facing interface.
 
 ### Solo mode (default)
 
@@ -310,8 +312,8 @@ See [`.env.example`](.env.example) for the full list with comments.
 | Variable | Required? | Description |
 | --- | --- | --- |
 | `DATABASE_URL` | Yes | Postgres connection string (e.g. `postgres://user:pass@localhost:5432/dbname`) |
-| `AGENTOS_BASE_URL` | No | Base URL of the AgentOS platform service (e.g. `http://agent-os:7778`) that powers the agent builder. Setting this alone activates the builder; when unset the builder is disabled (builder routes return 503 and the UI shows a disabled state). No trailing slash. |
-| `AGENTOS_JWT_SECRET` | No | JWT secret shared with the AgentOS dispatcher (HS256). Required whenever `AGENTOS_BASE_URL` is set — the builder UI works without it, but every run fails auth at the dispatcher until the secret is configured (a boot warning is logged). |
+| `AGENTOS_BASE_URL` | No | Base URL of the agent builder service (e.g. `http://agent-builder:7778`). Setting this alone activates the builder; when unset the builder is disabled (builder routes return 503 and the UI shows a disabled state). No trailing slash. |
+| `AGENTOS_JWT_SECRET` | No | JWT secret shared with the agent builder (HS256). Required whenever `AGENTOS_BASE_URL` is set — the builder UI works without it, but every run fails auth at the dispatcher until the secret is configured (a boot warning is logged). In the compose stacks this same variable is fed to the builder container as its `JWT_SECRET`. |
 | `BETTER_AUTH_SECRET` | Yes (unless `AUTH_DISABLED=true`) | Secret for signing session cookies. Generate with `openssl rand -hex 32`. The app refuses to boot without it when auth is enabled. |
 | `BETTER_AUTH_URL` | Yes (unless `AUTH_DISABLED=true`) | Public base URL of the app (e.g. `http://localhost:3000`) |
 | `AUTH_DISABLED` | No | Set to `true` to skip login (solo mode). **Never use this in any deployment exposed to the internet or shared users.** |
@@ -337,6 +339,8 @@ See [`.env.example`](.env.example) for the full list with comments.
 | `POSTGRES_PASSWORD` | No (docker-compose only) | Postgres password (default: `postgres`) |
 | `POSTGRES_DB` | No (docker-compose only) | Postgres database name (default: `tackui`) |
 | `APP_PORT` | No (docker-compose only) | Host port to expose the app on (default: `3000`) |
+| `AGENTOS_DB_PASSWORD` | No (docker-compose only) | Postgres password for the builder's own `db-builder` database (default: `agentos`) |
+| `AGENTOS_SENTRY_DSN` | No (docker-compose only) | Sentry DSN for the builder service itself (separate from the app's `SENTRY_DSN`) |
 
 ## Security
 

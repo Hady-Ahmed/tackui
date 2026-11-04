@@ -189,8 +189,9 @@ sessions, `ai` schema) and the catalog (admin decisions + revision counter,
 `.env.example` (copy to `.env`; per-service on Railway). The server binds
 `AGENT_OS_HOST` (default `0.0.0.0`) on port **7778** by default
 (`AGENT_OS_PORT`, or Railway's injected `PORT`, override it) — note this
-differs from the chat agents' 7777 default so platform-os and an agent can
-run side by side.
+differs from the chat agents' 7777 default so the agent builder and an
+agent can run side by side. The root compose stacks also run this service
+(plus its own `db-builder` Postgres, network-internal).
 
 ## Dead mechanisms
 

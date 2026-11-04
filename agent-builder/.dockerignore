@@ -1,0 +1,9 @@
+# Keep host artifacts out of the image build context:
+# - .venv would clobber the venv baked by `uv sync` in the Dockerfile
+#   (its interpreter symlinks don't resolve inside the image)
+# - secrets must come from the environment at runtime, never the image
+.venv/
+__pycache__/
+.pytest_cache/
+.env
+.env.*
