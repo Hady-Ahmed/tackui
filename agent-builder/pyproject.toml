@@ -17,7 +17,7 @@ dependencies = [
     # without a functional change, so it moves with its proven dependency
     # matrix rather than re-floating to whatever is newest.
     "fastapi==0.141.1",
-    "pyjwt==2.14.0",
+    "pyjwt==2.15.0",
     "python-dotenv==1.2.3",
     # AG-UI protocol types (ag_ui.*) — formerly pulled in via the shared
     # package's dependency list; the dispatcher imports it directly.
@@ -92,7 +92,7 @@ dev = [
     # tests/test_platform_os.py imports fastmcp directly (live MCP server
     # fixture). agno's mcp extra brings it transitively; the dev dep pins
     # the import the tests actually make.
-    "fastmcp==4.0.5",
+    "fastmcp==4.1.2",
     # tests/conftest.py boots a throwaway Postgres via testcontainers (the
     # agno db + catalog both need a real server now that sqlite is gone).
     "testcontainers[postgres]==4.15.0",
