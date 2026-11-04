@@ -59,10 +59,13 @@ no Docker required, no cleanup between runs (see `vitest.config.ts`).
   mocks. Restore in `afterEach`.
 - **No production code changes for testability** — the in-memory pg-mem
   emulator + vitest's `isolate: true` handle DB isolation without needing
-  test-only exports. pg-mem doesn't support `WITH RECURSIVE` CTEs or
-  cross-statement `ROLLBACK` — the skipped tests in
-  `lib/agents/pg-runner.test.ts` are intentional; don't "fix" them (see
-  `docs/architecture.md` Future section for the testcontainers follow-up).
+  test-only exports. pg-mem doesn't support `WITH RECURSIVE` CTEs,
+  cross-statement `ROLLBACK`, or pg_catalog index metadata — the tests
+  that need those (`pg-runner.test.ts` connect() suite, the
+  `withTransaction` rollback test, the migration index test) run against
+  a real Postgres via `@testcontainers/postgresql` (`lib/db/
+  test-postgres.ts`; Docker required — they SKIP with a console note when
+  the daemon is down, so a Docker-less environment stays green).
 - **Security-critical code** (`lib/auth`, `lib/billing`, `lib/net`,
   `lib/ratelimit`) — test the bypass attempt, not just the happy path.
 
@@ -70,6 +73,10 @@ no Docker required, no cleanup between runs (see `vitest.config.ts`).
 
 - **Commits:** Conventional Commits (`feat:`, `fix:`, `docs:`, `test:`,
   `chore:` with optional scope) — see CONTRIBUTING.md.
+- **Issues, branches & PRs:** features get an issue → a `<issue#>-short-slug`
+  branch → a PR that `Closes #N`. The full workflow lives in
+  CONTRIBUTING.md ("Workflow: issue → branch → PR") — point there, don't
+  duplicate it here.
 - **Changelog:** notable changes (features, behavior changes, fixes, security
   work) get a bullet under `## [Unreleased]` in `CHANGELOG.md` in the same
   change that introduces them. Released sections are frozen history. Docs-only
@@ -114,6 +121,13 @@ no Docker required, no cleanup between runs (see `vitest.config.ts`).
   persisting or fetching. Private IPs are blocked unless
   `ALLOW_PRIVATE_ENDPOINTS=true` (hard-locked ON under SaaS mode). The guard
   only fires on PATCH when `endpoint` is actually in the body.
+  **Run-time fetch policy is per-origin** (lib/agents/registry.ts):
+  manual/template-agent runs re-run the guard on every redirect hop via
+  `fetchGuardedRedirects`; builder-agent runs to the platform are
+  deliberately EXEMPT (operator infrastructure — the endpoint is
+  recomputed from `AGENTOS_BASE_URL`, not tenant-supplied). "Completing"
+  the guard coverage onto builder runs breaks every run under SaaS mode
+  — see docs/security.md.
 - **Rate-limit wiring on new routes:** every new route handler gets a
   per-user limit via `lib/ratelimit` (`checkUserLimit` / `acquireConcurrent`).
   Run-stream routes must exempt stop/connect paths — otherwise
@@ -146,6 +160,10 @@ no Docker required, no cleanup between runs (see `vitest.config.ts`).
 - `app/api/` — REST routes (agents, catalog, auth, billing, threads, org,
   health, copilotkit runtime)
 - `components/` — chat shell, sidebar, account menu, dialogs, tool renders
+- `agent-builder/` — the AgentOS service the agent builder runs on
+  (Python/uv, own venv + `uv run pytest`; moved here from the old
+  agent-warehouse monorepo — see `docs/agent-builder.md` and the
+  `ci-python.yml` workflow, which tests it only when the folder changes)
 - `proxy.ts` — cookie gate + per-IP flood protection + rate limiting
 - `docs/` — architecture deep-dives (index below)
 
@@ -159,6 +177,9 @@ full how-it-works detail this file deliberately omits:
   extension points
 - **`docs/agent-registry.md`** — agent CRUD + REST API, smoke tests, test connection,
   user identity forwarding, per-agent JWT auth, encryption at rest
+- **`docs/agent-builder.md`** — the agent builder subsystem: AgentOS platform
+  integration, builder create/update flows, run gate + per-run dependency
+  delivery, BYOK credentials, connectors, platform-key quota
 - **`docs/catalog.md`** — templates vs installed copies, install semantics,
   lifecycle/tombstones, run gates, monetization gates + copy policy
 - **`docs/auth-and-orgs.md`** — Better Auth setup, access control, orgs,

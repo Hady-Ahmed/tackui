@@ -7,18 +7,18 @@ import { CopilotChat, useCopilotKit } from "@copilotkit/react-core/v2";
 import { AgentSidebar } from "./agent-sidebar";
 import { HitlHandlers } from "./hitl/approval-card";
 import { ToolRenders } from "./tools/tool-renders";
-import { useAuthConfig } from "@/lib/auth/use-auth-config";
-import { useCanManageAgents } from "@/lib/auth/use-can-manage-agents";
 import { useBilling } from "@/lib/billing/use-billing";
 import { UpgradeDialog } from "./upgrade-dialog";
 import type { PublicAgent } from "@/lib/agents/agents.config";
 
 export function ChatShell() {
   const router = useRouter();
-  const { config } = useAuthConfig();
-  const { canManage } = useCanManageAgents();
   const [agents, setAgents] = useState<PublicAgent[]>([]);
   const [hasLoaded, setHasLoaded] = useState(false);
+  // The agent list failed to load (network error / non-401 failure) —
+  // distinct from the empty state so a failure is retryable instead of
+  // reading as "no agents configured".
+  const [loadError, setLoadError] = useState(false);
   const [activeAgent, setActiveAgent] = useState("");
   const [activeThreadId, setActiveThreadId] = useState(() =>
     crypto.randomUUID(),
@@ -50,36 +50,72 @@ export function ChatShell() {
     applyStoredCollapsed.current();
   }, []);
 
-  // Show the empty-state CTA to org owners/admins OR in solo mode.
-  const canManageAgents_ = canManage === true || (config?.authDisabled ?? false);
-
-  useEffect(() => {
-    let cancelled = false;
-    const load = async () => {
+  // The agent-list fetch, shared by mount, window-focus refetches, and the
+  // error pane's Retry button. On failure it surfaces a retryable error
+  // instead of sitting on "Loading agents..." forever.
+  // Focus refetches are gated by staleness: refetch only if the last
+  // fetch is older than FOCUS_REFETCH_MIN_MS. Without the gate, every
+  // alt-tab and every dev hot-reload remount fired a GET — bursts of
+  // requests the user never consciously made, enough to trip the
+  // per-minute agentRead limit. Mount fetches stay ungated.
+  const lastFetchAtRef = useRef(0);
+  const FOCUS_REFETCH_MIN_MS = 30_000;
+  const loadAgents = useCallback(async () => {
+    lastFetchAtRef.current = Date.now();
+    try {
       const res = await fetch("/api/agents");
-      if (cancelled) return;
       if (res.status === 401) {
         // Solo mode never 401s, so this only fires when auth is enabled.
+        // Stays on the loading pane — navigation takes over from here.
         router.push("/login");
         return;
       }
-      if (!res.ok) return;
+      if (!res.ok) {
+        setLoadError(true);
+        setHasLoaded(true);
+        return;
+      }
       const list: PublicAgent[] = await res.json();
       setAgents(list);
       setHasLoaded(true);
+      setLoadError(false);
+      // One-shot deep link: /app?agent=<id> selects a specific agent (the
+      // builder's "Save & open in chat"). The param is stripped via
+      // replaceState so a refresh or a focus refetch doesn't re-trigger
+      // the selection.
+      const requested = new URLSearchParams(window.location.search).get("agent");
+      if (requested && list.some((a) => a.id === requested)) {
+        window.history.replaceState(null, "", "/app");
+        setActiveAgent(requested);
+        return;
+      }
       setActiveAgent((prev) => {
         const stillExists = list.some((a) => a.id === prev);
         return stillExists ? prev : list[0]?.id ?? "";
       });
+    } catch {
+      // Network failure (offline, tab hidden mid-flight).
+      setLoadError(true);
+      setHasLoaded(true);
+    }
+  }, [router]);
+
+  // Ref indirection satisfies react-hooks/set-state-in-effect (the same
+  // pattern applyStoredCollapsed uses below): the effect calls through the
+  // ref, and the ref is refreshed whenever the callback changes.
+  const loadAgentsRef = useRef<(() => Promise<void>) | null>(null);
+  useEffect(() => {
+    loadAgentsRef.current = loadAgents;
+    void loadAgentsRef.current();
+    const onFocus = () => {
+      if (Date.now() - lastFetchAtRef.current < FOCUS_REFETCH_MIN_MS) return;
+      void loadAgentsRef.current?.();
     };
-    load();
-    const onFocus = () => load();
     window.addEventListener("focus", onFocus);
     return () => {
-      cancelled = true;
       window.removeEventListener("focus", onFocus);
     };
-  }, [router]);
+  }, [loadAgents]);
 
   const handleSelectAgent = useCallback((id: string) => {
     setActiveAgent(id);
@@ -167,7 +203,8 @@ export function ChatShell() {
           <>
             {runError && (
               <div
-                className={`mx-4 mt-4 flex items-start justify-between gap-3 rounded-lg border px-4 py-3 text-sm ${
+                role="alert"
+                className={`flex items-start justify-between gap-3 border-b px-4 py-2.5 text-sm ${
                   runErrorIsPaywall
                     ? // Quota/plan 402 — the paywall moment, not an error:
                       // calm blue info styling keeps the Upgrade button as
@@ -176,7 +213,25 @@ export function ChatShell() {
                     : "border-red-200 bg-red-50 text-red-700 dark:border-red-900 dark:bg-red-950 dark:text-red-300"
                 }`}
               >
-                <span>{runError.msg}</span>
+                <span>
+                  {runError.msg}{" "}
+                  {runError.code === "AGENT_REQUIREMENTS_MISSING" &&
+                    runError.msg.includes("add your own") && (
+                    // The banner names what's missing; this closes the loop
+                    // with the fix. The link only fires on KEY blockers —
+                    // model/tool blockers are phrased "add your own … key"
+                    // — because the credentials page can only fix keys. A
+                    // missing-connector blocker ("an org admin needs to add
+                    // …") would strand the user on a page that can't help;
+                    // that fix lives with org admins on /agents#connectors.
+                    <Link
+                      href="/app/credentials"
+                      className="font-medium underline underline-offset-2 hover:opacity-80"
+                    >
+                      Manage keys →
+                    </Link>
+                  )}
+                </span>
                 <div className="flex shrink-0 items-center gap-2">
                   {showRunUpgrade && (
                     <button
@@ -197,7 +252,7 @@ export function ChatShell() {
                         : "text-red-500 hover:text-red-700 dark:text-red-400 dark:hover:text-red-200"
                     }
                   >
-                    x
+                    ✕
                   </button>
                 </div>
               </div>
@@ -212,47 +267,40 @@ export function ChatShell() {
               }
             />
           </>
+        ) : hasLoaded && loadError ? (
+          <div className="flex flex-1 flex-col items-center justify-center gap-3 text-center">
+            <p className="text-sm text-zinc-400">
+              Couldn&apos;t load your agents — check your connection and try again.
+            </p>
+            <button
+              type="button"
+              onClick={() => {
+                setLoadError(false);
+                setHasLoaded(false);
+                void loadAgents();
+              }}
+              className="rounded-lg border border-zinc-300 px-4 py-1.5 text-sm font-medium text-zinc-700 transition-colors hover:bg-zinc-50 dark:border-zinc-700 dark:text-zinc-200 dark:hover:bg-zinc-900"
+            >
+              Retry
+            </button>
+          </div>
         ) : hasLoaded ? (
           <div className="flex flex-1 flex-col items-center justify-center gap-4 text-center">
-            {canManageAgents_ ? (
-              <>
-                <p className="text-sm text-zinc-400">
-                  No agents configured yet.
-                </p>
-                <Link
-                  href="/agents?add=1"
-                  className="rounded-lg bg-blue-600 px-4 py-2 text-sm font-medium text-white transition-colors hover:bg-blue-700"
-                >
-                  Add your first agent →
-                </Link>
-                <Link
-                  href="/app/catalog"
-                  className="text-sm text-blue-600 hover:underline dark:text-blue-400"
-                >
-                  Browse the agent catalog →
-                </Link>
-                <a
-                  href="https://docs.ag-ui.com/quickstart/server"
-                  target="_blank"
-                  rel="noreferrer"
-                  className="text-xs text-zinc-500 hover:text-zinc-400"
-                >
-                  Need a backend? AG-UI quickstart →
-                </a>
-              </>
-            ) : (
-              <>
-                <p className="text-sm text-zinc-400">
-                  No agents available yet. Ask your administrator to add one.
-                </p>
-                <Link
-                  href="/app/catalog"
-                  className="text-sm text-blue-600 hover:underline dark:text-blue-400"
-                >
-                  Browse the agent catalog →
-                </Link>
-              </>
-            )}
+            <div className="flex flex-1 flex-col items-center justify-center gap-4 text-center">
+              <p className="text-sm text-zinc-400">No agents yet.</p>
+              <Link
+                href="/agents?add=1"
+                className="rounded-lg bg-blue-600 px-4 py-2 text-sm font-medium text-white transition-colors hover:bg-blue-700"
+              >
+                Add your first agent →
+              </Link>
+              <Link
+                href="/app/catalog"
+                className="text-sm text-blue-600 hover:underline dark:text-blue-400"
+              >
+                Browse the agent catalog →
+              </Link>
+            </div>
           </div>
         ) : (
           <div className="flex flex-1 items-center justify-center text-sm text-zinc-400">
@@ -285,7 +333,7 @@ function AgentChat({
 
   return (
     <CopilotChat
-      key={agentId + threadId}
+      key={`${agentId}:${threadId}`}
       agentId={agentId}
       threadId={threadId}
       className="flex-1"
@@ -322,8 +370,16 @@ function AgentChat({
         // and whether an Upgrade affordance applies (it needs the org's
         // plan for that, which lives here as billing state in the parent).
         if (status === 429 || status === 402 || status === 410) {
+          // Status-specific fallbacks — a bare 402 isn't "too many
+          // requests" and a 410 isn't a rate limit. (The server's own
+          // message usually wins; these cover a missing payload.)
           onRunError(
-            serverMsg || "Too many requests. Try again shortly.",
+            serverMsg ||
+              (status === 410
+                ? "This agent is no longer available."
+                : status === 402
+                  ? "This agent can't run right now."
+                  : "Too many requests. Try again shortly."),
             status === 402 ? code : undefined,
           );
           return;

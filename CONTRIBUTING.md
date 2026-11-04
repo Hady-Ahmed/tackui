@@ -42,6 +42,7 @@ Before making changes, read [`AGENTS.md`](./AGENTS.md) — agent-facing rules: c
 
 - [`docs/architecture.md`](./docs/architecture.md) — request flow, runtime, thread persistence, rendering
 - [`docs/agent-registry.md`](./docs/agent-registry.md) — agent registry, CRUD, per-agent JWT auth, encryption at rest
+- [`docs/agent-builder.md`](./docs/agent-builder.md) — the agent builder: create-your-own agents, platform catalogs, BYOK credentials, connectors, run gate
 - [`docs/catalog.md`](./docs/catalog.md) — template catalog, install semantics, run gates, lifecycle
 - [`docs/auth-and-orgs.md`](./docs/auth-and-orgs.md) — Better Auth, access control, orgs, members
 - [`docs/security.md`](./docs/security.md) — SSRF guard, headers, rate limiting
@@ -102,9 +103,23 @@ chore: bump @copilotkit/runtime to 1.63
 
 Scope is optional for small changes. The body should explain *why*, not *what* — the diff shows what.
 
-## Branch naming
+## Workflow: issue → branch → PR
 
-No strict convention. Descriptive names help: `feat/usage-pricing`, `fix/session-fixation`, `docs/agent-matrix`. Avoid `patch-1`-style names.
+Features and anything non-trivial follow this loop (we use the `gh` CLI):
+
+1. **Issue first** — open a GitHub issue describing the feature/fix and the
+   acceptance criteria. One issue per feature; it's the anchor for the whole
+   change.
+2. **Branch off the issue** — branch name is `<issue#>-short-slug`, e.g.
+   `42-knowledge-upload` or `17-rate-limit-connectors`. Small fixes and docs
+   tweaks can go straight to `main` without an issue.
+3. **One PR per branch** — the description references the issue and uses
+   `Closes #<issue#>` so the issue auto-closes on merge. The PR template's
+   checklist mirrors what CI runs (lint, typecheck, test). PRs are for
+   anything that benefits from a written description; tiny one-line fixes
+   don't need the ceremony.
+
+Avoid `patch-1`-style branch names.
 
 ## Code style
 

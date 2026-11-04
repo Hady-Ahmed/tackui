@@ -2,6 +2,7 @@ import { NextResponse } from "next/server";
 import { getCurrentUser } from "@/lib/auth/context";
 import { checkCanCreateOrg } from "@/lib/plans/enforcement";
 import { query } from "@/lib/db/pg";
+import { checkUserLimit } from "@/lib/ratelimit/middleware";
 
 /**
  * GET /api/org — the current user's orgs + active org + per-org plan info.
@@ -50,6 +51,11 @@ export async function GET() {
   if (!user) {
     return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
   }
+
+  // Multi-query read (memberships + per-org member counts) — bounded like
+  // the other account reads.
+  const limited = checkUserLimit(user.id, "accountRead");
+  if (limited) return limited;
 
   // Join member → organization → subscriptions (LEFT JOIN so Free orgs
   // with no subscription row still appear with plan='free').

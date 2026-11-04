@@ -21,11 +21,13 @@ export async function testEndpoint(endpoint: string): Promise<TestResult> {
     if (!res.ok) {
       return {
         status: "fail",
+        // The ternary's fallback arm is exercised whenever the body has no
+        // string `error`; no second fallback needed (it would be
+        // unreachable — the ternary always yields a non-empty string).
         message:
-          (typeof data === "object" && data && "error" in data
+          typeof data === "object" && data && "error" in data
             ? String((data as { error: unknown }).error)
-            : `Request failed (${res.status})`) ||
-          "Validation failed — check the URL.",
+            : "Couldn't check the connection — please retry.",
       };
     }
     return {
@@ -33,7 +35,7 @@ export async function testEndpoint(endpoint: string): Promise<TestResult> {
       message: data.message as string,
     };
   } catch {
-    return { status: "fail", message: "Network error talking to /api/agents/reachability-probe" };
+    return { status: "fail", message: "Couldn't check the connection — try again shortly." };
   }
 }
 

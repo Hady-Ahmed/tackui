@@ -1,0 +1,802 @@
+import { describe, it, expect, beforeEach, vi, afterEach } from "vitest";
+
+// Mock the stores the run gate reads so the gate logic is tested in
+// isolation (the stores have their own suites).
+const mockGetAgent = vi.fn();
+vi.mock("@/lib/agents/agent-store", () => ({
+  getAgent: (...a: unknown[]) => mockGetAgent(...a),
+}));
+
+const mockGetCredentialSecrets = vi.fn();
+vi.mock("@/lib/credentials/credential-store", async (importOriginal) => {
+  const actual =
+    await importOriginal<typeof import("@/lib/credentials/credential-store")>();
+  return {
+    ...actual,
+    getCredentialSecrets: (...a: unknown[]) =>
+      mockGetCredentialSecrets(...a),
+  };
+});
+
+const mockGetConnectorsByIds = vi.fn();
+vi.mock("@/lib/connectors/connector-store", () => ({
+  getConnectorsByIds: (...a: unknown[]) => mockGetConnectorsByIds(...a),
+}));
+
+const mockConsumeQuota = vi.fn();
+vi.mock("@/lib/ratelimit/platform-quota", () => ({
+  consumePlatformKeyQuota: (...a: unknown[]) => mockConsumeQuota(...a),
+}));
+
+const mockGetEnforcementLimits = vi.fn();
+vi.mock("@/lib/plans/enforcement", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("@/lib/plans/enforcement")>();
+  return {
+    ...actual,
+    getEnforcementLimits: (...a: unknown[]) =>
+      mockGetEnforcementLimits(...a),
+  };
+});
+
+import type { AgentEntry } from "./agents.config";
+import type { Connector } from "@/lib/connectors/connector-store";
+
+// Imported at the top so the mock wiring applies; individual tests
+// re-import under the right env via loadSaaS()/plain dynamic import.
+void import("./run-gate");
+
+function connectorFixture(
+  name: string,
+  token = "",
+  overrides: Partial<Connector> = {},
+): Connector {
+  return {
+    id: `conn-${name}`,
+    orgId: "org-1",
+    name,
+    url: `https://mcp.example.com/${name}`,
+    token,
+    tokenUndecryptable: false,
+    createdAt: "2026-01-01T00:00:00Z",
+    updatedAt: "2026-01-01T00:00:00Z",
+    ...overrides,
+  };
+}
+
+function builderAgent(
+  requirements: AgentEntry["requirements"],
+): AgentEntry {
+  return {
+    id: "agent-1",
+    name: "Builder agent",
+    description: "",
+    endpoint: "",
+    orgId: "org-1",
+    authMode: "jwt",
+    origin: "builder",
+    authorUserId: "user-1",
+    remoteAgentId: "remote-1",
+    requirements,
+  };
+}
+
+const miniRequirements: NonNullable<AgentEntry["requirements"]> = {
+  model: { provider: "openai", id: "gpt-4o-mini", platformTier: true, depKey: "openai_api_key", name: "OpenAIChat" },
+  tools: [],
+  connectors: [],
+};
+
+async function loadGate() {
+  delete process.env.SAAS_MODE;
+  vi.resetModules();
+  return await import("./run-gate");
+}
+
+async function loadSaaSGate() {
+  process.env.SAAS_MODE = "true";
+  vi.resetModules();
+  return await import("./run-gate");
+}
+
+describe("lib/agents/run-gate", () => {
+  beforeEach(() => {
+    mockGetAgent.mockReset();
+    mockGetCredentialSecrets.mockReset();
+    mockGetConnectorsByIds.mockReset();
+    mockConsumeQuota.mockReset();
+    mockGetEnforcementLimits.mockReset();
+    mockConsumeQuota.mockReturnValue({
+      allowed: true,
+      resetAt: Date.now() + 1000,
+      used: 1,
+    });
+    mockGetEnforcementLimits.mockResolvedValue({
+      plan: "free",
+      limits: {
+        maxAgents: 3,
+        concurrentRuns: 1,
+        runsPerMinute: 10,
+        platformDailyQuota: 50,
+        maxMembers: 1,
+        canCreateOrg: false,
+        label: "Free",
+      },
+    });
+    // The runner's credentials: provider → named field map (migration 0014;
+    // single-key providers carry exactly one "api_key" field).
+    mockGetCredentialSecrets.mockResolvedValue({});
+  });
+
+  afterEach(() => {
+    delete process.env.SAAS_MODE;
+    vi.resetModules();
+  });
+
+  it("returns the empty resolution for a non-builder agent", async () => {
+    mockGetAgent.mockResolvedValue({ id: "agent-1", origin: "manual" });
+    const { checkBuilderRunGate } = await loadGate();
+    const result = await checkBuilderRunGate(
+      { id: "user-1", role: "member", name: "u", email: null, orgId: "org-1" },
+      "agent-1",
+    );
+    expect(result.response).toBeNull();
+    expect(result.contextItems).toEqual([]);
+    expect(result.platformKeyRun).toBe(false);
+    expect(mockGetCredentialSecrets).not.toHaveBeenCalled();
+  });
+
+  it("BLOCKS a builder agent whose requirements are absent (stale/unparseable snapshot — never runs ungated on the platform's env-key fallback)", async () => {
+    // The fail-open regression this pins: a snapshot that fails the schema
+    // comes back undefined from the store. The gate used to treat that as
+    // "no requirements → nothing to check", the run proceeded with NO key
+    // delivered, and the platform's env-key fallback spent the PLATFORM's
+    // credential on a member run. Builder rows always carry requirements,
+    // so undefined ⇔ stale — fail closed with the re-save instruction.
+    mockGetAgent.mockResolvedValue(builderAgent(undefined));
+    const { checkBuilderRunGate } = await loadGate();
+    const result = await checkBuilderRunGate(
+      { id: "user-1", role: "member", name: "u", email: null, orgId: "org-1" },
+      "agent-1",
+    );
+    expect(result.response).not.toBeNull();
+    expect(result.response!.status).toBe(402);
+    const body = await result.response!.json();
+    expect(body.error).toMatch(/out of date/);
+    expect(body.code).toBe("AGENT_REQUIREMENTS_MISSING");
+    expect(result.contextItems).toEqual([]);
+    expect(mockGetCredentialSecrets).not.toHaveBeenCalled();
+  });
+
+  it("returns the empty resolution when the agent does not exist", async () => {
+    mockGetAgent.mockResolvedValue(null);
+    const { checkBuilderRunGate } = await loadGate();
+    const result = await checkBuilderRunGate(
+      { id: "user-1", role: "member", name: "u", email: null, orgId: "org-1" },
+      "agent-1",
+    );
+    expect(result.response).toBeNull();
+    expect(result.contextItems).toEqual([]);
+  });
+
+  it("does NOT 402 a keyless-provider model (requiresKey: false — the provider is excluded from the credentials catalog, so the requirement could never be satisfied)", async () => {
+    mockGetAgent.mockResolvedValue(
+      builderAgent({
+        model: { provider: "ollama", id: "llama3:8b", platformTier: false, requiresKey: false, depKey: null, name: "Ollama" },
+        tools: [],
+        connectors: [],
+      }),
+    );
+    mockGetCredentialSecrets.mockResolvedValue({}); // no key saved — and none can be
+    const { checkBuilderRunGate } = await loadGate();
+    const result = await checkBuilderRunGate(
+      { id: "user-1", role: "member", name: "u", email: null, orgId: "org-1" },
+      "agent-1",
+    );
+    expect(result.response).toBeNull();
+    expect(result.contextItems).toEqual([]);
+  });
+
+  it("still 402s a keyed model when requiresKey is absent (undefined !== false)", async () => {
+    mockGetAgent.mockResolvedValue(
+      builderAgent({
+        model: { provider: "openai", id: "gpt-4o-mini", platformTier: false, depKey: "openai_api_key", name: "OpenAIChat" },
+        tools: [],
+        connectors: [],
+      }),
+    );
+    mockGetCredentialSecrets.mockResolvedValue({});
+    const { checkBuilderRunGate } = await loadGate();
+    const result = await checkBuilderRunGate(
+      { id: "user-1", role: "member", name: "u", email: null, orgId: "org-1" },
+      "agent-1",
+    );
+    expect(result.response?.status).toBe(402);
+  });
+
+  it("TIER DORMANCY: a platform-tier model without a runner key 402s (the platform key serves nothing until Phase 3)", async () => {
+    mockGetAgent.mockResolvedValue(builderAgent(miniRequirements));
+    const { checkBuilderRunGate } = await loadSaaSGate();
+    const result = await checkBuilderRunGate(
+      { id: "user-1", role: "member", name: "u", email: null, orgId: "org-1" },
+      "agent-1",
+    );
+    expect(result.response?.status).toBe(402);
+    const body = await result.response!.json();
+    expect(body.error).toContain("gpt-4o-mini");
+    // The dormant flag never flips — the quota phase no-ops.
+    expect(result.platformKeyRun).toBe(false);
+    expect(mockConsumeQuota).not.toHaveBeenCalled();
+  });
+
+  it("TIER DORMANCY: a platform-tier model WITH a runner key runs BYOK", async () => {
+    mockGetAgent.mockResolvedValue(builderAgent(miniRequirements));
+    mockGetCredentialSecrets.mockResolvedValue({ openai: { api_key: "sk-runner" } });
+    const { checkBuilderRunGate } = await loadSaaSGate();
+    const result = await checkBuilderRunGate(
+      { id: "user-1", role: "member", name: "u", email: null, orgId: "org-1" },
+      "agent-1",
+    );
+    expect(result.response).toBeNull();
+    expect(result.platformKeyRun).toBe(false);
+    expect(result.contextItems).toEqual([
+      { description: "openai_api_key", value: "sk-runner" },
+    ]);
+  });
+
+  it("402s a model when the runner has no key for its provider", async () => {
+    mockGetAgent.mockResolvedValue(
+      builderAgent({
+        model: { provider: "openai", id: "gpt-5", platformTier: false, depKey: "openai_api_key", name: "OpenAIChat" },
+        tools: [],
+        connectors: [],
+      }),
+    );
+    const { checkBuilderRunGate } = await loadSaaSGate();
+    const result = await checkBuilderRunGate(
+      { id: "user-1", role: "member", name: "u", email: null, orgId: "org-1" },
+      "agent-1",
+    );
+    expect(result.response?.status).toBe(402);
+    const body = await result.response!.json();
+    expect(body.code).toBe("AGENT_REQUIREMENTS_MISSING");
+    expect(body.error).toContain("gpt-5");
+    expect(result.contextItems).toEqual([]);
+    expect(mockConsumeQuota).not.toHaveBeenCalled();
+  });
+
+  it("injects the runner's model key from its field map", async () => {
+    mockGetAgent.mockResolvedValue(
+      builderAgent({
+        model: { provider: "openai", id: "gpt-5", platformTier: false, depKey: "openai_api_key", name: "OpenAIChat" },
+        tools: [],
+        connectors: [],
+      }),
+    );
+    mockGetCredentialSecrets.mockResolvedValue({ openai: { api_key: "sk-runner" } });
+    const { checkBuilderRunGate } = await loadGate();
+    const result = await checkBuilderRunGate(
+      { id: "user-1", role: "member", name: "u", email: null, orgId: "org-1" },
+      "agent-1",
+    );
+    expect(result.response).toBeNull();
+    expect(result.contextItems).toEqual([
+      { description: "openai_api_key", value: "sk-runner" },
+    ]);
+  });
+
+  it("resolves a door-slug model's key through the declared dep key (openai-responses shares the openai credential)", async () => {
+    // A responses-door agent's snapshot names the door slug; the key lives
+    // under the VENDOR. The declared depKey routes the lookup — slug math
+    // ("openai-responses_api_key") would demand a key nothing can provide.
+    mockGetAgent.mockResolvedValue(
+      builderAgent({
+        model: {
+          provider: "openai-responses",
+          id: "gpt-5.6-luna",
+          platformTier: false,
+          depKey: "openai_api_key",
+          name: "OpenAIResponses",
+        },
+        tools: [],
+        connectors: [],
+      }),
+    );
+    mockGetCredentialSecrets.mockResolvedValue({ openai: { api_key: "sk-runner" } });
+    const { checkBuilderRunGate } = await loadGate();
+    const result = await checkBuilderRunGate(
+      { id: "user-1", role: "member", name: "u", email: null, orgId: "org-1" },
+      "agent-1",
+    );
+    expect(result.response).toBeNull();
+    expect(result.contextItems).toEqual([
+      { description: "openai_api_key", value: "sk-runner" },
+    ]);
+  });
+
+  it("402s a door-slug model with the VENDOR label when the shared key is missing", async () => {
+    // The banner names the vendor the key is saved under ("OpenAI"), not
+    // the door slug — the member's fix is the same key either way.
+    mockGetAgent.mockResolvedValue(
+      builderAgent({
+        model: {
+          provider: "openai-responses",
+          id: "gpt-5.6-luna",
+          platformTier: false,
+          depKey: "openai_api_key",
+          name: "OpenAIResponses",
+        },
+        tools: [],
+        connectors: [],
+      }),
+    );
+    mockGetCredentialSecrets.mockResolvedValue({});
+    const { checkBuilderRunGate } = await loadGate();
+    const result = await checkBuilderRunGate(
+      { id: "user-1", role: "member", name: "u", email: null, orgId: "org-1" },
+      "agent-1",
+    );
+    expect(result.response).not.toBeNull();
+    expect(result.response!.status).toBe(402);
+    const body = await result.response!.json();
+    expect(body.error).toContain("OpenAI key");
+    expect(body.error).not.toContain("Openai Responses");
+  });
+
+  it("injects a BYOK tool key from the legacy single-dep snapshot (pre-multi-credential shape)", async () => {
+    mockGetAgent.mockResolvedValue(
+      builderAgent({
+        model: { provider: "openai", id: "gpt-5", platformTier: false, depKey: "openai_api_key", name: "OpenAIChat" },
+        tools: [
+          {
+            name: "tavily_search",
+            label: "Web search (Tavily)",
+            requiresKey: "tavily_api_key",
+            provider: "tavily",
+            platformFallback: false,
+          },
+        ],
+        connectors: [],
+      }),
+    );
+    mockGetCredentialSecrets.mockResolvedValue({
+      openai: { api_key: "sk-runner" },
+      // Migration 0014 backfills single-key providers to {api_key: ...}.
+      tavily: { api_key: "tvly-runner" },
+    });
+    const { checkBuilderRunGate } = await loadSaaSGate();
+    const result = await checkBuilderRunGate(
+      { id: "user-1", role: "member", name: "u", email: null, orgId: "org-1" },
+      "agent-1",
+    );
+    expect(result.response).toBeNull();
+    expect(result.platformKeyRun).toBe(false);
+    expect(mockConsumeQuota).not.toHaveBeenCalled();
+    expect(result.contextItems).toEqual([
+      { description: "openai_api_key", value: "sk-runner" },
+      { description: "tavily_api_key", value: "tvly-runner" },
+    ]);
+  });
+
+  it("delivers EVERY dep of a multi-credential toolkit's contract when all fields are saved", async () => {
+    mockGetAgent.mockResolvedValue(
+      builderAgent({
+        model: { provider: "openai", id: "gpt-5", platformTier: false, depKey: "openai_api_key", name: "OpenAIChat" },
+        tools: [
+          {
+            name: "search_x",
+            label: "Search X posts",
+            requiresKey: "x_consumer_key",
+            provider: "x",
+            platformFallback: false,
+            credentials: [
+              { depKey: "x_consumer_key", label: "X consumer key" },
+              { depKey: "x_consumer_secret", label: "X consumer secret" },
+              { depKey: "x_access_token", label: "X access token" },
+              { depKey: "x_access_token_secret", label: "X access token secret" },
+            ],
+          },
+        ],
+        connectors: [],
+      }),
+    );
+    mockGetCredentialSecrets.mockResolvedValue({
+      openai: { api_key: "sk-runner" },
+      x: {
+        consumer_key: "ck",
+        consumer_secret: "cs",
+        access_token: "at",
+        access_token_secret: "ats",
+      },
+    });
+    const { checkBuilderRunGate } = await loadGate();
+    const result = await checkBuilderRunGate(
+      { id: "user-1", role: "member", name: "u", email: null, orgId: "org-1" },
+      "agent-1",
+    );
+    expect(result.response).toBeNull();
+    expect(result.contextItems).toEqual([
+      { description: "openai_api_key", value: "sk-runner" },
+      { description: "x_consumer_key", value: "ck" },
+      { description: "x_consumer_secret", value: "cs" },
+      { description: "x_access_token", value: "at" },
+      { description: "x_access_token_secret", value: "ats" },
+    ]);
+    // The gate's reserved set is exactly what it delivered (plus the
+    // mcp_connectors namespace, reserved regardless of connectors here) —
+    // the registry strips client context against this set, so it must
+    // include every multi-field contract dep (not just `_api_key`).
+    expect([...result.reservedDepKeys].sort()).toEqual(
+      [
+        "mcp_connectors",
+        "openai_api_key",
+        "x_consumer_key",
+        "x_consumer_secret",
+        "x_access_token",
+        "x_access_token_secret",
+      ].sort(),
+    );
+  });
+
+  it("402s a multi-credential toolkit when ANY field of the contract is missing (all-or-nothing)", async () => {
+    mockGetAgent.mockResolvedValue(
+      builderAgent({
+        model: { provider: "openai", id: "gpt-5", platformTier: false, depKey: "openai_api_key", name: "OpenAIChat" },
+        tools: [
+          {
+            name: "search_x",
+            label: "Search X posts",
+            requiresKey: "x_consumer_key",
+            provider: "x",
+            platformFallback: false,
+            credentials: [
+              { depKey: "x_consumer_key", label: "X consumer key" },
+              { depKey: "x_access_token", label: "X access token" },
+            ],
+          },
+        ],
+        connectors: [],
+      }),
+    );
+    mockGetCredentialSecrets.mockResolvedValue({
+      openai: { api_key: "sk-runner" },
+      x: { consumer_key: "ck" }, // access_token missing
+    });
+    const { checkBuilderRunGate } = await loadGate();
+    const result = await checkBuilderRunGate(
+      { id: "user-1", role: "member", name: "u", email: null, orgId: "org-1" },
+      "agent-1",
+    );
+    expect(result.response?.status).toBe(402);
+    const body = await result.response!.json();
+    expect(body.error).toContain("Search X posts");
+    // Multi-field contract → the plural copy.
+    expect(body.error).toContain("X credentials");
+    // A partial contract must not partially deliver.
+    expect(result.contextItems).toEqual([]);
+  });
+
+  it("TIER DORMANCY: a platformFallback tool without a runner key 402s (the fallback is dormant until Phase 3)", async () => {
+    mockGetAgent.mockResolvedValue(
+      builderAgent({
+        ...miniRequirements,
+        tools: [
+          {
+            name: "tavily_search",
+            label: "Web search (Tavily)",
+            requiresKey: "tavily_api_key",
+            provider: "tavily",
+            platformFallback: true,
+          },
+        ],
+      }),
+    );
+    const { checkBuilderRunGate } = await loadSaaSGate();
+    const result = await checkBuilderRunGate(
+      { id: "user-1", role: "member", name: "u", email: null, orgId: "org-1" },
+      "agent-1",
+    );
+    expect(result.response?.status).toBe(402);
+    const body = await result.response!.json();
+    expect(body.error).toContain("Tavily");
+    expect(result.platformKeyRun).toBe(false);
+  });
+
+  it("402s a keyed tool with no platform fallback when the runner lacks the key", async () => {
+    mockGetAgent.mockResolvedValue(
+      builderAgent({
+        ...miniRequirements,
+        // A stale snapshot: the tool is no longer in the builder palette
+        // (or never was) — fail closed rather than silently degrade.
+        tools: [{ name: "unknown_tool", requiresKey: "tavily_api_key", platformFallback: false }],
+      }),
+    );
+    const { checkBuilderRunGate } = await loadSaaSGate();
+    const result = await checkBuilderRunGate(
+      { id: "user-1", role: "member", name: "u", email: null, orgId: "org-1" },
+      "agent-1",
+    );
+    expect(result.response?.status).toBe(402);
+    const body = await result.response!.json();
+    expect(body.error).toContain("unknown_tool");
+    expect(mockConsumeQuota).not.toHaveBeenCalled();
+  });
+
+  it("402s a required connector the org has not configured", async () => {
+    mockGetAgent.mockResolvedValue(
+      builderAgent({
+        ...miniRequirements,
+        connectors: [{ id: "conn-github", name: "github" }],
+      }),
+    );
+    mockGetConnectorsByIds.mockResolvedValue(new Map());
+    const { checkBuilderRunGate } = await loadSaaSGate();
+    const result = await checkBuilderRunGate(
+      { id: "user-1", role: "member", name: "u", email: null, orgId: "org-1" },
+      "agent-1",
+    );
+    expect(result.response?.status).toBe(402);
+    const body = await result.response!.json();
+    expect(body.error).toContain("github");
+    expect(mockConsumeQuota).not.toHaveBeenCalled();
+  });
+
+  it("injects configured connectors as the mcp_connectors JSON dep", async () => {
+    mockGetAgent.mockResolvedValue(
+      builderAgent({
+        ...miniRequirements,
+        connectors: [{ id: "conn-github", name: "github" }],
+      }),
+    );
+    mockGetConnectorsByIds.mockResolvedValue(
+      new Map([["conn-github", connectorFixture("github", "tok-123")]]),
+    );
+    mockGetCredentialSecrets.mockResolvedValue({ openai: { api_key: "sk-runner" } });
+    const { checkBuilderRunGate } = await loadSaaSGate();
+    const result = await checkBuilderRunGate(
+      { id: "user-1", role: "member", name: "u", email: null, orgId: "org-1" },
+      "agent-1",
+    );
+    expect(result.response).toBeNull();
+    const items = result.contextItems;
+    expect(items).toHaveLength(2);
+    const item = items.find((i) => i.description === "mcp_connectors")!;
+    // Keyed by the connector's stable ID and carrying NO URL: the platform
+    // resolves attach URLs from its push-first-synced registry and ignores
+    // wire URLs outright (a wire URL would be an SSRF primitive). Only the
+    // token rides the wire, per run.
+    expect(JSON.parse(item.value)).toEqual({
+      "conn-github": {
+        token: "tok-123",
+      },
+    });
+    expect(result.reservedDepKeys).toContain("mcp_connectors");
+    expect(mockGetConnectorsByIds).toHaveBeenCalledWith("org-1", ["conn-github"]);
+  });
+
+  it("402s when a snapshot connector id no longer exists (deleted-and-recreated)", async () => {
+    // Delete-and-recreate: the connector NAME still exists in the org, but
+    // with a NEW id. The snapshot declares the OLD id, the stored AgentOS
+    // config declares the OLD id — a name-based lookup would silently
+    // satisfy the gate and deliver a token keyed by the NEW id, which the
+    // dispatcher refuses mid-run. Id-based resolution makes the mismatch a
+    // pre-run 402.
+    mockGetAgent.mockResolvedValue(
+      builderAgent({
+        ...miniRequirements,
+        connectors: [{ id: "conn-old", name: "github" }],
+      }),
+    );
+    // The org's store resolves a DIFFERENT id under the same name — an
+    // id-keyed lookup for conn-old finds nothing.
+    mockGetConnectorsByIds.mockResolvedValue(new Map());
+    const { checkBuilderRunGate } = await loadSaaSGate();
+    const result = await checkBuilderRunGate(
+      { id: "user-1", role: "member", name: "u", email: null, orgId: "org-1" },
+      "agent-1",
+    );
+    expect(result.response?.status).toBe(402);
+    const body = await result.response!.json();
+    expect(body.error).toContain("github");
+    expect(body.error).toContain("re-save");
+  });
+
+  it("402s a connector whose stored token can't be decrypted (not treated as no-auth)", async () => {
+    mockGetAgent.mockResolvedValue(
+      builderAgent({
+        ...miniRequirements,
+        connectors: [{ id: "conn-github", name: "github" }],
+      }),
+    );
+    mockGetConnectorsByIds.mockResolvedValue(
+      new Map([
+        ["conn-github", connectorFixture("github", "", { tokenUndecryptable: true })],
+      ]),
+    );
+    mockGetCredentialSecrets.mockResolvedValue({ openai: { api_key: "sk-runner" } });
+    const { checkBuilderRunGate } = await loadSaaSGate();
+    const result = await checkBuilderRunGate(
+      { id: "user-1", role: "member", name: "u", email: null, orgId: "org-1" },
+      "agent-1",
+    );
+    expect(result.response?.status).toBe(402);
+    const body = await result.response!.json();
+    expect(body.error).toContain("can't be read");
+    // No mcp_connectors delivery — an empty bearer token would fail the
+    // run mid-stream against an authed MCP server.
+    expect(result.contextItems).toHaveLength(0);
+  });
+
+  it("consumeBuilderRunQuota consumes the platform-key quota (SaaS) — the wiring stays for Phase 3", async () => {
+    const { consumeBuilderRunQuota } = await loadSaaSGate();
+    const user = { id: "user-1", role: "member", name: "u", email: null, orgId: "org-1" };
+    const res = await consumeBuilderRunQuota(user, true);
+    expect(res).toBeNull();
+    expect(mockConsumeQuota).toHaveBeenCalledWith("user-1", 50);
+    expect(mockGetEnforcementLimits).toHaveBeenCalledWith("org-1");
+  });
+
+  it("402s when the platform-key quota is exhausted", async () => {
+    mockConsumeQuota.mockReturnValue({
+      allowed: false,
+      resetAt: Date.now() + 3_600_000,
+      used: 50,
+    });
+    const { consumeBuilderRunQuota } = await loadSaaSGate();
+    const result = await consumeBuilderRunQuota(
+      { id: "user-1", role: "member", name: "u", email: null, orgId: "org-1" },
+      true,
+    );
+    expect(result?.status).toBe(402);
+    const body = await result!.json();
+    expect(body.code).toBe("PLATFORM_QUOTA_EXCEEDED");
+    expect(body.resetsAt).toBeGreaterThan(Date.now());
+    expect(body.error).toContain("daily limit");
+    // Free-plan upsell clause, never a run number or "unlimited" promise.
+    expect(body.error).toContain("Upgrade to Pro");
+  });
+
+  it("consumeBuilderRunQuota is a no-op for BYOK runs and on self-host", async () => {
+    const user = { id: "user-1", role: "member", name: "u", email: null, orgId: "org-1" };
+    const saas = await loadSaaSGate();
+    // BYOK run — exempt.
+    expect(await saas.consumeBuilderRunQuota(user, false)).toBeNull();
+    // Self-host — the operator pays the platform bill themselves.
+    const selfHost = await loadGate();
+    expect(await selfHost.consumeBuilderRunQuota(user, true)).toBeNull();
+    expect(mockConsumeQuota).not.toHaveBeenCalled();
+  });
+
+  it("still blocks a missing connector on self-host (no fallback exists)", async () => {
+    mockGetAgent.mockResolvedValue(
+      builderAgent({
+        ...miniRequirements,
+        connectors: [{ id: "conn-github", name: "github" }],
+      }),
+    );
+    mockGetConnectorsByIds.mockResolvedValue(new Map());
+    mockGetCredentialSecrets.mockResolvedValue({ openai: { api_key: "sk-selfhost" } });
+    const { checkBuilderRunGate } = await loadGate();
+    const result = await checkBuilderRunGate(
+      { id: "user-1", role: "member", name: "u", email: null, orgId: "org-1" },
+      "agent-1",
+    );
+    expect(result.response?.status).toBe(402);
+    const body = await result.response!.json();
+    expect(body.error).toContain("github");
+  });
+
+  it("aggregates every blocker into one 402", async () => {
+    mockGetAgent.mockResolvedValue(
+      builderAgent({
+        model: { provider: "openai", id: "gpt-5", platformTier: false, depKey: "openai_api_key", name: "OpenAIChat" },
+        tools: [{ name: "unknown_tool", requiresKey: "tavily_api_key", platformFallback: false }],
+        connectors: [
+          { id: "conn-github", name: "github" },
+          { id: "conn-linear", name: "linear" },
+        ],
+      }),
+    );
+    mockGetConnectorsByIds.mockResolvedValue(new Map());
+    const { checkBuilderRunGate } = await loadSaaSGate();
+    const result = await checkBuilderRunGate(
+      { id: "user-1", role: "member", name: "u", email: null, orgId: "org-1" },
+      "agent-1",
+    );
+    expect(result.response?.status).toBe(402);
+    const body = await result.response!.json();
+    expect(body.error).toContain("gpt-5");
+    expect(body.error).toContain("unknown_tool");
+    expect(body.error).toContain("github");
+    expect(body.error).toContain("linear");
+    // One combined message, one code.
+    expect(body.code).toBe("AGENT_REQUIREMENTS_MISSING");
+  });
+});
+
+// (appended) contract-authoritative gating
+describe("lib/agents/run-gate — contract present despite null requiresKey", () => {
+  // A catalog row inconsistency: the legacy single-dep field is null but
+  // the credential contract is populated. The contract is authoritative —
+  // the gate must demand its deps (fail closed) rather than skip the tool.
+  beforeEach(() => {
+    mockGetAgent.mockReset();
+    mockGetCredentialSecrets.mockReset();
+    mockGetConnectorsByIds.mockReset();
+    mockConsumeQuota.mockReset();
+    mockGetEnforcementLimits.mockReset();
+    mockConsumeQuota.mockReturnValue({ allowed: true, resetAt: Date.now() + 1000, used: 1 });
+    mockGetEnforcementLimits.mockResolvedValue({
+      plan: "free",
+      limits: {
+        maxAgents: 3, concurrentRuns: 1, runsPerMinute: 10,
+        platformDailyQuota: 50, maxMembers: 1, canCreateOrg: false, label: "Free",
+      },
+    });
+  });
+
+  afterEach(() => {
+    delete process.env.SAAS_MODE;
+    vi.resetModules();
+  });
+
+  it("402s with the contract's copy when requiresKey is null but credentials exist", async () => {
+    mockGetAgent.mockResolvedValue(
+      builderAgent({
+        model: { provider: "openai", id: "gpt-5", platformTier: false, depKey: "openai_api_key", name: "OpenAIChat" },
+        tools: [
+          {
+            name: "search_x",
+            label: "Search X posts",
+            requiresKey: null,
+            provider: "x",
+            platformFallback: false,
+            credentials: [{ depKey: "x_consumer_key", label: "X consumer key" }],
+          },
+        ],
+        connectors: [],
+      }),
+    );
+    mockGetCredentialSecrets.mockResolvedValue({ openai: { api_key: "sk-runner" } });
+    const { checkBuilderRunGate } = await loadGate();
+    const result = await checkBuilderRunGate(
+      { id: "user-1", role: "member", name: "u", email: null, orgId: "org-1" },
+      "agent-1",
+    );
+    expect(result.response?.status).toBe(402);
+    const body = (await result.response?.json()) as { error?: string };
+    expect(body.error).toContain("X");
+  });
+
+  it("delivers the contract when the runner saved its fields", async () => {
+    mockGetAgent.mockResolvedValue(
+      builderAgent({
+        model: { provider: "openai", id: "gpt-5", platformTier: false, depKey: "openai_api_key", name: "OpenAIChat" },
+        tools: [
+          {
+            name: "search_x",
+            label: "Search X posts",
+            requiresKey: null,
+            provider: "x",
+            platformFallback: false,
+            credentials: [{ depKey: "x_consumer_key", label: "X consumer key" }],
+          },
+        ],
+        connectors: [],
+      }),
+    );
+    mockGetCredentialSecrets.mockResolvedValue({
+      openai: { api_key: "sk-runner" },
+      x: { consumer_key: "ck" },
+    });
+    const { checkBuilderRunGate } = await loadGate();
+    const result = await checkBuilderRunGate(
+      { id: "user-1", role: "member", name: "u", email: null, orgId: "org-1" },
+      "agent-1",
+    );
+    expect(result.response).toBeNull();
+    expect(result.contextItems).toEqual([
+      { description: "openai_api_key", value: "sk-runner" },
+      { description: "x_consumer_key", value: "ck" },
+    ]);
+  });
+});

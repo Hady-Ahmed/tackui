@@ -1,0 +1,39 @@
+name: Python CI
+
+# The agent-builder service (agent-builder/) is a Python/uv project
+# living alongside the Next.js app. This workflow runs only when that
+# folder changes — app-only PRs never pay for it. Keep it non-required
+# in branch protection: path-filtered workflows don't report a check at
+# all on PRs that don't touch the folder, and a required check that
+# never appears blocks the merge.
+on:
+  push:
+    branches: [main]
+    paths: ["agent-builder/**"]
+  pull_request:
+    paths: ["agent-builder/**"]
+
+concurrency:
+  group: ci-python-${{ github.ref }}
+  # Cancel superseded runs on rapid pushes — saves runner minutes.
+  cancel-in-progress: true
+
+jobs:
+  test:
+    name: agent-builder tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      # ubuntu-latest ships Docker, so the testcontainers Postgres in
+      # conftest.py runs for real here (not skipped).
+      - uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+          cache-dependency-glob: agent-builder/uv.lock
+      - name: Install dependencies
+        working-directory: agent-builder
+        run: uv sync --all-groups
+      - name: Run tests
+        working-directory: agent-builder
+        run: uv run pytest -q

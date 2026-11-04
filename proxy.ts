@@ -2,29 +2,15 @@ import { NextRequest, NextResponse } from "next/server";
 import { getSessionCookie } from "better-auth/cookies";
 import { checkLimit } from "@/lib/ratelimit/store";
 import { LIMITS } from "@/lib/ratelimit/limits";
+import { getClientIp as getClientIpFromHeaders } from "@/lib/ratelimit/client-ip";
 
 const AUTH_DISABLED = process.env.AUTH_DISABLED === "true";
 const SAAS_MODE = process.env.SAAS_MODE === "true";
 
-// Number of trusted reverse-proxy hops in front of this server. The
-// client IP is the Nth-from-RIGHT entry in X-Forwarded-For, where N is
-// this count. Default 1 (Vercel / Railway / Render / a single Nginx in
-// front all set the real client IP as the LAST entry).
-//
-// Why rightmost, not leftmost: X-Forwarded-For is client-appendable. A
-// malicious client can send `X-Forwarded-For: fake-ip` and, if the
-// proxy appends the real IP (the standard behaviour), the header
-// becomes `fake-ip, real-ip`. Taking the leftmost would rate-limit
-// against the spoofed value — attacker rotates it to bypass the
-// 300/min cap. Taking the rightmost-trusted-hop reads the real client
-// IP set by YOUR proxy.
-//
-// Set to 2 if you run Cloudflare -> Nginx -> app (two hops), 3 for
-// three hops, etc. If unset, defaults to 1.
-const TRUSTED_PROXY_HOPS = Math.max(
-  1,
-  Number(process.env.TRUSTED_PROXY_HOPS ?? "1") || 1,
-);
+// Number of trusted reverse-proxy hops in front of this server. Defined
+// in lib/ratelimit/client-ip.ts next to the IP-resolution logic that uses
+// it (this module re-exports nothing — the const lives there so both the
+// proxy and route-level IP limiters read the same value).
 
 // Auth pages are always public. Under SaaS mode the marketing landing page
 // (`/`), legal pages (`/terms`, `/privacy`), pricing, and the public agent
@@ -51,48 +37,12 @@ const WEBHOOK_PREFIX = "/api/billing/webhook";
 // store with a Redis backend.
 
 /**
- * Extract the client IP from the request.
- *
- * Resolution order:
- * 1. `CF-Connecting-IP` — set by Cloudflare to the real client IP. When
- *    the app is behind Cloudflare → Traefik (Coolify), Traefik overwrites
- *    `X-Forwarded-For` with the Cloudflare edge IP (not the client), but
- *    it passes `CF-Connecting-IP` through untouched. This is the reliable
- *    source for the real client IP behind a Cloudflare-proxied deploy.
- * 2. `X-Forwarded-For` with `TRUSTED_PROXY_HOPS` — for self-hosters not
- *    behind Cloudflare. Reads the Nth-from-right entry where N is the
- *    hop count (default 1). Defeats leftmost-spoofing: a client can
- *    prepend fake IPs, but the trusted proxy appends the real IP last.
- * 3. `"unknown"` — no headers present (direct connection in dev, or a
- *    proxy that strips both headers).
- *
- * Security note on CF-Connecting-IP: if someone bypasses Cloudflare and
- * hits the origin directly, they could send a fake `CF-Connecting-IP`.
- * This is mitigated by the app container only listening on its internal
- * port (external traffic must go through Cloudflare → Traefik), and even
- * if spoofed, per-user rate limits in route handlers still apply.
+ * Extract the client IP from the request — the resolution order and the
+ * spoofing notes live in lib/ratelimit/client-ip.ts (shared with the
+ * route-level IP limiters, e.g. the deep health probe).
  */
 function getClientIp(request: NextRequest): string {
-  // Cloudflare sets this to the real client IP — check it first.
-  const cfIp = request.headers.get("cf-connecting-ip");
-  if (cfIp) return cfIp.trim();
-
-  // Fallback: X-Forwarded-For with trusted-proxy-hop counting.
-  const xff = request.headers.get("x-forwarded-for");
-  if (xff) {
-    const hops = xff
-      .split(",")
-      .map((s) => s.trim())
-      .filter(Boolean);
-    if (hops.length > 0) {
-      // Take the Nth-from-right. If we have fewer hops than trusted
-      // proxies (direct connection, or proxy didn't forward), fall
-      // back to the leftmost available entry.
-      const idx = Math.max(0, hops.length - TRUSTED_PROXY_HOPS);
-      return hops[idx] ?? hops[0] ?? "unknown";
-    }
-  }
-  return "unknown";
+  return getClientIpFromHeaders((name) => request.headers.get(name));
 }
 
 export async function proxy(request: NextRequest) {

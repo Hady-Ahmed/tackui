@@ -86,7 +86,7 @@ export async function POST(
       error: err instanceof Error ? err.message : String(err),
     });
     return NextResponse.json(
-      { error: "Failed to install template. Check server logs." },
+      { error: "Couldn't install the template — please try again." },
       { status: 500 },
     );
   }

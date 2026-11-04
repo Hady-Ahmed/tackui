@@ -56,8 +56,15 @@ export default function AdminPage() {
               Admin settings
             </h1>
             <p className="mt-1 text-sm text-zinc-500 dark:text-zinc-400">
-              Global agent-catalog templates and user management. Workspace
-              agent backends live on the{" "}
+              Global agent-catalog templates and user management. The agent
+              builder&apos;s offering (models + tools) is configured on the{" "}
+              <Link
+                href="/admin/platform"
+                className="text-blue-600 hover:underline dark:text-blue-400"
+              >
+                Models &amp; tools
+              </Link>{" "}
+              page; workspace agent backends live on the{" "}
               <Link
                 href="/agents"
                 className="text-blue-600 hover:underline dark:text-blue-400"

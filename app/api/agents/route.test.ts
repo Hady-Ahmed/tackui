@@ -278,7 +278,7 @@ describe("POST /api/agents", () => {
     );
     expect(res.status).toBe(500);
     const data = await res.json();
-    expect(data.error).toBe("Failed to create agent. Check server logs.");
+    expect(data.error).toBe("Couldn't create the agent — please try again.");
     // The raw internal message must not leak
     expect(JSON.stringify(data)).not.toContain("ECONNREFUSED");
     expect(JSON.stringify(data)).not.toContain("5432");

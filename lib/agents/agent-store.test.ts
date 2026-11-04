@@ -174,6 +174,90 @@ describe("createAgent", () => {
     expect(created.orgId).toBe(TEST_ORG);
   });
 
+  it("round-trips the requirements snapshot through the store — including model.requiresKey (zod must not strip undeclared keys)", async () => {
+    // This is the test that pins the c44983f class of bug: a zod schema
+    // that fails to declare model.requiresKey strips it on BOTH the write
+    // (agentRowSchema.parse) and the read (parseRequirements), and every
+    // downstream consumer — the run gate's keyless check — sees a legacy
+    // snapshot. Assert the full shape survives a write + read.
+    const requirements = {
+      model: {
+        provider: "ollama",
+        id: "llama3:8b",
+        platformTier: false,
+        requiresKey: false,
+        depKey: null,
+        name: "Ollama",
+      },
+      tools: [
+        {
+          name: "web_search",
+          requiresKey: null,
+          provider: "duckduckgo",
+          platformFallback: false,
+          credentials: [],
+        },
+      ],
+      connectors: [],
+    };
+    const created = await createAgent(
+      { ...validInput, origin: "builder", requirements },
+      TEST_ORG,
+    );
+    const loaded = await getAgent(created.id, TEST_ORG);
+    expect(loaded?.requirements).toEqual(requirements);
+  });
+
+  it("keeps requiresKey absent on read when omitted (no default injected)", async () => {
+    // `in` + undefined: a default(true/false) in the schema would make
+    // requiresKey PRESENT on the parsed output; the gate's undefined-means-
+    // keyed contract requires it to be absent. depKey and name, by
+    // contrast, are REQUIRED now — a snapshot without them fails to parse
+    // (stale-snapshot fail-closed), it is never silently reshaped.
+    const requirements = {
+      model: {
+        provider: "openai",
+        id: "gpt-4o-mini",
+        platformTier: true,
+        depKey: "openai_api_key",
+        name: "OpenAIChat",
+      },
+      tools: [],
+      connectors: [],
+    };
+    const created = await createAgent(
+      { ...validInput, origin: "builder", requirements },
+      TEST_ORG,
+    );
+    const loaded = await getAgent(created.id, TEST_ORG);
+    expect(loaded?.requirements).toEqual(requirements);
+    expect("requiresKey" in (loaded?.requirements?.model ?? {})).toBe(false);
+  });
+
+  it("fails closed on a pre-door snapshot: the blob fails the schema and reads back as undefined", async () => {
+    // THE load-bearing rejection, pinned at the store level: a snapshot
+    // written before depKey/name were required (exactly what an upgrade
+    // leaves behind) must FAIL to parse — never be silently reshaped into
+    // something runnable. The run gate blocks builder agents whose
+    // requirements read back undefined, so this test guards the first link
+    // of the fail-closed chain; if someone later makes depKey/name
+    // optional (or adds a default), this is the test that fails.
+    const created = await createAgent({ ...validInput, origin: "builder" }, TEST_ORG);
+    await query(
+      `UPDATE agents SET requirements = $1 WHERE id = $2`,
+      [
+        JSON.stringify({
+          model: { provider: "openai", id: "gpt-4o-mini", platformTier: true },
+          tools: [],
+          connectors: [],
+        }),
+        created.id,
+      ],
+    );
+    const loaded = await getAgent(created.id, TEST_ORG);
+    expect(loaded?.requirements).toBeUndefined();
+  });
+
   it("stores authMode and jwtSecret", async () => {
     const created = await createAgent({
       ...validInput,

@@ -11,6 +11,7 @@ import { getCurrentUser, canManageAgents } from "@/lib/auth/context";
 import { assertSafeUrl, UnsafeUrlError } from "@/lib/net/safe-fetch";
 import { checkUserLimit } from "@/lib/ratelimit/middleware";
 import { SSRF_REJECTION_MESSAGE } from "@/lib/config/saas";
+import { deleteAgentosComponent, getAgentosCurrentConfig, AgentosError } from "@/lib/agents/builder";
 
 export async function GET(
   _request: Request,
@@ -27,8 +28,26 @@ export async function GET(
   }
   const limited = checkUserLimit(user.id, "agentRead");
   if (limited) return limited;
+  // Builder agents' instructions live in the AgentOS component config —
+  // read them back so the edit form can prefill (they're the owner's
+  // tweakable system prompt, not a secret). Best-effort: an unreachable
+  // platform omits the field and the form falls back to blank-preserve
+  // (the same PATCH contract), so nothing breaks.
+  let instructions: string | undefined;
+  if (agent.origin === "builder" && agent.remoteAgentId) {
+    try {
+      const config = await getAgentosCurrentConfig(agent.remoteAgentId);
+      const entries = config?.instructions;
+      if (Array.isArray(entries) && entries.length > 0) {
+        instructions = entries.join("\n");
+      }
+    } catch {
+      // Degrade silently — the catalog-error banner in the edit form
+      // covers the unreachable-platform case for the whole form anyway.
+    }
+  }
   const [annotated] = await annotateAgentTemplateState([agent]);
-  return NextResponse.json(annotated);
+  return NextResponse.json({ ...annotated, instructions });
 }
 
 export async function PATCH(
@@ -61,6 +80,22 @@ export async function PATCH(
         error:
           "This agent is managed by the agent catalog and can't be edited. Remove it from your workspace instead.",
         code: "AGENT_MANAGED",
+      },
+      { status: 400 },
+    );
+  }
+  // Builder-origin rows are projection-only on this route: their runtime
+  // config lives in the AgentOS component (versioned, edited via
+  // /api/agents/builder), so PATCHing endpoint/authMode/jwtSecret here
+  // would write fields the registry ignores while desyncing the local
+  // name/description from the AgentOS component with no sync path. The
+  // builder route owns every edit for these rows (author or org admin).
+  if (existing.origin === "builder") {
+    return NextResponse.json(
+      {
+        error:
+          "This agent was built with the agent builder and is edited there — not through this page.",
+        code: "AGENT_BUILDER_MANAGED",
       },
       { status: 400 },
     );
@@ -118,7 +153,46 @@ export async function DELETE(
   if (limited) return limited;
 
   const { id } = await params;
-  const ok = await deleteAgent(id, user.orgId);
+  const agent = await getAgent(id, user.orgId);
+
+  // Builder-origin rows carry a remote AgentOS component — removing the
+  // local row alone would orphan it (a live component with no projection).
+  // Best-effort soft-delete mirrors the builder route: a failure doesn't
+  // block the local removal (the registry stops resolving the row → no
+  // more runs; the orphan is logged for platform-side cleanup). A 404
+  // (already deleted) is fine.
+  if (agent?.origin === "builder" && agent.remoteAgentId) {
+    try {
+      await deleteAgentosComponent(agent.remoteAgentId);
+    } catch (err) {
+      if (!(err instanceof AgentosError) || err.status !== 404) {
+        console.error("[agents] builder component delete failed (local row still removed)", {
+          agentId: id,
+          remoteAgentId: agent.remoteAgentId,
+          error: err instanceof Error ? err.message : String(err),
+        });
+      }
+    }
+  }
+
+  // Same local-write guard as the builder route: a transient DB failure
+  // must not escape as a raw 500 AFTER the platform component was
+  // already soft-deleted. The retry is safe — the platform delete above
+  // treats an already-deleted 404 as success.
+  let ok;
+  try {
+    ok = await deleteAgent(id, user.orgId);
+  } catch (err) {
+    console.error("[agents] local delete failed", {
+      agentId: id,
+      orgId: user.orgId,
+      error: err instanceof Error ? err.message : String(err),
+    });
+    return NextResponse.json(
+      { error: "Couldn't delete the agent — please try again." },
+      { status: 500 },
+    );
+  }
   if (!ok) {
     return NextResponse.json({ error: "Agent not found" }, { status: 404 });
   }

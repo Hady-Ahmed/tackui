@@ -61,6 +61,16 @@ every `/run` request. This is the source of truth for message history — the
 frontend (CopilotKit's `agent.messages` + `PostgresAgentRunner`) stores and
 manages all messages.
 
+**Thread ids are per agent** — a `threadId` is only meaningful within the
+agent that created it. The frontend never reuses a thread id across two
+agents (CopilotKit keys threads by agent), and the platform-side session
+store matches on `(user_id, thread_id)` — it deliberately does NOT check
+that a run's component matches the session's component (parity with the
+stock AG-UI router). So two different agents writing into the same
+`thread_id` for the same user would interleave history; the frontend's
+keying is what prevents that, and any new backend consuming these threads
+must keep the same per-agent keying.
+
 Agent backends have two valid options for handling `input.messages`:
 
 1. **Stateless (read history):** Read `input.messages` from the request body
@@ -85,11 +95,87 @@ strategy it uses so users know whether server-side session storage is required.
 
 `lib/agents/pg-runner.ts` — `PostgresAgentRunner` extends `AgentRunner` from
 `@copilotkit/runtime/v2`, owns its `ACTIVE_CONNECTIONS` Map for live-bridging,
-and its smart-replay `connect()` filters `RUN_ERROR` events before
-`compactEvents` to avoid the AG-UI verifier lock bug. It exposes
+and shapes replay through `buildReplayEvents`: persisted `RUN_ERROR` events
+are filtered out (the AG-UI verifier locks on them mid-stream, making
+failed-run threads permanently unreadable on reconnect), and an unterminated
+run is closed with a synthetic `RUN_FINISHED` — closing any message/tool-call
+sequences the errored run left open first — when a later `RUN_STARTED` would
+otherwise follow in the same verified stream: either a later run's
+`RUN_STARTED` already in the history (the next run's start would otherwise
+trip the verifier's "run still active" lock and reject the whole replay), or
+a live bridge about to append an in-flight run's buffered events (whose
+first event is that run's `RUN_STARTED`) to the same stream. A run left
+unterminated at the END of the history with no bridge following stays
+unresolved: the spec makes resolving a truncated final run the consumer's
+business, and re-presenting the failure as a completed turn would erase
+what the live client actually watched. The same shaping applies when a run
+is merged into
+the events cache, so sync reads (`/threads/:id/events`) get identical
+history. It exposes
 `renameThread`/`deleteThread`, used by `PATCH/DELETE /api/threads/[id]` — the
 local SSE runner doesn't support CopilotKit's Intelligence-platform-only
 `useThreads` mutations.
+
+### Run lock lifecycle
+
+The per-thread run lock lives in the `run_state` table
+(`is_running`, `current_run_id`). `startRun` claims it with an **atomic
+conditional upsert** (`acquireRunState`: `INSERT … ON CONFLICT … WHERE
+is_running = false RETURNING`) — the check-then-act pair it replaced let two
+concurrent runs on the same thread both pass the "not running" check.
+
+Every exit path goes through `teardownRun`, which releases the lock **only
+while `current_run_id` still matches this run** and removes the
+`ACTIVE_CONNECTIONS` entry **only while it's still this run's object**.
+
+`stop()` deliberately does NOT release the lock — it only flags the
+connection (`stopRequested`) and calls `abortRun()`. The aborted run keeps
+the lock through its persistence window (partial `storeRun` +
+`captureThreadData` happen after the abort lands) and releases it in its own
+teardown, which the `current_run_id` guard makes safe. The earlier design
+released the lock inside `stop()`, which opened two races: a replacement run
+could acquire the freed lock and interleave with the aborted run's
+persistence (clobbered snapshots, out-of-order history), and the
+abort-failure "restore" could overwrite a successor's `current_run_id` with
+the stale id — wedging `is_running = true` until the next boot. Trade-off:
+between `stop()` and the aborted run's teardown, `is_running` still reads
+true, so an *immediate* replacement run gets "Thread already running" for
+the abort+persistence window (sub-second in practice; a hung backend that
+ignores the abort holds the lock until the boot reset, the same failure mode
+a hung non-stopped run always had).
+
+A third recovery covers the failure mode between those two: `teardownRun`'s
+release is best-effort, so a **transient DB failure during release** used to
+leave `is_running = true` with no runtime path back — every subsequent run
+refused with "Thread already running" until the next restart. `acquireRunState`
+now detects the orphan: a `current_run_id` with **no live `ACTIVE_CONNECTIONS`
+entry in this process** is stale (a genuine holder registers its map entry
+synchronously right after the acquire — no await in between — so a fresh
+map-absent row is a winner still mid-registration in a concurrent race, not
+an orphan), and after a grace window (`STALE_LOCK_GRACE_MS`, 10s) the next
+run attempt steals the lock with a loud log line. The grace is what makes
+the steal safe; the liveness check is in-process by design (single-instance,
+the same assumption as the boot-time reset).
+
+Failure handling is split by a `preRun` flag: **pre-run failures** (historic
+read, parent-run resolution) release the lock and rethrow — the run stream
+*errors*, matching the old contract; **mid-run failures** persist
+best-effort, release, and complete the stream. The ENTIRE mid-run unwind
+(finalize events, persistence, snapshot capture) is one guarded block so a
+throw from any step — including `finalizeRunEvents` — can't skip the
+teardown. `instrumentation.ts` also resets stale
+`is_running = true` rows at boot (single-instance constraint: no run can be
+in flight in a process that is still starting), so a crash no longer leaves
+threads permanently "already running".
+
+`connect()` never replays a run twice: when a run is in flight, live
+events are bridged from its subject — but if the historic replay snapshot
+already contains that run's id (the connect landed between `storeRun` and
+teardown), the bridge is skipped entirely. Every event a run emits is
+emitted *before* `storeRun` persists it, so a covered replay means the
+subject can only add duplicates (the messageId dedup doesn't cover
+`TOOL_CALL_*`/`STATE_*`, and a duplicate `TOOL_CALL_START` trips the AG-UI
+verifier).
 
 ### In-memory cache (sync interface bridge)
 
@@ -105,10 +191,24 @@ always the source of truth:**
 
 1. **Write-through:** write paths (`captureThreadData`, `deleteThread`,
    `renameThread`) update PG FIRST, then the cache. If the cache update fails,
-   PG is still correct.
+   PG is still correct. `deleteThread` clears all three caches **regardless
+   of deleted row counts** (a first in-flight run has no persisted rows yet,
+   but the thread is already user-visible) and marks the live connection
+   `threadDeleted` when a run is still streaming: the run's persistence
+   window (`storeRun` + `captureThreadData`) checks the marker and skips
+   writing, so a delete racing a run cannot resurrect the thread — the
+   marker dies with the connection at teardown.
 2. **Read-through on async paths:** `connect()` and `run()` (both async via
    fire-and-forget Observable pattern) fetch from PG INTO the cache before
-   completing.
+   completing, and `storeRun` merges each run's persisted events into
+   `eventsCache` when it persists them — so the sync readers (CopilotKit's
+   runtime `/threads/:id/events` and `/threads/:id/state` endpoints) reflect
+   completed runs immediately, not just after the next `connect()`.
+   `connect()`'s read-through write is **skipped when the cache already
+   holds a runId absent from its snapshot** — a run committing between the
+   history read and the write merged itself into the cache, and the older
+   snapshot would regress the sync readers to pre-run history until the
+   next write on the thread.
 3. **Sync methods read cache ONLY** — no DB I/O, no Promises.
 
 Single-instance deployments (OSS self-hosters, solo mode) have no staleness —
@@ -278,7 +378,10 @@ entirely by simply not setting the env vars.
 - **Additional backends** — CrewAI, Mastra, Pydantic AI, Google ADK, AWS
   Strands, etc.
 - **Integration test suite (testcontainers + real Postgres):** pg-mem doesn't
-  support `WITH RECURSIVE` CTEs (used by `PostgresAgentRunner.getHistoricRuns`)
-  or cross-statement `ROLLBACK`. The 3 skipped tests in
-  `lib/agents/pg-runner.test.ts` cover these paths. A testcontainers-based
-  integration suite would run them against a real PG container in CI.
+  support `WITH RECURSIVE` CTEs (used by `PostgresAgentRunner.getHistoricRuns`),
+  cross-statement `ROLLBACK`, or pg_catalog index metadata. DONE: the tests
+  that need those run against a real Postgres via `@testcontainers/postgresql`
+  (`lib/db/test-postgres.ts` — per-file container, skip-with-note when Docker
+  is down). What remains here is broader integration coverage: multi-connection
+  consistency tests would need the same harness extended beyond the current
+  suites.

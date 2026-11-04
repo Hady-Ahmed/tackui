@@ -2,8 +2,82 @@ import { randomUUID } from "node:crypto";
 import { query } from "@/lib/db/pg";
 import { decryptSecret, encryptSecret } from "@/lib/crypto/encrypt";
 import { z } from "zod";
-import type { AgentAuthMode, AgentEntry, PublicAgent } from "./agents.config";
+import type {
+  AgentAuthMode,
+  AgentEntry,
+  AgentOrigin,
+  AgentRequirements,
+  PublicAgent,
+} from "./agents.config";
+import { AGENT_ORIGINS } from "./agents.config";
+
 const agentAuthModeSchema = z.enum(["none", "jwt"]);
+const agentOriginSchema = z.enum(AGENT_ORIGINS);
+
+/**
+ * The shape of the per-agent requirements snapshot stored with the row.
+ * One schema, two consumers: `parseRequirements` gates every READ (fail
+ * closed — an unparseable blob drops the requirements and parseRequirements
+ * logs loudly; the run gate then BLOCKS builder agents whose requirements
+ * came back undefined, because a builder row always carries a snapshot —
+ * undefined ⇔ stale), and `buildRequirements` validates every WRITE
+ * so a malformed platform-catalog row surfaces as a 4xx at save time
+ * instead of silently ungateing the agent later.
+ */
+export const requirementsSchema = z.object({
+  model: z.object({
+    provider: z.string().min(1),
+    id: z.string().min(1),
+    platformTier: z.boolean(),
+    // Keyless providers (e.g. ollama) — false tells the run gate to demand
+    // no key at all (the provider is excluded from the credentials catalog,
+    // so a demanded key would be unsatisfiable). Optional, not defaulted:
+    // snapshots written before the field must stay "legacy" (undefined),
+    // which the gate treats as keyed — defaulting to true would be
+    // indistinguishable from an explicit true and silently re-shape old
+    // rows on read.
+    requiresKey: z.boolean().optional(),
+    // The platform's DECLARED dep key (e.g. "openai_api_key") — the run
+    // gate consumes it instead of deriving `<slug>_api_key` from the slug,
+    // which would miss for door slugs (openai-responses shares
+    // openai_api_key). REQUIRED on keyed models (null = keyless): a
+    // snapshot without one is stale — the gate refuses to guess a dep key,
+    // because slug math is exactly what breaks for doors. Old snapshots
+    // (written before this field) fail this schema and must be re-saved.
+    depKey: z.string().min(1).nullable(),
+    // The registry binding name (e.g. "OpenAIResponses") — sent back with
+    // the component config so same-id doors bind exactly. Required for the
+    // same reason: an id-only config first-matches the registry on id,
+    // which silently runs the wrong door once a same-id door exists.
+    name: z.string().min(1),
+  }),
+  tools: z.array(
+    z.object({
+      name: z.string().min(1),
+      label: z.string().min(1).optional(),
+      requiresKey: z.string().nullable().optional(),
+      provider: z.string().nullable().optional(),
+      // The credential contract (multi-credential toolkits list several).
+      // Absent on pre-0014 snapshots — the run gate then treats the single
+      // requiresKey dep as the contract.
+      credentials: z
+        .array(z.object({ depKey: z.string().min(1), label: z.string().min(1) }))
+        .optional(),
+      // Snapshots created before turn 5 lack the flag — default false
+      // (fail-closed: the run gate 402s rather than silently using the
+      // platform key).
+      platformFallback: z.boolean().default(false),
+    }),
+  ),
+  // Connector refs: the stable ID (what the stored AgentOS config
+  // declares — a delete-and-recreate gets a NEW id, which the id-based
+  // snapshot makes visible to the run gate) + the org-facing name for
+  // copy. Pre-id snapshots (bare name strings) fail this schema and drop
+  // the whole blob — fail-closed, the run gate then demands a re-save.
+  connectors: z.array(
+    z.object({ id: z.string().min(1), name: z.string().min(1) }),
+  ),
+});
 
 // Shared field definitions — used by the create + update input schemas
 // below. `id` is intentionally absent: it is server-generated on create
@@ -25,12 +99,45 @@ const fieldShapes = {
 };
 
 /**
+ * Builder-provenance fields (migration 0013) — layered on top of the base
+ * shapes for the builder create/update path (lib/agents/builder) and the
+ * internal row schema. The admin /agents form schemas use ONLY the base
+ * shapes so clients there can't forge origin="builder".
+ */
+const builderFieldShapes = {
+  ...fieldShapes,
+  origin: agentOriginSchema.optional(),
+  authorUserId: z.string().min(1).optional(),
+  remoteAgentId: z.string().min(1).optional(),
+  // Nullish (not just optional): the compensating revert in the builder
+  // PATCH route must be able to CLEAR a snapshot it added on a row that
+  // had none — null is only ever sent by that internal revert, never by
+  // a client body (the route constructs its UpdateBuilderAgentInput, it
+  // doesn't forward the raw request body).
+  requirements: requirementsSchema.nullish(),
+};
+
+/**
  * Body schema for POST /api/agents. `id` is never accepted from the
  * client — the server generates it. If a client sends `id`, zod's
  * default `.strip()` behavior drops unknown keys, so it's ignored.
  */
 export const createAgentBodySchema = z.object(fieldShapes);
 export type CreateAgentInput = z.infer<typeof createAgentBodySchema>;
+
+/**
+ * Body schemas for the builder create/update path (lib/agents/builder) —
+ * the base shapes plus builder provenance. The admin /agents form uses the
+ * base schemas only, so clients there can't forge origin="builder".
+ *
+ * Only the inferred TYPES are exported: the builder routes validate with
+ * lib/agents/builder.ts's own schemas, so no runtime schema object needs
+ * to escape this module (the row schema below reuses the shapes).
+ */
+export type CreateBuilderAgentInput = z.infer<z.ZodObject<typeof builderFieldShapes>>;
+export type UpdateBuilderAgentInput = z.infer<
+  ReturnType<z.ZodObject<typeof builderFieldShapes>["partial"]>
+>;
 
 /**
  * Body schema for PATCH /api/agents/[id]. All fields optional; `id`
@@ -47,7 +154,7 @@ export type UpdateAgentInput = z.infer<typeof updateAgentBodySchema>;
  */
 const agentRowSchema = z.object({
   id: z.string().min(1).max(64),
-  ...fieldShapes,
+  ...builderFieldShapes,
 });
 
 interface AgentRow {
@@ -62,7 +169,33 @@ interface AgentRow {
   source_template_id: string | null;
   installed_template_updated_at: Date | string | null;
   template_deleted_at: Date | string | null;
+  origin: string | null;
+  author_user_id: string | null;
+  remote_agent_id: string | null;
+  requirements: unknown;
 }
+
+function parseRequirements(raw: unknown): AgentRequirements | undefined {
+  if (raw == null) return undefined;
+  const parsed = requirementsSchema.safeParse(raw);
+  if (!parsed.success) {
+    // Fail closed — but make the corruption OBSERVABLE. Dropping the blob
+    // silently would look identical to "snapshot-less row". The run gate
+    // blocks builder agents whose requirements came back undefined (a
+    // builder row always carries a snapshot; undefined ⇔ stale), so this
+    // never runs ungated — the warn is for the operator's logs.
+    console.warn("[agent-store] unparseable requirements blob — agent runs gated as stale", {
+      error: parsed.error.message,
+    });
+    return undefined;
+  }
+  return parsed.data;
+}
+
+const AGENT_SELECT_COLUMNS =
+  `id, name, description, endpoint, org_id, auth_mode, jwt_secret, jwt_scopes,
+   source_template_id, installed_template_updated_at, template_deleted_at,
+   origin, author_user_id, remote_agent_id, requirements` as const;
 
 function rowToEntry(row: AgentRow): AgentEntry {
   // Decrypt at the read boundary. Legacy plaintext rows (written before
@@ -81,6 +214,7 @@ function rowToEntry(row: AgentRow): AgentEntry {
       });
     }
   }
+  const requirements = parseRequirements(row.requirements);
   return {
     id: row.id,
     name: row.name,
@@ -118,6 +252,15 @@ function rowToEntry(row: AgentRow): AgentEntry {
             : new Date(row.template_deleted_at).toISOString(),
         }
       : {}),
+    // Builder provenance (migration 0013). `origin` defaults to "manual"
+    // for pre-0013 rows; "template" is a legacy label with "manual"
+    // semantics.
+    origin: ((row.origin ?? "manual") as AgentOrigin),
+    ...(row.author_user_id ? { authorUserId: row.author_user_id } : {}),
+    ...(row.remote_agent_id ? { remoteAgentId: row.remote_agent_id } : {}),
+    ...(
+      requirements ? { requirements } : {}
+    ),
   };
 }
 
@@ -131,13 +274,17 @@ export function toPublicAgent(entry: AgentEntry): PublicAgent {
   // Managed agents (catalog installs) are references to their template,
   // not org-owned config: the endpoint is the curator's infrastructure,
   // so it never leaves the server. Tombstones keep their name/history
-  // but are equally endpoint-less.
+  // but are equally endpoint-less. Builder agents get the same treatment:
+  // their endpoint is the platform-os's internal address (built from
+  // AGENTOS_BASE_URL + the remote component id) — platform infrastructure
+  // the client never needs.
   const isManaged = entry.sourceTemplateId !== undefined;
+  const isBuilder = entry.origin === "builder";
   return {
     id: entry.id,
     name: entry.name,
     description: entry.description,
-    ...(isManaged ? {} : { endpoint: entry.endpoint }),
+    ...((isManaged || isBuilder) ? {} : { endpoint: entry.endpoint }),
     orgId: entry.orgId,
     authMode: entry.authMode,
     hasJwtSecret: Boolean(entry.jwtSecret),
@@ -150,6 +297,13 @@ export function toPublicAgent(entry: AgentEntry): PublicAgent {
       : {}),
     ...(entry.templateRemovedAt !== undefined
       ? { templateRemovedAt: entry.templateRemovedAt }
+      : {}),
+    ...(entry.origin !== undefined ? { origin: entry.origin } : {}),
+    ...(entry.authorUserId !== undefined
+      ? { authorUserId: entry.authorUserId }
+      : {}),
+    ...(entry.requirements !== undefined
+      ? { requirements: entry.requirements }
       : {}),
   };
 }
@@ -190,13 +344,13 @@ export async function listAgents(
 ): Promise<AgentEntry[]> {
   if (opts?.bypassOrgScope) {
     const result = await query<AgentRow>(
-      `SELECT id, name, description, endpoint, org_id, auth_mode, jwt_secret, jwt_scopes, source_template_id, installed_template_updated_at, template_deleted_at
+      `SELECT ${AGENT_SELECT_COLUMNS}
        FROM agents ORDER BY created_at ASC`,
     );
     return result.rows.map(rowToEntry);
   }
   const result = await query<AgentRow>(
-    `SELECT id, name, description, endpoint, org_id, auth_mode, jwt_secret, jwt_scopes, source_template_id, installed_template_updated_at, template_deleted_at
+    `SELECT ${AGENT_SELECT_COLUMNS}
      FROM agents WHERE org_id = $1 ORDER BY created_at ASC`,
     [orgId],
   );
@@ -214,14 +368,14 @@ export async function getAgent(
 ): Promise<AgentEntry | null> {
   if (opts?.bypassOrgScope) {
     const result = await query<AgentRow>(
-      `SELECT id, name, description, endpoint, org_id, auth_mode, jwt_secret, jwt_scopes, source_template_id, installed_template_updated_at, template_deleted_at
+      `SELECT ${AGENT_SELECT_COLUMNS}
        FROM agents WHERE id = $1`,
       [id],
     );
     return result.rows[0] ? rowToEntry(result.rows[0]) : null;
   }
   const result = await query<AgentRow>(
-    `SELECT id, name, description, endpoint, org_id, auth_mode, jwt_secret, jwt_scopes, source_template_id, installed_template_updated_at, template_deleted_at
+    `SELECT ${AGENT_SELECT_COLUMNS}
      FROM agents WHERE id = $1 AND org_id = $2`,
     [id, orgId],
   );
@@ -234,7 +388,9 @@ export async function getAgent(
  * belongs to). The `id` is server-generated (never client-supplied).
  */
 export async function createAgent(
-  input: CreateAgentInput,
+  // The builder input type is the superset (all provenance fields
+  // optional); plain admin-form inputs are assignable to it.
+  input: CreateBuilderAgentInput,
   orgId: string,
 ): Promise<AgentEntry> {
   const id = generateAgentId();
@@ -242,9 +398,9 @@ export async function createAgent(
   // DB_ENCRYPTION_KEY is unset — see lib/crypto/encrypt.ts).
   const jwtSecretForDb = input.jwtSecret ? encryptSecret(input.jwtSecret) : null;
   const result = await query<AgentRow>(
-    `INSERT INTO agents (id, name, description, endpoint, org_id, auth_mode, jwt_secret, jwt_scopes)
-     VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
-     RETURNING id, name, description, endpoint, org_id, auth_mode, jwt_secret, jwt_scopes`,
+    `INSERT INTO agents (id, name, description, endpoint, org_id, auth_mode, jwt_secret, jwt_scopes, origin, author_user_id, remote_agent_id, requirements)
+     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
+     RETURNING ${AGENT_SELECT_COLUMNS}`,
     [
       id,
       input.name,
@@ -254,6 +410,10 @@ export async function createAgent(
       input.authMode,
       jwtSecretForDb,
       input.jwtScopes?.join(",") ?? null,
+      input.origin ?? "manual",
+      input.authorUserId ?? null,
+      input.remoteAgentId ?? null,
+      input.requirements ? JSON.stringify(input.requirements) : null,
     ],
   );
   return rowToEntry(result.rows[0]);
@@ -266,7 +426,9 @@ export async function createAgent(
  */
 export async function updateAgent(
   id: string,
-  patch: UpdateAgentInput,
+  // The builder patch type is the superset; plain admin-form patches are
+  // assignable to it.
+  patch: UpdateBuilderAgentInput,
   orgId: string,
   opts?: { bypassOrgScope?: boolean },
 ): Promise<AgentEntry | null> {
@@ -280,6 +442,10 @@ export async function updateAgent(
     authMode: existing.authMode,
     jwtSecret: existing.jwtSecret,
     jwtScopes: existing.jwtScopes,
+    origin: existing.origin,
+    authorUserId: existing.authorUserId,
+    remoteAgentId: existing.remoteAgentId,
+    requirements: existing.requirements,
     ...patch,
   };
   const parsed = agentRowSchema.parse(merged);
@@ -292,9 +458,11 @@ export async function updateAgent(
     const result = await query<AgentRow>(
       `UPDATE agents
        SET name = $1, description = $2, endpoint = $3,
-           auth_mode = $4, jwt_secret = $5, jwt_scopes = $6, updated_at = now()
-       WHERE id = $7
-       RETURNING id, name, description, endpoint, org_id, auth_mode, jwt_secret, jwt_scopes`,
+           auth_mode = $4, jwt_secret = $5, jwt_scopes = $6,
+           origin = $7, author_user_id = $8, remote_agent_id = $9, requirements = $10,
+           updated_at = now()
+       WHERE id = $11
+       RETURNING ${AGENT_SELECT_COLUMNS}`,
       [
         parsed.name,
         parsed.description,
@@ -302,6 +470,10 @@ export async function updateAgent(
         parsed.authMode,
         jwtSecretForDb,
         parsed.jwtScopes?.join(",") ?? null,
+        parsed.origin ?? "manual",
+        parsed.authorUserId ?? null,
+        parsed.remoteAgentId ?? null,
+        parsed.requirements ? JSON.stringify(parsed.requirements) : null,
         id,
       ],
     );
@@ -310,9 +482,11 @@ export async function updateAgent(
   const result = await query<AgentRow>(
     `UPDATE agents
      SET name = $1, description = $2, endpoint = $3,
-         auth_mode = $4, jwt_secret = $5, jwt_scopes = $6, updated_at = now()
-     WHERE id = $7 AND org_id = $8
-     RETURNING id, name, description, endpoint, org_id, auth_mode, jwt_secret, jwt_scopes`,
+         auth_mode = $4, jwt_secret = $5, jwt_scopes = $6,
+         origin = $7, author_user_id = $8, remote_agent_id = $9, requirements = $10,
+         updated_at = now()
+     WHERE id = $11 AND org_id = $12
+     RETURNING ${AGENT_SELECT_COLUMNS}`,
     [
       parsed.name,
       parsed.description,
@@ -320,6 +494,10 @@ export async function updateAgent(
       parsed.authMode,
       jwtSecretForDb,
       parsed.jwtScopes?.join(",") ?? null,
+      parsed.origin ?? "manual",
+      parsed.authorUserId ?? null,
+      parsed.remoteAgentId ?? null,
+      parsed.requirements ? JSON.stringify(parsed.requirements) : null,
       id,
       orgId,
     ],

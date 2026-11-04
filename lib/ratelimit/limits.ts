@@ -16,6 +16,14 @@ export const LIMITS = {
   agentMutate: { max: 10, windowMs: 60_000 },
   /** Per-user: agent reads (GET /api/agents). 60/min. */
   agentRead: { max: 60, windowMs: 60_000 },
+  /**
+   * Per-user: platform-admin catalog writes (PUT catalog, POST test-model).
+   * Separate from agentMutate: admin configuration legitimately bursts
+   * (fix-and-resave validation loops, testing several models) and must
+   * not compete with the member-facing mutation budget. Still bounded —
+   * a buggy loop can't hammer the AgentOS.
+   */
+  adminMutate: { max: 30, windowMs: 60_000 },
   /** Per-user: thread mutations (PATCH/DELETE /api/threads). 30/min. */
   threadMutate: { max: 30, windowMs: 60_000 },
   /** Per-IP: sign-in/sign-up attempts. 10/min. */
@@ -24,6 +32,21 @@ export const LIMITS = {
    *  Generous enough for active use (page refreshes, CopilotKit connect/info
    *  streams, conversation switching) while still blocking flood attacks. */
   globalIp: { max: 300, windowMs: 60_000 },
+  /** PUT/DELETE /api/credentials — BYOK key upserts/removals. */
+  credentialMutate: { max: 20, windowMs: 60_000 },
+  /** PUT/DELETE /api/connectors — org connector upserts/removals. */
+  connectorMutate: { max: 20, windowMs: 60_000 },
+  /** POST /api/billing/checkout + /api/billing/portal — each creates an
+   *  outbound Stripe session. Tight: nothing legitimate bursts these. */
+  billingMutate: { max: 10, windowMs: 60_000 },
+  /** GET /api/billing/subscription + GET /api/org — account/org reads
+   *  that hit multiple DB tables (org also counts members per org). */
+  accountRead: { max: 60, windowMs: 60_000 },
+  /** GET /api/health?deep=true — unauthenticated DB roundtrip. The proxy
+   *  leaves /api/health unlimited (orchestrators poll it without a
+   *  session), so the deep branch rate-limits itself per IP: liveness
+   *  stays free, but the DB-touching readiness probe can't be flooded. */
+  healthDeep: { max: 30, windowMs: 60_000 },
 } as const;
 
 export type LimitName = keyof typeof LIMITS;

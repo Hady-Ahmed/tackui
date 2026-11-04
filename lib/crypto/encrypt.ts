@@ -63,7 +63,7 @@ function warnPlaintextOnce(): void {
   if (warnedPlaintext) return;
   warnedPlaintext = true;
   console.warn(
-    "[encrypt] DB_ENCRYPTION_KEY is not set — agent JWT secrets are being stored in PLAINTEXT. Set DB_ENCRYPTION_KEY (generate with: openssl rand -hex 32) to enable encryption at rest.",
+    "[encrypt] DB_ENCRYPTION_KEY is not set — secrets are being stored in PLAINTEXT. Boot-time enforcement only allows this in solo mode (AUTH_DISABLED=true); set DB_ENCRYPTION_KEY (generate with: openssl rand -hex 32) to enable encryption at rest.",
   );
 }
 

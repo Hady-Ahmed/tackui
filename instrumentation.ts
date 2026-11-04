@@ -8,6 +8,11 @@ const PG_MAX_RETRIES = 15;
  * connections when the app boots (the docker-compose healthcheck checks
  * local socket readiness, not cross-container TCP). Retries until PG
  * accepts connections.
+ *
+ * Returns null when every attempt failed — callers that leave the app
+ * NON-FUNCTIONAL in that state must fail fast (exit non-zero) instead of
+ * booting a server that 500s everything while the orchestrator's liveness
+ * probe keeps it "healthy" forever.
  */
 async function retryPg<T>(
   label: string,
@@ -66,36 +71,94 @@ export async function register() {
   // Migrations are Node.js-only — they need node:fs, node:path, and pg.
   if (process.env.NEXT_RUNTIME === "edge") return;
 
+  // Node-only module (process.exit): dynamic import keeps it out of the
+  // Edge bundle — see lib/db/fail-fast.ts for why that matters.
+  const { failFast } = await import("@/lib/db/fail-fast");
   const { runMigrations } = await import("@/lib/db/migrate");
   const { ensureAuthTables } = await import("@/lib/auth/migrate");
   const { ensureSoloOrg } = await import("@/lib/auth/solo-org");
+  const { logAgentosWarnings } = await import("@/lib/config/agentos");
 
   const migrationResult = await retryPg("migrate", () => runMigrations());
-  if (migrationResult) {
-    if (migrationResult.applied.length > 0) {
-      console.log(`[migrate] applied ${migrationResult.applied.length} migration(s): ${migrationResult.applied.join(", ")}`);
-    } else {
-      console.log("[migrate] no new migrations to apply");
-    }
+  // if/else rather than an early failFast(): TS only narrows via a
+  // never-returning call when the callee is a statically-typed binding,
+  // and a destructured dynamic import doesn't qualify.
+  if (!migrationResult) {
+    failFast("migrations");
+  } else if (migrationResult.applied.length > 0) {
+    console.log(`[migrate] applied ${migrationResult.applied.length} migration(s): ${migrationResult.applied.join(", ")}`);
+  } else {
+    console.log("[migrate] no new migrations to apply");
   }
 
-  await retryPg("auth", () => ensureAuthTables());
+  // Stale run-state reset: is_running=true rows surviving a crash or
+  // restart previously made those threads permanently unrunnable —
+  // "Thread already running" with no recovery path, because no process
+  // owns them anymore (ACTIVE_CONNECTIONS is empty at boot and stop()
+  // only reaches in-process connections). Safe at boot: no run can be
+  // in flight in a process that is still starting. Single-instance
+  // deployments only (the documented constraint) — a second instance
+  // booting would reset the first one's live locks.
+  // Non-fatal: a failed reset strands threads as "already running"
+  // (annoying, recoverable by rerunning boot) but does not 500 the app.
+  const resetResult = await retryPg("run-state-reset", async () => {
+    const { query } = await import("@/lib/db/pg");
+    return query(
+      `UPDATE run_state SET is_running = false, current_run_id = NULL WHERE is_running = true`,
+    );
+  });
+  if (resetResult && resetResult.rowCount && resetResult.rowCount > 0) {
+    console.log(
+      `[boot] reset ${resetResult.rowCount} stale in-flight run state(s) from a previous process`,
+    );
+  }
+
+  // ensureAuthTables reports success as a boolean (it swallows its own
+  // errors to keep the per-request lazy callers non-throwing), so the
+  // retry wrapper rethrows on false — otherwise retryPg could never retry
+  // an auth failure and success/failure would be indistinguishable (a
+  // plain `if (!result)` on a void return exits non-zero on EVERY boot).
+  const authOk = await retryPg("auth", async () => {
+    const ok = await ensureAuthTables();
+    if (!ok) throw new Error("auth tables not ensured yet");
+    return ok;
+  });
+  if (!authOk) failFast("auth tables");
   console.log("[auth] tables ensured");
 
   if (process.env.AUTH_DISABLED === "true") {
     await retryPg("solo-org", () => ensureSoloOrg());
   }
 
+  // Platform misconfiguration surface: AGENTOS_BASE_URL without its JWT
+  // secret boots fine but every builder run 401s at the dispatcher — warn
+  // at boot where the operator is looking, not at first-run failure.
+  logAgentosWarnings();
+
   // Encrypt-at-rest backfill: re-encrypt agent JWT secrets stored in
   // plaintext before DB_ENCRYPTION_KEY was configured. Idempotent —
   // rows already carrying the `enc:v1:` prefix are filtered out. When
   // no key is configured, warn loudly (secrets stay plaintext) instead
   // of backfilling.
+  // Encryption at rest is a boot REQUIREMENT outside solo-dev mode: with
+  // DB_ENCRYPTION_KEY unset, BYOK keys, connector tokens and agent JWT
+  // secrets would be stored unencrypted with only a console.warn — a
+  // config mistake that silently betrays the at-rest-encryption invariant
+  // (and the marketing/docs claim) in production. Solo mode
+  // (AUTH_DISABLED=true, a local playground with no real tenants or
+  // secrets) keeps the plaintext fallback so a bare `docker-compose up`
+  // demo still boots.
   const { isEncryptionConfigured } = await import("@/lib/crypto/encrypt");
   if (!isEncryptionConfigured()) {
-    console.warn(
-      "[encrypt] DB_ENCRYPTION_KEY is not set — agent JWT secrets will be stored in PLAINTEXT. Set DB_ENCRYPTION_KEY (generate with: openssl rand -hex 32) to enable encryption at rest.",
-    );
+    if (process.env.AUTH_DISABLED === "true") {
+      console.warn(
+        "[encrypt] DB_ENCRYPTION_KEY is not set — solo mode keeps the plaintext fallback (local playground only).",
+      );
+    } else {
+      throw new Error(
+        "DB_ENCRYPTION_KEY is required: BYOK keys, connector tokens and agent JWT secrets are encrypted at rest, and booting without the key would store them in plaintext. Set DB_ENCRYPTION_KEY (generate with: openssl rand -hex 32) — or set AUTH_DISABLED=true for a solo local playground.",
+      );
+    }
   } else {
     const { backfillEncryptedSecrets } = await import("@/lib/crypto/backfill");
     const backfillResult = await retryPg("encrypt-backfill", () =>

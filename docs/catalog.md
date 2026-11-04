@@ -7,6 +7,13 @@ the agent is running. No endpoints, no config.
 
 ## Model (template vs. installed copy — managed-plugin)
 
+Templates come from platform-admin curation only. Builder-origin agents
+(`origin: "builder"`, created by members via the agent builder — see
+[agent-builder.md](./agent-builder.md)) are org-scoped and **not
+publishable** in Phase 1: making a builder agent installable by other
+orgs is Phase 3. The catalog and the builder are separate surfaces —
+there is no path from a builder agent to a template.
+
 - `agent_templates` — global rows (NOT org-scoped), managed by platform
   admins (`role === "admin"` via the Catalog section on `/admin` or the
   `/api/catalog` REST API). Fields: `slug` (unique, shareable),
@@ -62,6 +69,18 @@ changes the org's agent list) → `checkTemplateInstall` (plan gate) →
   (id preserved) → `200 { installed: false, updated: bool }`. Invisible
   to users — the catalog card just shows "✓ Added to workspace" (live propagation
   means there is no user-facing update action).
+- **Install race is DB-enforced:** two concurrent installs of the same
+  template both pass `findInstalledAgentId` (check-then-act), but the
+  partial unique index from migration 0015 (`agents_org_template_uniq`
+  on `(org_id, source_template_id) WHERE source_template_id IS NOT NULL`)
+  makes the second INSERT fail with 23505 — `installTemplate()` catches
+  the violation and falls back to re-syncing the winner's row, so the org
+  always ends up with exactly one installed copy. Manual agents are
+  unaffected (NULL `source_template_id`, NULLs distinct).
+  Known residual edge: `checkAgentCountLimit` is still check-then-act, so
+  N concurrent installs of *different* templates at the cap boundary can
+  briefly overshoot the plan's agent cap by N−1 rows — accepted (no data
+  corruption, monetization-only, requires simultaneous admin installs).
 
 Catalog card text clamping — tagline clamps to 2 lines and description
 to 4 (`ExpandableText` in `components/expandable-text.tsx`: `line-clamp`
@@ -135,8 +154,9 @@ surfaces the zod limits in-field (`maxLength` + live `n/200` and
      agent — you can use it again in 5h 12m." + the free-tier-only
      "Upgrade to Pro for more usage." clause; the quota 402 banner also
      carries an inline Upgrade button that opens the upgrade dialog —
-     the conversion ask lands at the paywall moment, not behind the
-     account menu). The button only renders when an upgrade actually
+     the upgrade path surfaces in the message the user is already
+     reading, rather than only behind the account menu). The button only
+     renders when an upgrade actually
      helps (free quota exhaustion or a plan-lock; paid plans share one
      quota cap, so pro users who exhaust it get the countdown without a
      button) and the pricing page (Free tier lists "Daily usage limits

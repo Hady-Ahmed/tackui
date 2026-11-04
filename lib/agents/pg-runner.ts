@@ -18,7 +18,7 @@ import {
 } from "@ag-ui/client";
 import type { Message } from "@ag-ui/core";
 import { query, withTransaction } from "@/lib/db/pg";
-import { getRunnerUser } from "@/lib/auth/request-context";
+import { getReservedDepKeys, getRunnerUser } from "@/lib/auth/request-context";
 
 interface AgentRunRecord {
   id: number;
@@ -37,6 +37,19 @@ interface ActiveConnectionContext {
   runSubject?: ReplaySubject<BaseEvent>;
   currentEvents?: BaseEvent[];
   stopRequested?: boolean;
+  /** This run's id — lets connect() detect "replay already covers this run". */
+  runId?: string;
+  /**
+   * Set by deleteThread when the thread was deleted while this run was
+   * still in flight. The run's persistence window (storeRun +
+   * captureThreadData) checks this and skips writing: without it, the
+   * finishing run would resurrect the deleted thread — fresh agent_runs,
+   * thread_messages and thread_metadata rows (plus a re-seeded sidebar
+   * cache) containing only the in-flight run's data, silently undoing
+   * the deletion. The flag dies with the connection object at teardown,
+   * so a later run on a re-created thread (same id) persists normally.
+   */
+  threadDeleted?: boolean;
 }
 
 // Active connections for streaming events and stop support. Owned by this
@@ -46,6 +59,180 @@ interface ActiveConnectionContext {
 const ACTIVE_CONNECTIONS = new Map<string, ActiveConnectionContext>();
 
 const SCHEMA_VERSION = 1;
+
+/**
+ * How long a run_state row whose current_run_id has NO live
+ * ACTIVE_CONNECTIONS entry must age before acquireRunState treats it as a
+ * stale lock and steals it. A genuine holder registers its map entry
+ * synchronously right after the acquire returns (no await in between), so
+ * any map-absent row younger than this is a winner still mid-registration
+ * in a concurrent race — not an orphan. The value only bounds how long a
+ * transient release failure wedges the thread (teardownRun's release is
+ * best-effort); it is not a run timeout.
+ */
+const STALE_LOCK_GRACE_MS = 10_000;
+
+/**
+ * Defense in depth against secret persistence: the AG-UI schema allows
+ * events (and the stored run input) to carry the full request input,
+ * whose `context` array is where the run gate INJECTS this run's
+ * secrets (the model key, every tool dep key, mcp_connectors with org
+ * connector URLs+tokens). Today the dispatcher persists an empty
+ * context (verified against production-shaped data: zero reserved keys
+ * across all stored runs) — but an upstream change could start echoing
+ * it, and connect() replays stored events to browsers. Redact any
+ * context item whose description/name is a reserved dep key before
+ * persisting, so server-injected secrets can never reach `agent_runs`.
+ * Non-reserved client context is the client's own data and survives.
+ */
+export function redactReservedContext<T extends object>(
+  holder: T | undefined,
+  reserved: ReadonlySet<string>,
+): T | undefined {
+  const context = (holder as { context?: unknown } | undefined)?.context;
+  if (!holder || !Array.isArray(context)) return holder;
+  const kept = context.filter((item) => {
+    if (typeof item !== "object" || item === null) return true;
+    const { description, name } = item as { description?: unknown; name?: unknown };
+    return !reserved.has(String(description ?? "")) && !reserved.has(String(name ?? ""));
+  });
+  if (kept.length === context.length) return holder;
+  return { ...holder, context: kept };
+}
+
+/**
+ * Event-shaped variant: AG-UI events that carry an input embed it under
+ * `input` (RUN_STARTED), so the holder is `event.input`. Returns the
+ * original event object when there is nothing to redact.
+ */
+export function redactReservedEvent<E extends object>(
+  event: E,
+  reserved: ReadonlySet<string>,
+): E {
+  const input = (event as { input?: { context?: unknown } }).input;
+  if (!input) return event;
+  const safeInput = redactReservedContext(input, reserved);
+  return safeInput === input ? event : { ...event, input: safeInput };
+}
+
+/**
+ * Build a verifier-safe replay stream from raw persisted events:
+ *
+ * - RUN_ERROR events are removed (the documented replay filter — AG-UI's
+ *   verifier locks on a replayed RUN_ERROR mid-stream, making failed-run
+ *   threads permanently unreadable on reconnect).
+ * - An unterminated run is closed with a synthetic RUN_FINISHED **only
+ *   when a later RUN_STARTED follows it in the same history** — the next
+ *   run's RUN_STARTED would otherwise trip the verifier ("Cannot send
+ *   'RUN_STARTED' while a run is still active") and the whole connect
+ *   replay would be rejected. Before the terminator, any message or
+ *   tool-call sequence the errored run left open is CLOSED first: AG-UI
+ *   requires a producer to close what it opened before RUN_FINISHED, and
+ *   @copilotkit/shared's finalizeRunEvents deliberately skips closure
+ *   when a RUN_ERROR is present — so persisted errored runs keep open
+ *   sequences that a bare synthetic terminator would leave dangling
+ *   (permanently-spinning tool calls on reconnect).
+ * - A run left unterminated at the END of the history is left
+ *   unresolved — UNLESS the caller is about to append a live bridge to
+ *   the same verified stream (`opts.terminateTrailing`, set by
+ *   startConnect when it will subscribe an in-flight run's subject after
+ *   the replay): the bridge's first event is the new run's RUN_STARTED,
+ *   and a producer must close what it opened before a new RUN_STARTED in
+ *   the same stream. The bridge supplies the "later RUN_STARTED" the
+ *   synthesis exists for — it just isn't in the persisted history list.
+ *
+ * The failure flavor is preserved in the synthesized tool-call results
+ * (status "error") so replayed history reads as failed, not completed.
+ */
+function buildReplayEvents(
+  events: BaseEvent[],
+  opts: { terminateTrailing?: boolean } = {},
+): BaseEvent[] {
+  const out: BaseEvent[] = [];
+  let openRun: { threadId: string; runId: string } | null = null;
+  const openMessageIds = new Set<string>();
+  const openToolCalls = new Map<string, { hasEnd: boolean; hasResult: boolean }>();
+
+  const closeOpenSequences = (): void => {
+    for (const messageId of openMessageIds) {
+      out.push({ type: EventType.TEXT_MESSAGE_END, messageId } as unknown as BaseEvent);
+    }
+    for (const [toolCallId, info] of openToolCalls) {
+      if (!info.hasEnd) {
+        out.push({ type: EventType.TOOL_CALL_END, toolCallId } as unknown as BaseEvent);
+      }
+      if (!info.hasResult) {
+        out.push({
+          type: EventType.TOOL_CALL_RESULT,
+          toolCallId,
+          messageId: `${toolCallId}-result`,
+          role: "tool",
+          content: JSON.stringify({
+            status: "error",
+            reason: "run_error",
+            message: "The agent run failed. Please try again.",
+          }),
+        } as unknown as BaseEvent);
+      }
+    }
+    openMessageIds.clear();
+    openToolCalls.clear();
+  };
+
+  for (const event of events) {
+    if (event.type === EventType.RUN_ERROR) continue;
+    if (event.type === EventType.RUN_STARTED) {
+      if (openRun) {
+        closeOpenSequences();
+        out.push(syntheticRunFinished(openRun));
+      }
+      const started = event as { threadId?: string; runId?: string };
+      openRun =
+        started.threadId && started.runId
+          ? { threadId: started.threadId, runId: started.runId }
+          : null;
+    } else if (event.type === EventType.RUN_FINISHED) {
+      openRun = null;
+      openMessageIds.clear();
+      openToolCalls.clear();
+    } else if (event.type === EventType.TEXT_MESSAGE_START) {
+      const id = (event as { messageId?: unknown }).messageId;
+      if (typeof id === "string") openMessageIds.add(id);
+    } else if (event.type === EventType.TEXT_MESSAGE_END) {
+      const id = (event as { messageId?: unknown }).messageId;
+      if (typeof id === "string") openMessageIds.delete(id);
+    } else if (event.type === EventType.TOOL_CALL_START) {
+      const id = (event as { toolCallId?: unknown }).toolCallId;
+      if (typeof id === "string") openToolCalls.set(id, { hasEnd: false, hasResult: false });
+    } else if (event.type === EventType.TOOL_CALL_END) {
+      const id = (event as { toolCallId?: unknown }).toolCallId;
+      const info = typeof id === "string" ? openToolCalls.get(id) : undefined;
+      if (info) info.hasEnd = true;
+    } else if (event.type === EventType.TOOL_CALL_RESULT) {
+      const id = (event as { toolCallId?: unknown }).toolCallId;
+      const info = typeof id === "string" ? openToolCalls.get(id) : undefined;
+      if (info) info.hasResult = true;
+    }
+    out.push(event);
+  }
+  // End of history with an open run: unresolved by default — but a
+  // caller appending a live bridge to this same stream must close the
+  // run first (the bridge's RUN_STARTED would otherwise trip the
+  // verifier's "run still active" lock).
+  if (opts.terminateTrailing && openRun) {
+    closeOpenSequences();
+    out.push(syntheticRunFinished(openRun));
+  }
+  return out;
+}
+
+function syntheticRunFinished(run: { threadId: string; runId: string }): BaseEvent {
+  return {
+    type: EventType.RUN_FINISHED,
+    threadId: run.threadId,
+    runId: run.runId,
+  } as unknown as BaseEvent;
+}
 
 /**
  * Postgres-backed AgentRunner. Replaces @copilotkit/sqlite-runner's
@@ -154,49 +341,127 @@ export class PostgresAgentRunner extends AgentRunner {
     request: AgentRunnerRunRequest,
     runSubject: ReplaySubject<BaseEvent>,
   ): Promise<void> {
-    // Check + mark running atomically (avoids race where two concurrent runs
-    // both see "not running" and both proceed).
-    const runState = await this.getRunState(request.threadId);
-    if (runState.isRunning) {
+    // ─── Cross-tenant write guard ────────────────────────────────────────
+    // A caller who knows (or guesses) another tenant's thread id must not
+    // be able to write into it: without this check a foreign run marked
+    // the victim thread "running" (denying the owner's real runs with
+    // "Thread already running") and appended the attacker's messages and
+    // events to the victim's persisted history. The thread cache can't
+    // arbitrate this — a NEW chat is a cache miss by design — so existence
+    // is resolved from PG, the cross-process source of truth. A thread
+    // that exists and is foreign is denied before ANY state changes
+    // (run_state write, history read, cache seed); a thread that doesn't
+    // exist anywhere is creatable — its owner becomes the first runner
+    // (captureThreadData records user_id/org_id on first run).
+    const runnerUser = getRunnerUser();
+    if (runnerUser) {
+      const ownership = await this.getThreadOwnership(request.threadId);
+      if (ownership && !this.threadVisible(ownership, runnerUser)) {
+        throw new Error("Thread not found");
+      }
+    }
+
+    // Claim the run lock ATOMICALLY: the conditional upsert only takes the
+    // lock when the stored state says not-running, and RETURNING tells
+    // whether THIS call won it. The old check-then-act pair (getRunState →
+    // setRunState) let two concurrent runs on the same thread both observe
+    // "not running" and both proceed — interleaving both runs' events into
+    // one persisted history.
+    const acquired = await this.acquireRunState(
+      request.threadId,
+      request.input.runId,
+    );
+    if (!acquired) {
       throw new Error("Thread already running");
     }
-    await this.setRunState(request.threadId, true, request.input.runId);
 
     const seenMessageIds = new Set<string>();
     const currentRunEvents: BaseEvent[] = [];
-
-    const historicRuns = await this.getHistoricRuns(request.threadId);
-    const historicMessageIds = new Set<string>();
-    for (const run of historicRuns) {
-      for (const event of run.events) {
-        if ("messageId" in event && typeof event.messageId === "string") {
-          historicMessageIds.add(event.messageId);
-        }
-        if (event.type === EventType.RUN_STARTED) {
-          const runStarted = event as RunStartedEvent;
-          const messages = runStarted.input?.messages ?? [];
-          for (const message of messages) {
-            historicMessageIds.add(message.id);
-          }
-        }
-      }
-    }
 
     const nextSubject = new ReplaySubject<BaseEvent>(Infinity);
     const prevConnection = ACTIVE_CONNECTIONS.get(request.threadId);
     const prevSubject = prevConnection?.subject;
 
-    ACTIVE_CONNECTIONS.set(request.threadId, {
+    // THIS run's connection object — captured by identity so the teardown
+    // below can tell "still mine" from "a replacement run overwrote the
+    // map entry" (an aborted run's teardown must not touch the
+    // replacement's entry: its stop button and event routing depend on
+    // the agent/subject references this teardown used to clear).
+    const myConnection: ActiveConnectionContext = {
       subject: nextSubject,
       agent: request.agent,
       runSubject,
       currentEvents: currentRunEvents,
       stopRequested: false,
-    });
+      runId: request.input.runId,
+    };
+
+    ACTIVE_CONNECTIONS.set(request.threadId, myConnection);
+
+    // Seed the thread cache NOW, not at run end. The ownership gate in
+    // stop() (and every sync runner read) consults this cache, and it was
+    // otherwise only populated by captureThreadData() AFTER the run
+    // finishes — so stop() on a thread's FIRST in-flight run hit a cache
+    // miss and denied the owner: the stop button silently did nothing on
+    // the first message of every new chat, for every signed-in user.
+    // Seed only when absent: a cached thread keeps its real title and
+    // createdAt (captureThreadData reconciles the row at run end).
+    if (!this.threadCache.has(request.threadId)) {
+      const nowIso = new Date().toISOString();
+      this.threadCache.set(request.threadId, {
+        id: request.threadId,
+        name: this.deriveTitle(request.input.messages ?? []),
+        agentId: request.agent.agentId ?? "default",
+        organizationId: runnerUser?.orgId ?? "",
+        createdById: runnerUser?.id ?? "",
+        archived: false,
+        createdAt: nowIso,
+        updatedAt: nowIso,
+      });
+    }
 
     const runAgent = async () => {
-      const parentRunId = await this.getLatestRunId(request.threadId);
+      // The live stream is redacted with the SAME rule as persistence
+      // (storeRun below). Captured here — inside the runner ALS scope,
+      // which spans this whole async chain — so the redaction never
+      // depends on where a callback happens to run.
+      const liveReserved = new Set([...getReservedDepKeys(), "mcp_connectors"]);
+      // OUTER safety net: everything after the lock claim runs inside this
+      // try. A throw from the historic read or the pre-run parent
+      // resolution previously escaped the fire-and-forget wrapper entirely
+      // (logged and abandoned): is_running stayed true forever — the
+      // thread became unrunnable — and the SSE subjects never completed,
+      // hanging the client. The `preRun` flag splits the two failure
+      // contracts: a pre-run failure releases the lock + map entry and
+      // RETHROWS (the run stream errors, as it always did); a mid-run
+      // failure persists what it has, releases, and completes (as it
+      // always did). Either way the thread never stays locked.
+      let preRun = true;
+      // Declared outside the try so the mid-run failure path can persist
+      // the partial run with the correct parent linkage.
+      let parentRunId: string | null = null;
       try {
+        const historicRuns = await this.getHistoricRuns(request.threadId);
+        const historicMessageIds = new Set<string>();
+        for (const run of historicRuns) {
+          for (const event of run.events) {
+            if ("messageId" in event && typeof event.messageId === "string") {
+              historicMessageIds.add(event.messageId);
+            }
+            if (event.type === EventType.RUN_STARTED) {
+              const runStarted = event as RunStartedEvent;
+              const messages = runStarted.input?.messages ?? [];
+              for (const message of messages) {
+                historicMessageIds.add(message.id);
+              }
+            }
+          }
+        }
+
+        const parentRunIdResolved = await this.getLatestRunId(request.threadId);
+        parentRunId = parentRunIdResolved;
+        preRun = false;
+
         await request.agent.runAgent(request.input, {
           onEvent: ({ event }) => {
             let processedEvent: BaseEvent = event;
@@ -220,6 +485,16 @@ export class PostgresAgentRunner extends AgentRunner {
                 } as RunStartedEvent;
               }
             }
+            // Live redaction, BEFORE any subscriber sees the event: the
+            // RUN_STARTED fill above copies request.input — whose context
+            // carries the gate-injected secrets (model keys + MCP
+            // connector tokens) — into the event. Without this, those
+            // secrets stream to the browser on every run; storeRun
+            // redacted only the persisted copy.
+            processedEvent = redactReservedEvent(
+              processedEvent as { input?: { context?: unknown } },
+              liveReserved,
+            ) as BaseEvent;
 
             runSubject.next(processedEvent);
             nextSubject.next(processedEvent);
@@ -241,9 +516,8 @@ export class PostgresAgentRunner extends AgentRunner {
           },
         });
 
-        const connection = ACTIVE_CONNECTIONS.get(request.threadId);
         const appendedEvents = finalizeRunEvents(currentRunEvents, {
-          stopRequested: connection?.stopRequested ?? false,
+          stopRequested: myConnection.stopRequested ?? false,
         });
         for (const event of appendedEvents) {
           runSubject.next(event);
@@ -257,21 +531,30 @@ export class PostgresAgentRunner extends AgentRunner {
           request.input,
           parentRunId,
         );
-        await this.setRunState(request.threadId, false);
 
+        // Snapshot capture BEFORE releasing the lock: a replacement run
+        // can only start once the lock is gone, so this ordering
+        // guarantees the thread_messages/metadata write this run performs
+        // can't clobber — or be clobbered by — the next run's snapshot.
         await this.captureThreadData(request);
 
-        if (connection) {
-          connection.agent = undefined;
-          connection.runSubject = undefined;
-          connection.currentEvents = undefined;
-          connection.stopRequested = false;
-        }
+        await this.teardownRun(request.threadId, myConnection, request.input.runId);
 
         runSubject.complete();
         nextSubject.complete();
-        ACTIVE_CONNECTIONS.delete(request.threadId);
       } catch (err) {
+        if (preRun) {
+          // Pre-run failure (historic read / parent resolution): nothing
+          // was persisted — release the lock + map entry, then rethrow so
+          // the run stream ERRORS (the pre-run client contract) instead
+          // of completing silently. nextSubject must also be terminated:
+          // a connect() that bridged to it during the acquire→read window
+          // (is_running was already true) would otherwise never receive a
+          // terminal event and hang forever.
+          await this.teardownRun(request.threadId, myConnection, request.input.runId);
+          nextSubject.error(err);
+          throw err;
+        }
         console.error("[runner] run failed", {
           agentId: request.agent.agentId ?? "default",
           threadId: request.threadId,
@@ -279,41 +562,48 @@ export class PostgresAgentRunner extends AgentRunner {
           error: err instanceof Error ? err.message : String(err),
         });
 
-        const connection = ACTIVE_CONNECTIONS.get(request.threadId);
-        const appendedEvents = finalizeRunEvents(currentRunEvents, {
-          stopRequested: connection?.stopRequested ?? false,
-        });
-        for (const event of appendedEvents) {
-          runSubject.next(event);
-          nextSubject.next(event);
+        // Finalize, persist, and snapshot — ALL inside one guarded block.
+        // finalizeRunEvents + the subject emits previously ran OUTSIDE the
+        // guard: a throw there skipped the teardown below, wedging the
+        // run lock (the thread became unrunnable until a boot reset) and
+        // leaving the SSE subjects open. Every fallible step of the
+        // mid-run unwind is inside the try; the teardown ALWAYS runs.
+        try {
+          const appendedEvents = finalizeRunEvents(currentRunEvents, {
+            stopRequested: myConnection.stopRequested ?? false,
+          });
+          for (const event of appendedEvents) {
+            runSubject.next(event);
+            nextSubject.next(event);
+          }
+
+          if (currentRunEvents.length > 0) {
+            await this.storeRun(
+              request.threadId,
+              request.input.runId,
+              currentRunEvents,
+              request.input,
+              parentRunId,
+            );
+          }
+          // Even on failure, capture the thread snapshot so the
+          // conversation is still readable on reconnect (the connect()
+          // smart replay filters out RUN_ERROR events before replaying).
+          // BEFORE the lock release — same clobber argument as the
+          // success path.
+          await this.captureThreadData(request);
+        } catch (persistErr) {
+          console.error("[runner] run-failure persistence failed", {
+            threadId: request.threadId,
+            runId: request.input?.runId,
+            error: persistErr instanceof Error ? persistErr.message : String(persistErr),
+          });
         }
 
-        if (currentRunEvents.length > 0) {
-          await this.storeRun(
-            request.threadId,
-            request.input.runId,
-            currentRunEvents,
-            request.input,
-            parentRunId,
-          );
-        }
-        await this.setRunState(request.threadId, false);
-
-        // Even on failure, capture the thread snapshot so the conversation
-        // is still readable on reconnect (the connect() smart replay filters
-        // out RUN_ERROR events before replaying).
-        await this.captureThreadData(request);
-
-        if (connection) {
-          connection.agent = undefined;
-          connection.runSubject = undefined;
-          connection.currentEvents = undefined;
-          connection.stopRequested = false;
-        }
+        await this.teardownRun(request.threadId, myConnection, request.input.runId);
 
         runSubject.complete();
         nextSubject.complete();
-        ACTIVE_CONNECTIONS.delete(request.threadId);
       }
     };
 
@@ -329,12 +619,19 @@ export class PostgresAgentRunner extends AgentRunner {
       });
     }
 
-    // Fire-and-forget. Errors are caught internally and logged.
+    // Fire-and-forget. The catch logs AND errors the subject: a rethrow
+    // from runAgent (e.g. a pre-run DB failure the inner handling didn't
+    // cover) must reach the client as a failed run — a log-only catch
+    // left the SSE stream open forever with the lock held.
     runAgent().catch((err) => {
       console.error("[runner] runAgent unexpected error", {
         threadId: request.threadId,
         error: err instanceof Error ? err.message : String(err),
       });
+      runSubject.error(err);
+      // Mirror to nextSubject so a bridged connect() stream terminates too
+      // (a no-op when the subject already completed).
+      nextSubject.error(err);
     });
   }
 
@@ -354,6 +651,25 @@ export class PostgresAgentRunner extends AgentRunner {
     request: AgentRunnerConnectRequest,
     connectionSubject: ReplaySubject<BaseEvent>,
   ): Promise<void> {
+    // ─── Cross-tenant read guard ─────────────────────────────────────────
+    // Same visibility rule as the sync readers (getThreadEvents et al):
+    // an authenticated caller is denied for a thread unknown to this
+    // process or foreign to their org — fail-closed on cache miss, and
+    // the denial reads identically to an unknown thread (empty replay,
+    // immediate complete; the sync contract's indistinguishable-empty
+    // pattern). Without this, knowing a thread id was enough to replay
+    // its FULL event history: every sync read path gates on
+    // threadVisible, but this async replay path didn't. The guard must
+    // run before getHistoricRuns — the PG read itself is the leak.
+    const runnerUser = getRunnerUser();
+    if (runnerUser) {
+      const cached = this.threadCache.get(request.threadId);
+      if (!cached || !this.threadVisible(cached, runnerUser)) {
+        connectionSubject.complete();
+        return;
+      }
+    }
+
     // ─── Smart replay: filter RUN_ERROR events before compacting ─────
     // AG-UI's verifier locks when it sees a RUN_ERROR mid-stream, which
     // makes failed-run threads permanently unreadable on reconnect (the
@@ -365,18 +681,51 @@ export class PostgresAgentRunner extends AgentRunner {
     const allHistoricEvents: BaseEvent[] = [];
     for (const run of historicRuns) {
       for (const event of run.events) {
-        if (event.type === EventType.RUN_ERROR) continue;
         allHistoricEvents.push(event);
       }
     }
-    const compactedEvents = compactEvents(allHistoricEvents);
+    const snapshotRunIds = new Set(historicRuns.map((run) => run.run_id));
+
+    // Bridge-decision inputs are gathered BEFORE the replay is built:
+    // the trailing-run terminator and the live-bridge decision must
+    // agree on the SAME map/runState reads. If they didn't, a run
+    // registering between the two reads would be bridged onto a replay
+    // left unresolved (the verifier sees RUN_STARTED while a run is
+    // still active) or a replay terminated with no bridge to justify
+    // it. All awaits happen up front; from here to the bridge
+    // subscription every decision is synchronous off these values.
+    const activeConnection = ACTIVE_CONNECTIONS.get(request.threadId);
+    const runState = await this.getRunState(request.threadId);
+    const messages = await this.fetchThreadMessages(request.threadId);
+
+    // willBridge: an in-flight run exists and the snapshot does NOT
+    // cover it — the bridge will append its buffered events (first: its
+    // RUN_STARTED) to this same stream, so a trailing unresolved run in
+    // the replay must be closed first (see buildReplayEvents).
+    const willBridge =
+      activeConnection?.runId != null && !snapshotRunIds.has(activeConnection.runId);
+    // Filter RUN_ERROR + verifier-safe replay shaping (conditional
+    // synthetic terminator, closure of sequences the errored run left
+    // open — see buildReplayEvents) BEFORE compacting.
+    const compactedEvents = compactEvents(
+      buildReplayEvents(allHistoricEvents, { terminateTrailing: willBridge }),
+    );
 
     // ─── Read-through: populate caches from the PG fetch ──────────────
     // The sync LocalThreadEndpointRunner methods (getThreadEvents,
     // getThreadState) read from these caches. Future calls within the
     // same process get sync access to the historic event stream.
-    this.eventsCache.set(request.threadId, compactedEvents);
-    const messages = await this.fetchThreadMessages(request.threadId);
+    // NEVER clobber a fresher storeRun merge: a run committing between
+    // our getHistoricRuns snapshot (a PG statement snapshot) and this
+    // synchronous write has already merged its events into the cache —
+    // overwriting with the older snapshot would regress the sync
+    // readers to pre-run history (and getThreadState to the pre-run
+    // STATE_SNAPSHOT) until the next write on the thread. A cache
+    // holding a runId absent from the snapshot proves a newer write
+    // landed: skip and let the newer value stand.
+    if (!this.cacheHoldsRunOutsideSnapshot(request.threadId, snapshotRunIds)) {
+      this.eventsCache.set(request.threadId, compactedEvents);
+    }
     if (messages.length > 0) this.messageCache.set(request.threadId, messages);
 
     const emittedMessageIds = new Set<string>();
@@ -388,11 +737,31 @@ export class PostgresAgentRunner extends AgentRunner {
     }
 
     // ─── Live-bridging: if a run is in flight, stream new events ──────
-    const activeConnection = ACTIVE_CONNECTIONS.get(request.threadId);
-    const runState = await this.getRunState(request.threadId);
+    // `activeConnection` and `runState` were read up front (see above)
+    // so this decision matches the terminator that shaped the replay.
+
+    // A connect() landing between a run's storeRun and its teardown would
+    // otherwise replay the just-persisted run TWICE: once from the
+    // historic replay above, once from the subject's replay buffer. The
+    // messageId dedup below only covers TEXT_MESSAGE_* — duplicated
+    // TOOL_CALL_START / STATE_* events would pass it and the AG-UI
+    // verifier rejects a duplicate TOOL_CALL_START outright. The decisive
+    // fact: every event a run ever emits is emitted BEFORE storeRun
+    // persists it — so when the replay snapshot already contains the
+    // in-flight run, the bridge can only add duplicates. Skip it and
+    // complete: the client got the full history in the replay. (If
+    // storeRun commits AFTER our snapshot, the replay lacks the run, the
+    // bridge supplies it exactly once, and no duplication is possible —
+    // both orderings are covered by checking the SAME snapshot we
+    // replayed from.)
+    const replayCoversActiveRun =
+      activeConnection != null &&
+      activeConnection.runId != null &&
+      snapshotRunIds.has(activeConnection.runId);
 
     if (
       activeConnection &&
+      !replayCoversActiveRun &&
       (runState.isRunning || activeConnection.stopRequested)
     ) {
       activeConnection.subject.subscribe({
@@ -418,6 +787,15 @@ export class PostgresAgentRunner extends AgentRunner {
   async isRunning(
     request: AgentRunnerIsRunningRequest,
   ): Promise<boolean> {
+    // Same visibility rule as every other thread path: without this,
+    // knowing a foreign thread id yields a free "exists and is mid-run"
+    // oracle (the sync readers deny unknown/foreign threads with an
+    // indistinguishable empty/false response — this path must match).
+    const user = getRunnerUser();
+    if (user) {
+      const cached = this.threadCache.get(request.threadId);
+      if (!cached || !this.threadVisible(cached, user)) return false;
+    }
     const runState = await this.getRunState(request.threadId);
     return runState.isRunning;
   }
@@ -425,6 +803,17 @@ export class PostgresAgentRunner extends AgentRunner {
   async stop(
     request: AgentRunnerStopRequest,
   ): Promise<boolean | undefined> {
+    // Ownership gate BEFORE anything is aborted: a member who learns
+    // another org's thread id must not be able to kill their in-flight
+    // run (trace interference / DoS). Fail closed — deny when the thread
+    // is unknown to this process or foreign; the caller learns nothing
+    // either way (false reads identically for "not running").
+    const user = getRunnerUser();
+    if (user) {
+      const cached = this.threadCache.get(request.threadId);
+      if (!cached || !this.threadVisible(cached, user)) return false;
+    }
+
     const runState = await this.getRunState(request.threadId);
     if (!runState.isRunning) return false;
 
@@ -434,17 +823,60 @@ export class PostgresAgentRunner extends AgentRunner {
     if (connection.stopRequested) return false;
 
     connection.stopRequested = true;
-    await this.setRunState(request.threadId, false);
+
+    // The run lock is NOT released here. The aborted run still has to
+    // persist its partial history (storeRun + captureThreadData) after
+    // the abort lands — releasing the lock first let a replacement run
+    // acquire it and race the aborted run's persistence (interleaved
+    // snapshots, history out of order). Instead the lock stays with the
+    // aborted run until its own teardownRun releases it — that release is
+    // guarded by the current_run_id match, so it can never clobber a
+    // successor. Trade-off (documented in docs/architecture.md): between
+    // stop() and the aborted run's teardown, is_running still reads true,
+    // so an immediate replacement run gets "Thread already running" for
+    // the abort+persistence window (sub-second in practice).
 
     try {
       agent.abortRun();
       return true;
     } catch (error) {
       console.error("Failed to abort agent run", error);
+      // The abort failed and the run CONTINUES — it still owns the lock
+      // (never released above), so there is nothing to restore: the run's
+      // own teardown releases it when it settles.
       connection.stopRequested = false;
-      await this.setRunState(request.threadId, true, runState.currentRunId ?? undefined);
       return false;
     }
+  }
+
+  // ─── Thread visibility ────────────────────────────────────────────────
+  //
+  // The single rule every thread path applies (list, messages, events,
+  // state, stop, delete, rename, and — via getThreadOwnership / the
+  // cache — the async run and connect paths): the thread must belong to
+  // the caller's org AND be owned by them — or carry no recorded owner
+  // (legacy rows written when the runner ALS was absent are org-shared,
+  // matching the deleteThread org-mate semantics). Solo mode (no runner
+  // user) sees everything: one tenant, one operator.
+  //
+  // Without this, a signed-in member of any org could read another
+  // tenant's conversation messages/events/state — or kill another
+  // tenant's in-flight run — by knowing a thread id (leaked via logs,
+  // Sentry breadcrumbs, screenshots). The runtime's thread endpoints
+  // dispatch on threadId alone; the runner is where identity is available
+  // (getRunnerUser), so the runner is where the check lives.
+  //
+  // A thread that is not in THIS process's cache is denied for
+  // authenticated callers — fail-closed, same tradeoff deleteThread
+  // documented (the caches are the source of truth for what this process
+  // can serve; multi-instance SaaS needs the Redis migration).
+  private threadVisible(
+    t: Pick<LocalThreadEndpointRecord, "organizationId" | "createdById">,
+    user: { id: string; orgId: string } | null,
+  ): boolean {
+    if (!user) return true;
+    if (t.organizationId !== user.orgId) return false;
+    return t.createdById === user.id || t.createdById === "";
   }
 
   // ─── LocalThreadEndpointRunner: 5 SYNC methods ────────────────────────
@@ -456,31 +888,43 @@ export class PostgresAgentRunner extends AgentRunner {
 
   listThreads(): LocalThreadEndpointRecord[] {
     const user = getRunnerUser();
-    const userId = user?.id;
-    const orgId = user?.orgId;
     const all = Array.from(this.threadCache.values());
-    if (!userId) return all;
-    // Filter at read time — the cache contains threads across orgs.
-    // Scope by orgId (required, never null) + allow ownership of own
-    // threads. Platform admins do NOT bypass this filter — they see only
-    // their own threads in their active org, same as everyone else. Admin
-    // powers are limited to agent/user management, not thread browsing.
-    return all.filter(
-      (t) =>
-        (t.organizationId === orgId || t.organizationId === "") &&
-        (t.createdById === userId || t.createdById === ""),
-    );
+    if (!user) return all;
+    // Filter at read time — the cache contains threads across orgs. The
+    // org match is EXACT: the old `organizationId === ""` tolerance made
+    // metadata rows with no recorded org visible to every org. Platform
+    // admins do NOT bypass this filter — they see only their own threads
+    // in their active org, same as everyone else.
+    return all.filter((t) => this.threadVisible(t, user));
   }
 
   getThreadMessages(threadId: string): Message[] {
+    const user = getRunnerUser();
+    if (!user) return this.messageCache.get(threadId) ?? [];
+    const cached = this.threadCache.get(threadId);
+    // Cache-miss or foreign thread → indistinguishable empty response
+    // (the sync contract can't return errors; empty is what an unknown
+    // threadId already returned, so nothing new leaks).
+    if (!cached || !this.threadVisible(cached, user)) return [];
     return this.messageCache.get(threadId) ?? [];
   }
 
   getThreadEvents(threadId: string): BaseEvent[] {
+    const user = getRunnerUser();
+    if (!user) return this.eventsCache.get(threadId) ?? [];
+    const cached = this.threadCache.get(threadId);
+    if (!cached || !this.threadVisible(cached, user)) return [];
     return this.eventsCache.get(threadId) ?? [];
   }
 
   getThreadState(threadId: string): Record<string, unknown> | null {
+    const user = getRunnerUser();
+    if (user) {
+      const cached = this.threadCache.get(threadId);
+      // Same visibility rule as the other sync readers — the state
+      // snapshot is agent state, which can carry org-sensitive shapes.
+      if (!cached || !this.threadVisible(cached, user)) return null;
+    }
     const events = this.eventsCache.get(threadId) ?? [];
     for (let i = events.length - 1; i >= 0; i--) {
       const event = events[i];
@@ -589,13 +1033,15 @@ export class PostgresAgentRunner extends AgentRunner {
       // OSS deploys, this is fine. For multi-instance SaaS, see the
       // class doc on the future Redis migration.
       //
-      // Platform admins do NOT bypass this check — they can only delete
-      // their own threads, same as everyone else. Admin powers are
-      // limited to agent/user management, not thread management.
+      // The org match is EXACT (threadVisible): the old three-way deny
+      // condition let a metadata row with empty org_id AND empty owner
+      // be deleted by ANY user of ANY org — the empty tolerance must not
+      // widen the org boundary, only the owner half. Platform admins do
+      // NOT bypass this check — they can only delete their own threads,
+      // same as everyone else. Admin powers are limited to agent/user
+      // management, not thread management.
       const cached = this.threadCache.get(threadId);
-      if (!cached) return false;
-      // Owner OR org-mate (same org can manage each other's threads).
-      if (cached.createdById !== uid && cached.createdById !== "" && cached.organizationId !== oid) return false;
+      if (!cached || !this.threadVisible(cached, { id: uid, orgId: oid ?? "" })) return false;
     }
 
     let deleted = false;
@@ -616,13 +1062,28 @@ export class PostgresAgentRunner extends AgentRunner {
       deleted = (r1.rowCount ?? 0) > 0 || (r4.rowCount ?? 0) > 0;
     });
 
-    // Write-through: PG delete succeeded, now update the cache.
-    if (deleted) {
-      this.threadCache.delete(threadId);
-      this.messageCache.delete(threadId);
-      this.eventsCache.delete(threadId);
-    }
-    return deleted;
+    // Write-through: PG delete succeeded, now update the cache. The cache
+    // clears and the resurrection marker happen REGARDLESS of the row
+    // counts: a thread whose only existence is an in-flight FIRST run has
+    // no persisted rows yet (the seed is in-memory; DB rows are written
+    // by captureThreadData at run end), but it is still user-visible in
+    // the sidebar and must not be resurrected by that run's final write.
+    this.threadCache.delete(threadId);
+    this.messageCache.delete(threadId);
+    this.eventsCache.delete(threadId);
+    // A run still streaming on this thread would otherwise resurrect it:
+    // its final storeRun + captureThreadData re-insert the rows and
+    // re-seed the sidebar cache (the run started before the delete, so
+    // nothing else distinguishes its writes from a live thread's).
+    // Mark the live connection — the run's persistence window checks
+    // the flag and skips writing; the flag dies with the connection at
+    // teardown, so a later run on a re-created thread id persists
+    // normally. (In-process signal: on a multi-instance deploy a run
+    // streaming on another instance would still resurrect — the same
+    // single-instance assumption as the run-state boot reset.)
+    const active = ACTIVE_CONNECTIONS.get(threadId);
+    if (active) active.threadDeleted = true;
+    return deleted || active != null;
   }
 
   async renameThread(
@@ -634,9 +1095,10 @@ export class PostgresAgentRunner extends AgentRunner {
     const uid = userId ?? getRunnerUser()?.id;
     const oid = orgId ?? getRunnerUser()?.orgId;
     if (uid) {
+      // Same exact-org visibility rule as deleteThread (the empty-org
+      // tolerance must not widen the org boundary).
       const cached = this.threadCache.get(threadId);
-      if (!cached) return false;
-      if (cached.createdById !== uid && cached.createdById !== "" && cached.organizationId !== oid) return false;
+      if (!cached || !this.threadVisible(cached, { id: uid, orgId: oid ?? "" })) return false;
     }
 
     const result = await query(
@@ -668,7 +1130,22 @@ export class PostgresAgentRunner extends AgentRunner {
     input: RunAgentInput,
     parentRunId?: string | null,
   ): Promise<void> {
-    const compactedEvents = compactEvents(events);
+    // Deleted-mid-run guard: the thread was deleted while this run was
+    // streaming (deleteThread marks the live connection). Persisting now
+    // would resurrect it — fresh agent_runs rows (and, via
+    // captureThreadData, messages/metadata/cache) holding only this
+    // run's data, silently undoing the user's deletion.
+    if (ACTIVE_CONNECTIONS.get(threadId)?.threadDeleted) return;
+
+    // Reserved dep keys (this run's injected secrets) come from the
+    // runner ALS — storeRun only ever runs inside that scope. The
+    // non-contract key is added unconditionally so the redaction never
+    // depends on ALS presence alone. See redactReservedContext.
+    const reserved = new Set([...getReservedDepKeys(), "mcp_connectors"]);
+    const compactedEvents = compactEvents(events).map((event) =>
+      redactReservedEvent(event as { input?: { context?: unknown } }, reserved) as BaseEvent,
+    );
+    const safeInput = redactReservedContext(input as { context?: unknown }, reserved) as RunAgentInput;
     await query(
       `INSERT INTO agent_runs (thread_id, run_id, parent_run_id, events, input, version)
        VALUES ($1, $2, $3, $4::jsonb, $5::jsonb, $6)`,
@@ -677,9 +1154,25 @@ export class PostgresAgentRunner extends AgentRunner {
         runId,
         parentRunId ?? null,
         JSON.stringify(compactedEvents),
-        JSON.stringify(input),
+        JSON.stringify(safeInput),
         SCHEMA_VERSION,
       ],
+    );
+    // Read-through refresh: the sync readers (CopilotKit's runtime exposes
+    // /threads/:id/events and /threads/:id/state backed by the caches) used
+    // to serve the PRE-RUN history after a run — eventsCache was only ever
+    // populated by connect(). Merge this run's persisted events into the
+    // cache with the same verifier-safe treatment connect() applies before
+    // replaying: RUN_ERROR filtered out, and any run left unterminated by
+    // that filter closed with a synthetic RUN_FINISHED (AG-UI's verifier
+    // locks on a replayed RUN_ERROR mid-stream AND on a RUN_STARTED that
+    // follows an unterminated run).
+    const priorEvents = this.eventsCache.get(threadId) ?? [];
+    this.eventsCache.set(
+      threadId,
+      compactEvents(
+        buildReplayEvents([...priorEvents, ...compactedEvents]),
+      ),
     );
   }
 
@@ -749,9 +1242,203 @@ export class PostgresAgentRunner extends AgentRunner {
     };
   }
 
+  /**
+   * Atomically claim the run lock for a thread. The conditional upsert
+   * only takes the lock when the stored state says not-running (the
+   * ON CONFLICT ... WHERE guard), and RETURNING tells whether THIS call
+   * won it — false means another run holds the lock (or won the race).
+   */
+  /**
+   * Whether the events cache contains a runId the given snapshot lacks —
+   * i.e. a storeRun merged a run committed AFTER the snapshot was read,
+   * so the snapshot is stale and must not overwrite the cache (see the
+   * startConnect read-through comment).
+   */
+  private cacheHoldsRunOutsideSnapshot(
+    threadId: string,
+    snapshotRunIds: Set<string>,
+  ): boolean {
+    const cached = this.eventsCache.get(threadId);
+    if (!cached) return false;
+    for (const event of cached) {
+      const runId = (event as { runId?: unknown }).runId;
+      if (typeof runId === "string" && runId !== "" && !snapshotRunIds.has(runId)) {
+        return true;
+      }
+    }
+    return false;
+  }
+
+  private async acquireRunState(
+    threadId: string,
+    runId: string,
+  ): Promise<boolean> {
+    const result = await query<{ is_running: boolean }>(
+      `INSERT INTO run_state (thread_id, is_running, current_run_id, updated_at)
+       VALUES ($1, true, $2, now())
+       ON CONFLICT (thread_id) DO UPDATE SET
+         is_running = true,
+         current_run_id = EXCLUDED.current_run_id,
+         updated_at = now()
+       WHERE run_state.is_running = false
+       RETURNING is_running`,
+      [threadId, runId],
+    );
+    if (result.rows.length > 0) return true;
+
+    // The lock is held. Distinguish a LIVE holder from a STALE row: this
+    // process knows exactly which runs are actually active
+    // (ACTIVE_CONNECTIONS — registered synchronously right after a
+    // successful acquire, so no await can interleave between the two).
+    // A row whose current_run_id has no live map entry was left behind by
+    // a teardown whose release hit a transient DB failure (teardownRun is
+    // best-effort) — without this recovery the thread stays wedged with
+    // "Thread already running" until the next process restart. Steal it,
+    // conditional on the SAME row we inspected so a concurrent legitimate
+    // release/re-acquire between the read and the write can't be
+    // clobbered (0 rows updated → someone else changed the state → not
+    // ours to take).
+    //
+    // The liveness check is in-process by design: run_state is shared PG,
+    // but a multi-instance deploy would need shared state for this (see
+    // the class doc on the future Redis migration) — today the app is
+    // single-instance, the same assumption the boot-time run-state reset
+    // already makes.
+    // The liveness check is in-process by design: run_state is shared PG,
+    // but a multi-instance deploy would need shared state for this (see
+    // the class doc on the future Redis migration) — today the app is
+    // single-instance, the same assumption the boot-time run-state reset
+    // already makes.
+    //
+    // Grace window: any genuine holder registers its connection
+    // synchronously after acquiring, so a map-absent row YOUNGER than the
+    // grace cannot be stale — only a row that has been map-orphaned for
+    // at least this long is stolen.
+    const held = await query<{ current_run_id: string | null; updated_at: Date }>(
+      `SELECT current_run_id, updated_at FROM run_state WHERE thread_id = $1`,
+      [threadId],
+    );
+    const heldRow = held.rows[0];
+    const heldRunId = heldRow?.current_run_id ?? null;
+    const connection = ACTIVE_CONNECTIONS.get(threadId);
+    if (connection && connection.runId != null && connection.runId === heldRunId) {
+      return false; // genuinely running in this process
+    }
+    // Grace: a just-acquired lock registers its map entry SYNCHRONOUSLY
+    // after the acquire returns (no await in between), so a map-absent
+    // row younger than the grace is a winner still mid-registration in a
+    // concurrent race — refuse it normally instead of stealing.
+    const updatedAt = heldRow?.updated_at ? new Date(heldRow.updated_at).getTime() : NaN;
+    const ageMs = Number.isFinite(updatedAt) ? Date.now() - updatedAt : Infinity;
+    if (ageMs < STALE_LOCK_GRACE_MS) return false;
+    const steal = await query<{ is_running: boolean }>(
+      `UPDATE run_state SET is_running = true, current_run_id = $2, updated_at = now()
+       WHERE thread_id = $1 AND is_running = true
+         AND current_run_id IS NOT DISTINCT FROM $3
+       RETURNING is_running`,
+      [threadId, runId, heldRunId],
+    );
+    if (steal.rows.length > 0) {
+      console.warn("[runner] stole a stale run lock (previous release failed)", {
+        threadId,
+        staleRunId: heldRunId,
+        newRunId: runId,
+      });
+      return true;
+    }
+    return false;
+  }
+
+  /**
+   * Shared end-of-run cleanup — called on EVERY exit path (success,
+   * mid-run failure, pre-run failure). Two guarded steps:
+   *
+   * 1. Release the run lock only when THIS run still owns it: the
+   *    `current_run_id` match fails when a successor run re-claimed the
+   *    state after a boot reset — this run's teardown must not release
+   *    the SUCCESSOR's lock (that would let a third run interleave with
+   *    it). Note stop() no longer releases the lock itself: the aborted
+   *    run keeps it through persistence and releases it HERE (see stop()).
+   * 2. Remove the map entry only while it is still this run's OBJECT
+   *    (identity check against the captured connection): a replacement
+   *    run's entry keeps its agent/subject references — its stop button
+   *    and event routing depend on them.
+   *
+   * Best-effort: the state step is individually guarded so a transient
+   * DB failure can't skip the map cleanup (and vice versa). A release
+   * that fails on a transient DB error does NOT wedge the thread
+   * permanently: acquireRunState detects the stale row (current_run_id
+   * with no live ACTIVE_CONNECTIONS entry) and steals it on the next
+   * run attempt.
+   */
+  private async teardownRun(
+    threadId: string,
+    connection: ActiveConnectionContext,
+    runId: string,
+  ): Promise<void> {
+    try {
+      const state = await this.getRunState(threadId);
+      if (state.currentRunId === runId) {
+        await this.setRunState(threadId, false);
+      }
+    } catch (err) {
+      console.error("[runner] run-state release failed", {
+        threadId,
+        runId,
+        error: err instanceof Error ? err.message : String(err),
+      });
+    }
+    if (ACTIVE_CONNECTIONS.get(threadId) === connection) {
+      connection.agent = undefined;
+      connection.runSubject = undefined;
+      connection.currentEvents = undefined;
+      ACTIVE_CONNECTIONS.delete(threadId);
+    }
+  }
+
+  /**
+   * Resolve a thread's ownership row from PG — the cross-process source of
+   * truth for whether a threadId exists and who owns it. thread_metadata
+   * carries the owner (null user/org on legacy rows → ""); a thread with
+   * runs but no metadata row is treated as ownerless (the same shape the
+   * cache refresh derives). Returns null when the thread doesn't exist at
+   * all — the caller decides what "absent" means (startRun: creatable;
+   * startConnect: nothing to replay). The thread cache deliberately isn't
+   * consulted here: it's per-process and empty right after boot, so a
+   * cache-missed EXISTING thread must still resolve its real owner.
+   */
+  private async getThreadOwnership(
+    threadId: string,
+  ): Promise<
+    Pick<LocalThreadEndpointRecord, "organizationId" | "createdById"> | null
+  > {
+    const meta = await query<{ user_id: string | null; org_id: string | null }>(
+      `SELECT user_id, org_id FROM thread_metadata WHERE thread_id = $1`,
+      [threadId],
+    );
+    if (meta.rows[0]) {
+      return {
+        organizationId: meta.rows[0].org_id ?? "",
+        createdById: meta.rows[0].user_id ?? "",
+      };
+    }
+    const runs = await query<{ has_runs: boolean }>(
+      `SELECT EXISTS(SELECT 1 FROM agent_runs WHERE thread_id = $1) AS has_runs`,
+      [threadId],
+    );
+    if (runs.rows[0]?.has_runs) {
+      return { organizationId: "", createdById: "" };
+    }
+    return null;
+  }
+
   // ─── Thread snapshot capture (preserved from PersistentAgentRunner) ────
 
   private async captureThreadData(request: AgentRunnerRunRequest): Promise<void> {
+    // Deleted-mid-run guard (see storeRun): a thread deleted while this
+    // run streamed must not be resurrected by the run's final write.
+    if (ACTIVE_CONNECTIONS.get(request.threadId)?.threadDeleted) return;
+
     const agentId = request.agent.agentId ?? "default";
     const messages = (request.agent as unknown as { messages?: Message[] }).messages;
     const userId = getRunnerUser()?.id ?? null;

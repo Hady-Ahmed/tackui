@@ -106,7 +106,7 @@ export async function PATCH(
       error: err instanceof Error ? err.message : String(err),
     });
     return NextResponse.json(
-      { error: "Failed to update template. Check server logs." },
+      { error: "Couldn't update the template — please try again." },
       { status: 500 },
     );
   }

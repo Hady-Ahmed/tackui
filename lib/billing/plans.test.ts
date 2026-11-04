@@ -64,6 +64,19 @@ describe("billing/plans", () => {
       const { defaultPlan } = await import("./plans");
       expect(defaultPlan()).toBe("free");
     });
+
+    it("returns 'free' under SaaS mode even when Stripe is NOT wired (never the unlimited self-host sentinel)", async () => {
+      // THE regression: the hosted product without Stripe checkout must
+      // fall back to the RESTRICTED default. Keying on BILLING_ENABLED
+      // here handed every org unlimited limits the moment Stripe env vars
+      // were absent — the exact bring-up state a SaaS launch passes
+      // through.
+      process.env.SAAS_MODE = "true";
+      delete process.env.STRIPE_SECRET_KEY;
+      vi.resetModules();
+      const { defaultPlan } = await import("./plans");
+      expect(defaultPlan()).toBe("free");
+    });
   });
 
   describe("planIdFromPriceId", () => {

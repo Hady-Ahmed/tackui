@@ -10,6 +10,96 @@ import type { RequiredPlan } from "@/lib/catalog/catalog.config";
 
 export type AgentAuthMode = "none" | "jwt";
 
+/**
+ * Agent provenance:
+ * - "manual"   — added via the admin /agents page (default).
+ * - "template" — legacy label kept for rows created before migration 0013
+ *   (equivalent to "manual" for permissions; catalog installs are
+ *   distinguished by sourceTemplateId, not origin).
+ * - "builder"  — created through the builder (member-accessible). The
+ *   runtime config resolves from platform env at run time (endpoint from
+ *   AGENTOS_BASE_URL + remoteAgentId, JWT secret from AGENTOS_JWT_SECRET,
+ *   scopes ["app:user"]); the row's endpoint/jwtSecret carry nothing.
+ */
+export const AGENT_ORIGINS = ["manual", "template", "builder"] as const;
+export type AgentOrigin = (typeof AGENT_ORIGINS)[number];
+
+/**
+ * What a RUNNER needs to run a builder agent — snapshot written by the
+ * builder create/update path from the definition tackui itself built.
+ * The AgentOS stored config is the source of truth; this snapshot only
+ * powers the pre-run run gate (model tier / tool key checks) without an
+ * AgentOS round-trip.
+ */
+export interface AgentRequirements {
+  /**
+   * Model requirements snapshot — sourced from the platform models catalog
+   * at create/update time. `requiresKey` mirrors the catalog's wire field:
+   * false for keyless providers (e.g. ollama) where no credential is
+   * demanded and the provider is deliberately excluded from the runner's
+   * credentials catalog — the gate must not 402 a run that can never
+   * satisfy its own requirement.
+   */
+  model: {
+    provider: string;
+    id: string;
+    platformTier: boolean;
+    requiresKey?: boolean;
+    /**
+     * The platform's declared dep key (e.g. "openai_api_key") — the run
+     * gate consumes it instead of deriving from the slug. Null for keyless
+     * providers; the snapshot schema rejects a KEYED model without one.
+     */
+    depKey: string | null;
+    /**
+     * The agno registry binding name (e.g. "OpenAIResponses") — sent back
+     * with the component config so same-id doors bind exactly.
+     */
+    name: string;
+  };
+  /**
+   * Tool requirements snapshot — sourced from the platform tools catalog
+   * at create/update time. `requiresKey` is the AG-UI context dep key the
+   * runner delivers; `provider` is the derived provider slug (the key the
+   * runner saves under); `platformFallback` (true = the platform key
+   * serves a runner without one) drives the run gate's fallback decision.
+   * The run gate reads ONLY this snapshot — never a live catalog — so a
+   * tool unknown to the snapshot fails closed.
+   */
+  tools: {
+    name: string;
+    label?: string;
+    requiresKey?: string | null;
+    provider?: string | null;
+    /**
+     * Always present after the store parses a requirements payload —
+     * old snapshots default to false (fail-closed: the run gate then
+     * requires a runner key). New snapshots carry the platform-derived
+     * value computed at create/update time.
+     */
+    platformFallback: boolean;
+    /**
+     * The full credential contract — multi-credential toolkits (the X
+     * toolkit's four) carry several; single-key tools carry exactly one.
+     * Absent on snapshots written before multi-credential support: the
+     * run gate then treats the single `requiresKey` dep as the contract.
+     */
+    credentials?: { depKey: string; label: string }[];
+  }[];
+  /**
+   * MCP connectors (org-level, connectors table) this agent wires in,
+   * carried as the connector's stable ID plus its org-facing name. The ID
+   * is what the stored AgentOS config declares and what the dispatcher
+   * matches the run wire's mcp_connectors keys against — snapshotting the
+   * ID (not just the name) is what makes delete-and-recreate visible: a
+   * recreated connector gets a NEW id while the stored config still
+   * declares the old one, and the run gate must 402 instead of silently
+   * delivering a token for a connector the config never declared. The
+   * name is for gate copy and display only.
+   */
+  connectors: { id: string; name: string }[];
+}
+
 export interface AgentEntry {
   id: string;
   name: string;
@@ -54,6 +144,28 @@ export interface AgentEntry {
    * deleting a template leaves installed copies working.
    */
   sourceTemplateId?: string;
+  /**
+   * Builder provenance (migration 0013). "builder" agents resolve their
+   * runtime config from platform env at run time (see AgentOrigin docs).
+   * The store defaults absent rows to "manual".
+   */
+  origin?: AgentOrigin;
+  /**
+   * The member who created a builder agent (attribution survives
+   * membership changes). Undefined for manual/template rows.
+   */
+  authorUserId?: string;
+  /**
+   * The AgentOS-side component id for builder agents. Server-side only:
+   * the run/edit machinery uses it; it never leaves the server (the
+   * AgentOS's address is platform config).
+   */
+  remoteAgentId?: string;
+  /**
+   * Runner-requirements snapshot for builder agents (powers the pre-run
+   * gate). Undefined for non-builder agents.
+   */
+  requirements?: AgentRequirements;
   /**
    * Snapshot of the template's updated_at at install/last-sync time.
    * With live propagation the template is the runtime's source of truth;
@@ -100,6 +212,21 @@ export interface PublicAgent {
   hasJwtSecret: boolean;
   jwtScopes?: string[];
   sourceTemplateId?: string;
+  /** Builder provenance (absent = "manual"). */
+  origin?: AgentOrigin;
+  /** Creator attribution for builder agents. */
+  authorUserId?: string;
+  /** Runner-requirements snapshot for builder agents (run-gate display). */
+  requirements?: AgentRequirements;
+  /**
+   * The agent's current system prompt — builder agents only, read back
+   * from the AgentOS component config on GET /api/agents/[id] (the
+   * instructions are never stored locally). Omitted when the platform is
+   * unreachable — the edit form's blank-preserve wire contract keeps the
+   * stored value in that case. Not a secret (unlike jwtSecret): the owner
+   * needs to see and tweak it.
+   */
+  instructions?: string;
   installedTemplateUpdatedAt?: string;
   templateRemovedAt?: string;
   /**

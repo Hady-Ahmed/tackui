@@ -172,10 +172,13 @@ expose backend JWT verification keys.
   `rowToEntry` decrypts on read. Everything downstream (registry JWT
   minting, `toPublicAgent` stripping, blank-preserve PATCH) works
   unchanged on plaintext `AgentEntry.jwtSecret`.
-- **Plaintext fallback (documented):** when `DB_ENCRYPTION_KEY` is
-  unset, secrets are stored as plaintext — loud warning at boot
-  (instrumentation.ts) + once per process on write. Keeps zero-config
-  self-host working; set the key to get encryption.
+- **Plaintext fallback (solo mode only):** when `DB_ENCRYPTION_KEY` is
+  unset, secrets are stored as plaintext — but since the SaaS-hardening
+  pass, boot REFUSES without the key everywhere except solo mode
+  (`AUTH_DISABLED=true`, instrumentation.ts throws with the fix in the
+  error). The fallback keeps a bare `docker-compose up` local playground
+  working; any deployment with real tenants cannot boot plaintext.
+  Writes without a key still warn once per process (the solo path).
 - **Boot backfill** (`lib/crypto/backfill.ts`, wired into
   `instrumentation.ts`): idempotent pass that re-encrypts legacy
   plaintext rows (`jwt_secret NOT LIKE 'enc:v1:%'`) so existing
@@ -188,6 +191,54 @@ expose backend JWT verification keys.
 - **Key rotation:** changing `DB_ENCRYPTION_KEY` invalidates existing
   ciphertexts (GCM auth fails). Re-save each agent's JWT secret after
   rotation (the value itself doesn't change — only the encryption key).
+
+## Builder-origin agents
+
+Migration 0013 adds builder provenance to the same `agents` table. Rows
+created through the agent builder
+([agent-builder.md](./agent-builder.md) — full details there) carry:
+
+- `origin: "builder"` — provenance. `manual`/`template` are the
+  admin-created rows; `template` is a legacy label for pre-0013 rows
+  (catalog installs are distinguished by `sourceTemplateId`, not origin).
+- `authorUserId` — the member who created it (attribution survives
+  membership changes). Null for manual/template rows.
+- `remoteAgentId` — the AgentOS-side component id. tackui's own ids stay
+  server-generated; the AgentOS component id mirrors it. Run/edit
+  requests to the AgentOS use this id.
+- `requirements` — a JSON snapshot of what a RUNNER needs to run the
+  agent (`{ model: {provider, id, platformTier}, tools: [{name,
+  requiresKey?, provider?, platformFallback?}], connectors: [{id, name}] }`),
+  written at create/update from the definition tackui itself built. The
+  AgentOS stored config is the source of truth; this snapshot only powers
+  the pre-run run gate so run requests need no AgentOS round-trip.
+  Snapshots that predate the `provider`/`platformFallback` tool fields
+  parse fail-closed (provider re-derived from the dep key, fallback
+  false). Connector snapshots that predate the id form carry names —
+  they resolve against nothing and 402 until the agent is re-saved.
+  When the gate refuses a run it aggregates the remedies into the 402:
+  a missing connector needs an org admin to add it (and the agent
+  re-saved in the agent builder); an unreadable connector token needs
+  the admin to re-enter it.
+
+How they differ from manual/template agents at run time:
+
+- **Endpoint resolution:** the runtime recomputes
+  `{AGENTOS_BASE_URL}/agui/{remoteAgentId}` per request (so an
+  `AGENTOS_BASE_URL` change takes effect without rewriting rows) instead
+  of reading the stored `endpoint`. When the platform is unconfigured,
+  builder agents resolve to nothing rather than half-running.
+- **Auth:** the JWT is minted with `AGENTOS_JWT_SECRET` (platform env),
+  `sub` = the running user, `scopes: ["app:user"]`. The stored row
+  carries no `jwtSecret` — a platform secret rotation is transparent.
+- **Dependencies:** the definition carries requirement *declarations*
+  only; the runner's BYOK keys and the org's connector tokens are
+  resolved per-run and delivered as AG-UI context items (see
+  [agent-builder.md](./agent-builder.md#run-gate--libagentsrun-gatets)).
+- **Permissions:** members can read builder agents via the org's
+  `GET /api/agents`; only the author can edit or delete them
+  (PATCH/DELETE `on /api/agents/builder/[id]`), unlike manual agents
+  (admin-gated) and catalog installs (fully locked).
 
 ## Future / extension points
 

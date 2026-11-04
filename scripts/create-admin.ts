@@ -35,6 +35,15 @@ async function main() {
     ["admin", email],
   );
 
+  // Mark the email verified: the script is the operator's own action
+  // (no SMTP round-trip to click), and an unverified admin would trip
+  // every emailVerified-gated path (social-account linking, OIDC
+  // flows). Column is camelCase-quoted per Better Auth's schema.
+  await query(
+    `UPDATE "user" SET "emailVerified" = TRUE WHERE email = $2 AND role = $1`,
+    ["admin", email],
+  );
+
   console.log(`Admin user ready: ${email}`);
 }
 

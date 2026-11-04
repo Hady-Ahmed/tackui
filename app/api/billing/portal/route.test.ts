@@ -8,8 +8,15 @@ vi.mock("@/lib/auth/context", () => ({
 }));
 
 const mockCreatePortalSession = vi.fn();
+// Mock the checkout helper so we don't hit Stripe.
 vi.mock("@/lib/billing/checkout", () => ({
   createPortalSession: (...a: unknown[]) => mockCreatePortalSession(...a),
+}));
+
+// Rate limiting is mocked (the store has its own suite).
+const mockCheckUserLimit = vi.fn().mockReturnValue(null);
+vi.mock("@/lib/ratelimit/middleware", () => ({
+  checkUserLimit: (...a: unknown[]) => mockCheckUserLimit(...a),
 }));
 
 import { POST } from "./route";
@@ -34,6 +41,7 @@ describe("POST /api/billing/portal", () => {
     mockGetCurrentUser.mockReset();
     mockCanManageAgents.mockReset();
     mockCreatePortalSession.mockReset();
+    mockCheckUserLimit.mockReset().mockReturnValue(null);
   });
   afterEach(() => {
     delete process.env.SAAS_MODE;
@@ -79,5 +87,18 @@ describe("POST /api/billing/portal", () => {
     expect(res.status).toBe(200);
     expect((await res.json()).url).toBe("https://billing.stripe.com/portal");
     expect(mockCreatePortalSession).toHaveBeenCalledWith("org-1");
+  });
+
+  it("enforces the billingMutate rate limit (after auth, before Stripe)", async () => {
+    const { POST } = await loadSaaS();
+    mockGetCurrentUser.mockResolvedValue(user());
+    mockCanManageAgents.mockResolvedValue(true);
+    mockCheckUserLimit.mockReturnValueOnce(
+      new Response("Rate limited", { status: 429 }) as never,
+    );
+    const res = await POST();
+    expect(res.status).toBe(429);
+    expect(mockCheckUserLimit).toHaveBeenCalledWith("u1", "billingMutate");
+    expect(mockCreatePortalSession).not.toHaveBeenCalled();
   });
 });

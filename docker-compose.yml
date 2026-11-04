@@ -37,6 +37,9 @@ services:
       ALLOW_PRIVATE_ENDPOINTS: ${ALLOW_PRIVATE_ENDPOINTS:-}
       TRUSTED_PROXY_HOPS: ${TRUSTED_PROXY_HOPS:-}
       CONCURRENT_RUN_TIMEOUT_MS: ${CONCURRENT_RUN_TIMEOUT_MS:-}
+      DB_ENCRYPTION_KEY: ${DB_ENCRYPTION_KEY:-}
+      AGENTOS_BASE_URL: ${AGENTOS_BASE_URL:-http://agent-builder:7778}
+      AGENTOS_JWT_SECRET: ${AGENTOS_JWT_SECRET:-}
       SENTRY_DSN: ${SENTRY_DSN:-}
       SENTRY_TRACES_SAMPLE_RATE: ${SENTRY_TRACES_SAMPLE_RATE:-0.1}
       # Connecting to a local agent backend? Uncomment this + see README.
@@ -46,12 +49,56 @@ services:
       db:
         condition: service_healthy
     healthcheck:
-      test: ["CMD-SHELL", "wget -qO- http://localhost:3000/api/health || exit 1"]
+      test: ["CMD-SHELL", "wget -qO- http://127.0.0.1:3000/api/health || exit 1"]
       interval: 10s
       timeout: 5s
       retries: 3
       start_period: 15s
     restart: unless-stopped
 
+  # Agent-builder service database — separate from the app's `db` on
+  # purpose: the builder owns its catalog/state schema and its backups
+  # have a different lifecycle. Not exposed to the host; the compose
+  # network is the only way in.
+  db-builder:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: agentos
+      POSTGRES_PASSWORD: ${AGENTOS_DB_PASSWORD:-agentos}
+      POSTGRES_DB: agentos
+    volumes:
+      - pg_data_builder:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U agentos"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+    restart: unless-stopped
+
+  # The agent builder itself. No published ports — the app is the only
+  # host-facing interface and reaches it over the compose network via
+  # AGENTOS_BASE_URL above. JWT_SECRET must equal the app's
+  # AGENTOS_JWT_SECRET (the dispatcher refuses to boot without one).
+  agent-builder:
+    build:
+      context: ./agent-builder
+    environment:
+      DATABASE_URL: postgresql://agentos:${AGENTOS_DB_PASSWORD:-agentos}@db-builder:5432/agentos
+      JWT_SECRET: ${AGENTOS_JWT_SECRET:-}
+      AGENT_OS_HOST: 0.0.0.0
+      AGENT_OS_PORT: "7778"
+      SENTRY_DSN: ${AGENTOS_SENTRY_DSN:-}
+    depends_on:
+      db-builder:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "python3", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:7778/health')"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+      start_period: 30s
+    restart: unless-stopped
+
 volumes:
   pg_data:
+  pg_data_builder:

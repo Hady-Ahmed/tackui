@@ -15,6 +15,12 @@ vi.mock("@/lib/db/pg", () => ({
   query: (...a: unknown[]) => mockQuery(...a),
 }));
 
+// Rate limiting is mocked (the store has its own suite).
+const mockCheckUserLimit = vi.fn().mockReturnValue(null);
+vi.mock("@/lib/ratelimit/middleware", () => ({
+  checkUserLimit: (...a: unknown[]) => mockCheckUserLimit(...a),
+}));
+
 import { GET } from "./route";
 
 const user = (orgId = "org-1") => ({
@@ -28,6 +34,7 @@ beforeEach(() => {
   mockGetCurrentUser.mockReset();
   mockCheckCanCreateOrg.mockReset();
   mockQuery.mockReset();
+  mockCheckUserLimit.mockReset().mockReturnValue(null);
   mockCheckCanCreateOrg.mockResolvedValue(null);
   mockQuery.mockImplementation(async (sql: string) => {
     // Member count query (GROUP BY)
@@ -83,5 +90,16 @@ describe("GET /api/org", () => {
     const res = await GET();
     const data = await res.json();
     expect(data.canCreateOrg).toBe(true);
+  });
+
+  it("enforces the accountRead rate limit", async () => {
+    mockGetCurrentUser.mockResolvedValue(user());
+    mockCheckUserLimit.mockReturnValueOnce(
+      new Response("Rate limited", { status: 429 }) as never,
+    );
+    const res = await GET();
+    expect(res.status).toBe(429);
+    expect(mockCheckUserLimit).toHaveBeenCalledWith("u1", "accountRead");
+    expect(mockQuery).not.toHaveBeenCalled();
   });
 });

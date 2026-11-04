@@ -9,79 +9,21 @@ import { planSatisfies, type PlanId } from "@/lib/billing/plans";
 import { useBilling } from "@/lib/billing/use-billing";
 import { AccountMenu } from "./account-menu";
 import { ThemeToggle } from "./theme-toggle";
-import { useAuthConfig } from "@/lib/auth/use-auth-config";
-import { useCanManageAgents } from "@/lib/auth/use-can-manage-agents";
 
 function planLabel(required: RequiredPlan): string {
   return required === "pro" ? "Pro" : "Team";
 }
 
-type TestStatus = "idle" | "loading" | "ok" | "fail";
-type TestResult = { status: TestStatus; message?: string };
-
-const TEST_HELP =
-  "Tests only that the server is reachable (an HTTP request succeeds). " +
-  "A success does NOT validate auth, AG-UI protocol compliance, or that the agent will actually run. " +
-  "A failure usually means the URL is wrong or the server is down.";
-
-async function testEndpoint(endpoint: string): Promise<TestResult> {
-  try {
-    const res = await fetch("/api/agents/reachability-probe", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ endpoint }),
-    });
-    const data = await res.json().catch(() => ({}));
-    if (!res.ok) {
-      return {
-        status: "fail",
-        message:
-          (typeof data === "object" && data && "error" in data
-            ? String((data as { error: unknown }).error)
-            : `Validation failed (${res.status})`),
-      };
-    }
-    return {
-      status: data.ok ? "ok" : "fail",
-      message: data.message as string,
-    };
-  } catch {
-    return { status: "fail", message: "Network error talking to /api/agents/reachability-probe" };
-  }
-}
-
-function dotClass(status: TestStatus): string {
-  switch (status) {
-    case "loading":
-      return "bg-zinc-400 animate-pulse";
-    case "ok":
-      return "bg-green-500";
-    case "fail":
-      return "bg-red-500";
-    default:
-      return "bg-zinc-300 dark:bg-zinc-600";
-  }
-}
-
-function dotTitle(status: TestStatus, message?: string): string {
-  switch (status) {
-    case "idle":
-      return "Not tested yet";
-    case "loading":
-      return "Testing connection...";
-    default:
-      return message || "";
-  }
-}
-
 /**
  * Resolved state-dot spec for an agent's avatar corner — null = no dot.
- * Precedence: Paused (amber) > plan-locked (blue) > probe status (manual
- * agents only — managed agents' endpoints never reach the client, so
- * there's nothing to probe). Removed agents get no dot (the "Removed"
- * chip carries it); healthy managed agents get none either. Shared by
- * the expanded rows and the collapsed rail — one source of truth for
- * the precedence order.
+ * Precedence: Paused (amber) > plan-locked (blue). Removed agents get no
+ * dot (the "Removed" chip carries it); healthy managed agents get none
+ * either. No reachability dot: a green probe only proves the endpoint
+ * answered *something* — not that the agent works — so it read as false
+ * reassurance. Dead endpoints surface at run time, and the edit surface
+ * keeps an explicit "Test connection" button. Shared by the expanded
+ * rows and the collapsed rail — one source of truth for the precedence
+ * order.
  */
 interface DotSpec {
   cls: string;
@@ -89,11 +31,7 @@ interface DotSpec {
   aria: string;
 }
 
-function agentDot(
-  agent: PublicAgent,
-  statuses: Record<string, TestResult>,
-  plan: string | null,
-): DotSpec | null {
+function agentDot(agent: PublicAgent, plan: string | null): DotSpec | null {
   const removed = Boolean(agent.templateRemovedAt);
   const paused = !removed && Boolean(agent.templateUnpublished);
   // Plan-gated install whose template's requiredPlan outranks the
@@ -120,15 +58,6 @@ function agentDot(
       aria: `Requires the ${label} plan`,
     };
   }
-  if (agent.endpoint) {
-    const status = (statuses[agent.id] ?? { status: "idle" }).status;
-    const title = dotTitle(status, statuses[agent.id]?.message);
-    return {
-      cls: dotClass(status),
-      title,
-      aria: `Connection status: ${title}`,
-    };
-  }
   return null;
 }
 
@@ -141,6 +70,9 @@ function agentDot(
 function AgentDot({ dot, titled = true }: { dot: DotSpec; titled?: boolean }) {
   return (
     <span
+      // role="img": aria-label on a bare span is ignored by assistive
+      // tech — the img role makes the status announcement land.
+      role="img"
       className={`absolute -bottom-0.5 -right-0.5 inline-block h-2 w-2 rounded-full border border-white dark:border-zinc-950 ${dot.cls}`}
       title={titled ? dot.title : undefined}
       aria-label={titled ? dot.aria : undefined}
@@ -173,63 +105,11 @@ export function AgentSidebar({
   mobileOpen,
   onCloseMobile,
 }: AgentSidebarProps) {
-  const [statuses, setStatuses] = useState<Record<string, TestResult>>({});
-  const { config } = useAuthConfig();
-  const { canManage } = useCanManageAgents();
   // The viewer's org plan (null when billing isn't configured —
   // self-host, or SaaS without Stripe). Cached module-level and already
   // fetched by the AccountMenu in this sidebar, so no extra request.
   const { billing } = useBilling();
   const plan = billing?.plan ?? null;
-  // Show the add-agent (+) icon to org owners/admins (canManage from
-  // /api/auth/can-manage-agents) OR in solo mode (synthetic admin). It
-  // links to /agents?add=1 — the workspace agent-management page with
-  // the add form already open. The catalog book icon is for everyone.
-  const showManageLink = canManage === true || (config?.authDisabled ?? false);
-
-  useEffect(() => {
-    let cancelled = false;
-    const testAll = async () => {
-      // Managed agents (catalog installs) carry no endpoint in the API
-      // response — the curator's backend URLs never reach the client —
-      // so there's nothing to probe. They show no status dot; their
-      // connection health is the curator's responsibility.
-      const entries = agents
-        .filter((a) => a.endpoint)
-        .map((a) => ({
-          id: a.id,
-          endpoint: a.endpoint as string,
-        }));
-      setStatuses((prev) => {
-        const next: Record<string, TestResult> = {};
-        for (const e of entries) next[e.id] = { status: "loading" };
-        for (const id of Object.keys(prev)) {
-          if (!next[id]) next[id] = prev[id];
-        }
-        return next;
-      });
-
-      const results = await Promise.all(
-        entries.map(async (e) => ({
-          id: e.id,
-          result: await testEndpoint(e.endpoint),
-        })),
-      );
-      if (cancelled) return;
-      setStatuses((prev) => {
-        const next = { ...prev };
-        for (const r of results) next[r.id] = r.result;
-        return next;
-      });
-    };
-    testAll();
-    const onFocus = () => testAll();
-    window.addEventListener("focus", onFocus);
-    return () => {
-      cancelled = true;
-      window.removeEventListener("focus", onFocus);
-    };
-  }, [agents]);
 
   const selectAgentAndClose = useCallback(
     (id: string) => {
@@ -262,25 +142,21 @@ export function AgentSidebar({
           <CollapsedContent
             agents={agents}
             activeAgent={activeAgent}
-            statuses={statuses}
             plan={plan}
             onSelectAgent={onSelectAgent}
             onNewChat={onNewChat}
             onToggleCollapse={onToggleCollapse}
-            showManageLink={showManageLink}
           />
         ) : (
           <ExpandedContent
             agents={agents}
             activeAgent={activeAgent}
             activeThreadId={activeThreadId}
-            statuses={statuses}
             plan={plan}
             onSelectAgent={onSelectAgent}
             onNewChat={onNewChat}
             onSelectThread={onSelectThread}
             onToggleCollapse={onToggleCollapse}
-            showManageLink={showManageLink}
           />
         )}
       </aside>
@@ -297,21 +173,19 @@ export function AgentSidebar({
           aria-hidden="true"
         />
         <aside
-          className={`fixed inset-y-0 left-0 z-50 flex w-64 flex-col overflow-hidden border-r border-zinc-200 bg-white shadow-xl transition-transform duration-200 ease-in-out dark:border-zinc-800 dark:bg-zinc-950 ${
-            mobileOpen ? "translate-x-0" : "-translate-x-full"
+          className={`fixed inset-y-0 left-0 z-50 flex w-64 flex-col overflow-hidden border-r border-zinc-200 bg-white shadow-xl transition-[transform,visibility] duration-200 ease-in-out dark:border-zinc-800 dark:bg-zinc-950 ${
+            mobileOpen ? "visible translate-x-0" : "invisible -translate-x-full"
           }`}
         >
           <ExpandedContent
             agents={agents}
             activeAgent={activeAgent}
             activeThreadId={activeThreadId}
-            statuses={statuses}
             plan={plan}
             onSelectAgent={selectAgentAndClose}
             onNewChat={newChatAndClose}
             onSelectThread={selectThreadAndClose}
             onToggleCollapse={onCloseMobile}
-            showManageLink={showManageLink}
             isMobile
           />
         </aside>
@@ -324,26 +198,22 @@ function ExpandedContent({
   agents,
   activeAgent,
   activeThreadId,
-  statuses,
   plan,
   onSelectAgent,
   onNewChat,
   onSelectThread,
   onToggleCollapse,
-  showManageLink,
   isMobile = false,
 }: {
   agents: PublicAgent[];
   activeAgent: string;
   activeThreadId: string;
-  statuses: Record<string, TestResult>;
   /** Viewer's org plan (null when billing isn't configured — never gate). */
   plan: string | null;
   onSelectAgent: (id: string) => void;
   onNewChat: () => void;
   onSelectThread: (threadId: string) => void;
   onToggleCollapse: () => void;
-  showManageLink: boolean;
   isMobile?: boolean;
 }) {
   return (
@@ -407,25 +277,6 @@ function ExpandedContent({
           <p className="text-xs font-medium uppercase tracking-wide text-zinc-400">
             Agents
           </p>
-          <span
-            className="inline-flex cursor-help text-zinc-400 transition-colors hover:text-zinc-600 dark:hover:text-zinc-300"
-            title={TEST_HELP}
-            aria-label="What do the status dots mean?"
-          >
-            <svg
-              xmlns="http://www.w3.org/2000/svg"
-              viewBox="0 0 16 16"
-              fill="currentColor"
-              className="h-3.5 w-3.5"
-              aria-hidden="true"
-            >
-              <path
-                fillRule="evenodd"
-                d="M8 15A7 7 0 1 0 8 1a7 7 0 0 0 0 14Zm0-9a1 1 0 1 1-2 0 1 1 0 0 1 2 0ZM7 7a.75.75 0 0 0 0 1.5h.25v2.5H7a.75.75 0 0 0 0 1.5h2a.75.75 0 0 0 0-1.5h-.25v-3A.75.75 0 0 0 8 7H7Z"
-                clipRule="evenodd"
-              />
-            </svg>
-          </span>
           <div className="ml-auto flex items-center gap-0.5">
             <Link
               href="/app/catalog"
@@ -445,25 +296,27 @@ function ExpandedContent({
                 <path d="M8.75 12.9556C9.68656 12.3509 10.8023 12 12 12C12.4539 12 12.8959 12.0504 13.321 12.1459C13.6577 12.2215 14 11.9794 14 11.6344V3.63964C14 3.4115 13.8459 3.21064 13.6224 3.16462C13.0985 3.05669 12.5559 3 12 3C10.8428 3 9.74308 3.24568 8.75 3.68772V12.9556Z" />
               </svg>
             </Link>
-            {showManageLink && (
-              <Link
-                href="/agents?add=1"
-                title="Add agent"
-                aria-label="Add agent"
-                className="rounded p-1 text-zinc-400 transition-colors hover:bg-zinc-100 hover:text-zinc-600 dark:hover:bg-zinc-800 dark:hover:text-zinc-300"
+            <Link
+              href="/agents?add=1"
+              title="Add agent"
+              aria-label="Add agent"
+              className="rounded p-1 text-zinc-400 transition-colors hover:bg-zinc-100 hover:text-zinc-600 dark:hover:bg-zinc-800 dark:hover:text-zinc-300"
+            >
+              {/* Plus glyph — the one agent entry point: opens /agents with
+                  the add panel open (builder form by default; org admins
+                  can flip to the connect-your-own-backend form). Members
+                  build agents here too — the builder is
+                  member-accessible. */}
+              <svg
+                xmlns="http://www.w3.org/2000/svg"
+                viewBox="0 0 24 24"
+                fill="currentColor"
+                className="h-4 w-4"
+                aria-hidden="true"
               >
-                {/* Plus glyph — opens /agents with the add-agent form open. */}
-                <svg
-                  xmlns="http://www.w3.org/2000/svg"
-                  viewBox="0 0 16 16"
-                  fill="currentColor"
-                  className="h-4 w-4"
-                  aria-hidden="true"
-                >
-                  <path d="M8.75 3.75a.75.75 0 0 0-1.5 0v3.5h-3.5a.75.75 0 0 0 0 1.5h3.5v3.5a.75.75 0 0 0 1.5 0v-3.5h3.5a.75.75 0 0 0 0-1.5h-3.5v-3.5Z" />
-                </svg>
-              </Link>
-            )}
+                <path d="M12 5.25a.75.75 0 0 1 .75.75v5.25H18a.75.75 0 0 1 0 1.5h-5.25V18a.75.75 0 0 1-1.5 0v-5.25H6a.75.75 0 0 1 0-1.5h5.25V6a.75.75 0 0 1 .75-.75Z" />
+              </svg>
+            </Link>
           </div>
         </div>
         <ul className="space-y-0.5">
@@ -491,7 +344,7 @@ function ExpandedContent({
             // the collapsed rail): amber = Paused, blue = plan-locked,
             // probe colors for manual agents; removed + healthy managed
             // agents show none.
-            const dot = agentDot(agent, statuses, plan);
+            const dot = agentDot(agent, plan);
             // Hover completes the clamped subtitle: managed agents get
             // the live tagline (whose tail the 2-line clamp may hide)
             // plus the description — the tooltip renders the newlines
@@ -599,22 +452,18 @@ function ExpandedContent({
 function CollapsedContent({
   agents,
   activeAgent,
-  statuses,
   plan,
   onSelectAgent,
   onNewChat,
   onToggleCollapse,
-  showManageLink,
 }: {
   agents: PublicAgent[];
   activeAgent: string;
-  statuses: Record<string, TestResult>;
   /** Viewer's org plan (null when billing isn't configured — never gate). */
   plan: string | null;
   onSelectAgent: (id: string) => void;
   onNewChat: () => void;
   onToggleCollapse: () => void;
-  showManageLink: boolean;
 }) {
   return (
     <>
@@ -665,7 +514,7 @@ function CollapsedContent({
           // expanded rows (amber = Paused, blue = plan-locked, probe
           // colors for manual agents; managed agents without a flag show
           // none — never probed).
-          const dot = agentDot(agent, statuses, plan);
+          const dot = agentDot(agent, plan);
           const lockedLabel = agent.templateRequiredPlan
             ? planLabel(agent.templateRequiredPlan)
             : "";
@@ -716,25 +565,26 @@ function CollapsedContent({
       </nav>
 
       <div className="mt-2 flex flex-col items-center gap-1">
-        {showManageLink && (
-          <Link
-            href="/agents?add=1"
-            title="Add agent"
-            className="flex h-9 w-9 items-center justify-center rounded-lg text-zinc-500 transition-colors hover:bg-zinc-100 dark:text-zinc-400 dark:hover:bg-zinc-800"
-            aria-label="Add agent"
+        <Link
+          href="/agents?add=1"
+          title="Add agent"
+          className="flex h-9 w-9 items-center justify-center rounded-lg text-zinc-500 transition-colors hover:bg-zinc-100 dark:text-zinc-400 dark:hover:bg-zinc-800"
+          aria-label="Add agent"
+        >
+          {/* Plus glyph — the one agent entry point: opens /agents with the
+              add panel open (builder form by default; org admins can flip
+              to the connect-your-own-backend form). Members build agents
+              here too — the builder is member-accessible. */}
+          <svg
+            xmlns="http://www.w3.org/2000/svg"
+            viewBox="0 0 24 24"
+            fill="currentColor"
+            className="h-4 w-4"
+            aria-hidden="true"
           >
-            {/* Plus glyph — opens /agents with the add-agent form open. */}
-            <svg
-              xmlns="http://www.w3.org/2000/svg"
-              viewBox="0 0 16 16"
-              fill="currentColor"
-              className="h-4 w-4"
-              aria-hidden="true"
-            >
-              <path d="M8.75 3.75a.75.75 0 0 0-1.5 0v3.5h-3.5a.75.75 0 0 0 0 1.5h3.5v3.5a.75.75 0 0 0 1.5 0v-3.5h3.5a.75.75 0 0 0 0-1.5h-3.5v-3.5Z" />
-            </svg>
-          </Link>
-        )}
+            <path d="M12 5.25a.75.75 0 0 1 .75.75v5.25H18a.75.75 0 0 1 0 1.5h-5.25V18a.75.75 0 0 1-1.5 0v-5.25H6a.75.75 0 0 1 0-1.5h5.25V6a.75.75 0 0 1 .75-.75Z" />
+          </svg>
+        </Link>
         <Link
           href="/app/catalog"
           title="Browse catalog"
@@ -814,46 +664,66 @@ function ConversationList({
     setError(null);
   };
 
+  const [renaming, setRenaming] = useState(false);
+
   const submitRename = async (threadId: string) => {
+    // In-flight guard: a double-Enter or double-click on ✓ must not fire
+    // the PATCH twice.
+    if (renaming) return;
     const title = editValue.trim();
     if (!title) {
       cancelRename();
       return;
     }
-    const res = await fetch(`/api/threads/${threadId}`, {
-      method: "PATCH",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ title }),
-    });
-    if (!res.ok) {
-      const data = await res.json().catch(() => ({}));
-      setError(
-        (typeof data === "object" && data && "error" in data
-          ? String((data as { error: unknown }).error)
-          : null) || "Rename failed",
-      );
-      return;
+    setRenaming(true);
+    try {
+      const res = await fetch(`/api/threads/${threadId}`, {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ title }),
+      });
+      if (!res.ok) {
+        const data = await res.json().catch(() => ({}));
+        setError(
+          (typeof data === "object" && data && "error" in data
+            ? String((data as { error: unknown }).error)
+            : null) || "Rename failed",
+        );
+        return;
+      }
+      cancelRename();
+      refetchThreads();
+    } catch {
+      // Network failure must not die silently — same copy as the other
+      // mutating surfaces.
+      setError("Couldn't reach the server — please try again.");
+    } finally {
+      setRenaming(false);
     }
-    cancelRename();
-    refetchThreads();
   };
 
   const handleDelete = async (threadId: string) => {
     if (!confirm("Delete this conversation? This cannot be undone.")) return;
-    const res = await fetch(`/api/threads/${threadId}`, {
-      method: "DELETE",
-    });
-    if (!res.ok) {
-      const data = await res.json().catch(() => ({}));
-      setError(
-        (typeof data === "object" && data && "error" in data
-          ? String((data as { error: unknown }).error)
-          : null) || "Delete failed",
-      );
-      return;
+    try {
+      const res = await fetch(`/api/threads/${threadId}`, {
+        method: "DELETE",
+      });
+      if (!res.ok) {
+        const data = await res.json().catch(() => ({}));
+        setError(
+          (typeof data === "object" && data && "error" in data
+            ? String((data as { error: unknown }).error)
+            : null) || "Delete failed",
+        );
+        return;
+      }
+      if (threadId === activeThreadId) onNewChat();
+      refetchThreads();
+    } catch {
+      // Network failure must not die silently — same copy as the other
+      // mutating surfaces.
+      setError("Couldn't reach the server — please try again.");
     }
-    if (threadId === activeThreadId) onNewChat();
-    refetchThreads();
   };
 
   if (isLoading) {
@@ -919,8 +789,9 @@ function ConversationList({
                 />
                 <button
                   onClick={() => submitRename(thread.id)}
+                  disabled={renaming}
                   title="Save"
-                  className="shrink-0 text-xs font-medium text-green-600 hover:underline dark:text-green-400"
+                  className="shrink-0 text-xs font-medium text-green-600 hover:underline disabled:opacity-50 dark:text-green-400"
                 >
                   ✓
                 </button>
@@ -954,11 +825,12 @@ function ConversationList({
               >
                 {name}
               </button>
-              <span className="flex shrink-0 items-center opacity-0 transition-opacity group-hover:opacity-100">
+              <span className="flex shrink-0 items-center opacity-0 transition-opacity group-hover:opacity-100 group-focus-within:opacity-100">
                 <button
                   onClick={() => startRename(thread.id, name)}
                   title="Rename"
-                  className="px-1 py-1 text-xs text-zinc-400 hover:text-zinc-700 dark:hover:text-zinc-200"
+                  aria-label={`Rename conversation ${name}`}
+                  className="rounded px-1 py-1 text-xs text-zinc-400 hover:text-zinc-700 focus-visible:outline focus-visible:outline-2 focus-visible:outline-blue-500 dark:hover:text-zinc-200"
                 >
                   <svg
                     xmlns="http://www.w3.org/2000/svg"
@@ -973,7 +845,8 @@ function ConversationList({
                 <button
                   onClick={() => handleDelete(thread.id)}
                   title="Delete"
-                  className="px-1 py-1 text-xs text-zinc-400 hover:text-red-600 dark:hover:text-red-400"
+                  aria-label={`Delete conversation ${name}`}
+                  className="rounded px-1 py-1 text-xs text-zinc-400 hover:text-red-600 focus-visible:outline focus-visible:outline-2 focus-visible:outline-blue-500 dark:hover:text-red-400"
                 >
                   <svg
                     xmlns="http://www.w3.org/2000/svg"

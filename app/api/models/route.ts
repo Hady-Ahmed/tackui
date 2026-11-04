@@ -1,0 +1,56 @@
+/**
+ * GET /api/models — the builder's model picker source.
+ *
+ * Server-side proxy to the AgentOS /platform/models catalog (service
+ * token — the catalog is admin-only on the AgentOS; tackui re-exposes it
+ * to signed-in org members for the builder UI). Every entry carries
+ * `platform_tier` (dormant — builder runs are 100% BYOK until Phase 3
+ * publishing wakes the platform-key tier) and `requires_key` (false for
+ * keyless providers like ollama); keyed models show the "needs your own
+ * key" badge and 402 at run time when the runner hasn't connected the
+ * provider key.
+ */
+import { NextResponse } from "next/server";
+import { getCurrentUser } from "@/lib/auth/context";
+import { checkUserLimit } from "@/lib/ratelimit/middleware";
+import { fetchAgentosModels, AgentosError } from "@/lib/agents/builder";
+
+export async function GET() {
+  const user = await getCurrentUser();
+  if (!user) return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
+  const limited = checkUserLimit(user.id, "agentRead");
+  if (limited) return limited;
+
+  try {
+    const models = await fetchAgentosModels();
+    return NextResponse.json({
+      models: models.map((m) => ({
+        provider: m.provider,
+        id: m.id,
+        // platformTier is the canonical server-derived flag — dormant for
+        // builder runs (100% BYOK; wakes at Phase 3 publishing) but kept in
+        // the wire so the future needs no shape change.
+        platformTier: m.platform_tier,
+        // false for keyless providers (e.g. ollama) — no credential demanded.
+        requiresKey: m.requires_key,
+        // The vendor's declared dep key (null for keyless providers — both
+        // openai doors share "openai_api_key") and the agno registry binding
+        // name. buildRequirements persists both into the requirements
+        // snapshot; the builder badge routes keys through the dep key.
+        depKey: m.dep_key,
+        name: m.name,
+      })),
+    });
+  } catch (err) {
+    if (err instanceof AgentosError) {
+      return NextResponse.json({ error: err.message }, { status: err.status });
+    }
+    console.error("[models] unexpected error", {
+      error: err instanceof Error ? err.message : String(err),
+    });
+    return NextResponse.json(
+      { error: "The agent builder is unavailable right now — please try again shortly." },
+      { status: 502 },
+    );
+  }
+}

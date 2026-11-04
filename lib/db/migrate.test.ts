@@ -5,11 +5,14 @@ import {
   listAppliedMigrations,
 } from "./migrate";
 import { setTestDb, query, closePool, type PgClient } from "./pg";
+import { registerPgMemShims } from "./pg-test-shim";
+import { useRealPostgres } from "./test-postgres";
 
 let db: IMemoryDb;
 
 beforeEach(() => {
   db = newDb();
+  registerPgMemShims(db);
   const { Pool } = db.adapters.createPg();
   const pool = new Pool();
   const client = Object.assign(pool, { release: () => {} }) as unknown as PgClient;
@@ -22,9 +25,9 @@ afterEach(async () => {
 });
 
 describe("runMigrations", () => {
-  it("applies 0001–0012 migrations, creates all expected tables", async () => {
+  it("applies 0001–0015 migrations, creates all expected tables", async () => {
     const result = await runMigrations();
-    expect(result.applied).toEqual(["0001", "0002", "0003", "0004", "0006", "0007", "0008", "0009", "0010", "0011", "0012"]);
+    expect(result.applied).toEqual(["0001", "0002", "0003", "0004", "0006", "0007", "0008", "0009", "0010", "0011", "0012", "0013", "0014", "0015"]);
     expect(result.skipped).toEqual([]);
 
     const tables = await query<{ table_name: string }>(`
@@ -42,12 +45,14 @@ describe("runMigrations", () => {
     expect(names).toContain("thread_messages");
     expect(names).toContain("thread_metadata");
     expect(names).toContain("subscriptions");
+    expect(names).toContain("credentials");
+    expect(names).toContain("connectors");
   });
 
   it("records each applied migration in schema_migrations", async () => {
     await runMigrations();
     const applied = await listAppliedMigrations();
-    expect(applied).toHaveLength(11);
+    expect(applied).toHaveLength(14);
     expect(applied[0].id).toBe("0001");
     expect(applied[0].filename).toBe("0001_init.sql");
     expect(applied[1].id).toBe("0002");
@@ -70,6 +75,10 @@ describe("runMigrations", () => {
     expect(applied[9].filename).toBe("0011_template_tombstones.sql");
     expect(applied[10].id).toBe("0012");
     expect(applied[10].filename).toBe("0012_paid_daily_quota.sql");
+    expect(applied[11].id).toBe("0013");
+    expect(applied[11].filename).toBe("0013_agent_builder.sql");
+    expect(applied[13].id).toBe("0015");
+    expect(applied[13].filename).toBe("0015_template_install_unique.sql");
     // applied_at is returned as a Date by pg-mem and as an ISO string by real
     // pg (depending on driver parsing). Accept both.
     const appliedAt = applied[0].applied_at;
@@ -80,12 +89,12 @@ describe("runMigrations", () => {
   it("is idempotent — second run reports skipped, no new inserts", async () => {
     const first = await runMigrations();
     const second = await runMigrations();
-    expect(first.applied).toEqual(["0001", "0002", "0003", "0004", "0006", "0007", "0008", "0009", "0010", "0011", "0012"]);
+    expect(first.applied).toEqual(["0001", "0002", "0003", "0004", "0006", "0007", "0008", "0009", "0010", "0011", "0012", "0013", "0014", "0015"]);
     expect(second.applied).toEqual([]);
-    expect(second.skipped).toEqual(["0001", "0002", "0003", "0004", "0006", "0007", "0008", "0009", "0010", "0011", "0012"]);
+    expect(second.skipped).toEqual(["0001", "0002", "0003", "0004", "0006", "0007", "0008", "0009", "0010", "0011", "0012", "0013", "0014", "0015"]);
 
     const applied = await listAppliedMigrations();
-    expect(applied).toHaveLength(11);
+    expect(applied).toHaveLength(14);
   });
 
   it("creates the agents table with the documented columns", async () => {
@@ -136,23 +145,32 @@ describe("runMigrations", () => {
 
   // pg-mem doesn't expose index metadata via the pg_catalog tables (it
   // tracks indexes internally but doesn't surface them through the standard
-  // views). Verify that the migration SQL parses + runs without error —
-  // the actual index presence is validated by real PG integration tests
-  // (see testcontainers suite, planned alongside PR4).
-  it.skip("creates the thread_metadata indexes for user_id and org_id", async () => {
-    await runMigrations();
-    const indexes = await query<{ indexname: string }>(`
-      SELECT i.relname as indexname
-      FROM pg_index x
-      JOIN pg_class c ON c.oid = x.indrelid
-      JOIN pg_class i ON i.oid = x.indexrelid
-      JOIN pg_namespace n ON n.oid = c.relnamespace
-      WHERE c.relname = 'thread_metadata'
-        AND n.nspname = 'public'
-      ORDER BY indexname
-    `);
-    const names = indexes.rows.map((r) => r.indexname);
-    expect(names).toContain("idx_thread_metadata_user_id");
-    expect(names).toContain("idx_thread_metadata_org_id");
+  // views). The migration SQL parsing itself is covered by the other tests
+  // in this file; actual index presence is asserted against a real
+  // Postgres via testcontainers (skips with a note when Docker is down).
+  it("creates the thread_metadata indexes for user_id and org_id", async (ctx) => {
+    const restore = await useRealPostgres();
+    if (!restore) {
+      ctx.skip();
+      return;
+    }
+    try {
+      await runMigrations();
+      const indexes = await query<{ indexname: string }>(`
+        SELECT i.relname as indexname
+        FROM pg_index x
+        JOIN pg_class c ON c.oid = x.indrelid
+        JOIN pg_class i ON i.oid = x.indexrelid
+        JOIN pg_namespace n ON n.oid = c.relnamespace
+        WHERE c.relname = 'thread_metadata'
+          AND n.nspname = 'public'
+        ORDER BY indexname
+      `);
+      const names = indexes.rows.map((r) => r.indexname);
+      expect(names).toContain("idx_thread_metadata_user_id");
+      expect(names).toContain("idx_thread_metadata_org_id");
+    } finally {
+      restore();
+    }
   });
 });

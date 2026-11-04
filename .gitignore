@@ -28,6 +28,13 @@
 npm-debug.log*
 yarn-debug.log*
 yarn-error.log*
+
+# python (agent-builder/)
+__pycache__/
+*.pyc
+.venv/
+.pytest_cache/
+.ruff_cache/
 .pnpm-debug.log*
 
 # env files (can opt-in for committing if needed)
@@ -40,3 +47,5 @@ yarn-error.log*
 # typescript
 *.tsbuildinfo
 next-env.d.ts
+
+.playwright-mcp/

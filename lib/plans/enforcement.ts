@@ -185,9 +185,10 @@ export async function checkTemplateInstall(
  * never states the run number and never promises "unlimited" (a promise
  * that outlives the cap's nullness) — the 402 itself is the one
  * in-product surface that mentions the limit. The exact caps stay
- * server-side tunables.
+ * server-side tunables. Exported so the builder run gate can reuse the
+ * same convention for its platform-key quota 402s.
  */
-function formatCountdown(ms: number): string {
+export function formatCountdown(ms: number): string {
   if (ms <= 60_000) return "less than a minute";
   const totalMinutes = Math.ceil(ms / 60_000);
   if (totalMinutes < 60) return `${totalMinutes}m`;
@@ -196,7 +197,7 @@ function formatCountdown(ms: number): string {
   return minutes > 0 ? `${hours}h ${minutes}m` : `${hours}h`;
 }
 
-const QUOTA_WINDOW_MS = 24 * 60 * 60 * 1000;
+export const QUOTA_WINDOW_MS = 24 * 60 * 60 * 1000;
 
 /**
  * Enforce the catalog run gates on an agent run. Called by the

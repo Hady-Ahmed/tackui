@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeEach, vi } from "vitest";
+import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import {
   checkLimit,
   checkConcurrent,
@@ -10,6 +10,13 @@ import {
 
 beforeEach(() => {
   _resetForTests();
+});
+
+// Safety net: the fake-timer tests restore inline (so subsequent calls in
+// the same test see real time), but a failing assertion must not leak fake
+// timers into the rest of the suite.
+afterEach(() => {
+  vi.useRealTimers();
 });
 
 describe("checkLimit (sliding window)", () => {

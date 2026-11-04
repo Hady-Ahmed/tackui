@@ -4,6 +4,7 @@ import { getPoolOrTestClient, query } from "@/lib/db/pg";
 import { EMAIL_ENABLED, sendEmail } from "@/lib/email/client";
 import { verificationEmail, passwordResetEmail, invitationEmail } from "@/lib/email/templates";
 import { getMembershipLimit } from "@/lib/billing/subscription-store";
+import { TRUST_CF_CONNECTING_IP } from "@/lib/ratelimit/client-ip";
 
 const AUTH_DISABLED = process.env.AUTH_DISABLED === "true";
 
@@ -141,14 +142,17 @@ export const auth = betterAuth({
       secure: process.env.NODE_ENV === "production",
     },
     ipAddress: {
-      // CF-Connecting-IP is set by Cloudflare to the real client IP and
-      // passes through Railway's proxy untouched. X-Forwarded-For is the
-      // fallback (used when Cloudflare is not in front). This matches the
-      // resolution order in proxy.ts getClientIp(). Without this config,
-      // Better Auth cannot determine the client IP and falls back to a
-      // single shared rate-limit bucket — effectively disabling per-IP
-      // rate limiting on sign-in/sign-up.
-      ipAddressHeaders: ["cf-connecting-ip", "x-forwarded-for"],
+      // IP-header priority mirrors lib/ratelimit/client-ip.ts: CF-Connecting-IP
+      // only when the topology is known to include Cloudflare (SAAS_MODE or
+      // an explicit TRUST_CF_CONNECTING_IP=true) — on a non-CF deployment
+      // the header is client-suppliable, and trusting it lets an attacker
+      // rotate buckets past Better Auth's sign-in/sign-up limiter. XFF with
+      // trusted hops is the fallback. Without any config, Better Auth falls
+      // back to a single shared rate-limit bucket — effectively disabling
+      // per-IP rate limiting on sign-in/sign-up.
+      ipAddressHeaders: TRUST_CF_CONNECTING_IP
+        ? ["cf-connecting-ip", "x-forwarded-for"]
+        : ["x-forwarded-for"],
     },
   },
   emailAndPassword: {
@@ -216,12 +220,13 @@ export const auth = betterAuth({
     user: {
       create: {
         async after(user) {
-          // First-user-is-admin bootstrap only.
-          // Org + member creation moved to session.create.before — see
-          // the comment there for why (Better Auth defers user.create.after
-          // to post-transaction, so the member row isn't available when
-          // session.create.before fires).
+          // First-user-is-admin bootstrap — SOLO/SELF-HOST BRING-UP ONLY.
+          // Under SaaS mode the admin is created exclusively by the
+          // operator script (npm run create-admin, which also marks the
+          // email verified): an automatic bootstrap would make the first
+          // person to sign up on the hosted product an instance admin.
           // "user" is a reserved word in Postgres and must be double-quoted.
+          if (process.env.SAAS_MODE === "true") return;
           const row = await query<{ count: number }>(
             `SELECT COUNT(*)::int as count FROM "user"`,
           );

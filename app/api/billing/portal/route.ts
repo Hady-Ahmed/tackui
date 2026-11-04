@@ -2,6 +2,7 @@ import { NextResponse } from "next/server";
 import { getCurrentUser, canManageAgents } from "@/lib/auth/context";
 import { BILLING_ENABLED } from "@/lib/config/saas";
 import { createPortalSession } from "@/lib/billing/checkout";
+import { checkUserLimit } from "@/lib/ratelimit/middleware";
 
 /**
  * POST /api/billing/portal — start a Stripe Customer Portal session so the
@@ -23,6 +24,9 @@ export async function POST() {
   if (!(await canManageAgents(user))) {
     return NextResponse.json({ error: "Forbidden" }, { status: 403 });
   }
+
+  const limited = checkUserLimit(user.id, "billingMutate");
+  if (limited) return limited;
 
   const result = await createPortalSession(user.orgId);
   if ("error" in result) {

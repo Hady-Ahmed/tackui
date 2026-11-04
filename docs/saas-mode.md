@@ -38,8 +38,10 @@ server-to-server, signature-verified).
   `getPlanLimits(plan)` (returns the unlimited sentinel for self-host) +
   `planIdFromPriceId` (maps a Stripe Price ID → plan; the dollar amounts
   live in Stripe, only the price IDs are env-configured) +
-  `priceIdForPlan` + `defaultPlan` (free when billing is enabled,
-  self-host otherwise). `SAAS_PLANS` exported for the pricing page.
+  `priceIdForPlan` + `defaultPlan` (free under SaaS mode, self-host
+  otherwise — keyed on `SAAS_MODE`, not `BILLING_ENABLED`: a SaaS deploy
+  without Stripe still puts every org on the Free plan). `SAAS_PLANS`
+  exported for the pricing page.
 - `lib/billing/stripe.ts` — Stripe SDK singleton (null when
   `!BILLING_ENABLED`). `getStripe()` + `getWebhookSecret()` (empty-string
   `STRIPE_WEBHOOK_SECRET` is treated as `null` — a blank secret would
@@ -91,11 +93,34 @@ Routes:
 
 - `getEnforcementLimits(orgId)` — returns `{ plan, limits }`. Self-host
   returns the unlimited sentinel without a DB call.
+- **Payment status gates limits:** `getOrgPlan`
+  (lib/billing/subscription-store.ts) reads the subscription's Stripe
+  status — only `active`/`trialing` keep their plan; a lapsed status
+  (`past_due`, `unpaid`, `canceled`, `incomplete_expired` …) reads as
+  **free**. The plan column alone is not authorization: a dunning org must
+  not ride paid enforcement (agent caps, concurrent runs, quotas) until the
+  subscription is fixed. The account-menu badge still shows the stored plan
+  + status honestly (display is not enforcement).
 - `checkAgentCountLimit(orgId)` — POST `/api/agents` rejects (402) when
   the org is at its plan's agent cap (free ≤ 3). Pro/team unlimited.
+  Builder-agent creates (`POST /api/agents/builder`) count against the
+  same cap.
 - `checkMemberCountLimit(orgId, currentCount)` — invite path rejects
   (402) when at the seat cap. Free/pro = 1 (personal, no invites),
   team = `subscription.seats`.
+- **`platformDailyQuota`** — per-user rolling-24h cap on
+  *platform-key* agent runs: runs where tackui does not deliver the
+  runner's own key (a platform-tier model or a tool's platform fallback
+  serves the dependency). BYOK runs are exempt — they cost the platform
+  ~nothing. Enforced by the builder run gate
+  (`checkBuilderRunGate`, 402 `PLATFORM_QUOTA_EXCEEDED` with a reset
+  countdown) via `lib/ratelimit`'s sliding-window counter. Values:
+  free = 50, pro = 2000, team = 2000, self-host = `null` (unlimited —
+  the operator pays the platform key bill themselves; the check
+  short-circuits entirely). This is the only SaaS-only check in the
+  builder run gate: requirement 402s (missing keys/connectors) apply in
+  both modes. See
+  [agent-builder.md](./agent-builder.md#platform-key-quota--libratelimitplatform-quotats).
 - `checkCanCreateOrg(orgId)` — always returns null (allowed). Workspace
   creation is free and unrestricted (Vercel/GitHub model): a Free
   workspace has 3 agents max, 1 member, no invites — harmless. The Team

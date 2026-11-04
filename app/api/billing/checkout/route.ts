@@ -2,6 +2,7 @@ import { NextResponse } from "next/server";
 import { getCurrentUser, canManageAgents } from "@/lib/auth/context";
 import { BILLING_ENABLED } from "@/lib/config/saas";
 import { createCheckoutSession } from "@/lib/billing/checkout";
+import { checkUserLimit } from "@/lib/ratelimit/middleware";
 import { z } from "zod";
 
 /**
@@ -42,6 +43,11 @@ export async function POST(request: Request) {
       { status: 400 },
     );
   }
+
+  // Each call creates an outbound Stripe session — bounded like the other
+  // mutation routes so a buggy loop can't hammer Stripe.
+  const limited = checkUserLimit(user.id, "billingMutate");
+  if (limited) return limited;
 
   let body: unknown;
   try {

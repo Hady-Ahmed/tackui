@@ -108,13 +108,15 @@ The first user to sign up becomes the admin.
 
 > **Env changes require a restart.** Next.js reads `.env.local` at boot and does not hot-reload env vars. After editing `.env.local`, stop the dev server (`Ctrl+C`) and run `npm run dev` again.
 
-> **No agents configured?** Click the **+** icon next to "Agents" in the chat sidebar (or visit `/agents`) to add your first agent backend. Only admins see the + icon.
+> **No agents configured?** Click the **+** icon next to "Agents" in the chat sidebar (or visit `/agents`) to add your first agent backend. The + icon is visible to every signed-in user — agents built through the agent builder are member-accessible; only the connect-your-own-backend form is admin-only.
 
 ## Self-hosting with Docker
 
-The bundled `docker-compose.yml` runs the app + Postgres with one command.
-Migrations run automatically on boot (via `instrumentation.ts`) — no manual
-step needed.
+The bundled `docker-compose.yml` runs the app + Postgres + the agent
+builder (with its own separate Postgres) with one command. Migrations run
+automatically on boot (via `instrumentation.ts`) — no manual step needed.
+The builder is part of the default stack and reachable only from inside
+the compose network — the app is the sole host-facing interface.
 
 ### Solo mode (default)
 
@@ -216,8 +218,8 @@ OAuth callback URLs follow the pattern `{BETTER_AUTH_URL}/api/auth/callback/{pro
 
 ### Roles
 
-- **Admin** — can add/edit/delete agents, test connections, manage users (set roles, ban/unban). First user to sign up is automatically promoted to admin.
-- **User** — can chat with all agents and manage their own conversations. Cannot manage agents.
+- **Admin** — can add/edit/delete agents, connect their own agent backends, test connections, manage users (set roles, ban/unban). First user to sign up is automatically promoted to admin.
+- **User** — can chat with all agents and manage their own conversations, and can build and manage their own agents with the agent builder. Cannot connect their own backend URLs or manage other users' agents.
 - Existing admins can promote users via the **user management** panel on the `/agents` page (set role, ban/unban). To bootstrap an admin on a fresh database before the UI is accessible, use the CLI: `npm run create-admin <email> <password> [name]`.
 
 ### Account linking
@@ -310,12 +312,15 @@ See [`.env.example`](.env.example) for the full list with comments.
 | Variable | Required? | Description |
 | --- | --- | --- |
 | `DATABASE_URL` | Yes | Postgres connection string (e.g. `postgres://user:pass@localhost:5432/dbname`) |
+| `AGENTOS_BASE_URL` | No | Base URL of the agent builder service (e.g. `http://agent-builder:7778`). Setting this alone activates the builder; when unset the builder is disabled (builder routes return 503 and the UI shows a disabled state). No trailing slash. |
+| `AGENTOS_JWT_SECRET` | No | JWT secret shared with the agent builder (HS256). Required whenever `AGENTOS_BASE_URL` is set — the builder UI works without it, but every run fails auth at the dispatcher until the secret is configured (a boot warning is logged). In the compose stacks this same variable is fed to the builder container as its `JWT_SECRET`. |
 | `BETTER_AUTH_SECRET` | Yes (unless `AUTH_DISABLED=true`) | Secret for signing session cookies. Generate with `openssl rand -hex 32`. The app refuses to boot without it when auth is enabled. |
 | `BETTER_AUTH_URL` | Yes (unless `AUTH_DISABLED=true`) | Public base URL of the app (e.g. `http://localhost:3000`) |
 | `AUTH_DISABLED` | No | Set to `true` to skip login (solo mode). **Never use this in any deployment exposed to the internet or shared users.** |
 | `ALLOW_PRIVATE_ENDPOINTS` | No | Set to `true` to allow creating/editing agents with endpoints that resolve to private/internal IPs (e.g. when agent backends run on the same host). Defaults to `false` (blocks private IPs to prevent SSRF). |
-| `DB_ENCRYPTION_KEY` | No | 32-byte hex key (generate with `openssl rand -hex 32`) used to encrypt agent JWT secrets at rest (AES-256-GCM). When unset, secrets are stored in plaintext (a warning is logged at boot). Rotating the key requires re-saving each agent's JWT secret. |
-| `TRUSTED_PROXY_HOPS` | No | Number of trusted reverse-proxy hops in front of the server, used to resolve the real client IP from `X-Forwarded-For` (default `1`). Set to `2` for Cloudflare → Nginx → app, etc. When behind Cloudflare → Traefik (Coolify), the proxy checks `CF-Connecting-IP` first (Traefik overwrites XFF with the edge IP). This env var is the fallback for non-Cloudflare deploys. |
+| `DB_ENCRYPTION_KEY` | Yes (unless `AUTH_DISABLED=true`) | 32-byte hex key (generate with `openssl rand -hex 32`) used to encrypt secrets at rest (AES-256-GCM): agent JWT secrets, BYOK credential fields, connector tokens, and catalog template JWT secrets. Required in any mode with auth — the app refuses to boot without it (storing tenant secrets in plaintext is never acceptable); only solo mode may omit it (plaintext + a boot warning). Rotating the key requires re-saving each secret: an old ciphertext becomes unreadable, which surfaces as "incomplete"/re-enter prompts for BYOK credentials and connector tokens, and as failed runs for agents whose JWT secret can't be decrypted (the backend rejects the unsigned request) until the secret is re-saved. |
+| `TRUSTED_PROXY_HOPS` | No | Number of trusted reverse-proxy hops in front of the server, used to resolve the real client IP from `X-Forwarded-For` (default `1`). Set to `2` for Cloudflare → Nginx → app, etc. This is the resolution path whenever Cloudflare trust is off (see the next row). Without the right hop count, a malicious client can prepend a fake IP to the header and bypass the per-IP limits entirely. |
+| `TRUST_CF_CONNECTING_IP` | No | Set to `true` on deploys fronted by Cloudflare where the next hop overwrites `X-Forwarded-For` with the Cloudflare edge IP (e.g. Cloudflare → Traefik/Coolify): rate limits then key on `CF-Connecting-IP` instead. Defaults to following `SAAS_MODE` (trusted in SaaS mode, untrusted otherwise). Leave unset on deploys without Cloudflare — there the header is client-suppliable, and trusting it would let an attacker rotate it per request to get a fresh bucket in every IP-keyed limiter. |
 | `CONCURRENT_RUN_TIMEOUT_MS` | No | Watchdog timeout (ms) for concurrent-run rate-limit slots. Default `600000` (10 min). Floor `60000`. Safety net only — the actual SSE stream / agent run is NOT cancelled; only the counter is decremented to prevent slot leaks when a client opens a run and drops TCP without triggering `ReadableStream.cancel()`. Override if your agents do legitimately long research runs. |
 | `SENTRY_DSN` | No | Sentry DSN for server-side error tracking. No-op if unset. |
 | `NEXT_PUBLIC_SENTRY_DSN` | No | Sentry DSN for client-side error tracking (public, exposed to browser). No-op if unset. |
@@ -323,6 +328,7 @@ See [`.env.example`](.env.example) for the full list with comments.
 | `NEXT_PUBLIC_SENTRY_TRACES_SAMPLE_RATE` | No | Client-side trace sampling rate, 0.0–1.0 (default: 0.1). Set to 0 to disable (public, exposed to browser). |
 | `NEXT_PUBLIC_UMAMI_URL` | No | Base URL of a self-hosted Umami analytics instance (e.g. `https://analytics.yourdomain.com`). No-op if unset. |
 | `NEXT_PUBLIC_UMAMI_WEBSITE_ID` | No | Umami website ID for page-view tracking. No-op if unset. |
+| `COPILOTKIT_TELEMETRY_DISABLED` | No | Set to `true` to disable the CopilotKit runtime's anonymous usage telemetry (it is on by default; the standard `DO_NOT_TRACK=1` is honored too). Shipped enabled in `.env.example` so copied configs start telemetry-off. |
 | `GOOGLE_CLIENT_ID` / `GOOGLE_CLIENT_SECRET` | No | Google OAuth provider |
 | `GITHUB_CLIENT_ID` / `GITHUB_CLIENT_SECRET` | No | GitHub OAuth provider |
 | `OIDC_CLIENT_ID` / `OIDC_CLIENT_SECRET` / `OIDC_ISSUER` | No | External OIDC SSO (Keycloak, Authentik, Okta, Entra, etc.) |
@@ -333,6 +339,8 @@ See [`.env.example`](.env.example) for the full list with comments.
 | `POSTGRES_PASSWORD` | No (docker-compose only) | Postgres password (default: `postgres`) |
 | `POSTGRES_DB` | No (docker-compose only) | Postgres database name (default: `tackui`) |
 | `APP_PORT` | No (docker-compose only) | Host port to expose the app on (default: `3000`) |
+| `AGENTOS_DB_PASSWORD` | No (docker-compose only) | Postgres password for the builder's own `db-builder` database (default: `agentos`) |
+| `AGENTOS_SENTRY_DSN` | No (docker-compose only) | Sentry DSN for the builder service itself (separate from the app's `SENTRY_DSN`) |
 
 ## Security
 
@@ -375,17 +383,23 @@ The app sets the following headers on all responses:
 
 The app has two-layer rate limiting to protect against abuse and server overload:
 
-**Per-IP flood protection** (in `proxy.ts`, pre-auth): 300 requests/min per IP on all `/api/*` routes (except `/api/health` which is unlimited, and `/api/auth/*` which has its own limiter). Uses `CF-Connecting-IP` (Cloudflare) or `X-Forwarded-For` (with `TRUSTED_PROXY_HOPS`) for IP extraction behind a reverse proxy.
+**Per-IP flood protection** (in `proxy.ts`, pre-auth): 300 requests/min per IP on all `/api/*` routes (except `/api/auth/*` which has its own limiter, and `/api/health` whose plain liveness probe is unlimited — the `?deep=true` readiness probe rate-limits itself at 30/min per IP since it touches the database). Uses `CF-Connecting-IP` (Cloudflare) or `X-Forwarded-For` (with `TRUSTED_PROXY_HOPS`) for IP extraction behind a reverse proxy.
 
 **Per-user route limits** (in route handlers, post-auth):
 
 | Route | Limit | Concurrent |
 | --- | --- | --- |
-| `/api/copilotkit/*` (POST runs only — connect/info exempt) | 20/min per user | 3 concurrent run streams per user |
+| `/api/copilotkit/*` (POST runs only — connect/stop/info exempt) | 20/min per user | 3 concurrent run streams per user |
 | `/api/agents/reachability-probe` | 30/min per user | — |
 | `/api/agents` POST + PATCH/DELETE | 10/min per user | — |
 | `/api/agents` GET | 60/min per user | — |
 | `/api/threads/[id]` PATCH/DELETE | 30/min per user | — |
+| `/api/credentials` PUT/DELETE | 20/min per user | — |
+| `/api/connectors` PUT/DELETE | 20/min per user | — |
+| `/api/billing/checkout` + `/api/billing/portal` POST | 10/min per user | — |
+| `/api/billing/subscription` + `/api/org` GET | 60/min per user | — |
+
+This table mirrors the presets in `lib/ratelimit/limits.ts` — the single source of truth (the admin catalog-write and platform-admin limits also live there; see `docs/security.md` for the full wiring).
 
 **Better Auth rate limiting**: sign-in is limited to 10/min per IP, sign-up to 5/min per IP.
 
@@ -443,7 +457,7 @@ These are documented for transparency and will be addressed in future releases:
 
 ## Contributing
 
-See [AGENTS.md](AGENTS.md) for development conventions and agent-facing rules, and [`docs/`](docs/) for the architecture deep-dives (runtime, agent registry, catalog, auth, security, SaaS mode). PRs welcome.
+See [AGENTS.md](AGENTS.md) for development conventions and agent-facing rules, and [`docs/`](docs/) for the architecture deep-dives (runtime, agent registry, agent builder, catalog, auth, security, SaaS mode). PRs welcome.
 
 ## License
 
