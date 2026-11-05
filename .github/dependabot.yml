@@ -20,6 +20,24 @@ updates:
       prefix: "chore(deps)"
       include: scope
 
+  # Keep the agent-builder Python dependencies current (uv / pyproject.toml).
+  # Major versions get their own PR (Dependabot default) — review carefully
+  # (agno, fastmcp, pydantic can all have breaking changes).
+  - package-ecosystem: uv
+    directory: /agent-builder
+    schedule:
+      interval: weekly
+      day: monday
+    open-pull-requests-limit: 5
+    groups:
+      patch-and-minor:
+        update-types:
+          - patch
+          - minor
+    commit-message:
+      prefix: "build(deps)"
+      include: scope
+
   # Keep GitHub Actions versions current.
   - package-ecosystem: github-actions
     directory: /
