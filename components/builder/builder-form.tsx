@@ -1019,7 +1019,7 @@ function ModelKeyBadge({
         <button
           type="button"
           onClick={onConnect}
-          className="underline"
+          className="cursor-pointer underline underline-offset-2 hover:text-amber-800 dark:hover:text-amber-300 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-amber-500"
         >
           connect one
         </button>
@@ -1056,7 +1056,7 @@ function KeyBadge({
         <button
           type="button"
           onClick={onConnect}
-          className="text-[10px] underline"
+          className="cursor-pointer text-[10px] underline underline-offset-2 hover:text-red-800 dark:hover:text-red-300 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-red-500"
         >
           Connect
         </button>
