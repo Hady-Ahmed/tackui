@@ -762,7 +762,16 @@ export function BuilderForm({
             <ModelKeyBadge
               state={modelState}
               onConnect={() => {
-                if (form.model?.provider) openKeyForm(form.model.provider);
+                // modelKeyState already resolved the credential provider
+                // from the model's declared dep key — the VENDOR ("azure"),
+                // not the model's door slug ("azure-claude"). The
+                // credentials catalog collapses a vendor's doors into one
+                // entry, so opening the key form at the door slug misses
+                // the providerMeta lookup → KeyForm renders null (the
+                // "connect one" button that opens nothing).
+                if (modelState?.status === "missing" && modelState.provider) {
+                  openKeyForm(modelState.provider);
+                }
               }}
             />
           </div>
