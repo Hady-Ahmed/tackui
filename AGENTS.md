@@ -68,6 +68,11 @@ no Docker required, no cleanup between runs (see `vitest.config.ts`).
   the daemon is down, so a Docker-less environment stays green).
 - **Security-critical code** (`lib/auth`, `lib/billing`, `lib/net`,
   `lib/ratelimit`) — test the bypass attempt, not just the happy path.
+- **E2E (Playwright)** — `npm run test:e2e` runs the Tier 1 smoke suite
+  (`e2e/`) against the real built app: the standalone build, a throwaway
+  Postgres container, and a mock AG-UI agent — only the model is faked.
+  Harness details and conventions in `docs/e2e.md`. Unit tests stay the
+  default; don't add E2E coverage for what a unit test can cover.
 
 ## Ground rules
 
@@ -188,3 +193,6 @@ full how-it-works detail this file deliberately omits:
   layers), concurrent cap + watchdog
 - **`docs/saas-mode.md`** — SAAS_MODE/BILLING_ENABLED flags, Stripe billing,
   plan enforcement, marketing pages
+- **`docs/e2e.md`** — the Playwright E2E smoke suite: the real-app harness
+  (web-server lifecycle, seeding, mock agent), the 8 Tier 1 tests, locator
+  discipline, and the breakage-test contract

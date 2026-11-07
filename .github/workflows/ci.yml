@@ -50,3 +50,29 @@ jobs:
           cache: npm
       - run: npm ci
       - run: npm run test
+
+  e2e:
+    name: E2E smoke
+    # Runs the real built app (standalone build) against a throwaway
+    # Postgres container (testcontainers — Docker is preinstalled on the
+    # runner) + the mock AG-UI agent. See e2e/web-server.mjs and docs/e2e.md.
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+      - run: npm ci
+      # Build-time env is inline (never .env.local); values are dummies —
+      # the runtime DB is the throwaway container web-server.mjs starts,
+      # and runtime env is set there.
+      - run: npm run build
+        env:
+          DATABASE_URL: postgres://build:build@localhost:5432/build
+          AUTH_DISABLED: "true"
+          NEXT_TELEMETRY_DISABLED: "1"
+      - run: npx playwright install --with-deps chromium
+      # Skip the rebuild — the build above is the artifact under test.
+      - run: npm run test:e2e:local

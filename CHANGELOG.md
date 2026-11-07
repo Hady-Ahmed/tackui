@@ -4,6 +4,15 @@ All notable changes to this project will be documented in this file. The format 
 
 ## [Unreleased]
 
+- **Tier 1 E2E smoke suite** (`npm run test:e2e`, new `e2e` CI job):
+  8 Playwright tests run the real built app — the standalone `server.js`
+  build against a throwaway Postgres container, real better-auth sessions,
+  and a mock AG-UI agent standing in for the model. Covers boot (login page,
+  deep health probe), the login journey (session persists across reload),
+  the chat run path end-to-end, and every surface rendering with a clean
+  console. Verified to fail when the app breaks (breakage test). See
+  `docs/e2e.md`.
+
 - **The agent-builder service now lives in this repo** (`agent-builder/`
   at the root), moved out of the agent-warehouse monorepo where it sat
   beside unrelated projects. Location-only move — no functional change.
