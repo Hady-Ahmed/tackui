@@ -1,7 +1,7 @@
 import { ImageResponse } from "next/og";
 import { OgCard } from "@/lib/brand/pin";
 
-export const alt = "TackUI — Unified agent frontend for AG-UI agents";
+export const alt = "TackUI — Build, install, and chat with your own AI agents";
 export const size = { width: 1200, height: 630 };
 export const contentType = "image/png";
 

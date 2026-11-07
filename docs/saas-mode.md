@@ -155,8 +155,18 @@ layer so direct calls can't bypass the plan.
   marketing pages. Session-aware: calls `getCurrentUser()`, shows "Go to
   app" for signed-in users, "Sign in" + "Sign up free" for signed-out.
 - `components/landing.tsx` + `app/page.tsx` (SaaS → `<Landing/>`) — hero
-  with radial blue glow, gradient headline, feature cards with inline SVG
-  icons, "Built on" trust section, final CTA. CSS animations in
+  with radial blue glow, outcome-first gradient headline + chat mockup; a
+  "three ways to get an agent" section (build in the builder / install
+  from the catalog / connect an AG-UI backend); an agent-builder spotlight
+  section (rendered only when `AGENTOS_ENABLED` — a boot-time env check,
+  not a health probe, so a builder outage never changes the page); a
+  catalog spotlight section with an illustrative template-card mockup
+  (static examples, not live catalog data); feature
+  cards with inline SVG icons; a "for developers: bring your own backend"
+  section where the protocol, self-host, and BYOB content lives; "Built
+  on" trust strip; final CTA. Copy rule: AG-UI appears only in the hero
+  badge, built-on strip, and developer section — the selling copy is
+  written for non-technical visitors and says TackUI. CSS animations in
   `globals.css` (`fade-in-up`, `pulse-glow`). Linear/Vercel style.
 - `app/pricing/page.tsx` — Free/Pro/Team tier cards. The dollar amounts
   live in Stripe; the page shows feature gates only. Session-aware buttons
