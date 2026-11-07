@@ -4,6 +4,18 @@ All notable changes to this project will be documented in this file. The format 
 
 ## [Unreleased]
 
+- **The landing page now sells the whole product, not just the protocol.**
+  The hero leads with an outcome ("Your own AI agents — built, installed,
+  or connected") instead of AG-UI jargon; a "three ways to get an agent"
+  section (build in the no-code builder / install from the catalog /
+  connect your own AG-UI backend) replaces the connect-endpoint-first
+  how-it-works; an agent-builder spotlight section (rendered when
+  `AGENTOS_ENABLED`), a catalog spotlight with an illustrative template
+  mockup, and a consolidated "for developers" section give each of the
+  three paths a full section and move the protocol, self-host, and
+  bring-your-own-backend content low on the page. SEO metadata and the
+  OG/Twitter card copy follow the same structure.
+
 - **The agent-builder service now lives in this repo** (`agent-builder/`
   at the root), moved out of the agent-warehouse monorepo where it sat
   beside unrelated projects. Location-only move — no functional change.

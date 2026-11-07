@@ -120,7 +120,7 @@ export function OgCard(): ReactElement {
               fontSize: "27px",
             }}
           >
-            Unified agent frontend for AG-UI agents
+            Build, install, and chat with your own AI agents
           </div>
         </div>
       </div>
