@@ -211,9 +211,14 @@ describe("PUT /api/credentials", () => {
       `SELECT fields FROM credentials WHERE user_id = $1 AND provider = 'x'`,
       [USER_ID],
     );
-    // Encrypted at rest per field.
-    expect(stored.rows[0].fields.consumer_key).toMatch(/^enc:v1:/);
-    expect(JSON.stringify(stored.rows[0])).not.toContain("ck");
+    // Encrypted at rest per field — every value must be a v1 ciphertext,
+    // never the plaintext. (A substring scan can't express this check:
+    // the plaintext "ck" is 2 chars inside the base64 alphabet, so a
+    // random IV occasionally spells it inside the ciphertext — it burned
+    // run 42442614816.)
+    for (const value of Object.values(stored.rows[0].fields)) {
+      expect(value).toMatch(/^enc:v1:/);
+    }
   });
 
   it("rejects an unknown field name (a typo would silently never deliver)", async () => {

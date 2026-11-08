@@ -27,8 +27,8 @@ the app needs the container's connection string in its env. So one script owns
 the full lifecycle and is the only `webServer` command:
 
 1. Start a throwaway Postgres container (`postgres:16-alpine`, plain
-   `docker run` — testcontainers@12 needs Node ≥ 22 via its nested undici,
-   and CI runs the Node 20 the Dockerfile ships).
+   `docker run` — testcontainers stays in the vitest tier; the harness
+   itself is dependency-free on purpose, see the teardown note below).
 2. Run migrations (`e2e/migrate.mjs` — a standalone port of `lib/db/migrate.ts`),
    better-auth tables (`e2e/auth-tables.mjs`), and seed data (`e2e/seed.mjs`).
    The app's own boot migrations re-run afterwards as no-ops (idempotent).
