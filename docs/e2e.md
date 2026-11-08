@@ -1,10 +1,12 @@
-# E2E smoke suite (Tier 1)
+# E2E suite (Tier 1 smoke + Tier 2 depth)
 
 The CI canary that proves the app actually runs: the built Next.js server
 boots, every surface renders, and the two most important journeys (login,
 chat) work end-to-end. Eight tests, one file (`e2e/smoke.spec.ts`), ~6s of
-browser time. Run with `npm run test:e2e` (builds first) — or
-`npm run test:e2e:local` to reuse an existing build.
+browser time. Deeper journeys live in sibling specs that reuse the same
+harness — Tier 2 starts with `e2e/chat.spec.ts` (chat depth, below). Run
+with `npm run test:e2e` (builds first) — or `npm run test:e2e:local` to
+reuse an existing build.
 
 ## What's real, what's faked
 
@@ -16,7 +18,10 @@ dependency-free Node `http` server (`e2e/mock-agent.mjs`) that emits the AG-UI
 event stream as SSE `data:` lines — byte-identical to what `@ag-ui/encoder`
 produces — so the real CopilotKit runtime path (`/api/copilotkit` → registry →
 agent → SSE → chat UI) is exercised end-to-end without an LLM. Runs are
-deterministic, fast, and free.
+deterministic, fast, and free. One conditional branch: a message containing
+the trigger phrase `"use the tool"` makes the same reply carry AG-UI
+tool-call events (`TOOL_CALL_START/ARGS/END` + `TOOL_CALL_RESULT`) — the
+plain-reply path stays byte-identical, and Tier 1's chat test guards that.
 
 ## Lifecycle: `e2e/web-server.mjs`
 
@@ -66,7 +71,7 @@ deployment.
 Setting `E2E_APP_IMAGE=<tag>` swaps the app-under-test from the local
 standalone build to that **container** — the packaged artifact the
 Dockerfile ships. Only step 4 changes; Postgres, migrations, seed, mock
-agent, and all eight tests are identical. One runtime env block (`appEnv`)
+agent, and the tests are identical. One runtime env block (`appEnv`)
 is shared verbatim between both modes, so the spawn and the container
 cannot drift.
 
@@ -94,14 +99,14 @@ In CI this is the second half of the `image` job (below).
 - **One agent** — id `e2e-mock-agent`, auth mode `jwt`, endpoint
   `http://127.0.0.1:3999/` (the mock agent).
 
-## The eight tests
+## The eight Tier 1 tests
 
 | Test | Proves |
 | --- | --- |
 | login page renders | The app boots and serves hydrating pages; form fields + button present, no console errors. |
 | health endpoint answers | `/api/health?deep=true` reports app + Postgres + migrations healthy. |
 | login works, session persists | Real better-auth email/password login through the page, redirect to `/app`, session survives a full reload (exercises the `proxy.ts` cookie gate). |
-| chat journey completes | A message sent in the chat UI produces the mock agent's reply — the full run path works. |
+| chat journey completes | A message sent in the chat UI produces the mock agent's reply — the full run path works (plain-reply; also the regression guard for the mock agent's unchanged plain path). |
 | agent list renders | `/agents` lists the seeded agent. |
 | catalog renders | `/app/catalog` renders its header + empty state. |
 | builder renders | The add-agent entry point is present. |
@@ -169,9 +174,18 @@ The recipe was proven one-off on 2026-11-08 (image `tackui:node24-check`:
 deep health `{"ok":true,"db":true,"migrations":14}`, `sharp` loading
 natively under musl) when the runtime moved to Node 24 (#91); #96 made it
 permanent. The job has two halves: the boot gate above (required), then the
-full smoke suite against the containerized app via the harness's
+Tier 1 smoke suite against the containerized app via the harness's
 `E2E_APP_IMAGE` mode (see the lifecycle section) — so the eight journeys
 run against the packaged artifact, not just the boot.
+
+**The image job runs Tier 1 only** (`npm run test:e2e:local --
+e2e/smoke.spec.ts`): it is the packaging gate, and its signal is "the
+packaged artifact boots and runs the core journeys." Feature tiers (Tier 2+,
+e.g. `e2e/chat.spec.ts`) run in standalone mode in the `e2e` job — they grow
+per area and would only inflate the image job's minutes without adding
+packaging signal. The boundary follows the suite's structure: whatever
+`smoke.spec.ts` certifies ships-checked in both modes; everything else is
+standalone-only.
 
 ## Running locally
 
@@ -184,6 +198,28 @@ npm run test:e2e:headed # visible browser for debugging
 Docker must be running (the throwaway Postgres is a container). Ports 3990
 (app) and 3999 (mock agent) are loopback-only; a stray `next-server` from a
 previous run causes `EADDRINUSE` — `pkill -f next-server` clears it.
+
+## Tier 2 — chat depth (built: `e2e/chat.spec.ts`, #101)
+
+The first Tier 2 file: three tests over the same harness, growing chat
+behaviors the Tier 1 round-trip can't reach. The smoke suite stays frozen at
+its 8 tests.
+
+| Test | Proves |
+| --- | --- |
+| conversation survives a reload | Send → reply → full reload → reopen from the sidebar; user message + reply render again. The conversation-history contract (threads API + `PostgresAgentRunner` + `/connect` replay) through the real cookie gate. Thread ids are not client-persisted, so the reload alone shows a fresh empty chat — reopening the sidebar thread IS the persistence assertion. |
+| tool call renders in the bubble | The mock agent's `"use the tool"` trigger makes the run carry AG-UI tool-call events; the wildcard tool render (`components/tools/tool-renders.tsx`) shows the humanized name inside the assistant bubble, and expanding it renders args (key-value rows) + the result through the react-markdown path. |
+| two exchanges stay ordered | Two send/reply cycles in one thread render in DOM order: user1, reply1, user2, reply2 (the second send waits for the run to finalize — the sidebar entry appearing — so it can't race the per-thread run lock). |
+
+Notes:
+
+- The tool render has no `data-testid` of its own — the spec asserts on the
+  stable rendered text (humanized name, the Arguments/Result labels, the
+  markdown heading), scoped inside `[data-testid="copilot-assistant-message"]`.
+  A CopilotKit default fallback would render the raw tool name, so the
+  humanized-name assertion is what pins the app's own renderer.
+- Each spec file (and test) keeps to its own thread; unique first messages
+  keep the shared seeded DB's sidebar listings unambiguous across the suite.
 
 ## Tier 2 (not built)
 
