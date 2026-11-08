@@ -15,6 +15,15 @@ All notable changes to this project will be documented in this file. The format 
   a hard count). Makes the 2026-11-08 one-off Node 24 container certification
   repeatable. See #96.
 
+- **Smoke suite can run against the containerized app (`E2E_APP_IMAGE`).**
+  `e2e/web-server.mjs` gains an image mode: setting `E2E_APP_IMAGE=<tag>`
+  swaps the app-under-test from the local standalone build to that
+  container — same Postgres, seed, mock agent, and eight tests, one shared
+  runtime env block so the two modes can't drift. The container runs with
+  `--network host` so the loopback-only mock agent stays loopback-only and
+  the seeded URLs are unchanged. Wired as the second half of the CI `image`
+  job. See #96.
+
 - **Shipped runtime on Node 24 (current LTS since Oct 2025; Node 20 EOL'd
   April 2026).** The Dockerfile moves `node:20-alpine` → `node:24-alpine`,
   the `engines` floor moves to `>=24`, and the remaining CI jobs (`lint`,

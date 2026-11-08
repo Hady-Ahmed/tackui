@@ -34,7 +34,8 @@ the full lifecycle and is the only `webServer` command:
    The app's own boot migrations re-run afterwards as no-ops (idempotent).
 3. Start the mock AG-UI agent on loopback port 3999.
 4. Copy `.next/static` into `.next/standalone/.next/static`, then start
-   `node server.js` (port 3990, loopback).
+   `node server.js` (port 3990, loopback) — or, in image mode, run the
+   `E2E_APP_IMAGE` container (see below).
 5. Poll `/api/health?deep=true` until ready, then stay alive until Playwright
    tears the stack down (it kills the whole process group — see below).
 
@@ -59,6 +60,29 @@ never inherited from the developer's shell. All values are throwaway (the
 requires a valid 64-hex-char key when auth is on — and the container's
 `DATABASE_URL`). The container is disposable; nothing here can touch a real
 deployment.
+
+### Image mode (`E2E_APP_IMAGE`)
+
+Setting `E2E_APP_IMAGE=<tag>` swaps the app-under-test from the local
+standalone build to that **container** — the packaged artifact the
+Dockerfile ships. Only step 4 changes; Postgres, migrations, seed, mock
+agent, and all eight tests are identical. One runtime env block (`appEnv`)
+is shared verbatim between both modes, so the spawn and the container
+cannot drift.
+
+The container runs with `--network host` on purpose: the mock agent is
+loopback-only (a permanent property) and pg is published to host loopback,
+so host networking lets the container reach both exactly as the spawned
+process does — no docker network to wire, no seed-URL changes, and the
+loopback-only property is preserved. The container boundary isn't doing
+security work here — it's the same app with the same throwaway env.
+
+```bash
+docker build -t tackui:ci .                 # build once
+E2E_APP_IMAGE=tackui:ci npm run test:e2e:local   # no local build needed
+```
+
+In CI this is the second half of the `image` job (below).
 
 ## Seed data (`e2e/seed.mjs`)
 
@@ -144,7 +168,10 @@ crashed run sweeps its own residue on the next start.
 The recipe was proven one-off on 2026-11-08 (image `tackui:node24-check`:
 deep health `{"ok":true,"db":true,"migrations":14}`, `sharp` loading
 natively under musl) when the runtime moved to Node 24 (#91); #96 made it
-permanent.
+permanent. The job has two halves: the boot gate above (required), then the
+full smoke suite against the containerized app via the harness's
+`E2E_APP_IMAGE` mode (see the lifecycle section) — so the eight journeys
+run against the packaged artifact, not just the boot.
 
 ## Running locally
 

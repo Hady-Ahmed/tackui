@@ -119,5 +119,16 @@ jobs:
           cache-to: type=gha,scope=ci-image,mode=max
       # Build + boot the image and poll deep health; exits non-zero on any
       # failure (dumping the app container's logs first). Teardown is
-      # idempotent on every exit path.
+      # idempotent on every exit path. This is the required gate — keep it
+      # before the npm steps so a packaging failure skips that spend.
       - run: node e2e/image-smoke.mjs tackui:ci
+      # Stretch (#96): the 8-test smoke suite against the containerized
+      # app. The harness (e2e/web-server.mjs, E2E_APP_IMAGE mode) swaps
+      # only the app-under-test — Postgres, migrations, seed, mock agent
+      # and tests are identical. No local build here: the image IS the
+      # artifact under test.
+      - run: npm ci
+      - run: npx playwright install --with-deps chromium
+      - run: npm run test:e2e:local
+        env:
+          E2E_APP_IMAGE: tackui:ci
