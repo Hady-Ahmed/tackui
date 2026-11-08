@@ -65,7 +65,9 @@ no Docker required, no cleanup between runs (see `vitest.config.ts`).
   `withTransaction` rollback test, the migration index test) run against
   a real Postgres via `@testcontainers/postgresql` (`lib/db/
   test-postgres.ts`; Docker required — they SKIP with a console note when
-  the daemon is down, so a Docker-less environment stays green).
+  the daemon is down (local only: on CI a probe failure fails the job —
+  a skip must never mask a broken probe), so a Docker-less local
+  environment stays green).
 - **Security-critical code** (`lib/auth`, `lib/billing`, `lib/net`,
   `lib/ratelimit`) — test the bypass attempt, not just the happy path.
 - **E2E (Playwright)** — `npm run test:e2e` runs the Tier 1 smoke suite
