@@ -14,6 +14,15 @@ export default defineConfig({
     // the budget is generous; pg-mem tests finish in milliseconds either
     // way.
     testTimeout: 30_000,
+    // Same economics, but for hooks — a file's FIRST real-PG test pays the
+    // container start inside beforeEach, and several files start their
+    // containers concurrently on a 2-core CI runner. The 10s default blew
+    // the budget on Node 24 CI (#90), and the abandoned hook then raced
+    // the next hook's migrations on the same container (concurrent CREATE
+    // TABLE → pg_type duplicate-key crash). The mutex in test-postgres.ts
+    // makes that race structurally impossible; this budget keeps the hook
+    // alive long enough to finish in the first place.
+    hookTimeout: 60_000,
   },
   resolve: {
     alias: {

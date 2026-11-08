@@ -4,6 +4,14 @@ All notable changes to this project will be documented in this file. The format 
 
 ## [Unreleased]
 
+- **CI test tier on Node 24 + fail-loud real-Postgres probe.** The vitest
+  real-Postgres tests (testcontainers) were silently skipping on CI: the
+  availability probe labeled a Node-20 library crash (nested undici needs
+  Node ≥ 22) as "Docker unavailable", so the job ran green with zero
+  real-Postgres coverage. The `test` job now runs Node 24, and the probe
+  distinguishes genuine Docker-unavailability (skip locally) from any other
+  failure (throw — red on CI). See #90.
+
 - **Tier 1 E2E smoke suite** (`npm run test:e2e`, new `e2e` CI job):
   8 Playwright tests run the real built app — the standalone `server.js`
   build against a throwaway Postgres container, real better-auth sessions,

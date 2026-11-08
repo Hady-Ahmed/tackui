@@ -7,8 +7,10 @@
  * per-file pg-mem injection from vitest.setup.ts) to a throwaway Postgres
  * container for the duration of ONE test, runs the idempotent migrations
  * against it, and returns a restore function that puts the previous
- * client back. Returns null when Docker isn't available — callers should
- * `ctx.skip()` with a note so Docker-less environments stay green.
+ * client back. Returns null only when the local environment genuinely
+ * can't run containers (no Docker daemon) — callers should `ctx.skip()`
+ * with a note so Docker-less environments stay green. On CI there is no
+ * legitimate skip: any probe failure throws and fails the job.
  *
  * The container is a module-level singleton per test file (vitest's
  * `isolate: true` gives each file its own module registry, so each file
@@ -27,6 +29,29 @@ let pool: { end: () => Promise<unknown>; query: PgClient["query"] } | null =
   null;
 let starting: Promise<boolean> | null = null;
 
+/**
+ * Does this error mean "this environment can't run containers" — the only
+ * condition allowed to skip the real-Postgres tier (locally; on CI nothing
+ * may skip)? Deliberately narrow: connection/permission errors on the
+ * Docker socket and daemon-level errors. Anything else — a library crash,
+ * a bug — is NOT docker-unavailability and must surface. The cautionary
+ * tale (#90): testcontainers' nested undici crashed at import on Node 20,
+ * the catch-all labeled it "Docker down", and CI ran green with zero
+ * real-Postgres coverage.
+ */
+function isDockerUnavailable(err: unknown): boolean {
+  if (!(err instanceof Error)) return false;
+  const msg = `${err.message} ${(err as NodeJS.ErrnoException).code ?? ""}`;
+  return (
+    /\bECONNREFUSED\b/.test(msg) || // daemon not listening
+    /\bENOENT\b/.test(msg) || // docker socket missing
+    /\bEACCES\b|\bEPERM\b/.test(msg) || // no permission on the socket
+    /error response from daemon|cannot connect to the docker daemon|is the docker daemon running/i.test(
+      msg,
+    )
+  );
+}
+
 async function ensureStarted(): Promise<boolean> {
   if (container && pool) return true;
   if (!starting) {
@@ -40,6 +65,12 @@ async function ensureStarted(): Promise<boolean> {
         pool = p;
         return true;
       } catch (err) {
+        // CI provisions Docker — a probe failure there is always a bug or
+        // an environment break, never a legitimate skip. Locally, only
+        // genuine docker-unavailability skips; anything else throws.
+        if (process.env.CI || !isDockerUnavailable(err)) {
+          throw err instanceof Error ? err : new Error(String(err));
+        }
         console.warn(
           "[test-postgres] Real Postgres unavailable (Docker down or image pull failed) — " +
             "skipping the real-Postgres tests:",
@@ -54,15 +85,31 @@ async function ensureStarted(): Promise<boolean> {
   return starting;
 }
 
+// Serializes useRealPostgres end-to-end. Vitest abandons a hook when it
+// times out but the abandoned async keeps running — without this mutex,
+// the next hook's runMigrations() can race the abandoned one on the same
+// container: concurrent CREATE TABLE schema_migrations crashes with a
+// pg_type duplicate-key error (seen on the first Node-24 CI run, #90 —
+// the 10s hookTimeout expired during a slow container start).
+let tail: Promise<unknown> = Promise.resolve();
+
 export async function useRealPostgres(): Promise<(() => void) | null> {
-  const ok = await ensureStarted();
-  if (!ok || !pool) return null;
-  // The callers' beforeEach injects a fresh pg-mem client per test —
-  // capture exactly what's live right now and restore it afterwards.
-  const previous = getPoolOrTestClient() as unknown as PgClient;
-  setTestDb(pool as unknown as PgClient);
-  await runMigrations();
-  return () => {
-    setTestDb(previous);
-  };
+  // .catch shields the chain: a prior abandoned call that eventually
+  // rejects must not poison everyone queued behind it.
+  const run = tail
+    .catch(() => {})
+    .then(async (): Promise<(() => void) | null> => {
+      const ok = await ensureStarted();
+      if (!ok || !pool) return null;
+      // The callers' beforeEach injects a fresh pg-mem client per test —
+      // capture exactly what's live right now and restore it afterwards.
+      const previous = getPoolOrTestClient() as unknown as PgClient;
+      setTestDb(pool as unknown as PgClient);
+      await runMigrations();
+      return () => {
+        setTestDb(previous);
+      };
+    });
+  tail = run;
+  return run;
 }

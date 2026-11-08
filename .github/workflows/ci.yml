@@ -46,7 +46,13 @@ jobs:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
         with:
-          node-version: 20
+          # Node 24, deliberately NOT the Dockerfile's 20: the real-Postgres
+          # test tier (testcontainers) needs node >= 22.22 via its nested
+          # undici and crashed at import on 20 — which the availability probe
+          # used to mask as "Docker down", silently skipping the tier (#90).
+          # The unit tier runs app logic under vitest, not the shipped
+          # runtime; the e2e job owns shipped-runtime parity.
+          node-version: 24
           cache: npm
       - run: npm ci
       - run: npm run test
