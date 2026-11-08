@@ -122,13 +122,20 @@ jobs:
       # idempotent on every exit path. This is the required gate — keep it
       # before the npm steps so a packaging failure skips that spend.
       - run: node e2e/image-smoke.mjs tackui:ci
-      # Stretch (#96): the 8-test smoke suite against the containerized
+      # Stretch (#96): the Tier 1 smoke suite against the containerized
       # app. The harness (e2e/web-server.mjs, E2E_APP_IMAGE mode) swaps
       # only the app-under-test — Postgres, migrations, seed, mock agent
       # and tests are identical. No local build here: the image IS the
       # artifact under test.
+      #
+      # Scoped to e2e/smoke.spec.ts (#101): this job is the packaging gate
+      # — it certifies that the packaged artifact runs the Tier 1
+      # journeys. Feature tiers (Tier 2+, e.g. e2e/chat.spec.ts) run in
+      # standalone mode in the `e2e` job; they grow per area and would
+      # only inflate this job's minutes without adding packaging signal.
+      # See docs/e2e.md ("Packaging gate").
       - run: npm ci
       - run: npx playwright install --with-deps chromium
-      - run: npm run test:e2e:local
+      - run: npm run test:e2e:local -- e2e/smoke.spec.ts
         env:
           E2E_APP_IMAGE: tackui:ci

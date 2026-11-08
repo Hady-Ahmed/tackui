@@ -4,6 +4,18 @@ All notable changes to this project will be documented in this file. The format 
 
 ## [Unreleased]
 
+- **E2E Tier 2A — chat depth** (`e2e/chat.spec.ts`, new alongside the frozen
+  8-test smoke suite): thread persistence across a real reload (send → reply
+  → reload → reopen the conversation from the sidebar, exercising the
+  threads API + `PostgresAgentRunner` + `/connect` replay through the cookie
+  gate), AG-UI tool-call rendering (the mock agent gains a `"use the tool"`
+  trigger branch that emits `TOOL_CALL_*` events — the plain-reply path stays
+  byte-identical — asserted through the wildcard tool render's expanded
+  args/result panel), and multi-turn ordering (two exchanges in DOM order in
+  one thread). The CI `image` job's Playwright step is scoped to
+  `e2e/smoke.spec.ts`: it stays the packaging gate (Tier 1 only); feature
+  tiers run in standalone mode in the `e2e` job. See #101 and `docs/e2e.md`.
+
 - **CI packaging gate (`image` job): every PR boots the shipped container.**
   The e2e job certifies the standalone `server.js` under the CI runner's
   Node 24 (Ubuntu/glibc); the new `image` job certifies the `node:24-alpine`
