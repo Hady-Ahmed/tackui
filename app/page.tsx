@@ -21,9 +21,9 @@ import { Landing } from "@/components/landing";
 export const dynamic = "force-dynamic";
 
 export const metadata: Metadata = {
-  title: "TackUI — One frontend for every AG-UI agent",
+  title: "TackUI — Build, install, and chat with your own AI agents",
   description:
-    "A ChatGPT-style chat for your custom agents. Connect any backend speaking the AG-UI protocol — switch agents, stream tokens, approve interrupts.",
+    "Build an agent without code, install a ready-made one from the catalog, or connect your own AG-UI backend — all in one ChatGPT-style chat.",
 };
 
 export default function RootPage() {
