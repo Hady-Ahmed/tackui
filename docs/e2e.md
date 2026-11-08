@@ -9,7 +9,7 @@ browser time. Run with `npm run test:e2e` (builds first) — or
 ## What's real, what's faked
 
 The suite runs the **real built app** — the standalone `server.js` the
-Dockerfile ships — against a **real Postgres** (a throwaway testcontainers
+Dockerfile ships — against a **real Postgres** (a throwaway `docker run`
 container) with the **real auth flow** (better-auth session cookies issued by
 the login page). The only fake is the model: a mock AG-UI agent, a
 dependency-free Node `http` server (`e2e/mock-agent.mjs`) that emits the AG-UI
@@ -26,7 +26,9 @@ boots (its instrumentation runs migrations and fails fast without a DB), and
 the app needs the container's connection string in its env. So one script owns
 the full lifecycle and is the only `webServer` command:
 
-1. Start a throwaway Postgres container (`postgres:16-alpine`, testcontainers).
+1. Start a throwaway Postgres container (`postgres:16-alpine`, plain
+   `docker run` — testcontainers@12 needs Node ≥ 22 via its nested undici,
+   and CI runs the Node 20 the Dockerfile ships).
 2. Run migrations (`e2e/migrate.mjs` — a standalone port of `lib/db/migrate.ts`),
    better-auth tables (`e2e/auth-tables.mjs`), and seed data (`e2e/seed.mjs`).
    The app's own boot migrations re-run afterwards as no-ops (idempotent).
@@ -34,7 +36,17 @@ the full lifecycle and is the only `webServer` command:
 4. Copy `.next/static` into `.next/standalone/.next/static`, then start
    `node server.js` (port 3990, loopback).
 5. Poll `/api/health?deep=true` until ready, then stay alive until Playwright
-   tears it down (SIGTERM → children killed).
+   tears the stack down (it kills the whole process group — see below).
+
+**Teardown is outsourced to a detached reaper.** Playwright kills the
+webServer process group with a bare SIGKILL — no SIGTERM, no grace period —
+so no in-process cleanup can run at shutdown (a SIGKILL'd process executes no
+handlers). Instead, right after `docker run` the script spawns a tiny
+detached watchdog (`sh` loop in its own session, invisible to the group kill)
+that polls the harness pid and runs `docker rm -f` the moment the harness is
+gone. Container removal also happens on the direct-signal paths (Ctrl-C,
+normal exit), and every startup first sweeps stale `tackui-e2e-pg-*`
+containers, so a crashed run leaves nothing behind.
 
 **The standalone static-copy step is load-bearing.** `output: "standalone"`
 does not include `.next/static` — the Dockerfile does the same copy in a

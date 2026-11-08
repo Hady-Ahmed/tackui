@@ -54,8 +54,9 @@ jobs:
   e2e:
     name: E2E smoke
     # Runs the real built app (standalone build) against a throwaway
-    # Postgres container (testcontainers — Docker is preinstalled on the
-    # runner) + the mock AG-UI agent. See e2e/web-server.mjs and docs/e2e.md.
+    # Postgres container (plain `docker run` — Docker is preinstalled on
+    # the runner) + the mock AG-UI agent. See e2e/web-server.mjs and
+    # docs/e2e.md.
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
