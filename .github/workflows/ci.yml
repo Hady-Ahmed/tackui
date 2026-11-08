@@ -83,3 +83,52 @@ jobs:
       - run: npx playwright install --with-deps chromium
       # Skip the rebuild — the build above is the artifact under test.
       - run: npm run test:e2e:local
+
+  image:
+    name: Image boot (node:24-alpine)
+    # Packaging gate (#96): the e2e job certifies the standalone server.js
+    # under CI's Node 24 — Ubuntu/glibc. This job certifies the container
+    # the PR actually ships, where musl libc can change native addon
+    # resolution (sharp/libvips): build the image, boot it against a
+    # throwaway Postgres on a docker network, require a green
+    # /api/health?deep=true. Recipe proven one-off 2026-11-08 — see #96 and
+    # docs/e2e.md. (The build logs a pre-existing informational
+    # SecretsUsedInArgOrEnv warning on the Dockerfile's build-stage
+    # AUTH_DISABLED — build-time dummy, not a secret; nothing to fix.)
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      # The harness script is stock Node — but pin 24 so every CI job runs
+      # the same Node the image ships.
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+      - uses: docker/setup-buildx-action@v3
+      # GHA layer cache, own scope (distinct from release.yml's per-arch
+      # scopes): the deps layer only rebuilds when package-lock.json
+      # changes. `load: true` puts the image in the local daemon for the
+      # smoke step. Same-repo PRs can write the cache; forks read-only.
+      - uses: docker/build-push-action@v6
+        with:
+          context: .
+          load: true
+          tags: tackui:ci
+          cache-from: type=gha,scope=ci-image
+          cache-to: type=gha,scope=ci-image,mode=max
+      # Build + boot the image and poll deep health; exits non-zero on any
+      # failure (dumping the app container's logs first). Teardown is
+      # idempotent on every exit path. This is the required gate — keep it
+      # before the npm steps so a packaging failure skips that spend.
+      - run: node e2e/image-smoke.mjs tackui:ci
+      # Stretch (#96): the 8-test smoke suite against the containerized
+      # app. The harness (e2e/web-server.mjs, E2E_APP_IMAGE mode) swaps
+      # only the app-under-test — Postgres, migrations, seed, mock agent
+      # and tests are identical. No local build here: the image IS the
+      # artifact under test.
+      - run: npm ci
+      - run: npx playwright install --with-deps chromium
+      - run: npm run test:e2e:local
+        env:
+          E2E_APP_IMAGE: tackui:ci

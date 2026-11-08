@@ -14,7 +14,9 @@
  *   1. Start a throwaway Postgres container (docker run, postgres:16-alpine).
  *   2. Run migrations + auth tables + seed the admin user + the test agent.
  *   3. Start the mock AG-UI agent (127.0.0.1, E2E_MOCK_AGENT_PORT).
- *   4. Start the built app (PORT) with the E2E env inline.
+ *   4. Start the app: the built standalone server.js — or, when
+ *      E2E_APP_IMAGE names an image, that container (`docker run --network
+ *      host` of the packaged artifact; see the note at the definition).
  *   5. Wait for the app's readiness probe.
  *
  * Postgres is started with plain `docker run`, not testcontainers. The
@@ -39,9 +41,29 @@ import { startMockAgent } from "./mock-agent.mjs";
 const APP_PORT = Number(process.env.E2E_APP_PORT || 3990);
 const APP_URL = `http://127.0.0.1:${APP_PORT}`;
 
+// Image mode (stretch, #96): when E2E_APP_IMAGE names a built image, the
+// app under test is that container instead of a local spawn of the
+// standalone build. Everything else — Postgres, migrations, seed, mock
+// agent, the eight tests — is identical: the Playwright tests only hit
+// APP_URL. The image ships the standalone server.js the Dockerfile builds,
+// so this certifies the packaged artifact on the real journeys, not just
+// at boot (that boot check lives in e2e/image-smoke.mjs / the CI image job).
+//
+// The container runs with `--network host` on purpose: the mock agent is
+// loopback-only by design (a permanent property — see its file), and pg is
+// published to host loopback. Host networking lets the container reach both
+// exactly as the spawned process does — no docker network, no seed-URL
+// changes, no loopback-only exception. The container boundary isn't doing
+// security work here: it's the same app with the same throwaway env.
+const APP_IMAGE = process.env.E2E_APP_IMAGE || "";
+
 // The throwaway Postgres container's name — module scope so the exit
 // handlers and the watchdog can always find it, however the script dies.
 const PG_CONTAINER = `tackui-e2e-pg-${process.pid}`;
+
+// Image mode only: the app container's name (pid-suffixed like pg's) so
+// teardown, the reaper, and the sweep can always find it.
+const APP_CONTAINER = APP_IMAGE ? `tackui-e2e-app-${process.pid}` : null;
 
 // Fixed test credentials — the seed admin. Not secrets; the whole DB is
 // disposable. The mock agent needs a 32+ char secret for the JWT signing
@@ -81,15 +103,22 @@ function freePort() {
 }
 
 /**
- * Remove the Postgres container. execSync because exit handlers can't
+ * Remove the throwaway containers. execSync because exit handlers can't
  * await — this must finish synchronously before the process disappears.
  * `rm -f` is idempotent: a container that never started is fine.
  */
-function teardownPg() {
+function teardownStack() {
   try {
     execSync(`docker rm -f ${PG_CONTAINER}`, { stdio: "ignore" });
   } catch {
     // nothing to remove
+  }
+  if (APP_CONTAINER) {
+    try {
+      execSync(`docker rm -f ${APP_CONTAINER}`, { stdio: "ignore" });
+    } catch {
+      // nothing to remove
+    }
   }
 }
 
@@ -97,13 +126,14 @@ function teardownPg() {
  * Detached container reaper. Playwright kills the webServer process group
  * with a bare SIGKILL (see the shutdown code in playwright-core — no
  * SIGTERM, no grace period), so no in-process handler ever runs on webServer
- * shutdown and the container would leak every run. This watchdog is started
+ * shutdown and the containers would leak every run. This watchdog is started
  * in its own session (detached) precisely so that kill misses it: it polls
- * the harness pid and removes the container the moment the harness is gone.
- * Harmless when the container is already gone — `rm -f` is idempotent.
+ * the harness pid and removes the containers the moment the harness is
+ * gone. Harmless when a container is already gone — `rm -f` is idempotent.
  */
 function startReaper() {
-  const cmd = `while kill -0 ${process.pid} 2>/dev/null; do sleep 1; done; docker rm -f ${PG_CONTAINER}`;
+  const targets = APP_CONTAINER ? `${PG_CONTAINER} ${APP_CONTAINER}` : PG_CONTAINER;
+  const cmd = `while kill -0 ${process.pid} 2>/dev/null; do sleep 1; done; docker rm -f ${targets}`;
   spawn("sh", ["-c", cmd], { detached: true, stdio: "ignore" }).unref();
 }
 
@@ -111,7 +141,7 @@ function startReaper() {
 async function sweepStaleContainers() {
   await new Promise((resolve) => {
     exec(
-      `docker ps -aq --filter name=tackui-e2e-pg- | xargs -r docker rm -f`,
+      `docker ps -aq --filter name=tackui-e2e-pg- --filter name=tackui-e2e-app- | xargs -r docker rm -f`,
       { stdio: "ignore" },
       () => resolve(),
     );
@@ -123,20 +153,20 @@ async function main() {
 
   // Tear down on every way out. Playwright SIGTERMs the whole process
   // group on webServer shutdown (which also delivers SIGTERM to the app +
-  // mock agent children), so the container is removed here — nothing else
-  // owns its lifecycle. The 'exit' backstop covers crashes and the
-  // catch-all below; it runs synchronously, hence teardownPg only.
+  // mock agent children), so the containers are removed here — nothing
+  // else owns their lifecycle. The 'exit' backstop covers crashes and the
+  // catch-all below; it runs synchronously, hence teardownStack only.
   const exitNow = (signal) => {
     log(`received ${signal} — tearing down`);
     for (const fn of cleanup) fn();
-    teardownPg();
+    teardownStack();
     process.exit(0);
   };
   process.on("SIGTERM", () => exitNow("SIGTERM"));
   process.on("SIGINT", () => exitNow("SIGINT"));
   process.on("SIGTERM", exitNow);
   process.on("SIGINT", exitNow);
-  process.on("exit", teardownPg);
+  process.on("exit", teardownStack);
 
   // 1. Postgres — throwaway container, bound to loopback only.
   await sweepStaleContainers();
@@ -206,48 +236,81 @@ async function main() {
   cleanup.push(() => mockServer.close());
   log(`mock agent listening on 127.0.0.1:${mockPort}`);
 
-  // 4. The built app. The standalone build's server.js — the same binary
-  //    the Dockerfile ships. Next.js docs (output: standalone) + the
-  //    Dockerfile both note: the standalone output does NOT include the
-  //    `.next/static` folder by default — it must be copied into
-  //    standalone/.next/static before the server starts (the Dockerfile
-  //    does exactly this COPY step). Without it, every static chunk 404s.
-  log("starting built app...");
-  await run("cp", ["-r", ".next/static", ".next/standalone/.next/static"]);
-  const app = spawn("node", ["server.js"], {
-    cwd: ".next/standalone",
-    env: {
-      ...process.env,
-      NODE_ENV: "production",
-      PORT: String(APP_PORT),
-      HOSTNAME: "127.0.0.1",
-      DATABASE_URL: dbUrl,
-      AUTH_DISABLED: "false",
-      BETTER_AUTH_SECRET: AUTH_SECRET,
-      BETTER_AUTH_URL: APP_URL,
-      ALLOW_PRIVATE_ENDPOINTS: "true",
-      SAAS_MODE: "false",
-      // The app's boot guard requires DB_ENCRYPTION_KEY when auth is
-      // enabled (agent JWT secrets are encrypted at rest). A throwaway
-      // key — same contract as prod, disposable value. 64 hex chars
-      // (openssl rand -hex 32 format).
-      DB_ENCRYPTION_KEY: "e2e0e2e0e2e0e2e0e2e0e2e0e2e0e2e0e2e0e2e0e2e0e2e0e2e0e2e0e2e0e2e0",
-      // Sentry: no DSN → no-op (the config files guard on it).
-      SENTRY_DSN: "",
-      // Builder features off (no AGENTOS_BASE_URL) — the smoke suite
-      // doesn't need them; keeps boot free of platform warnings.
-      AGENTOS_BASE_URL: "",
-      NEXT_TELEMETRY_DISABLED: "1",
-    },
-    stdio: ["ignore", "pipe", "pipe"],
-  });
-  // Stream app output so failures surface in the Playwright webServer log.
-  app.stdout.on("data", (c) => process.stdout.write(`[app] ${c}`));
-  app.stderr.on("data", (c) => process.stderr.write(`[app] ${c}`));
-  app.on("exit", (code) => log(`app exited ${code}`));
-  cleanup.push(() => {
-    app.kill("SIGTERM");
-  });
+  // 4. The app under test — two modes, one env:
+  //      default:  spawn the standalone build's server.js (the same binary
+  //                the Dockerfile ships)
+  //      image:    `docker run` the E2E_APP_IMAGE container — the packaged
+  //                artifact itself (stretch, #96)
+  //
+  //    The standalone build's server.js does NOT include the `.next/static`
+  //    folder by default — it must be copied into standalone/.next/static
+  //    before the server starts (the Dockerfile does exactly this COPY
+  //    step). Without it, every static chunk 404s. Image mode skips the
+  //    copy: the image contains it already.
+  const appEnv = {
+    NODE_ENV: "production",
+    PORT: String(APP_PORT),
+    HOSTNAME: "127.0.0.1",
+    DATABASE_URL: dbUrl,
+    AUTH_DISABLED: "false",
+    BETTER_AUTH_SECRET: AUTH_SECRET,
+    BETTER_AUTH_URL: APP_URL,
+    ALLOW_PRIVATE_ENDPOINTS: "true",
+    SAAS_MODE: "false",
+    // The app's boot guard requires DB_ENCRYPTION_KEY when auth is
+    // enabled (agent JWT secrets are encrypted at rest). A throwaway
+    // key — same contract as prod, disposable value. 64 hex chars
+    // (openssl rand -hex 32 format).
+    DB_ENCRYPTION_KEY: "e2e0e2e0e2e0e2e0e2e0e2e0e2e0e2e0e2e0e2e0e2e0e2e0e2e0e2e0e2e0e2e0",
+    // Sentry: no DSN → no-op (the config files guard on it).
+    SENTRY_DSN: "",
+    // Builder features off (no AGENTOS_BASE_URL) — the smoke suite
+    // doesn't need them; keeps boot free of platform warnings.
+    AGENTOS_BASE_URL: "",
+    NEXT_TELEMETRY_DISABLED: "1",
+  };
+
+  if (APP_IMAGE) {
+    log(`starting app image ${APP_IMAGE}...`);
+    // Args-array spawn, not a shell string — env values go in verbatim
+    // with no quoting to get wrong.
+    const dockerArgs = [
+      "run",
+      "-d",
+      "--name",
+      APP_CONTAINER,
+      "--network",
+      "host",
+      ...Object.entries(appEnv).flatMap(([k, v]) => ["-e", `${k}=${v}`]),
+      APP_IMAGE,
+    ];
+    await run("docker", dockerArgs);
+    // Follow the container's logs so failures surface in the webServer log.
+    const logs = spawn("docker", ["logs", "-f", APP_CONTAINER], {
+      stdio: ["ignore", "pipe", "pipe"],
+    });
+    logs.stdout.on("data", (c) => process.stdout.write(`[app] ${c}`));
+    logs.stderr.on("data", (c) => process.stderr.write(`[app] ${c}`));
+    logs.on("exit", (code) => log(`app container gone (logs stream ended, code ${code})`));
+    cleanup.push(() => {
+      logs.kill("SIGTERM");
+    });
+  } else {
+    log("starting built app...");
+    await run("cp", ["-r", ".next/static", ".next/standalone/.next/static"]);
+    const app = spawn("node", ["server.js"], {
+      cwd: ".next/standalone",
+      env: { ...process.env, ...appEnv },
+      stdio: ["ignore", "pipe", "pipe"],
+    });
+    // Stream app output so failures surface in the Playwright webServer log.
+    app.stdout.on("data", (c) => process.stdout.write(`[app] ${c}`));
+    app.stderr.on("data", (c) => process.stderr.write(`[app] ${c}`));
+    app.on("exit", (code) => log(`app exited ${code}`));
+    cleanup.push(() => {
+      app.kill("SIGTERM");
+    });
+  }
 
   // 5. Wait for readiness (the deep probe pings Postgres + migrations).
   const deadline = Date.now() + 60_000;
