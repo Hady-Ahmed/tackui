@@ -110,6 +110,42 @@ placeholder → 7 of 8 tests fail (all but the health probe, which never touches
 the UI); restoring the source → 8 of 8 pass. Re-run a breakage check whenever
 tests are added — a test that has never failed is not a test.
 
+## Packaging gate: the CI `image` job
+
+The smoke suite runs the app as a bare `node server.js` process on the CI
+runner — Ubuntu, glibc. That never exercises the container the Dockerfile
+ships: `node:24-alpine` runs **musl**, the one environment where native
+(C/C++) addon resolution can differ from every other job (prebuilt `.node`
+binaries ship per platform + libc; `sharp`/libvips is the obvious resident).
+A musl-broken dep would keep lint/typecheck/test/e2e green and fail at
+container boot — in someone's production compose stack.
+
+The `image` job closes that gap on every PR:
+
+1. `docker build` the image the PR actually ships (GHA-cached — the deps
+   layer only rebuilds when `package-lock.json` changes).
+2. Boot it against a throwaway `postgres:16-alpine` on a docker network —
+   the same plain-`docker run` pattern as the harness above, with the
+   minimal boot env (`AUTH_DISABLED=true`, `DATABASE_URL` pointing at the
+   pg container by name; matching the compose default).
+3. Poll `/api/health?deep=true` and require `ok === true`, `db === true`,
+   and a numeric migration count — the app booted, connected, and
+   auto-migrated. The response shape is asserted, not a hard count: adding
+   migrations must never break the gate.
+
+Harness: `e2e/image-smoke.mjs` (dependency-free, like `web-server.mjs` —
+runs on the runner with nothing but docker and stock Node). On failure it
+dumps the app container's logs before teardown — a boot crash is the exact
+failure mode the gate exists for, and its last words ("Cannot find module
+… sharp" under musl, say) are the whole diagnosis. Teardown (`docker rm -f`
+both containers + network rm) is idempotent on every exit path, and a
+crashed run sweeps its own residue on the next start.
+
+The recipe was proven one-off on 2026-11-08 (image `tackui:node24-check`:
+deep health `{"ok":true,"db":true,"migrations":14}`, `sharp` loading
+natively under musl) when the runtime moved to Node 24 (#91); #96 made it
+permanent.
+
 ## Running locally
 
 ```bash
