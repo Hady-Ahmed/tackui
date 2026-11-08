@@ -85,15 +85,31 @@ async function ensureStarted(): Promise<boolean> {
   return starting;
 }
 
+// Serializes useRealPostgres end-to-end. Vitest abandons a hook when it
+// times out but the abandoned async keeps running — without this mutex,
+// the next hook's runMigrations() can race the abandoned one on the same
+// container: concurrent CREATE TABLE schema_migrations crashes with a
+// pg_type duplicate-key error (seen on the first Node-24 CI run, #90 —
+// the 10s hookTimeout expired during a slow container start).
+let tail: Promise<unknown> = Promise.resolve();
+
 export async function useRealPostgres(): Promise<(() => void) | null> {
-  const ok = await ensureStarted();
-  if (!ok || !pool) return null;
-  // The callers' beforeEach injects a fresh pg-mem client per test —
-  // capture exactly what's live right now and restore it afterwards.
-  const previous = getPoolOrTestClient() as unknown as PgClient;
-  setTestDb(pool as unknown as PgClient);
-  await runMigrations();
-  return () => {
-    setTestDb(previous);
-  };
+  // .catch shields the chain: a prior abandoned call that eventually
+  // rejects must not poison everyone queued behind it.
+  const run = tail
+    .catch(() => {})
+    .then(async (): Promise<(() => void) | null> => {
+      const ok = await ensureStarted();
+      if (!ok || !pool) return null;
+      // The callers' beforeEach injects a fresh pg-mem client per test —
+      // capture exactly what's live right now and restore it afterwards.
+      const previous = getPoolOrTestClient() as unknown as PgClient;
+      setTestDb(pool as unknown as PgClient);
+      await runMigrations();
+      return () => {
+        setTestDb(previous);
+      };
+    });
+  tail = run;
+  return run;
 }
