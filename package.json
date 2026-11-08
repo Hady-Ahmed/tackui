@@ -23,6 +23,9 @@
     "lint": "eslint",
     "test": "vitest run",
     "test:watch": "vitest",
+    "test:e2e": "npm run build && playwright test",
+    "test:e2e:local": "playwright test",
+    "test:e2e:headed": "playwright test --headed",
     "migrate": "npx tsx scripts/migrate.ts",
     "create-admin": "npx tsx scripts/create-admin.ts"
   },
@@ -46,6 +49,7 @@
     "zod": "^3.25.76"
   },
   "devDependencies": {
+    "@playwright/test": "^1.65.0",
     "@tailwindcss/postcss": "^4",
     "@testcontainers/postgresql": "^12.2.1",
     "@types/node": "^20",
