@@ -4,6 +4,22 @@ All notable changes to this project will be documented in this file. The format 
 
 ## [Unreleased]
 
+- **Agent builder tool palette: readable rows, palette search, honest
+  tool cap.** Palette rows were a single flex line where the key badge
+  crushed both the tool name ("Gen…") and the description into
+  unreadable slivers with no way to expand; they're now two-line rows —
+  full name + badge on the first line, the description clamped at two
+  lines with a "Show more / Show less" toggle (rendered only when the
+  text overflows) beneath, and a blue border on checked rows (the
+  platform-admin ToolRow language). The palette gains a search input
+  (case-insensitive on label + description, with a "No tools match"
+  state — filtering is display-only, so hidden selections keep their
+  payload slot), the cap hint counts live ("3 of 10 selected"), and at
+  the cap unchecked rows disable with an explanatory title instead of
+  the click silently no-op'ing. Rows render in a deterministic
+  (toolkit, label) order instead of the upstream allowlist's append
+  order. See #106.
+
 - **CI packaging gate (`image` job): every PR boots the shipped container.**
   The e2e job certifies the standalone `server.js` under the CI runner's
   Node 24 (Ubuntu/glibc); the new `image` job certifies the `node:24-alpine`
