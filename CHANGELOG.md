@@ -4,6 +4,15 @@ All notable changes to this project will be documented in this file. The format 
 
 ## [Unreleased]
 
+- **Shipped runtime on Node 24 (current LTS since Oct 2025; Node 20 EOL'd
+  April 2026).** The Dockerfile moves `node:20-alpine` → `node:24-alpine`,
+  the `engines` floor moves to `>=24`, and the remaining CI jobs (`lint`,
+  `typecheck`, `e2e`) converge on 24 — the whole battery now matches what
+  ships. The e2e Postgres harness keeps plain `docker run`: the original
+  swap was a Node-20 workaround (#90), but a dependency-free supervisor
+  that survives Playwright's bare-SIGKILL teardown is a permanent property,
+  not a version workaround. See #91.
+
 - **CI test tier on Node 24 + fail-loud real-Postgres probe.** The vitest
   real-Postgres tests (testcontainers) were silently skipping on CI: the
   availability probe labeled a Node-20 library crash (nested undici needs

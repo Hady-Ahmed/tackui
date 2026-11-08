@@ -19,8 +19,8 @@ jobs:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
         with:
-          # Match the Dockerfile (node:20-alpine) — CI validates what ships.
-          node-version: 20
+          # Match the Dockerfile (node:24-alpine) — CI validates what ships.
+          node-version: 24
           cache: npm
       - run: npm ci
       - run: npm run lint
@@ -33,7 +33,7 @@ jobs:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
         with:
-          node-version: 20
+          node-version: 24
           cache: npm
       - run: npm ci
       - run: npx tsc --noEmit
@@ -46,12 +46,12 @@ jobs:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
         with:
-          # Node 24, deliberately NOT the Dockerfile's 20: the real-Postgres
-          # test tier (testcontainers) needs node >= 22.22 via its nested
-          # undici and crashed at import on 20 — which the availability probe
-          # used to mask as "Docker down", silently skipping the tier (#90).
-          # The unit tier runs app logic under vitest, not the shipped
-          # runtime; the e2e job owns shipped-runtime parity.
+          # Node 24 — the whole battery now matches the Dockerfile
+          # (node:24-alpine). This job also can't go below it: the
+          # real-Postgres test tier (testcontainers) needs node >= 22.22 via
+          # its nested undici and crashed at import on 20 — which the
+          # availability probe used to mask as "Docker down", silently
+          # skipping the tier (#90).
           node-version: 24
           cache: npm
       - run: npm ci
@@ -69,7 +69,7 @@ jobs:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
         with:
-          node-version: 20
+          node-version: 24
           cache: npm
       - run: npm ci
       # Build-time env is inline (never .env.local); values are dummies —

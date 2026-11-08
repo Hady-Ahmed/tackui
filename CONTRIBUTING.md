@@ -16,7 +16,7 @@ For the full environment-variable reference, see [`.env.example`](./.env.example
 
 ## Prerequisites
 
-- **Node.js 20+** (the Dockerfile pins `node:20-alpine`)
+- **Node.js 24+** (the Dockerfile pins `node:24-alpine`)
 - **Postgres 14+** for production/realistic local dev, OR run with the in-memory `pg-mem` emulator for tests (no Postgres required)
 - A `DATABASE_URL` pointing at your Postgres instance (e.g. `postgres://user:pass@localhost:5432/agentui`)
 

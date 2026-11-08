@@ -17,11 +17,14 @@
  *   4. Start the built app (PORT) with the E2E env inline.
  *   5. Wait for the app's readiness probe.
  *
- * Postgres is started with plain `docker run`, not testcontainers:
- * testcontainers@12 (via its nested undici) requires Node >= 22, and CI runs
- * the Node 20 the Dockerfile ships — the import crashes there. Keeping this
- * script dependency-free (like the mock agent) means it runs identically on
- * every Node the app itself supports.
+ * Postgres is started with plain `docker run`, not testcontainers. The
+ * original swap was a Node-20 workaround (testcontainers' nested undici
+ * crashed at import there, #90 — the Dockerfile now ships 24), but the
+ * split stays: this script is a long-lived supervisor that must survive
+ * Playwright's bare-SIGKILL teardown — no in-process handler can run — and
+ * keeping the boot path dependency-free (like the mock agent) is a
+ * permanent property, not a version workaround. The vitest tier keeps
+ * testcontainers; `@testcontainers/postgresql` is its dependency, not ours.
  *
  * The E2E env is passed inline to the child process — never written to
  * .env.local, never inherited from the developer's environment. The

@@ -48,7 +48,7 @@ body:
     attributes:
       label: Relevant environment
       description: The env vars that matter for the bug (redact secrets). e.g. `ALLOW_PRIVATE_ENDPOINTS=true`, `EMAIL_ENABLED`, hosting platform, Node version, Postgres version. Don't paste `BETTER_AUTH_SECRET`, Stripe keys, or any other secret.
-      placeholder: "ALLOW_PRIVATE_ENDPOINTS=true, hosted on Railway, Node 20, PG 16"
+      placeholder: "ALLOW_PRIVATE_ENDPOINTS=true, hosted on Railway, Node 24, PG 16"
   - type: textarea
     id: logs
     attributes:
