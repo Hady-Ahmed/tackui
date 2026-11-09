@@ -5,8 +5,9 @@ boots, every surface renders, and the two most important journeys (login,
 chat) work end-to-end. Eight tests, one file (`e2e/smoke.spec.ts`), ~6s of
 browser time. Deeper journeys live in sibling specs that reuse the same
 harness — Tier 2 so far: `e2e/chat.spec.ts` (chat depth),
-`e2e/agents.spec.ts` (agent CRUD), and `e2e/orgs.spec.ts` (orgs &
-invitations), below. Run
+`e2e/agents.spec.ts` (agent CRUD), `e2e/orgs.spec.ts` (orgs &
+invitations), and `e2e/auth.spec.ts` (auth journeys — signup, email
+verification, password reset), below. Run
 with `npm run test:e2e` (builds first) — or `npm run test:e2e:local` to
 reuse an existing build.
 
@@ -24,6 +25,14 @@ deterministic, fast, and free. One conditional branch: a message containing
 the trigger phrase `"use the tool"` makes the same reply carry AG-UI
 tool-call events (`TOOL_CALL_START/ARGS/END` + `TOOL_CALL_RESULT`) — the
 plain-reply path stays byte-identical, and Tier 1's chat test guards that.
+Since the auth-journeys spec (#107) the same shape covers the mail
+transport: the app's email features are ON (a throwaway `RESEND_API_KEY`)
+but the Resend SDK's `RESEND_BASE_URL` points at a **local catcher**
+(`e2e/email-catcher.mjs`) — every email the app really sends (verification,
+password reset, invitation) is delivered to the catcher through the app's
+own `sendEmail` path, and the spec drives the real link it carries. Nothing
+in the app is stubbed; only where the transport sends changed, exactly like
+the mock agent for the model.
 
 ## Lifecycle: `e2e/web-server.mjs`
 
@@ -40,10 +49,13 @@ the full lifecycle and is the only `webServer` command:
    better-auth tables (`e2e/auth-tables.mjs`), and seed data (`e2e/seed.mjs`).
    The app's own boot migrations re-run afterwards as no-ops (idempotent).
 3. Start the mock AG-UI agent on loopback port 3999.
-4. Copy `.next/static` into `.next/standalone/.next/static`, then start
+4. Start the local email catcher on loopback port 3998
+   (`e2e/email-catcher.mjs` — POST `/emails` swallows the app's real
+   sends, GET `/emails?to=` is how the auth spec picks mail up).
+5. Copy `.next/static` into `.next/standalone/.next/static`, then start
    `node server.js` (port 3990, loopback) — or, in image mode, run the
    `E2E_APP_IMAGE` container (see below).
-5. Poll `/api/health?deep=true` until ready, then stay alive until Playwright
+6. Poll `/api/health?deep=true` until ready, then stay alive until Playwright
    tears the stack down (it kills the whole process group — see below).
 
 **Teardown is outsourced to a detached reaper.** Playwright kills the
@@ -164,8 +176,8 @@ Every test pays one real login (`helpers.ts` `login()`), and better-auth
 caps sign-in at 10/min per IP (`lib/auth/auth.ts` — in production this is
 the brute-force guard; the harness runs with it fully enabled). A suite
 that grows one login per test therefore hits a hard ceiling: at Tier 2's
-15 tests, a fast machine compresses the whole run into ~60s and the
-limiter's counter overflows — the last login wave 429s ("Too many
+19 paced sign-ins, a fast machine compresses the whole run into ~60s and
+the limiter's counter overflows — the last login wave 429s ("Too many
 requests") and tests die in `login()`. Found exactly that way when the
 agent-CRUD spec joined the suite (#102).
 
@@ -187,7 +199,14 @@ Three conventions keep the suite under the cap as Tier 2 grows:
   `helpers.ts` grew a parameterized `loginAs()` that shares the
   parameter-free `login()`'s pacer and 429 ride-out verbatim; the
   chat-input assertion stays in `login()` because a member with zero
-  agents never sees it).
+  agents never sees it). The auth spec (#107) is the other shape: its
+  journeys ARE login boundaries, so there is no `beforeAll` login at
+  all — signup, verification, and the reset rotate credentials and
+  issue sessions through the real forms — and its EXPECTED-REJECTION
+  sign-ins (the unverified 403 gate, the old-password refusal after a
+  reset) are paced through the same slot queue via `rejectedSignIn`,
+  because a limiter charge is a limiter charge whether or not it
+  succeeds.
 - **`login()` never bursts the cap.** Playwright workers are separate OS
   processes with no shared lock, so sign-ins are paced through the
   filesystem: each login claims a slot on a 7s grid (`slot-<grid
@@ -222,13 +241,14 @@ Three conventions keep the suite under the cap as Tier 2 grows:
   the original navigation timeout. Jitter keeps parallel workers from
   retrying in lockstep.
 
-The pacer's queue is paid for in test time — 12 logins at ≥7s spacing
-puts the last slot up to ~84s out — so the Playwright test timeout is
-120s, not 60s: the wait happens inside the test, and the queue is
+The pacer's queue is paid for in test time — 16 sign-ins at ≥7s spacing
+puts the last slot up to ~105s out — so the Playwright test timeout is
+150s, not 60s (bumped from 120s when the auth-journeys spec joined,
+#107): the wait happens inside the test, and the queue is
 suite-wide (every spec's logins draw from the same slots, so a test
-joining the opening burst can queue ~84s regardless of which spec it
+joining the opening burst can queue ~105s regardless of which spec it
 belongs to). Still a strict ceiling: a hung journey fails within two
-minutes.
+and a half minutes.
 
 Sign-ins aren't the only shared budget. `agentRead` (60/min per user)
 is charged by ten routes — the agents list on every sidebar and /agents
@@ -258,12 +278,13 @@ login count (#103), and the harness raises both the same way — app env
 in `e2e/web-server.mjs`, prod defaults untouched:
 
 - **The Better Auth sign-in cap** (10/min per IP, `lib/auth/auth.ts`
-  `customRules` → `AUTH_SIGNIN_RATE_MAX=30` in the harness). With 12
-  logins in the four-file run, the gap-based reset above makes the
-  counter climb for the entire ~84s login queue — no spacing fits under
+  `customRules` → `AUTH_SIGNIN_RATE_MAX=30` in the harness). With 16
+  sign-ins in the five-file run, the gap-based reset above makes the
+  counter climb for the entire ~105s login queue — no spacing fits under
   10. The knob gives headroom for further Tier 2 files without
   re-litigating the pacer's grid math every time one joins; sign-up
-  stays at 5.
+  stays at 5 and the auth spec (#107) spends it once — its journeys
+  issue their own sessions rather than logging into fixtures.
 - **The per-IP flood cap** (300/min on all `/api/*`, the proxy's
   `globalIp` preset → `GLOBAL_IP_RATE_MAX=1200` in the harness). A true
   fixed window, but the aggregate trips it: 4 parallel workers' page
@@ -416,12 +437,17 @@ org scoping memberships exist to provide.
 
 Notes:
 
-- **No email transport is faked.** The harness sets no mail provider, so
-  better-auth's `sendInvitationEmail` stays undefined — exactly the
-  production-without-SMTP configuration, where the invitee discovers the
-  invitation via the pending-invitations badge (docs/auth-and-orgs.md).
-  That badge → `/app/invitations` → Accept path IS the app's real flow;
-  there is no mail token to reconstruct and nothing to substitute.
+- **No email transport is faked — and since 2E, none is missing.** When
+  this spec was built (#103) the harness set no mail provider, so
+  better-auth's `sendInvitationEmail` stayed undefined — exactly the
+  production-without-SMTP configuration — and the app's own no-email
+  discovery path (pending-invitations badge → `/app/invitations` →
+  Accept) was the journey under test; nothing was stubbed or forged.
+  Since the auth-journeys spec (#107) the harness runs a local mail
+  catcher (`RESEND_BASE_URL` → `e2e/email-catcher.mjs`), so an
+  invitation email is now delivered to the catcher as well — the badge
+  → accept path remains what this spec drives; the email is
+  additional, not load-bearing.
 - **Two real logins, one per user** (the auth budget exception, above):
   both happen in `beforeAll` through the shared pacer — `login()` for the
   admin and the new `loginAs()` for the member, which is the same paced
@@ -440,6 +466,48 @@ Notes:
   only widens a roster nothing else reads. The invite test still
   cancel-owns a stale pending invitation before sending, so a CI retry
   cannot accumulate invites.
+
+## Tier 2 — auth journeys (built: `e2e/auth.spec.ts`, #107)
+
+The fourth Tier 2 file and the first to exercise the app's email-gated
+surfaces: signup, email verification, and password reset — the journeys
+Tier 1's login-only coverage deliberately left out. The unlock is the
+local mail catcher (see "What's real, what's faked"): the app's email
+features are fully ON (a throwaway `RESEND_API_KEY` flips
+`lib/email`'s `EMAIL_ENABLED`, turning on `requireEmailVerification`
+and the send callbacks — the production-with-SMTP configuration), and
+the Resend SDK's `RESEND_BASE_URL` points delivery at
+`e2e/email-catcher.mjs`. Every email goes through the app's real
+`sendEmail` path; the spec picks up the real link from the catcher and
+drives it through the real UI. No app stubbing, no token forging —
+and, notably, no DB scraping: better-auth 1.6 stores nothing for the
+verification token (it is a signed JWT handed only to the send
+callback), which is what routed the DB-driven-link idea to the email
+boundary, the artifact the user actually receives.
+
+| Test | Proves |
+| --- | --- |
+| signup is gated on verification, and the emailed link activates the account | The real `/signup` form with a fresh random identity gets the check-your-email screen (no session at signup), a sign-in before verification meets the app's 403 panel (`rejectedSignIn` — the gate is enforced, and the pacing covers expected rejections), the resend button — `sendOnSignIn: false`'s recovery path — delivers a second, independently-tokened email through the real send path, the newest emailed link activates the account through better-auth's real verify endpoint (the no-error redirect render), and `loginAs` then issues the real session: the account menu names the unique address and the user's own personal workspace settles on the "No agents yet." empty state. |
+| a tampered verification token cannot activate an account | A fabricated token on better-auth's real GET verify endpoint redirects with `?error=INVALID_TOKEN` to the app's failure render — the negative half of the verification journey, pinning that the verifier rejects instead of passing garbage through. No rows touched. |
+| a password reset through the emailed link replaces the credential | The real forgot-password form (reached via the login page's `emailVerification`-gated link) requests the reset — its anti-enumeration confirmation renders regardless — and the emailed link's token is validated server-side against the verification row better-auth created at request time ("Set a new password" only renders when it did). The reset form sets the new password, and the replacement is asserted in BOTH directions: the old password stops working (paced rejected sign-in), the new one signs in through the real login page and opens the app. The target is the account this file's signup test created — never the seeded admin (the hard rule). |
+
+Notes:
+
+- **Identity generation is per-test-execution, not per-module-load.** A
+  CI retry re-runs the signup test with a fresh random address —
+  better-auth's duplicate-email response is deliberately identical to
+  the fresh path, so a reused address could silently verify the FIRST
+  attempt's account and make the retry lie about the gate. The reset
+  journey receives the identity through module state; serial mode
+  guarantees the handoff order.
+- **The file spends no `beforeAll` login** — four paced sign-ins total
+  (two `rejectedSignIn` gate checks, two `loginAs` real logins) plus
+  one signup, all through the shared pacer (the auth budget, above).
+  This is why the suite-wide timeout moved to 150s.
+- **No teardown.** A fresh DB is seeded per run; the leftovers (one
+  personal workspace per attempt, its verification rows, the catcher's
+  in-memory spool) are read by nobody, and the smoke suite's /admin
+  assertion is a render, not a user census.
 
 ## Tier 2 (not built)
 
