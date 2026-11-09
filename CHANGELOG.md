@@ -4,6 +4,22 @@ All notable changes to this project will be documented in this file. The format 
 
 ## [Unreleased]
 
+- **Agent builder tool palette: readable rows, palette search, honest
+  tool cap.** Palette rows were a single flex line where the key badge
+  crushed both the tool name ("Gen…") and the description into
+  unreadable slivers with no way to expand; they're now two-line rows —
+  full name + badge on the first line, the description clamped at two
+  lines with a "Show more / Show less" toggle (rendered only when the
+  text overflows) beneath, and a blue border on checked rows (the
+  platform-admin ToolRow language). The palette gains a search input
+  (case-insensitive on label + description, with a "No tools match"
+  state — filtering is display-only, so hidden selections keep their
+  payload slot), the cap hint counts live ("3 of 10 selected"), and at
+  the cap unchecked rows disable with an explanatory title instead of
+  the click silently no-op'ing. Rows render in a deterministic
+  (toolkit, label) order instead of the upstream allowlist's append
+  order. See #106.
+
 - **E2E Tier 2A — chat depth** (`e2e/chat.spec.ts`, new alongside the frozen
   8-test smoke suite): thread persistence across a real reload (send → reply
   → reload → reopen the conversation from the sidebar, exercising the
