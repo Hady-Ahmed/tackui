@@ -278,8 +278,18 @@ Two-layer rate limiting protects the server from abuse and floods.
   `TRUSTED_PROXY_HOPS` (the Nth-from-right entry, which a trusted proxy
   always appends the real IP to). Without the right hop count, a malicious
   client can prepend a fake IP to `X-Forwarded-For` and bypass the per-IP
-  limit entirely. Better Auth's `ipAddressHeaders` mirrors the same
-  conditional CF trust, so its sign-in limiter keys on the same resolved IP.
+  limit entirely. And when the header carries FEWER entries than
+  `TRUSTED_PROXY_HOPS`, resolution fails closed to the shared `"unknown"`
+  bucket instead of trusting the leftmost entry: on a misconfigured
+  deployment (hop count set higher than the real proxy chain) that
+  leftmost entry is client-suppliable, and trusting it would hand the
+  client a fresh bucket per request. All short-header requests share one
+  bucket and mutually throttle — mutual throttling beats a spoofable
+  bypass, and the fix for the operator is correcting `TRUSTED_PROXY_HOPS`.
+  Better Auth's `ipAddressHeaders` mirrors the same header priority
+  (conditional CF trust, then `X-Forwarded-For`), but it parses
+  X-Forwarded-For with its own logic — it does not share this resolver's
+  short-header `unknown` contract.
 - Proxy runtime pinned to `nodejs` — the in-memory `Map` requires it.
 
 ### Layer 2 — Per-user route-level limits (`lib/ratelimit/`)
@@ -290,16 +300,28 @@ Enforced in route handlers, post-auth, keyed by `user.id`. Limits (see
 | Route | Limit | Concurrent |
 | --- | --- | --- |
 | `/api/copilotkit/*` (POST runs only) | 20/min per user | 3 concurrent run streams per user |
-| `/api/agents/reachability-probe` | 30/min per user | — |
-| `/api/agents` POST + `/api/agents/[id]` PATCH/DELETE | 10/min per user, `AGENT_MUTATE_RATE_MAX`-overridable (the catalog's template CRUD + install share this bucket) | — |
-| `/api/agents` GET + `/api/agents/[id]` GET | 60/min per user | — |
-| `/api/threads/[id]` PATCH/DELETE | 30/min per user | — |
+| `/api/agents/reachability-probe` POST | 30/min per user (`reachabilityProbe`) — the probe makes an outbound fetch, so it has its own tighter-of-two budget vs reads | — |
+| `/api/agents` POST + `/api/agents/[id]` PATCH/DELETE | 10/min per user, `AGENT_MUTATE_RATE_MAX`-overridable (`agentMutate` — shared with the catalog + builder mutation rows below; mutations are expensive: encryption, SSRF checks, platform calls) | — |
+| `/api/agents` GET + `/api/agents/[id]` GET | 60/min per user (`agentRead`, `AGENT_READ_RATE_MAX`-overridable) | — |
+| `/api/agents/builder` POST + `/api/agents/builder/[id]` PATCH/DELETE | 10/min per user (shares the `agentMutate` bucket) — each builder write round-trips the AgentOS (models catalog, component create/update) | — |
+| `/api/catalog` GET + `/api/catalog/[id]` GET | 60/min per user (shares `agentRead`) | — |
+| `/api/catalog` POST + `/api/catalog/[id]` PATCH/DELETE + `/api/catalog/[id]/install` POST | 10/min per user (shares the `agentMutate` bucket) | — |
+| `/api/threads/[id]` PATCH/DELETE | 30/min per user (`threadMutate`) | — |
+| `/api/models` GET + `/api/tools` GET | 60/min per user (shares `agentRead`) | — |
 | `/api/auth/can-manage-agents` GET | 60/min per user (shares `agentRead` bucket) | — |
 | `/api/credentials` GET + `/api/connectors` GET | 60/min per user (shares `agentRead` bucket) | — |
 | `/api/credentials` PUT/DELETE | 20/min per user (`credentialMutate`) | — |
 | `/api/connectors` PUT/DELETE | 20/min per user (`connectorMutate`) | — |
+| `/api/admin/platform/catalog` GET | 60/min per user (shares `agentRead`) — admin-only route | — |
+| `/api/admin/platform/catalog` PUT + `/api/admin/platform/test-model` POST | 30/min per user (`adminMutate`) — separate from `agentMutate`: admin configuration legitimately bursts (fix-and-resave loops, model testing) and must not compete with the member-facing mutation budget | — |
 | `/api/billing/checkout` POST + `/api/billing/portal` POST | 10/min per user (`billingMutate`) — each creates an outbound Stripe session | — |
 | `/api/billing/subscription` GET + `/api/org` GET | 60/min per user (`accountRead`) | — |
+
+Org member mutations (create workspace, invites, role changes) have no
+custom route to limit — they go through Better Auth's own endpoints
+(`authClient.organization.create` / `inviteMember`), which sit behind the
+per-IP global flood layer above plus Better Auth's own limiter; the plan
+gates for them are enforced server-side in `lib/auth/auth.ts`.
 
 Under SaaS mode the copilotkit route derives per-plan caps instead of the
 static presets (exact caps: [saas-mode.md](./saas-mode.md#plan-enforcement-saas-only)).
@@ -377,9 +399,8 @@ alive on shutdown.
 ### Solo mode (`AUTH_DISABLED=true`)
 
 Per-user limits are not enforced (everyone is `id: "local"`). This applies to
-**all** per-user limits — the copilotkit run/concurrent caps, agent
-mutations, agent reads, thread mutations, reachability probe, and the
-can-manage-agents check. The guard is centralized in `checkUserLimit()` /
+**all** per-user limits — every row in the Layer-2 table above. The guard is
+centralized in `checkUserLimit()` /
 `acquireConcurrent()` in `lib/ratelimit/middleware.ts` (not in each route
 handler). Per-IP flood protection from `proxy.ts` still applies.
 

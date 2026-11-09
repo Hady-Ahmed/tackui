@@ -12,9 +12,16 @@
  * 2. `X-Forwarded-For` with TRUSTED_PROXY_HOPS — for self-hosters not
  *    behind Cloudflare. Reads the Nth-from-right entry where N is the
  *    hop count (default 1). Defeats leftmost-spoofing: a client can
- *    prepend fake IPs, but the trusted proxy appends the real IP last.
- * 3. `"unknown"` — no headers present (direct connection in dev, or a
- *    proxy that strips both headers).
+ *    prepend fake IPs, but every trusted proxy appends the address it
+ *    forwarded for, so the Nth-from-right entry is what OUR outermost
+ *    trusted proxy saw. Short-header contract: when the header carries
+ *    FEWER entries than the hop count, no entry can be attributed to
+ *    the trusted chain — resolution fails closed to `"unknown"` rather
+ *    than trusting the (client-suppliable) leftmost entry.
+ * 3. `"unknown"` — no headers present (direct connection in dev, a proxy
+ *    that strips both headers), or an X-Forwarded-For shorter than
+ *    TRUSTED_PROXY_HOPS. All of these collide into one shared bucket:
+ *    mutual throttling beats a spoofable fresh-bucket-per-request bypass.
  *
  * Security note on CF-Connecting-IP: if someone bypasses Cloudflare and
  * hits the origin directly, they could send a fake `CF-Connecting-IP`.
@@ -70,12 +77,27 @@ export function getClientIp(getHeader: (name: string) => string | null): string 
       .split(",")
       .map((s) => s.trim())
       .filter(Boolean);
-    if (hops.length > 0) {
-      // Take the Nth-from-right. If we have fewer hops than trusted
-      // proxies (direct connection, or proxy didn't forward), fall
-      // back to the leftmost available entry.
-      const idx = Math.max(0, hops.length - TRUSTED_PROXY_HOPS);
-      return hops[idx] ?? hops[0] ?? "unknown";
+    // Take the Nth-from-right, where N = TRUSTED_PROXY_HOPS. Every
+    // trusted proxy appends the address it forwarded for, so the
+    // Nth-from-right entry is the client IP as recorded by OUR
+    // outermost trusted proxy — anything left of it was on the header
+    // before the first trusted proxy touched it, i.e. client-suppliable.
+    //
+    // Short-header contract: when the header carries FEWER entries than
+    // TRUSTED_PROXY_HOPS, we cannot tell which entries (if any) our own
+    // proxies appended. On a misconfigured deployment (hop count set
+    // higher than the real proxy chain), the leftmost entry is the
+    // client's own claim — trusting it lets that client rotate a fresh
+    // rate-limit bucket per request. So resolution fails closed to
+    // "unknown": every such request collides into one shared bucket and
+    // mutually throttles. Mutual throttling beats a spoofable bypass;
+    // the fix for the operator is correcting TRUSTED_PROXY_HOPS.
+    if (hops.length > 0 && hops.length < TRUSTED_PROXY_HOPS) {
+      return "unknown";
+    }
+    const idx = hops.length - TRUSTED_PROXY_HOPS;
+    if (idx >= 0) {
+      return hops[idx];
     }
   }
   return "unknown";

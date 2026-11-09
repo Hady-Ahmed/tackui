@@ -23,7 +23,8 @@ import { DELETE } from "./route";
 import { listConnectors, deleteConnector, upsertConnector } from "@/lib/connectors/connector-store";
 import { AgentosError } from "@/lib/agents/builder";
 import { runMigrations } from "@/lib/db/migrate";
-import type { NextRequest } from "next/server";
+import { checkUserLimit } from "@/lib/ratelimit/middleware";
+import { NextResponse, type NextRequest } from "next/server";
 
 const ORG = "org-conn-del";
 
@@ -51,6 +52,9 @@ describe("DELETE /api/connectors/[name]", () => {
       params: Promise.resolve({ name: "x" }),
     });
     expect(res.status).toBe(401);
+    // Auth gates first — the per-user limiter is keyed on user.id and
+    // must never be consulted for an anonymous request.
+    expect(vi.mocked(checkUserLimit)).not.toHaveBeenCalled();
   });
 
   it("returns 403 for members", async () => {
@@ -101,5 +105,20 @@ describe("DELETE /api/connectors/[name]", () => {
     // Nothing was deleted locally — the push-first contract: a failed
     // delete leaves the two stores agreeing (both with the connector).
     expect((await listConnectors(ORG)).map((c) => c.id)).toEqual([stored.id]);
+  });
+});
+
+describe("DELETE /api/connectors/[name] rate limit", () => {
+  it("charges the connectorMutate bucket and propagates its 429 (no delete happens)", async () => {
+    vi.mocked(checkUserLimit).mockReturnValueOnce(
+      NextResponse.json({ error: "Rate limit exceeded" }, { status: 429 }),
+    );
+    const res = await DELETE(new Request("http://localhost:3000/api/connectors/github") as NextRequest, {
+      params: Promise.resolve({ name: "github" }),
+    });
+    expect(res.status).toBe(429);
+    expect(vi.mocked(checkUserLimit)).toHaveBeenCalledWith("admin-1", "connectorMutate");
+    // The platform push never started — a 429 must not consume work.
+    expect(mockDeletePlatformConnector).not.toHaveBeenCalled();
   });
 });

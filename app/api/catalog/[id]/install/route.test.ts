@@ -31,6 +31,7 @@ import {
 import { listAgents, deleteAgent, getAgent } from "@/lib/agents/agent-store";
 import { runMigrations } from "@/lib/db/migrate";
 import { checkTemplateInstall, checkAgentCountLimit } from "@/lib/plans/enforcement";
+import { checkUserLimit } from "@/lib/ratelimit/middleware";
 import { NextResponse } from "next/server";
 
 function managerUser() {
@@ -197,5 +198,30 @@ describe("POST /api/catalog/[id]/install", () => {
     );
     const res = await POST(new Request("http://localhost/x", { method: "POST" }), ctx(tpl.id));
     expect(res.status).toBe(402);
+  });
+});
+
+describe("POST /api/catalog/[id]/install rate limit", () => {
+  it("charges the shared agentMutate bucket and propagates its 429 (no install happens)", async () => {
+    vi.mocked(checkUserLimit).mockReturnValueOnce(
+      NextResponse.json({ error: "Rate limit exceeded" }, { status: 429 }),
+    );
+    const tpl = await createTemplate(validInput);
+    const res = await POST(new Request("http://localhost/x", { method: "POST" }), ctx(tpl.id));
+    expect(res.status).toBe(429);
+    // The install is expensive (template copy + encrypted-secret
+    // re-wrap) — it must not even start behind the 429.
+    expect(vi.mocked(checkUserLimit)).toHaveBeenCalledWith("owner-1", "agentMutate");
+    expect(await listAgents("org-1")).toHaveLength(0);
+  });
+
+  it("returns 401 without a user — auth gates first; the limiter never sees a null id", async () => {
+    mockGetCurrentUser.mockImplementation(async () => null);
+    const res = await POST(new Request("http://localhost/x", { method: "POST" }), ctx("any"));
+    expect(res.status).toBe(401);
+    // The limit check is keyed on user.id — an anonymous request must be
+    // rejected by auth before the limiter is ever consulted (a null id
+    // would either crash or mint a spoofable bucket, never a 500).
+    expect(vi.mocked(checkUserLimit)).not.toHaveBeenCalled();
   });
 });

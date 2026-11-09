@@ -163,6 +163,10 @@ describe("POST /api/agents/reachability-probe", () => {
     vi.mocked(getCurrentUser).mockResolvedValueOnce(null);
     const res = await POST(makeRequest(validBody));
     expect(res.status).toBe(401);
+    // Auth gates first — the per-user limiter is keyed on user.id and
+    // must never be consulted for an anonymous request (the probe is the
+    // most expensive mutation: an outbound fetch).
+    expect(vi.mocked(checkUserLimit)).not.toHaveBeenCalled();
   });
 
   it("rejects unsafe (private-IP) endpoints with the SSRF message", async () => {

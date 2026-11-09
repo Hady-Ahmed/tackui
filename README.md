@@ -319,7 +319,7 @@ See [`.env.example`](.env.example) for the full list with comments.
 | `AUTH_DISABLED` | No | Set to `true` to skip login (solo mode). **Never use this in any deployment exposed to the internet or shared users.** |
 | `ALLOW_PRIVATE_ENDPOINTS` | No | Set to `true` to allow creating/editing agents with endpoints that resolve to private/internal IPs (e.g. when agent backends run on the same host). Defaults to `false` (blocks private IPs to prevent SSRF). |
 | `DB_ENCRYPTION_KEY` | Yes (unless `AUTH_DISABLED=true`) | 32-byte hex key (generate with `openssl rand -hex 32`) used to encrypt secrets at rest (AES-256-GCM): agent JWT secrets, BYOK credential fields, connector tokens, and catalog template JWT secrets. Required in any mode with auth — the app refuses to boot without it (storing tenant secrets in plaintext is never acceptable); only solo mode may omit it (plaintext + a boot warning). Rotating the key requires re-saving each secret: an old ciphertext becomes unreadable, which surfaces as "incomplete"/re-enter prompts for BYOK credentials and connector tokens, and as failed runs for agents whose JWT secret can't be decrypted (the backend rejects the unsigned request) until the secret is re-saved. |
-| `TRUSTED_PROXY_HOPS` | No | Number of trusted reverse-proxy hops in front of the server, used to resolve the real client IP from `X-Forwarded-For` (default `1`). Set to `2` for Cloudflare → Nginx → app, etc. This is the resolution path whenever Cloudflare trust is off (see the next row). Without the right hop count, a malicious client can prepend a fake IP to the header and bypass the per-IP limits entirely. |
+| `TRUSTED_PROXY_HOPS` | No | Number of trusted reverse-proxy hops in front of the server, used to resolve the real client IP from `X-Forwarded-For` (default `1`). Set to `2` for Cloudflare → Nginx → app, etc. This is the resolution path whenever Cloudflare trust is off (see the next row). The resolver reads the Nth-from-right entry, which the outermost trusted proxy appended; a client can prepend fake IPs, but they land left of that entry and are ignored. When the header carries FEWER entries than the hop count, resolution fails closed to a shared `unknown` bucket instead of trusting the (client-suppliable) leftmost entry — set the hop count correctly or all such requests mutually throttle. |
 | `TRUST_CF_CONNECTING_IP` | No | Set to `true` on deploys fronted by Cloudflare where the next hop overwrites `X-Forwarded-For` with the Cloudflare edge IP (e.g. Cloudflare → Traefik/Coolify): rate limits then key on `CF-Connecting-IP` instead. Defaults to following `SAAS_MODE` (trusted in SaaS mode, untrusted otherwise). Leave unset on deploys without Cloudflare — there the header is client-suppliable, and trusting it would let an attacker rotate it per request to get a fresh bucket in every IP-keyed limiter. |
 | `CONCURRENT_RUN_TIMEOUT_MS` | No | Watchdog timeout (ms) for concurrent-run rate-limit slots. Default `600000` (10 min). Floor `60000`. Safety net only — the actual SSE stream / agent run is NOT cancelled; only the counter is decremented to prevent slot leaks when a client opens a run and drops TCP without triggering `ReadableStream.cancel()`. Override if your agents do legitimately long research runs. |
 | `SENTRY_DSN` | No | Sentry DSN for server-side error tracking. No-op if unset. |
@@ -383,23 +383,28 @@ The app sets the following headers on all responses:
 
 The app has two-layer rate limiting to protect against abuse and server overload:
 
-**Per-IP flood protection** (in `proxy.ts`, pre-auth): 300 requests/min per IP on all `/api/*` routes (except `/api/auth/*` which has its own limiter, and `/api/health` whose plain liveness probe is unlimited — the `?deep=true` readiness probe rate-limits itself at 30/min per IP since it touches the database). Uses `CF-Connecting-IP` (Cloudflare) or `X-Forwarded-For` (with `TRUSTED_PROXY_HOPS`) for IP extraction behind a reverse proxy.
+**Per-IP flood protection** (in `proxy.ts`, pre-auth): 300 requests/min per IP on all `/api/*` routes (except `/api/auth/*` which has its own limiter, and `/api/health` whose plain liveness probe is unlimited — the `?deep=true` readiness probe rate-limits itself at 30/min per IP since it touches the database). Uses `CF-Connecting-IP` (Cloudflare) or `X-Forwarded-For` (with `TRUSTED_PROXY_HOPS`) for IP extraction behind a reverse proxy; an X-Forwarded-For shorter than the hop count fails closed to a shared `unknown` bucket rather than trusting a client-suppliable leftmost entry.
 
 **Per-user route limits** (in route handlers, post-auth):
 
 | Route | Limit | Concurrent |
 | --- | --- | --- |
 | `/api/copilotkit/*` (POST runs only — connect/stop/info exempt) | 20/min per user | 3 concurrent run streams per user |
-| `/api/agents/reachability-probe` | 30/min per user | — |
+| `/api/agents/reachability-probe` POST | 30/min per user | — |
 | `/api/agents` POST + PATCH/DELETE | 10/min per user | — |
 | `/api/agents` GET | 60/min per user | — |
+| `/api/agents/builder` POST + PATCH/DELETE | 10/min per user (shares the agent-mutation bucket) | — |
+| `/api/catalog` GET + `/api/catalog/[id]` GET | 60/min per user | — |
+| `/api/catalog` POST + `/api/catalog/[id]` PATCH/DELETE + `/api/catalog/[id]/install` POST | 10/min per user (shares the agent-mutation bucket) | — |
 | `/api/threads/[id]` PATCH/DELETE | 30/min per user | — |
+| `/api/models` GET + `/api/tools` GET | 60/min per user | — |
 | `/api/credentials` PUT/DELETE | 20/min per user | — |
 | `/api/connectors` PUT/DELETE | 20/min per user | — |
+| `/api/admin/platform/catalog` PUT + `/api/admin/platform/test-model` POST | 30/min per user (admin-only routes) | — |
 | `/api/billing/checkout` + `/api/billing/portal` POST | 10/min per user | — |
 | `/api/billing/subscription` + `/api/org` GET | 60/min per user | — |
 
-This table mirrors the presets in `lib/ratelimit/limits.ts` — the single source of truth (the admin catalog-write and platform-admin limits also live there; see `docs/security.md` for the full wiring).
+This table mirrors the presets in `lib/ratelimit/limits.ts` — the single source of truth (see `docs/security.md` for the full wiring, including the read routes that share the `agentRead` bucket).
 
 **Better Auth rate limiting**: sign-in is limited to 10/min per IP, sign-up to 5/min per IP.
 
