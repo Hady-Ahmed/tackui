@@ -22,10 +22,27 @@ vi.mock("@/lib/credentials/catalog", () => ({
     "Can't reach the agent builder — your saved keys are unaffected. New keys can't be added until it's back.",
 }));
 
+// Passthrough wrapper around @/lib/db/pg that COUNTS withTransaction
+// calls — proof that the PUT merge runs inside one transaction (the
+// issue-#70 serialization boundary) without reimplementing the runner.
+// Everything else forwards to the real module untouched.
+const pgCounters = vi.hoisted(() => ({ withTransaction: 0 }));
+vi.mock("@/lib/db/pg", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("@/lib/db/pg")>();
+  return {
+    ...actual,
+    withTransaction: (fn: Parameters<typeof actual.withTransaction>[0]) => {
+      pgCounters.withTransaction += 1;
+      return actual.withTransaction(fn);
+    },
+  };
+});
+
 import { GET, PUT } from "./route";
 import { DELETE as DELETE_PROVIDER } from "./[provider]/route";
 import { runMigrations } from "@/lib/db/migrate";
-import { query } from "@/lib/db/pg";
+import { query, withTransaction } from "@/lib/db/pg";
+import { useRealPostgres } from "@/lib/db/test-postgres";
 import { checkUserLimit } from "@/lib/ratelimit/middleware";
 import { setCredential, getCredentialSecrets } from "@/lib/credentials/credential-store";
 import type { NextRequest } from "next/server";
@@ -83,6 +100,17 @@ function put(body: unknown) {
   );
 }
 
+/** PUT with a RAW body string — for malformed-JSON and size probes. */
+function putRaw(body: string) {
+  return PUT(
+    new Request("http://localhost:3000/api/credentials", {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body,
+    }) as NextRequest,
+  );
+}
+
 async function putAs(caller: string, body: unknown) {
   mockGetCurrentUser.mockImplementation(async () => user(caller));
   return PUT(
@@ -111,6 +139,9 @@ beforeEach(async () => {
   vi.clearAllMocks();
   vi.stubEnv("DB_ENCRYPTION_KEY", ENCRYPTION_TEST_KEY);
   await runMigrations();
+  // Reset AFTER migrations: runMigrations itself wraps its run in
+  // withTransaction, and the counter must count the ROUTE's calls only.
+  pgCounters.withTransaction = 0;
   await query(`DELETE FROM credentials WHERE user_id = ANY($1)`, [
     [USER_ID, OTHER_USER_ID],
   ]);
@@ -365,6 +396,157 @@ describe("PUT /api/credentials", () => {
     errSpy.mockRestore();
   });
 
+  it("runs the read-merge-write inside ONE transaction (withTransaction per PUT)", async () => {
+    const res = await put({ provider: "openai", fields: { api_key: "sk-tx" } });
+    expect(res.status).toBe(200);
+    expect(pgCounters.withTransaction).toBe(1);
+  });
+
+  it("takes the transaction even when the merge is REJECTED (the lock is held before the completeness decision)", async () => {
+    // Seed a PARTIAL row directly (the store is catalog-agnostic); the
+    // completeness check then fails INSIDE the tx, after the row lock —
+    // no check-then-write gap for a concurrent writer to slip through.
+    await setCredential({ userId: USER_ID, provider: "x", kind: "tool", fields: { consumer_key: "ck" } });
+    pgCounters.withTransaction = 0;
+    const res = await put({ provider: "x", fields: { consumer_secret: "cs" } });
+    expect(res.status).toBe(400);
+    expect((await res.json()).error).toContain("all of its fields");
+    expect(pgCounters.withTransaction).toBe(1);
+  });
+
+  it("serializes concurrent PUTs for the same provider — every rotation survives (real Postgres)", async (ctx) => {
+    const restore = await useRealPostgres();
+    if (!restore) {
+      ctx.skip(); // Docker-less local environment only; CI must never skip
+      return;
+    }
+    try {
+      await query(`DELETE FROM credentials WHERE user_id = ANY($1)`, [
+        [USER_ID, OTHER_USER_ID],
+      ]);
+      await setCredential({
+        userId: USER_ID,
+        provider: "x",
+        kind: "tool",
+        fields: { consumer_key: "ck", consumer_secret: "cs", access_token: "at", access_token_secret: "ats" },
+      });
+
+      // Hold the row's lock from OUTSIDE the routes so every PUT's
+      // read-merge-write QUEUES behind it before any of them runs. Under
+      // the fix each PUT blocks at its SELECT ... FOR UPDATE and reads
+      // the store only after the previous writer committed. (Unserialized,
+      // all four merges would read the ORIGINAL map before any write —
+      // the last whole-map write would stomp the other three rotations.)
+      let pending!: Promise<number[]>;
+      await withTransaction(async (holder) => {
+        await holder.query(
+          `SELECT fields FROM credentials WHERE user_id = $1 AND provider = $2 FOR UPDATE`,
+          [USER_ID, "x"],
+        );
+        pending = Promise.all(
+          [
+            { consumer_key: "ck-1", consumer_secret: "", access_token: "", access_token_secret: "" },
+            { consumer_key: "", consumer_secret: "cs-2", access_token: "", access_token_secret: "" },
+            { consumer_key: "", consumer_secret: "", access_token: "at-3", access_token_secret: "" },
+            { consumer_key: "", consumer_secret: "", access_token: "", access_token_secret: "ats-4" },
+          ].map((fields) => put({ provider: "x", fields }).then((r) => r.status)),
+        );
+        // Give every PUT time to reach its lock wait, then release the
+        // holder (COMMIT) — from here the PUTs proceed one at a time.
+        await new Promise((resolve) => setTimeout(resolve, 150));
+      });
+
+      expect(await pending).toEqual([200, 200, 200, 200]);
+      // THE assertion: four concurrent single-field rotations, one per
+      // field, and ALL FOUR landed.
+      expect((await getCredentialSecrets(USER_ID)).x).toEqual({
+        consumer_key: "ck-1",
+        consumer_secret: "cs-2",
+        access_token: "at-3",
+        access_token_secret: "ats-4",
+      });
+    } finally {
+      restore();
+    }
+  });
+
+  it("the row lock is a real serialization point: a competing FOR UPDATE waits, then times out (real Postgres)", async (ctx) => {
+    const restore = await useRealPostgres();
+    if (!restore) {
+      ctx.skip();
+      return;
+    }
+    try {
+      await query(`DELETE FROM credentials WHERE user_id = ANY($1)`, [
+        [USER_ID, OTHER_USER_ID],
+      ]);
+      await setCredential({
+        userId: USER_ID,
+        provider: "x",
+        kind: "tool",
+        fields: { consumer_key: "ck", consumer_secret: "cs", access_token: "at", access_token_secret: "ats" },
+      });
+      // tx1 takes the route's lock and holds it; tx2 — the same shape of
+      // statement the route runs — must block on that row. Proves
+      // FOR UPDATE genuinely conflicts across connections (pg-mem has no
+      // locking, so only real Postgres can answer this).
+      await withTransaction(async (holder) => {
+        await holder.query(
+          `SELECT fields FROM credentials WHERE user_id = $1 AND provider = $2 FOR UPDATE`,
+          [USER_ID, "x"],
+        );
+        await expect(
+          withTransaction(async (competing) => {
+            // Transaction-local so nothing outlives this tx.
+            await competing.query(`SET LOCAL lock_timeout = '250ms'`);
+            await competing.query(
+              `SELECT fields FROM credentials WHERE user_id = $1 AND provider = $2 FOR UPDATE`,
+              [USER_ID, "x"],
+            );
+          }),
+        ).rejects.toMatchObject({ code: "55P03" }); // lock_not_available
+      });
+    } finally {
+      restore();
+    }
+  });
+
+  it("rejects a field value over the 500-char body bound (400, nothing stored)", async () => {
+    const res = await put({ provider: "openai", fields: { api_key: "k".repeat(501) } });
+    expect(res.status).toBe(400);
+    expect((await res.json()).error).toBe("Validation failed");
+    const rows = await query(`SELECT provider FROM credentials WHERE user_id = $1`, [USER_ID]);
+    expect(rows.rows).toHaveLength(0);
+  });
+
+  it("accepts a field value of exactly 500 chars (the boundary itself is legal)", async () => {
+    const res = await put({ provider: "openai", fields: { api_key: "k".repeat(500) } });
+    expect(res.status).toBe(200);
+    expect((await getCredentialSecrets(USER_ID)).openai).toEqual({
+      api_key: "k".repeat(500),
+    });
+  });
+
+  it("rejects a provider over the 64-char bound (400)", async () => {
+    const res = await put({ provider: "x".repeat(65), fields: { api_key: "k" } });
+    expect(res.status).toBe(400);
+    expect((await res.json()).error).toBe("Validation failed");
+  });
+
+  it("survives a multi-MB MALFORMED JSON body with 400, never an unhandled 500", async () => {
+    const big = "x".repeat(2_000_000);
+    const res = await putRaw(`{"provider":"openai","fields":{"api_key":"${big}`);
+    expect(res.status).toBe(400);
+  });
+
+  it("survives a multi-MB VALID JSON body that fails validation with 400, never an unhandled 500", async () => {
+    const res = await putRaw(
+      JSON.stringify({ provider: "openai", fields: { api_key: "x".repeat(2_000_000) } }),
+    );
+    expect(res.status).toBe(400);
+    expect((await res.json()).error).toBe("Validation failed");
+  });
+
   it("GET still lists an undecryptable row (field NAMES) so the user can re-enter it", async () => {
     const errSpy = vi.spyOn(console, "error").mockImplementation(() => {});
     await setCredential({ userId: USER_ID, provider: "openai", kind: "llm", fields: { api_key: "sk-good" } });
@@ -485,6 +667,12 @@ describe("DELETE /api/credentials/[provider]", () => {
   it("returns 404 when nothing was stored", async () => {
     const res = await del("openai");
     expect(res.status).toBe(404);
+  });
+
+  it("handles a pathological provider path cleanly (404, never an unhandled 500)", async () => {
+    const res = await del("x".repeat(5000));
+    expect(res.status).toBe(404);
+    expect((await res.json()).error).toBe("No credential stored for this provider");
   });
 
   it("never touches another user's key", async () => {

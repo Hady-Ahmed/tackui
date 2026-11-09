@@ -401,7 +401,10 @@ export async function createTemplate(
  * the patch body). Absent patch keys preserve the stored values; explicit
  * `null` on clearable fields (category, icon, requiredPlan,
  * freeDailyQuota, jwtScopes) clears them. Omitting jwtSecret preserves
- * the existing secret (blank-preserve, same as agents).
+ * the existing secret (blank-preserve, same as agents) — including an
+ * UNDECRYPTABLE stored ciphertext, which is written back raw
+ * (byte-for-byte): a decrypt failure is never silently upgraded to "no
+ * secret" (see storedRawJwtSecret).
  */
 export async function updateTemplate(
   id: string,
@@ -429,9 +432,17 @@ export async function updateTemplate(
     ...patch,
   };
   const parsed = templateRowSchema.parse(merged);
-  // Re-encrypt (fresh IV) even when the secret is preserved — same
-  // behavior as agent-store's updateAgent.
-  const jwtSecretForDb = parsed.jwtSecret ? encryptSecret(parsed.jwtSecret) : null;
+  // Re-encrypt (fresh IV) when the merged row carries a usable secret —
+  // same behavior as agent-store's updateAgent. When it doesn't, DON'T
+  // write NULL: `existing.jwtSecret` is undefined both for "no secret
+  // stored" and for "stored but undecryptable" (rowToTemplate degrades a
+  // decrypt failure to secret-less), and nulling the latter would
+  // silently destroy the stored ciphertext on an unrelated edit (a
+  // rename), unrecoverable even after the encryption key is restored.
+  // An update that supplies no secret preserves the raw stored value.
+  const jwtSecretForDb = parsed.jwtSecret
+    ? encryptSecret(parsed.jwtSecret)
+    : await storedRawJwtSecret(id);
   const result = await query<TemplateRow>(
     `UPDATE agent_templates
      SET name = $1, slug = $2, tagline = $3, description = $4,
@@ -461,6 +472,24 @@ export async function updateTemplate(
     ],
   );
   return result.rows[0] ? rowToTemplate(result.rows[0]) : null;
+}
+
+/**
+ * The raw stored `jwt_secret` for an update that supplies no new secret.
+ * `rowToTemplate` degrades an undecryptable ciphertext to secret-less, so
+ * the mapped row can't distinguish "no secret stored" from "stored but
+ * undecryptable" (key rotation / backup mismatch) — the raw column read
+ * can. This branch is only reached for those two cases: a decryptable
+ * secret (including legacy plaintext) surfaces on the mapped row and the
+ * update re-encrypts it with a fresh IV instead. Returned unchanged: the
+ * undecryptable ciphertext is preserved byte-for-byte.
+ */
+async function storedRawJwtSecret(id: string): Promise<string | null> {
+  const result = await query<{ jwt_secret: string | null }>(
+    `SELECT jwt_secret FROM agent_templates WHERE id = $1`,
+    [id],
+  );
+  return result.rows[0]?.jwt_secret ?? null;
 }
 
 /**

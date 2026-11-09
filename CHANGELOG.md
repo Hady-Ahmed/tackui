@@ -4,6 +4,25 @@ All notable changes to this project will be documented in this file. The format 
 
 ## [Unreleased]
 
+- **Undecryptable secrets can no longer be erased by unrelated edits, and
+  concurrent credential rotations can no longer silently drop each other
+  (#70).** Three secret-handling edges tightened. (1) `updateTemplate`
+  used to write NULL over an UNDECRYPTABLE stored `jwt_secret` (a key
+  rotation or backup mismatch reads as secret-less through the
+  graceful-degrade read path), so an unrelated edit — a rename —
+  destroyed the stored ciphertext, unrecoverable even after the
+  encryption key is restored. A patch that supplies no new secret now
+  preserves the raw stored bytes byte-for-byte; entering a fresh secret
+  remains the recovery path. (2) The credentials PUT read-merge-write is
+  serialized: it runs in one transaction holding the provider row's
+  `SELECT … FOR UPDATE` lock, so two concurrent single-field rotations
+  of a multi-field toolkit both survive instead of the last whole-map
+  write silently erasing the others (proven against real Postgres with
+  a four-way concurrent-rotation test). (3) The route's body bounds gain
+  regression coverage: a >500-char field value or >64-char provider is a
+  400 (nothing stored), a multi-MB malformed or schema-failing body is a
+  400 — never an unhandled 500 — and a pathological DELETE path is a
+  clean 404.
 - **Short `X-Forwarded-For` headers no longer mint spoofable rate-limit
   buckets (#68).** When the header carries FEWER entries than
   `TRUSTED_PROXY_HOPS`, the IP resolver used to clamp to its LEFTMOST
