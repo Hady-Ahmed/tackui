@@ -85,11 +85,22 @@ test.describe("smoke — surfaces render", () => {
     const errors = watchConsoleErrors(page);
     await login(page);
     await page.goto("/app/catalog");
-    // The catalog page renders its header + the empty state (the seeded
-    // DB has no templates — a fresh install is the documented empty
-    // state: "The catalog is empty").
+    // Seeding-agnostic (#104): Tier 2's catalog spec seeds a template
+    // into this same shared DB and owns its lifecycle, so the smoke
+    // suite can no longer pin the empty state — depending on what the
+    // shared DB holds at this instant, the settled page renders EITHER
+    // its documented empty state ("The catalog is empty — …") OR
+    // template cards (each card's affordance names the workspace:
+    // "Add to workspace", "✓ Added to workspace", …). The heading above
+    // is the render canary — it only appears after the page's fetches
+    // settle — and this pins the settled body in either state.
     await expect(page.getByRole("heading", { name: "Agent catalog" })).toBeVisible();
-    await expect(page.getByText(/catalog is empty/i)).toBeVisible();
+    await expect(
+      page
+        .getByText(/catalog is empty/i)
+        .or(page.getByText(/to workspace/i))
+        .first(),
+    ).toBeVisible();
     expect(errors).toEqual([]);
   });
 

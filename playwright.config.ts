@@ -24,9 +24,9 @@ export default defineConfig({
   //
   // 150s, not 60s — the sign-in pacer's queue is suite-wide, not a
   // per-spec cost (e2e/helpers.ts, "The auth budget" in docs/e2e.md):
-  // all 16 paced sign-ins across smoke + chat + agents + orgs + auth
-  // draw from one ≥7s-spaced slot queue, so a test whose sign-in joins
-  // the opening burst can queue for up to ~105s (15 queued claims)
+  // all 17 paced sign-ins across smoke + chat + agents + orgs + auth +
+  // catalog draw from one ≥7s-spaced slot queue, so a test whose sign-in
+  // joins the opening burst can queue for up to ~112s (16 queued claims)
   // before the login page is even touched, and that wait counts against
   // this timeout. (Bumped from 120s when the auth-journeys spec added
   // four — #107: two real logins and two expected-rejection gate checks,

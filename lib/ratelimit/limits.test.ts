@@ -15,6 +15,23 @@ describe("LIMITS env overrides", () => {
     expect(LIMITS.agentRead.windowMs).toBe(60_000);
   });
 
+  it("keeps the agentMutate preset when no override is set", async () => {
+    const { LIMITS } = await import("./limits");
+    expect(LIMITS.agentMutate.max).toBe(10);
+    expect(LIMITS.agentMutate.windowMs).toBe(60_000);
+  });
+
+  it("raises agentMutate when AGENT_MUTATE_RATE_MAX is a positive integer, ignores junk", async () => {
+    vi.stubEnv("AGENT_MUTATE_RATE_MAX", "60");
+    const { LIMITS } = await import("./limits");
+    expect(LIMITS.agentMutate.max).toBe(60);
+
+    vi.stubEnv("AGENT_MUTATE_RATE_MAX", "banana");
+    vi.resetModules();
+    const { LIMITS: junk } = await import("./limits");
+    expect(junk.agentMutate.max).toBe(10);
+  });
+
   it("raises agentRead when AGENT_READ_RATE_MAX is a positive integer", async () => {
     vi.stubEnv("AGENT_READ_RATE_MAX", "600");
     const { LIMITS } = await import("./limits");

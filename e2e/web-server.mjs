@@ -282,10 +282,21 @@ async function main() {
     // relaxation shape as ALLOW_PRIVATE_ENDPOINTS above: a harness env,
     // not a test-if.
     AGENT_READ_RATE_MAX: "600",
-    // 16 paced sign-ins across the 5-spec suite trip better-auth's sign-in
+    // Same relaxation for the mutation bucket: agent CRUD (2B) and the
+    // catalog lifecycle (2D — seed, install, template edit, template
+    // delete, tombstone cleanup) share agentMutate (10/min in prod),
+    // and the combined suite's mutations land in the same window as ONE
+    // user — 12 charges against the 10 preset (agents.spec's 7: tests
+    // 1/2/4 each create+delete their row plus test 2's PATCH; the
+    // catalog file's 5) — observed live when the catalog file joined
+    // (2D): a DELETE 429ed. Same harness-env shape, prod default
+    // untouched (docs/e2e.md "The auth budget").
+    AGENT_MUTATE_RATE_MAX: "60",
+    // 17 paced sign-ins across the 6-spec suite trip better-auth's sign-in
     // cap (10/min, and its counter only resets after a >60s quiet gap —
     // sustained sub-rate traffic accumulates forever; #107 added the auth
-    // spec's two real logins + two expected-rejection gate checks), and the
+    // spec's two real logins + two expected-rejection gate checks, #104's
+    // catalog file one), and the
     // aggregate /api traffic of 4 workers + 2 chat runs saturates the
     // 300/min per-IP flood cap. Both knobs are the same harness-relaxation
     // shape as AGENT_READ_RATE_MAX above; prod defaults are untouched
