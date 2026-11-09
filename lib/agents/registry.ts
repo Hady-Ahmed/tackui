@@ -37,15 +37,24 @@ export type AgentsMap = Record<string, AbstractAgent>;
  */
 const RESERVED_DEP_KEY = /^(mcp_connectors|[a-z0-9_-]+_api_key)$/i;
 
+/**
+ * Resolve the calling user's org into the runtime's agent registry
+ * (`AgentsMap`, keyed by agent id). Called per-request by the CopilotKit
+ * runtime's `agents` factory, so this resolver feeds BOTH the `/info`
+ * listing and every run/connect/stop dispatch.
+ *
+ * Contract: an empty workspace is a NORMAL state — the empty registry is
+ * returned, not thrown. The runtime serves `/info` 200 with zero agents
+ * (the client's "No agents yet" empty state) and fails any run/stop/
+ * connect against an unknown agent id with its own 404 ("Agent not
+ * found"), so no caller needs the throw to stay safe. Genuinely broken
+ * conditions still throw: no authenticated user means no org to scope
+ * the registry by.
+ */
 export async function getAgents(request?: Request): Promise<AgentsMap> {
   const user = await getRequestUser(request ?? new Request("http://localhost"));
   if (!user) throw new Error("No agents available — not authenticated.");
   const entries = await listAgents(user.orgId);
-  if (entries.length === 0) {
-    throw new Error(
-      "No agents are set up in this workspace yet.",
-    );
-  }
 
   // Live-resolve catalog agents (managed-plugin model): the template is
   // the source of truth for endpoint/auth — a template edit propagates

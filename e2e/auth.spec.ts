@@ -109,16 +109,6 @@ function freshIdentity(): { name: string; email: string } {
   };
 }
 
-/** The fresh user's own personal workspace has no agents, so the /app
- * chat surface shows the empty state — the same settled signal the orgs
- * spec uses for an agent-less workspace. And like there, the empty
- * state legitimately produces one console error (the CopilotKit
- * provider's runtime-info auto-detect fails BY DESIGN — see
- * e2e/orgs.spec.ts's identical, reviewed filter). */
-function agentlessWorkspaceConsoleNoise(errors: string[]): string[] {
-  return errors.filter((e) => !/runtime_info_fetch_failed/.test(e));
-}
-
 /** The fresh user's account-menu trigger on /app: its accessible name
  * folds the display name and the email into one string (the orgs spec's
  * accountMenuButton pattern; the random address is the unambiguous part). */
@@ -214,7 +204,7 @@ test("signup is gated on verification, and the emailed link activates the accoun
   ).toBeVisible();
   await expect(page.getByText("No agents yet.", { exact: true })).toBeVisible();
 
-  expect(agentlessWorkspaceConsoleNoise(errors)).toEqual([]);
+  expect(errors).toEqual([]);
   await context.close();
 });
 
@@ -306,6 +296,6 @@ test("a password reset through the emailed link replaces the credential", async 
   await loginAs(page, email, newPassword);
   await expect(page.getByText("No agents yet.", { exact: true })).toBeVisible();
 
-  expect(agentlessWorkspaceConsoleNoise(errors)).toEqual([]);
+  expect(errors).toEqual([]);
   await context.close();
 });

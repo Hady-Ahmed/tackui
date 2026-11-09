@@ -152,23 +152,6 @@ function agentRow(page: Page, name: string) {
   return page.locator("table tbody tr").filter({ hasText: name });
 }
 
-/**
- * Console errors the agent-less-workspace state legitimately produces:
- * the CopilotKit provider's runtime-info auto-detect fails BY DESIGN
- * there — the registry throws "No agents are set up in this workspace
- * yet." (lib/agents/registry.ts, the run path's user-facing message),
- * the runtime's info handler wraps any factory throw as a 500, and the
- * client's single-route POST fallback then 404s — one console.error per
- * agent-less /app mount. The UI's own empty state is the honest surface
- * (asserted separately). Used ONLY where the test's subject includes the
- * agent-less workspace (the member before accepting / mid-switch);
- * T1/T4 and every other spec assert console-clean unfiltered, so a
- * runtime-info failure on any agent-full page stays a red signal.
- */
-function agentlessWorkspaceConsoleNoise(errors: string[]): string[] {
-  return errors.filter((e) => !/runtime_info_fetch_failed/.test(e));
-}
-
 test("the owner invites the member by email through the account menu", async ({
   browser,
 }) => {
@@ -295,7 +278,7 @@ test("before accepting, the member sees none of the owner's org", async ({
   });
   await expect(badge).toBeVisible();
 
-  expect(agentlessWorkspaceConsoleNoise(errors)).toEqual([]);
+  expect(errors).toEqual([]);
   await context.close();
 });
 
@@ -389,8 +372,8 @@ test("the member accepts the invitation and joins the owner's workspace", async 
   await expectRunSettled(page, MEMBER_THREAD);
 
   // The switch-back deliberately re-entered the member's agent-less
-  // personal workspace (see agentlessWorkspaceConsoleNoise).
-  expect(agentlessWorkspaceConsoleNoise(errors)).toEqual([]);
+  // personal workspace.
+  expect(errors).toEqual([]);
   await context.close();
 });
 
