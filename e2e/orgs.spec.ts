@@ -188,9 +188,28 @@ test("the owner invites the member by email through the account menu", async ({
   // behind (CI retries a failed test once) so exactly one is sent —
   // cancel-own before create-own.
   await page.goto("/app/members");
+  // Scoped to a pending-invitation row by its own status badge, NOT the
+  // email text alone: once the member has JOINED (a serial re-run from
+  // T1 after T3 accepted), the members roster renders their email too
+  // (app/app/members/page.tsx) and a text-only match would enter the
+  // loop and hang clicking a Cancel button the roster row doesn't have.
+  // The badge also beats the obvious alternative — filtering by the
+  // Cancel-invite affordance — because the click relabels that button to
+  // "Cancelling…" while the request is in flight, dropping the row out
+  // of an affordance-scoped locator and letting the loop's exit check
+  // pass before the server has actually cancelled (the re-invite below
+  // would then race the stale invitation). The badge persists through
+  // the in-flight state, so toHaveCount(0) below only passes once the
+  // row is really gone. The roster never renders "pending" (its badges
+  // are roles), and this spec is the only writer of this org's invites.
   const pendingRow = page
     .locator("ul li")
-    .filter({ hasText: E2E_MEMBER_EMAIL });
+    .filter({ hasText: E2E_MEMBER_EMAIL })
+    .filter({ has: page.getByText("pending", { exact: true }) });
+  // When the member has already joined, no invitation is pending, the
+  // filter matches nothing and this loop no-ops — the re-invite below
+  // then fails fast (better-auth rejects an invite addressed to an
+  // existing member) instead of spinning into the test timeout.
   while (await pendingRow.count()) {
     await pendingRow
       .first()
