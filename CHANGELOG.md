@@ -4,6 +4,21 @@ All notable changes to this project will be documented in this file. The format 
 
 ## [Unreleased]
 
+- **Agent builder tool palette: readable rows, palette search, honest
+  tool cap.** Palette rows were a single flex line where the key badge
+  crushed both the tool name ("Gen…") and the description into
+  unreadable slivers with no way to expand; they're now two-line rows —
+  full name + badge on the first line, the description clamped at two
+  lines with a "Show more / Show less" toggle (rendered only when the
+  text overflows) beneath, and a blue border on checked rows (the
+  platform-admin ToolRow language). The palette gains a search input
+  (case-insensitive on label + description, with a "No tools match"
+  state — filtering is display-only, so hidden selections keep their
+  payload slot), the cap hint counts live ("3 of 10 selected"), and at
+  the cap unchecked rows disable with an explanatory title instead of
+  the click silently no-op'ing. Rows render in a deterministic
+  (toolkit, label) order instead of the upstream allowlist's append
+  order. See #106.
 - **E2E Tier 2D — catalog install** (`e2e/catalog.spec.ts`): the full
   documented catalog lifecycle (docs/catalog.md) driven through the real
   UI — the journey that closes the pure-app Tier 2 ladder. A template is
@@ -28,7 +43,6 @@ All notable changes to this project will be documented in this file. The format 
   60. Tier 1's catalog smoke assertion is now seeding-agnostic (the
   suite can no longer assume an empty catalog); the suite stands at 17
   paced sign-ins. See #104 and `docs/e2e.md`.
-
 - **E2E Tier 2E — auth journeys** (`e2e/auth.spec.ts`): signup, email
   verification, and password reset driven end-to-end through the real
   forms and better-auth's real endpoints — the pure-app journeys Tier 1's
@@ -80,7 +94,6 @@ All notable changes to this project will be documented in this file. The format 
   integer contract as the existing `AGENT_READ_RATE_MAX`); prod defaults
   are untouched and the harness raises only these two. See #103,
   `docs/e2e.md`, and `docs/security.md`.
-
 - **E2E Tier 2B — agent CRUD** (`e2e/agents.spec.ts`, new Tier 2 spec along
   the frozen smoke suite): the core operator workflow driven end-to-end
   through the real `/agents` UI — create a custom-endpoint agent aimed at

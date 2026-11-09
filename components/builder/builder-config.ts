@@ -326,6 +326,43 @@ export function toolKeyState(
 }
 
 /**
+ * The palette's display order: toolkit-mates adjacent, alphabetical
+ * within each toolkit. The AgentOS allowlist order is upstream state
+ * (toolkits append as admins enable them, order drifts between
+ * deployments) — sorting here makes the palette deterministic: the same
+ * toolkit's functions sit together and the list reads the same on every
+ * load. Returns a new array; the input is untouched.
+ */
+export function sortTools(tools: BuilderToolOption[]): BuilderToolOption[] {
+  return [...tools].sort(
+    (a, b) =>
+      (a.toolkit || "").localeCompare(b.toolkit || "") ||
+      a.label.localeCompare(b.label),
+  );
+}
+
+/**
+ * Palette search — case-insensitive substring match on the label (the
+ * human-facing name) and the description (which carries the arg/return
+ * docs, so searching an argument name hits too). An empty/whitespace
+ * query matches everything and returns the input as-is (no array copy).
+ * Filtering is display-only: selections live in form.tools, so a hidden
+ * tool keeps its slot in the payload.
+ */
+export function filterTools(
+  tools: BuilderToolOption[],
+  query: string,
+): BuilderToolOption[] {
+  const needle = query.trim().toLowerCase();
+  if (!needle) return tools;
+  return tools.filter(
+    (tool) =>
+      tool.label.toLowerCase().includes(needle) ||
+      (tool.description ?? "").toLowerCase().includes(needle),
+  );
+}
+
+/**
  * Client-side validation — mirrors the builder zod schemas (name ≤100,
  * description ≤300, instructions ≤8000, all required on create). In edit
  * mode instructions may be blank (blank preserves the stored ones).
