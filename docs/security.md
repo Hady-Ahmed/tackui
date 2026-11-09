@@ -196,10 +196,12 @@ review that added the connector guard):
   half of the primitive.
 - **Destructive runtime endpoints are unreachable** — the CopilotKit
   runtime exposes `POST /threads/clear`, which reaches the runner's
-  `clearThreads()` and deletes every tenant's runs, run states, messages
-  and metadata with no caller identity to scope by (the runner is
-  server-side). The copilotkit route refuses it unconditionally — before
-  auth, before rate-limit accounting — since nothing in the app calls it.
+  `clearThreads()`. The runner method itself is a deliberate no-op
+  (#99): a global wipe has no owner to scope by in a multi-tenant DB,
+  and it would delete live runs' lock rows (history interleaving +
+  unstoppable stops). The copilotkit route refuses it unconditionally —
+  before auth, before rate-limit accounting — since nothing in the app
+  calls it.
 - **The live run stream is redacted like persistence** — the `RUN_STARTED`
   fill (emitted when the backend doesn't echo the input) copies
   `request.input`, whose context carries the gate-injected secrets; every
