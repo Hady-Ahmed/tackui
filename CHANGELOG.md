@@ -19,6 +19,27 @@ All notable changes to this project will be documented in this file. The format 
   the click silently no-op'ing. Rows render in a deterministic
   (toolkit, label) order instead of the upstream allowlist's append
   order. See #106.
+- **E2E Tier 2E — auth journeys** (`e2e/auth.spec.ts`): signup, email
+  verification, and password reset driven end-to-end through the real
+  forms and better-auth's real endpoints — the pure-app journeys Tier 1's
+  login-only coverage left out. The harness now runs the app with email
+  features ON (a throwaway `RESEND_API_KEY` flips `lib/email`'s
+  `EMAIL_ENABLED`, turning on `requireEmailVerification` and the send
+  callbacks — the production-with-SMTP configuration) while pointing the
+  Resend SDK's `RESEND_BASE_URL` env at a new local mail catcher
+  (`e2e/email-catcher.mjs`, loopback port 3998, started by the harness
+  like the mock agent): every email the app really sends lands there and
+  the spec drives the real link each carries — signup gated on
+  verification (no session until the emailed link activates the account,
+  the 403 panel on early sign-in, the resend recovery path), a tampered
+  token rejected by the real verifier, and a password reset asserted in
+  both directions (old password stops working, new one signs in). The
+  reset target is the test-created account only — the seeded admin's
+  password is never touched. `helpers.ts` grows `rejectedSignIn` (a paced
+  expected-rejection sign-in — a limiter charge is a charge whether or
+  not it succeeds), taking the suite to 16 paced sign-ins and the
+  Playwright timeout to 150s. See #107 and `docs/e2e.md`.
+
 - **E2E Tier 2C — orgs, invitations, member visibility** (`e2e/orgs.spec.ts`,
   the first multi-user Tier 2 spec): the real invite → accept handoff
   driven across two isolated browser contexts — the seed admin invites the

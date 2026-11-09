@@ -179,6 +179,16 @@ const LOGIN_WAIT_URL_MS = 15_000;
 const LOGIN_RETRY_MIN_MS = 6_000;
 const LOGIN_RETRY_JITTER_MS = 4_000;
 
+/** The two login-form fields + the submit button, filled and clicked —
+ * the shared body of the paced sign-in forms below. Locators exact: the
+ * canary lesson (substring matching would let a renamed field keep
+ * satisfying the old selector). */
+async function fillCredentials(page: Page, email: string, password: string) {
+  await page.getByPlaceholder("Email", { exact: true }).fill(email);
+  await page.getByPlaceholder("Password", { exact: true }).fill(password);
+  await page.getByRole("button", { name: /sign in/i }).click();
+}
+
 export async function loginAs(page: Page, email: string, password: string) {
   const waitForMs = await reserveSigninSlot();
   if (waitForMs > 0) {
@@ -186,14 +196,50 @@ export async function loginAs(page: Page, email: string, password: string) {
   }
   for (let attempt = 0; ; attempt++) {
     await page.goto("/login");
-    // exact: placeholder matching is substring by default — "Email" would
-    // also match a renamed "Broken Email Field", blinding the canary.
-    await page.getByPlaceholder("Email", { exact: true }).fill(email);
-    await page.getByPlaceholder("Password", { exact: true }).fill(password);
-    await page.getByRole("button", { name: /sign in/i }).click();
+    await fillCredentials(page, email, password);
     try {
       await page.waitForURL(/\/app/, { timeout: LOGIN_WAIT_URL_MS });
       break;
+    } catch (err) {
+      const limited = await page
+        .getByText(/too many requests/i)
+        .isVisible();
+      if (!limited || attempt >= LOGIN_ATTEMPTS - 1) throw err;
+      await page.waitForTimeout(
+        LOGIN_RETRY_MIN_MS + Math.random() * LOGIN_RETRY_JITTER_MS,
+      );
+    }
+  }
+}
+
+/**
+ * A paced sign-in EXPECTED to be rejected: the auth journeys' gate
+ * assertions (an unverified email's 403 panel, a rotated password's
+ * invalid-credential error) are still real sign-in attempts — the same
+ * limiter charge as a successful one — so they go through the same slot
+ * reservation and 429 ride-out as `loginAs`. The pass signal is `message`
+ * rendering on the login page (the app's own error/verification panel)
+ * instead of the /app navigation; on a 429 banner the attempt is retried
+ * exactly like `loginAs` rides one out.
+ */
+export async function rejectedSignIn(
+  page: Page,
+  email: string,
+  password: string,
+  message: RegExp,
+) {
+  const waitForMs = await reserveSigninSlot();
+  if (waitForMs > 0) {
+    await new Promise((resolve) => setTimeout(resolve, waitForMs));
+  }
+  for (let attempt = 0; ; attempt++) {
+    await page.goto("/login");
+    await fillCredentials(page, email, password);
+    try {
+      await expect(page.getByText(message)).toBeVisible({
+        timeout: LOGIN_WAIT_URL_MS,
+      });
+      return;
     } catch (err) {
       const limited = await page
         .getByText(/too many requests/i)

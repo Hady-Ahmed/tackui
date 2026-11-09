@@ -30,14 +30,16 @@
  *    still theirs alone (the member's probe is invisible), and the
  *    invitation is no longer pending.
  *
- * Email reality (docs/auth-and-orgs.md): the harness sets no mail
- * provider, so better-auth's `sendInvitationEmail` is undefined — no
- * invitation email is sent, exactly as in production without SMTP. The
- * app's own no-email discovery path is what this spec drives: the
- * pending-invitations badge → /app/invitations → Accept. Nothing is
- * stubbed, no membership is forged via internal APIs, and the
- * invitation id travels through the authenticated listUserInvitations
- * response — the acceptance is the genuine UI flow.
+ * Email reality (docs/auth-and-orgs.md): when this spec was built the
+ * harness set no mail provider, so better-auth's `sendInvitationEmail`
+ * was undefined — the app's own no-email discovery path (badge →
+ * /app/invitations → Accept) was the journey under test. Since 2E
+ * (#107) the harness runs a local mail catcher (RESEND_BASE_URL →
+ * e2e/email-catcher.mjs), so an invitation email is delivered there
+ * too; nothing here reads it, and nothing is stubbed or forged — the
+ * invitation id still travels through the authenticated
+ * listUserInvitations response, and the acceptance is the genuine UI
+ * flow.
  *
  * Auth budget: better-auth caps sign-in at 10/min per IP
  * (lib/auth/auth.ts). This file spends TWO real logins — one per user,
