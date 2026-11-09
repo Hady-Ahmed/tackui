@@ -19,6 +19,36 @@ All notable changes to this project will be documented in this file. The format 
   the click silently no-op'ing. Rows render in a deterministic
   (toolkit, label) order instead of the upstream allowlist's append
   order. See #106.
+- **E2E Tier 2C — orgs, invitations, member visibility** (`e2e/orgs.spec.ts`,
+  the first multi-user Tier 2 spec): the real invite → accept handoff
+  driven across two isolated browser contexts — the seed admin invites the
+  new seeded second user (`e2e-member@test.local`, created by `e2e/seed.mjs`
+  through the same `auth.api.signUpEmail` + verified-email path as the
+  admin, but a plain user) through the real invite dialog, the member
+  discovers the pending invitation via the account-menu badge, accepts it
+  through the real `/app/invitations` acceptance UI, and switches into the
+  owner's workspace with the org switcher. No mail provider runs in the
+  harness (better-auth's `sendInvitationEmail` stays undefined, as in
+  production without SMTP) — the app's own no-email discovery path is what
+  is exercised; nothing is stubbed and no membership is forged. Org scoping
+  is asserted in both directions: before accepting, the member sees none of
+  the owner's org (no workspace agent on /agents, no probe thread in the
+  chat surface); after joining, the workspace agent appears but threads
+  stay scoped to their creator (the owner's probe thread is invisible to
+  the member and vice versa), and the members roster shows the joined
+  member with the role the invitation carried. The suite now spends two
+  real logins per run for this file (one per user, both through the shared
+  sign-in pacer — `helpers.ts` grows a parameterized `loginAs` that keeps
+  the pacer and the 429 ride-out verbatim). The doubled login count (and
+  the 4-worker suite's aggregate /api traffic) overflowed two rate-limit
+  buckets that pacing alone cannot fit under: Better Auth's 10/min sign-in
+  cap — its counter only resets after a full quiet gap larger than the
+  window, so sustained sub-rate logins accumulate until they trip — and
+  the proxy's 300/min per-IP flood cap. Both become boot-time env
+  overrides (`AUTH_SIGNIN_RATE_MAX`, `GLOBAL_IP_RATE_MAX`, same positive-
+  integer contract as the existing `AGENT_READ_RATE_MAX`); prod defaults
+  are untouched and the harness raises only these two. See #103,
+  `docs/e2e.md`, and `docs/security.md`.
 - **E2E Tier 2B — agent CRUD** (`e2e/agents.spec.ts`, new Tier 2 spec along
   the frozen smoke suite): the core operator workflow driven end-to-end
   through the real `/agents` UI — create a custom-endpoint agent aimed at

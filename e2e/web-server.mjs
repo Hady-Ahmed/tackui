@@ -65,11 +65,14 @@ const PG_CONTAINER = `tackui-e2e-pg-${process.pid}`;
 // teardown, the reaper, and the sweep can always find it.
 const APP_CONTAINER = APP_IMAGE ? `tackui-e2e-app-${process.pid}` : null;
 
-// Fixed test credentials — the seed admin. Not secrets; the whole DB is
-// disposable. The mock agent needs a 32+ char secret for the JWT signing
-// path; the app auth secret is a throwaway too.
+// Fixed test credentials — the seed admin + the seeded second user
+// (e2e/seed.mjs). Not secrets; the whole DB is disposable. The mock agent
+// needs a 32+ char secret for the JWT signing path; the app auth secret
+// is a throwaway too.
 const E2E_ADMIN_EMAIL = "e2e-admin@test.local";
 const E2E_ADMIN_PASSWORD = "e2e-admin-password";
+const E2E_MEMBER_EMAIL = "e2e-member@test.local";
+const E2E_MEMBER_PASSWORD = "e2e-member-password";
 const AUTH_SECRET = "e2e-only-throwaway-secret-0123456789abcdef";
 const MOCK_AGENT_JWT_SECRET = "e2e-mock-agent-jwt-secret-0123456789abcdef";
 
@@ -223,10 +226,12 @@ async function main() {
   const seedInfo = await seed(pool, {
     adminEmail: E2E_ADMIN_EMAIL,
     adminPassword: E2E_ADMIN_PASSWORD,
+    memberEmail: E2E_MEMBER_EMAIL,
+    memberPassword: E2E_MEMBER_PASSWORD,
     mockAgentUrl: `http://127.0.0.1:${Number(process.env.E2E_MOCK_AGENT_PORT || 3999)}/`,
     mockAgentJwtSecret: MOCK_AGENT_JWT_SECRET,
   });
-  log(`seeded: ${seedInfo.adminEmail} + ${seedInfo.agents.length} agent(s)`);
+  log(`seeded: ${seedInfo.adminEmail} + ${seedInfo.memberEmail} + ${seedInfo.agents.length} agent(s)`);
   await pool.end();
 
   // 3. Mock AG-UI agent — loopback-only, the seeded agent's endpoint.
@@ -262,6 +267,14 @@ async function main() {
     // relaxation shape as ALLOW_PRIVATE_ENDPOINTS above: a harness env,
     // not a test-if.
     AGENT_READ_RATE_MAX: "600",
+    // 12 paced logins across the 4-spec suite trip better-auth's sign-in cap
+    // (10/min, and its counter only resets after a >60s quiet gap — sustained
+    // sub-rate traffic accumulates forever), and the aggregate /api traffic of
+    // 4 workers + 2 chat runs saturates the 300/min per-IP flood cap. Both
+    // knobs are the same harness-relaxation shape as AGENT_READ_RATE_MAX above;
+    // prod defaults are untouched (docs/e2e.md "The auth budget").
+    AUTH_SIGNIN_RATE_MAX: "30",
+    GLOBAL_IP_RATE_MAX: "1200",
     SAAS_MODE: "false",
     // The app's boot guard requires DB_ENCRYPTION_KEY when auth is
     // enabled (agent JWT secrets are encrypted at rest). A throwaway

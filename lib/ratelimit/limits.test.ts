@@ -46,4 +46,21 @@ describe("LIMITS env overrides", () => {
     const { LIMITS: empty } = await import("./limits");
     expect(empty.agentRead.max).toBe(60);
   });
+
+  it("keeps the globalIp preset when no override is set", async () => {
+    const { LIMITS } = await import("./limits");
+    expect(LIMITS.globalIp.max).toBe(300);
+    expect(LIMITS.globalIp.windowMs).toBe(60_000);
+  });
+
+  it("raises globalIp when GLOBAL_IP_RATE_MAX is a positive integer, ignores junk", async () => {
+    vi.stubEnv("GLOBAL_IP_RATE_MAX", "1200");
+    const { LIMITS } = await import("./limits");
+    expect(LIMITS.globalIp.max).toBe(1200);
+
+    vi.stubEnv("GLOBAL_IP_RATE_MAX", "banana");
+    vi.resetModules();
+    const { LIMITS: junk } = await import("./limits");
+    expect(junk.globalIp.max).toBe(300);
+  });
 });
