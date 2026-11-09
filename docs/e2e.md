@@ -277,11 +277,12 @@ failures under sustained overflow are real signals, not noise.
 The mutation bucket needed the same relaxation when the catalog spec
 joined (#104): `agentMutate` (10/min per user) is charged by agent CRUD
 AND the catalog's template routes + install, so the combined run's
-mutations — agents.spec's create/edit/delete plus the catalog lifecycle's
-seed/install/edit/delete/remove — land in the same window as ONE user,
-exactly at the preset (observed live: a 429ed agent DELETE). The preset
-is now `AGENT_MUTATE_RATE_MAX`-overridable the same way (default stays
-10 in prod; the harness sets 60).
+mutations land in the same window as ONE user — agents.spec's 7 (tests
+1/2/4 each create+delete their own row, test 2 adds a PATCH) plus the
+catalog lifecycle's 5 (seed, install, template edit, template delete,
+tombstone delete) = 12 against the 10 preset (observed live: a 429ed
+agent DELETE). The preset is now `AGENT_MUTATE_RATE_MAX`-overridable the
+same way (default stays 10 in prod; the harness sets 60).
 
 Two more budgets saturated the same way when the orgs spec doubled the
 login count (#103), and the harness raises both the same way — app env
@@ -546,10 +547,12 @@ Notes:
   untouched — the template's install/run never goes through it; only the
   reachability probe does (a GET, answered 405).
 - **The mutation budget grew a knob** (see "The auth budget" above):
-  joining this file put the combined run's `agentMutate` charges exactly
-  at the 10/min preset, and a delete 429ed live — the preset is now
-  `AGENT_MUTATE_RATE_MAX`-overridable (harness: 60, prod default
-  untouched).
+  joining this file put the combined run's `agentMutate` charges past
+  the 10/min preset — agents.spec's 7 (tests 1/2/4 each create+delete
+  their own row, test 2 adds a PATCH) plus this file's 5 (seed, install,
+  template edit, template delete, tombstone delete) = 12 — and a delete
+  429ed live; the preset is now `AGENT_MUTATE_RATE_MAX`-overridable
+  (harness: 60, prod default untouched).
 - **Dialog confirms are awaited as events** (`page.waitForEvent`),
   not asserted from a `once`-listener's side effect: `await click()`
   resolves when the input was dispatched, before the renderer's

@@ -18,10 +18,16 @@ All notable changes to this project will be documented in this file. The format 
   against a dead endpoint, so green is earned), and the template's
   deletion tombstones the installed copy — "Removed" chip, still
   endpoint-less, the blast-radius warning in the delete confirm — before
-  the workspace cleans the tombstone up via Remove. Tier 1's catalog
-  smoke assertion is now seeding-agnostic (the suite can no longer
-  assume an empty catalog); the suite stands at 17 paced sign-ins. See
-  #104 and `docs/e2e.md`.
+  the workspace cleans the tombstone up via Remove. Joining the file
+  overflowed the shared `agentMutate` bucket the same one-user way — 12
+  combined charges (agents.spec's 7 plus this file's seed/install/
+  template edit/template delete/tombstone delete) against the 10/min
+  prod preset, a live 429ed DELETE — so the preset becomes a boot-time
+  env override (`AGENT_MUTATE_RATE_MAX`, same positive-integer contract
+  as the other rate knobs); prod default untouched, the harness sets
+  60. Tier 1's catalog smoke assertion is now seeding-agnostic (the
+  suite can no longer assume an empty catalog); the suite stands at 17
+  paced sign-ins. See #104 and `docs/e2e.md`.
 
 - **E2E Tier 2E — auth journeys** (`e2e/auth.spec.ts`): signup, email
   verification, and password reset driven end-to-end through the real
