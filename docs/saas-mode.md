@@ -144,10 +144,20 @@ daily quotas, enforced at install AND run time. See
 the personal org auto-created on signup goes through the session hook, NOT
 this gate, so signup always works) + `membershipLimit` (per-org seat cap:
 free/pro = 1, team = `subscription.seats`) + `sendInvitationEmail`
-(env-gated via `EMAIL_ENABLED` — sends an invitation email via Resend when
-configured, no-op otherwise; the invitee discovers the invite via the
+(env-gated — sends an invitation email via Resend when configured,
+no-op otherwise; the invitee discovers the invite via the
 pending-invitations badge in the account menu). These enforce at the API
 layer so direct calls can't bypass the plan.
+
+`EMAIL_ENABLED` — that gate — is a derived constant, not a settable env
+var: `lib/email/client.ts` computes it at module load as
+`!!process.env.RESEND_API_KEY` (evaluated once at boot like the flags
+above). Its effective values: `true` only when `RESEND_API_KEY` is set
+(the Resend client is constructed; invite, verification, and
+password-reset emails send), `false` otherwise (every send is a silent
+no-op). Setting `EMAIL_ENABLED` directly does nothing — email turns on by
+setting `RESEND_API_KEY` + `EMAIL_FROM`. Behavior details:
+[auth-and-orgs.md](./auth-and-orgs.md#email-verification--password-reset).
 
 ## Marketing + legal pages (SaaS-only)
 
