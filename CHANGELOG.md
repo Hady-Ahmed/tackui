@@ -47,6 +47,13 @@ All notable changes to this project will be documented in this file. The format 
   (`catalogErrorCopy`, alongside the form's other pure copy helpers):
   identical messages collapse to one, while genuinely distinct failures
   (one catalog 503, the other 502) still both display.
+- **The admin model Test-button tooltip names where the key goes (#84).**
+  The `env_key_set: false` hint read "Set `OPENAI_API_KEY` on the platform
+  to test this model" — "on the platform" could mean the Next.js app, the
+  builder, or the host, leaving the operator to guess. The tooltip now
+  names the destination: "in the agent builder service's environment"
+  (matching the service name as `docs/agent-builder.md` uses it). Copy
+  only — the probe, its gating, and the `env_key_set` logic are untouched.
 - **Agent builder tool palette: readable rows, palette search, honest
   tool cap.** Palette rows were a single flex line where the key badge
   crushed both the tool name ("Gen…") and the description into

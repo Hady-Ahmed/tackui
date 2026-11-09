@@ -705,7 +705,7 @@ export function PlatformAdmin() {
                                   ? !line.trim()
                                     ? "Enter a model id first"
                                     : undefined
-                                  : `Set ${p.platform_env_key} on the platform to test this model`
+                                  : `Set ${p.platform_env_key} in the agent builder service's environment to test this model`
                               }
                               onClick={() => testModel(p, line.trim())}
                               className="shrink-0 rounded border border-zinc-300 px-2 py-1 text-[10px] text-zinc-600 transition-colors hover:bg-zinc-50 disabled:opacity-40 dark:border-zinc-700 dark:text-zinc-300 dark:hover:bg-zinc-900"
