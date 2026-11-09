@@ -9,7 +9,10 @@ service-token endpoints from it to render the agent builder:
 
 plus an admin-scope catalog API (`/platform/available`,
 `GET|PUT /platform/catalog/{models,tools}`, `POST /platform/test/model`)
-that the frontend's admin page (`/admin/platform`) proxies.
+that the frontend's admin page (`/admin/platform`) proxies, and the
+connector-registry admin API (`GET /platform/connectors`,
+`PUT|DELETE /platform/connectors/{connector_id}`) that the run client's
+server pushes to ([Connector registry](#connector-registry)).
 
 ## Configure the catalog
 
@@ -157,12 +160,98 @@ database at write time, so an unparseable-attrs row cannot exist (the old
 sqlite TEXT column needed a skip-on-read guard for that; JSONB is the
 stronger guarantee).
 
+## Connector registry
+
+**The registry stores URLs, never tokens.** The `platform_connector` table
+(beside the catalog's own tables in the same Postgres, `public` schema) maps
+each connector's tackui-side id — globally unique, because connector NAMES
+are org-scoped and collide across orgs while the platform has no org concept
+— to the MCP endpoint's attach URL plus an optional cosmetic label (the
+org-facing connector name, carried for the admin/debug surfaces). Connector
+credentials are per-run dependencies: the run client delivers
+`{connector_id: {token}}` in the run's context and the dispatcher attaches
+them per run — tokens never touch this service's storage, and nothing in
+this API can store one.
+
+Exactly one client writes the registry in practice: the run client's server
+(the frontend's backend), push-first-then-commit — the row must exist before
+any local row references it. It pushes on connector create/edit and
+belt-and-braces at agent save; the dispatcher resolves each run's attach
+URLs from here and never takes a URL from the wire (see Known limitations).
+
+All three endpoints below are admin-scope: a bearer JWT the frontend's
+server mints as its service token (`scopes: ["app:superadmin"]`,
+HS256-signed with the service's `JWT_SECRET`). Anonymous callers are 401; a
+valid `app:user` token is 403. The routes' own checks answer 400s that name
+the problem (`connector id must be 1-200 characters`,
+`url must be an absolute http(s) URL`); request-body constraint violations —
+a missing `url`, an over-long `url` or `label` — come back as sanitized 422s
+(location, message, type; never the submitted value). Every write bumps the
+catalog's revision counter, so the change is live on the next request — no
+restart, the same mechanism as the catalog PUTs.
+
+### `GET /platform/connectors` — the registry listing
+
+The admin/debug view of what the dispatcher can currently resolve, sorted by
+connector id:
+
+```
+{"connectors": [{"connectorId": "4b1f6c2e-8a47-4d0e-9b21-6f0a2c9d5e71",
+                 "url": "https://mcp.example.test/mcp", "label": "GitHub"}]}
+```
+
+`label` is `null` when the client pushed none. The row shape has no place
+for secrets: a listing can never carry tokens, whatever a writer submits.
+
+```
+curl -H "Authorization: Bearer $SERVICE_TOKEN" \
+  http://localhost:7778/platform/connectors
+```
+
+### `PUT /platform/connectors/{connector_id}` — register/refresh one
+
+Idempotent upsert keyed by the path id (1-200 characters). Repeated
+identical PUTs are the normal case; a changed `url`/`label` replaces the
+stored values, and there is always exactly one row per id (a re-push without
+`label` clears it). Body:
+
+- `url` (string, required, 1-2000 chars) — must be an absolute `http(s)`
+  URL: scheme `http`/`https` with a host. Shape only — this service never
+  fetches a connector URL outside the MCP handshake the run client already
+  authorized; the SSRF decision (private-address refusal) belongs to the run
+  client's create-time guard.
+- `label` (string or null, optional, at most 200 chars) — cosmetic.
+
+Response: `{"ok": true, "revision": <n>}` — the new revision. Unknown body
+fields are ignored: the request model accepts `url` and `label` only, so no
+extra field (a `token`) can reach the table.
+
+```
+curl -X PUT -H "Authorization: Bearer $SERVICE_TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{"url": "https://mcp.example.test/mcp", "label": "GitHub"}' \
+  http://localhost:7778/platform/connectors/4b1f6c2e-8a47-4d0e-9b21-6f0a2c9d5e71
+```
+
+### `DELETE /platform/connectors/{connector_id}` — remove one
+
+Idempotent: deleting an id the registry doesn't hold is still
+`{"ok": true, "revision": <n>}` and still bumps the revision — the delete
+IS the state. The run client deletes the registry entry BEFORE its local
+row, so an entry that never synced (or was already removed) must not error
+the connector delete flow.
+
+```
+curl -X DELETE -H "Authorization: Bearer $SERVICE_TOKEN" \
+  http://localhost:7778/platform/connectors/4b1f6c2e-8a47-4d0e-9b21-6f0a2c9d5e71
+```
+
 ## Known limitations
 
 **MCP connector attach URLs resolve from the platform registry, not the
 wire.** (This section previously described the opposite design — URL +
 Authorization taken from the client's wire payload, an SSRF primitive —
-as current. That shipped closed: the connector registry below is the
+as current. That shipped closed: the connector registry above is the
 mechanism.) The run request carries `{connector_id: {token}}` only; the
 dispatcher resolves each id's attach URL from the `platform_connector`
 registry table, refuses any id the component's stored config doesn't
