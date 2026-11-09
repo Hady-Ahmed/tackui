@@ -40,6 +40,13 @@ All notable changes to this project will be documented in this file. The format 
   (interleaved history + unstoppable stop). The method now does nothing
   by design; a real "clear everything" feature needs deliberate scoping,
   auth, and live-run handling.
+- **The disabled-builder banner renders its message once (#81).** With
+  `AGENTOS_BASE_URL` unset, both catalog loads fail with the identical
+  `AgentosError` message, and the builder form joined the two error slots
+  verbatim — the same sentence twice, dot-separated. The join now dedupes
+  (`catalogErrorCopy`, alongside the form's other pure copy helpers):
+  identical messages collapse to one, while genuinely distinct failures
+  (one catalog 503, the other 502) still both display.
 - **Agent builder tool palette: readable rows, palette search, honest
   tool cap.** Palette rows were a single flex line where the key badge
   crushed both the tool name ("Gen…") and the description into

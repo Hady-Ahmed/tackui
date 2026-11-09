@@ -46,6 +46,7 @@ import {
   BUILDER_TOOLS_MAX,
   buildCreatePayload,
   catalogEmptyCopy,
+  catalogErrorCopy,
   createBlockedByEmptyModels,
   buildEditPayload,
   extractErrorMessage,
@@ -555,7 +556,7 @@ export function BuilderForm({
       {builderDisabled && (
         <div className="rounded-lg border border-zinc-200 bg-white px-4 py-3 text-sm text-zinc-500 dark:border-zinc-800 dark:bg-zinc-950 dark:text-zinc-400">
           <div className="flex items-center justify-between gap-3">
-            <span>{[modelsError, toolsError].filter(Boolean).join(" · ")}</span>
+            <span>{catalogErrorCopy(modelsError, toolsError)}</span>
             {/* Same recovery affordance as the admin page's Retry —
                 without it the only path out is a full browser reload. */}
             <button

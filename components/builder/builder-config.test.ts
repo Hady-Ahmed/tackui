@@ -6,6 +6,7 @@ import {
   buildEditPayload,
   buildUpdatePayload,
   catalogEmptyCopy,
+  catalogErrorCopy,
   createBlockedByEmptyModels,
   extractErrorMessage,
   filterTools,
@@ -689,6 +690,34 @@ describe("catalogEmptyCopy — empty-by-default platform catalogs (turn 7)", () 
       const copy = catalogEmptyCopy(kind, [], null) ?? "";
       expect(copy.toLowerCase()).not.toContain("your agent platform");
     }
+  });
+});
+
+describe("catalogErrorCopy — the disabled-builder banner", () => {
+  it("joins two genuinely distinct catalog errors with the separator", () => {
+    expect(catalogErrorCopy("Models catalog returned 503", "Tools catalog returned 502")).toBe(
+      "Models catalog returned 503 · Tools catalog returned 502",
+    );
+  });
+
+  it("collapses the identical message both catalog loads fail with", () => {
+    // One shared 503 from agentosRequest sets BOTH state slots to the
+    // same AgentosError message — the banner must render it once.
+    const message = "The agent builder isn't enabled on this deployment.";
+    expect(catalogErrorCopy(message, message)).toBe(message);
+  });
+
+  it("keeps only the failing side when a single catalog fails", () => {
+    expect(catalogErrorCopy("Models catalog returned 503", null)).toBe(
+      "Models catalog returned 503",
+    );
+    expect(catalogErrorCopy(null, "Tools catalog returned 502")).toBe(
+      "Tools catalog returned 502",
+    );
+  });
+
+  it("returns null when nothing failed", () => {
+    expect(catalogErrorCopy(null, null)).toBeNull();
   });
 });
 
