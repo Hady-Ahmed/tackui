@@ -289,7 +289,7 @@ Enforced in route handlers, post-auth, keyed by `user.id`. Limits (see
 | --- | --- | --- |
 | `/api/copilotkit/*` (POST runs only) | 20/min per user | 3 concurrent run streams per user |
 | `/api/agents/reachability-probe` | 30/min per user | — |
-| `/api/agents` POST + `/api/agents/[id]` PATCH/DELETE | 10/min per user | — |
+| `/api/agents` POST + `/api/agents/[id]` PATCH/DELETE | 10/min per user, `AGENT_MUTATE_RATE_MAX`-overridable (the catalog's template CRUD + install share this bucket) | — |
 | `/api/agents` GET + `/api/agents/[id]` GET | 60/min per user | — |
 | `/api/threads/[id]` PATCH/DELETE | 30/min per user | — |
 | `/api/auth/can-manage-agents` GET | 60/min per user (shares `agentRead` bucket) | — |

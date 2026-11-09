@@ -28,8 +28,16 @@ export const LIMITS = {
   copilotkitConcurrent: { max: 3 },
   /** Per-user: reachability probe (outbound fetch). 30/min. */
   reachabilityProbe: { max: 30, windowMs: 60_000 },
-  /** Per-user: agent mutations (POST/PATCH/DELETE /api/agents). 10/min. */
-  agentMutate: { max: 10, windowMs: 60_000 },
+  /** Per-user: agent mutations (POST/PATCH/DELETE /api/agents). 10/min,
+   *  AGENT_MUTATE_RATE_MAX-overridable (same contract as agentRead
+   *  above): the catalog's install/template routes share this bucket
+   *  with agent CRUD, and one busy deployment (or one e2e suite) where
+   *  several surfaces mutate in the same minute legitimately outgrows
+   *  the member-facing preset. */
+  agentMutate: {
+    max: maxFromEnv("AGENT_MUTATE_RATE_MAX", 10),
+    windowMs: 60_000,
+  },
   /** Per-user: agent reads (GET /api/agents — and the ten other routes
    *  that charge this bucket: agent detail, catalog, connectors,
    *  credentials, models, tools, can-manage-agents). 60/min by default,
