@@ -4,10 +4,11 @@
  * The Models & tools page's body — the deployment's agent catalog: which
  * model providers/models and which toolkits tackui's builder offers.
  *
- * The admin's only actions are toggling rows and typing model ids —
- * everything else (class names, credential contracts, function lists) is
- * derived from the platform's discovery scan and rendered read-only, so
- * nothing editable here can desynchronize the stack. A save
+ * The admin's only actions are typing model ids (a provider's enablement
+ * follows its id list) and toggling toolkits — everything else (class
+ * names, credential contracts, function lists) is derived from the
+ * platform's discovery scan and rendered read-only, so nothing editable
+ * here can desynchronize the stack. A save
  * is a full-state replace that goes live on the next request (the platform
  * rebuilds its registry lazily) — no restart, no redeploy.
  *
@@ -18,19 +19,29 @@
  * Phase 3 publishing) but the UI no longer advertises it.
  *
  * UX shape (the catalogs are long — 36 providers, 56 toolkits):
- *  - Provider rows are accordions: collapsed shows toggle + badges +
- *    model count; the model-id rows live inside the expanded row. Enabled
- *    providers start expanded (the working set), everything else stays
- *    collapsed. Both sections have a substring filter.
+ *  - Provider rows are accordions: the header carries a derived status
+ *    dot + count label (● n models / ○ off — the glyph shape and the
+ *    label text carry the state, not just color) and the model-id rows
+ *    live inside the expanded row. Enabled available providers start expanded
+ *    (the working set), everything else stays collapsed. Both sections
+ *    have a substring filter.
+ *  - A provider's enabled state is DERIVED, not stored: it is on exactly
+ *    when it lists ≥1 model id (components/platform-admin-catalog.ts).
+ *    Adding the first id lights it, removing the last dims it, and a
+ *    Clear all button (shown only when ids exist; no confirmation —
+ *    nothing persists until Save, so not-saving is the undo) empties the
+ *    list in one go. The two old save-time guards — "enabled with no ids"
+ *    (blocked) and "ids under a disabled provider" (silently dropped) —
+ *    forbade the same diagonal, proving the checkbox and the id list were
+ *    one fact; the UI now encodes it, so both error states are
+ *    unconstructible here, and the PUT body derives enabled from the rows.
+ *    The AgentOS keeps its own guards as defense-in-depth.
  *  - Toolkits group under free alphabetical bands derived at render time —
  *    no maintained category list anywhere (agno has none, and curated
  *    categories would mean a code change per re-organization). Function
  *    lists truncate to a few names with a native <details> expander when
  *    there are more; short lists render as plain text (no dead expander,
  *    no class-name chip — it would just duplicate the toolkit's title).
- *  - An enabled provider with no model ids is blocked client-side (inline
- *    error + disabled save) AND server-side (the AgentOS PUT answers 400)
- *    — the tick-the-box-forget-the-rows state must not be saveable.
  *
  * Wire contract (app/api/admin/platform):
  *  - GET  → {providers: [...], tools: [...]} — discovery ∪ durable rows.
@@ -50,6 +61,13 @@
 
 import { useCallback, useEffect, useRef, useState } from "react";
 import type { ClipboardEvent as ReactClipboardEvent, ReactNode } from "react";
+import {
+  deriveProviderEnabled,
+  modelEntryText,
+  providerPutEntry,
+  providerStatus,
+  savedEntries,
+} from "./platform-admin-catalog";
 
 /** One provider row of GET /api/admin/platform/catalog. */
 interface CatalogProvider {
@@ -81,27 +99,14 @@ interface CatalogResponse {
   error?: string;
 }
 
-/** The editable draft: provider slug → enabled + the model-id rows. Each
-    row is one grammar entry (id[:key=value ...]) — edit, test, remove in
-    place, exactly one list. */
+/** The editable draft: provider slug → the model-id rows. Each row is one
+    grammar entry (id[:key=value ...]) — edit, test, remove in place,
+    exactly one list. There is NO `enabled` field: enablement is derived
+    from the rows (components/platform-admin-catalog.ts), so the states
+    both save-time guards used to forbid are unrepresentable in the
+    draft, let alone sendable. */
 interface ProviderDraft {
-  enabled: boolean;
   models: string[];
-}
-
-/** Non-empty, trimmed model entries — what save() sends and what counts. */
-function savedEntries(models: string[]): string[] {
-  return models.map((m) => m.trim()).filter((m) => m.length > 0);
-}
-
-/** Serialize a saved model row back to its grammar entry (row prefill). */
-function modelEntryText(row: { id: string; attrs: Record<string, unknown>; tier: boolean }): string {
-  const parts = [row.id];
-  if (row.tier) parts.push("tier");
-  for (const [key, value] of Object.entries(row.attrs)) {
-    parts.push(`${key}=${String(value)}`);
-  }
-  return parts.join(":");
 }
 
 /** Page-level failure: the route's user-safe message plus, when the
@@ -214,7 +219,6 @@ export function PlatformAdmin() {
     const d: Record<string, ProviderDraft> = {};
     for (const p of data.providers ?? []) {
       d[p.slug] = {
-        enabled: p.enabled,
         models: p.models.map(modelEntryText),
       };
     }
@@ -255,11 +259,13 @@ export function PlatformAdmin() {
         method: "PUT",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
-          providers: providers.map((p) => ({
-            slug: p.slug,
-            enabled: draft[p.slug]?.enabled ?? false,
-            models: savedEntries(draft[p.slug]?.models ?? []),
-          })),
+          // Each provider entry derives `enabled` from its rows
+          // (providerPutEntry) — the body physically cannot carry the
+          // states the AgentOS's guards reject: an enabled provider with
+          // no ids, or ids under a disabled one.
+          providers: providers.map((p) =>
+            providerPutEntry(p.slug, draft[p.slug]?.models ?? []),
+          ),
           tools: tools.map((t) => ({
             slug: t.slug,
             enabled: toolDraft[t.slug] ?? false,
@@ -352,7 +358,7 @@ export function PlatformAdmin() {
   // rows so bulk-pasting a list still works.
   const updateModels = (slug: string, fn: (models: string[]) => string[]) =>
     setDraft((prev) => {
-      const cur = prev[slug] ?? { enabled: false, models: [] };
+      const cur = prev[slug] ?? { models: [] };
       return { ...prev, [slug]: { ...cur, models: fn(cur.models) } };
     });
 
@@ -406,25 +412,20 @@ export function PlatformAdmin() {
   const providerList = providers ?? [];
   const toolList = tools ?? [];
 
-  // Enabled-but-empty providers: invalid, and save is blocked while any
-  // exist. The row itself shows the inline error; this count drives the
-  // save bar.
-  const invalidProviders = providerList.filter((p) => {
-    const d = draft[p.slug];
-    return (d?.enabled ?? false) && p.available && savedEntries(d?.models ?? []).length === 0;
-  });
-  const invalidSlugs = new Set(invalidProviders.map((p) => p.slug));
-
+  // Dirty detection compares the DERIVED draft enablement (a provider is
+  // on exactly when its rows list ≥1 id) against the saved catalog.
   const dirtyCount =
     providerList.filter(
       (p) =>
-        (draft[p.slug]?.enabled ?? false) !== p.enabled ||
+        deriveProviderEnabled(draft[p.slug]?.models ?? []) !== p.enabled ||
         JSON.stringify(savedEntries(draft[p.slug]?.models ?? [])) !==
           JSON.stringify(p.models.map(modelEntryText)),
     ).length +
     toolList.filter((t) => (toolDraft[t.slug] ?? false) !== t.enabled).length;
 
-  const enabledProviderCount = providerList.filter((p) => draft[p.slug]?.enabled).length;
+  const enabledProviderCount = providerList.filter((p) =>
+    deriveProviderEnabled(draft[p.slug]?.models ?? []),
+  ).length;
   const enabledToolCount = toolList.filter((t) => toolDraft[t.slug]).length;
 
   // Unsaved-changes guard: a dirty draft must not die silently on tab
@@ -563,44 +564,47 @@ export function PlatformAdmin() {
             className="w-48 rounded-lg border border-zinc-200 bg-white px-2.5 py-1.5 text-xs text-zinc-900 outline-none transition-colors focus:border-blue-500 dark:border-zinc-700 dark:bg-zinc-900 dark:text-zinc-50"
           />
         </div>
-        {/* Two-column flow at md+; expanded/invalid rows span the full row
-            so the row list + test result keep their roomy width. */}
+        {/* Two-column flow at md+; expanded rows span the full row so the
+            row list + test result keep their roomy width. */}
         <div className="grid grid-cols-1 gap-x-3 gap-y-1.5 md:grid-cols-2">
           {visibleProviders.map((p) => {
-            const d = draft[p.slug] ?? { enabled: p.enabled, models: [] };
+            const d = draft[p.slug] ?? { models: [] };
             const open = expanded[p.slug] ?? false;
-            const modelCount = savedEntries(d.models).length;
-            const invalid = invalidSlugs.has(p.slug);
-            const wide = (open && p.available) || invalid;
+            // The header's status indicator — derived from the id rows,
+            // never stored (see platform-admin-catalog.ts).
+            const status = providerStatus(d.models);
             return (
               <div
                 key={p.slug}
-                className={`min-w-0 rounded-xl border bg-white dark:bg-zinc-950 ${
-                  wide ? "md:col-span-full " : ""
-                }${
-                  invalid
-                    ? "border-red-300 dark:border-red-900"
-                    : "border-zinc-200 dark:border-zinc-800"
+                className={`min-w-0 rounded-xl border border-zinc-200 bg-white dark:border-zinc-800 dark:bg-zinc-950 ${
+                  open ? "md:col-span-full" : ""
                 }`}
               >
                 {/* Collapsed header — the whole row toggles expansion
-                    except the controls themselves. */}
+                    except the status indicator (not a control; see
+                    onClick below). */}
                 <div
                   role="button"
                   tabIndex={0}
                   aria-expanded={open}
                   // aria-controls points at the panel element, which only
-                  // exists when open && available — emit the reference just
-                  // then so it never dangles.
-                  {...(open && p.available
-                    ? { "aria-controls": `provider-panel-${p.slug}` }
-                    : {})}
-                  onClick={() => setExpanded((prev) => ({ ...prev, [p.slug]: !open }))}
+                  // exists when open — emit the reference just then so it
+                  // never dangles.
+                  {...(open ? { "aria-controls": `provider-panel-${p.slug}` } : {})}
+                  onClick={(e) => {
+                    // The status dot is not a control — a click inside it
+                    // must not toggle the row; the row itself (its name,
+                    // badges, empty space) is the expand/collapse target.
+                    if ((e.target as HTMLElement).closest("[data-provider-status]")) return;
+                    setExpanded((prev) => ({ ...prev, [p.slug]: !open }));
+                  }}
                   onKeyDown={(e) => {
-                    // Only the header itself toggles — a keydown from the
-                    // nested checkbox (Space on a focused checkbox bubbles
-                    // here) must not also toggle the accordion, or keyboard
-                    // users can't check the box without collapsing the row.
+                    // Only the header itself toggles — a keydown from a
+                    // nested interactive child (Space on a focused control
+                    // bubbles here) must not also toggle the accordion.
+                    // No such child exists today (the status dot is inert),
+                    // but the guard costs nothing and keeps a future one
+                    // from double-firing.
                     if (e.target !== e.currentTarget) return;
                     if (e.key === "Enter" || e.key === " ") {
                       e.preventDefault();
@@ -609,37 +613,37 @@ export function PlatformAdmin() {
                   }}
                   className="flex cursor-pointer select-none items-center gap-3 p-3"
                 >
-                  <input
-                    type="checkbox"
-                    checked={d.enabled}
-                    // An unavailable provider can't be ENABLED (the
-                    // platform can't produce it), but one that is still
-                    // enabled must stay untickable — the backend's
-                    // dead-row clear path (an agno upgrade dropped it)
-                    // only fires when the save says enabled:false.
-                    // Disabling the checkbox outright would trap an
-                    // enabled dead row in a permanent 400 loop.
-                    disabled={saving || (!p.available && !d.enabled)}
-                    aria-label={`Enable ${p.class_name ?? p.slug}`}
-                    title={
-                      !p.available
-                        ? d.enabled
-                          ? `No longer available — untick to clear this row`
-                          : `No longer available`
-                        : undefined
-                    }
-                    onClick={(e) => e.stopPropagation()}
-                    onChange={(e) => {
-                      const enabled = e.target.checked;
-                      // Enabling expands the row (the editor is the
-                      // next required action); disabling collapses it.
-                      // Outside the setDraft updater — updaters must be
-                      // pure (React may invoke them twice).
-                      setExpanded((x) => ({ ...x, [p.slug]: enabled && p.available }));
-                      setDraft((prev) => ({ ...prev, [p.slug]: { ...d, enabled } }));
-                    }}
-                    className="h-4 w-4 rounded border-zinc-300 text-blue-600 dark:border-zinc-600"
-                  />
+                  {/* Derived status — NOT an input. A provider is enabled
+                      exactly when it lists ≥1 model id: the dot fills and
+                      counts when ids exist and goes hollow/off when none
+                      do. The state rides the glyph shape and the label
+                      text, not just color. Data attribute lets the row's
+                      click handler ignore clicks here. */}
+                  <span
+                    data-provider-status
+                    title="A provider is enabled while it lists at least one model id"
+                    className="flex shrink-0 cursor-default items-center gap-1.5 text-xs font-medium"
+                  >
+                    <span
+                      aria-hidden
+                      className={
+                        status.enabled
+                          ? "text-green-600 dark:text-green-400"
+                          : "text-zinc-400 dark:text-zinc-500"
+                      }
+                    >
+                      {status.glyph}
+                    </span>
+                    <span
+                      className={
+                        status.enabled
+                          ? "text-green-700 dark:text-green-300"
+                          : "text-zinc-400 dark:text-zinc-500"
+                      }
+                    >
+                      {status.label}
+                    </span>
+                  </span>
                   <span className="min-w-0 truncate font-medium text-zinc-900 dark:text-zinc-50">
                     {/* The agno class name IS the honest display name
                         ("AzureOpenAI", not "azure" — which reads like all
@@ -647,18 +651,23 @@ export function PlatformAdmin() {
                         fallback for any provider without a class. */}
                     {p.class_name ?? p.slug}
                   </span>
-                  {!p.available && <Pill tone="amber">No longer available</Pill>}
-                  {/* Expanded rows show no inline metadata — the model
-                      count pill is a collapsed-state summary, and the slug
-                      lives in the editor panel below where it's actually
-                      referenced (result keys, error copy). */}
-                  {!open &&
-                    d.enabled &&
-                    p.available && (
-                      <Pill tone={modelCount > 0 ? "gray" : "amber"}>
-                        {modelCount} {modelCount === 1 ? "model" : "models"}
-                      </Pill>
-                    )}
+                  {!p.available && (
+                    <Pill tone="amber">
+                      <span
+                        title={
+                          status.enabled
+                            ? "No longer available — clear its model ids to remove this row on save"
+                            : "No longer available"
+                        }
+                      >
+                        No longer available
+                      </span>
+                    </Pill>
+                  )}
+                  {/* The status label above IS the model-count display —
+                      collapsed and expanded alike; no separate count pill.
+                      The slug lives in the editor panel below where it's
+                      actually referenced (result keys, error copy). */}
                   <span className="ml-auto flex shrink-0 items-center gap-2.5">
                     <span
                       className={`shrink-0 pr-0.5 text-xs text-zinc-400 transition-transform ${open ? "rotate-90" : ""}`}
@@ -668,7 +677,7 @@ export function PlatformAdmin() {
                     </span>
                   </span>
                 </div>
-                {open && p.available && (
+                {open && (
                   <div id={`provider-panel-${p.slug}`} className="px-3 pb-3">
                     {/* The row list IS the editor — no textarea mirror:
                         each id is its own input with Test/remove inline,
@@ -679,7 +688,11 @@ export function PlatformAdmin() {
                         surfaces in this UI. The slug is NOT displayed
                         here: error copy names slugs, but the provider
                         filter matches them too — type it there to find
-                        the row. */}
+                        the row. Unavailable (dead) rows render read-only:
+                        the platform can't serve them, so their ids can
+                        only be cleared — which is exactly what this panel
+                        now exists to offer them (the old checkbox's
+                        untick-to-clear path). */}
                     <div className="space-y-1.5">
                       {d.models.map((line, i) => {
                         const resultKey = `${p.slug}:${line.trim()}`;
@@ -689,7 +702,7 @@ export function PlatformAdmin() {
                               value={line}
                               onChange={(e) => setModelRow(p.slug, i, e.target.value, line)}
                               onPaste={(e) => pasteIntoRow(e, p.slug, i)}
-                              disabled={saving}
+                              disabled={saving || !p.available}
                               placeholder="model-id"
                               aria-label={`Model id ${i + 1} for ${p.class_name ?? p.slug}`}
                               className="min-w-0 flex-1 rounded-lg border border-zinc-200 bg-white px-3 py-1.5 font-mono text-xs text-zinc-900 outline-none transition-colors focus:border-blue-500 dark:border-zinc-700 dark:bg-zinc-900 dark:text-zinc-50"
@@ -698,14 +711,20 @@ export function PlatformAdmin() {
                               type="button"
                               aria-label={`Test model id ${line.trim()} on ${p.class_name ?? p.slug}`}
                               disabled={
-                                saving || !p.env_key_set || testing !== null || !line.trim()
+                                saving ||
+                                !p.available ||
+                                !p.env_key_set ||
+                                testing !== null ||
+                                !line.trim()
                               }
                               title={
-                                p.env_key_set
-                                  ? !line.trim()
-                                    ? "Enter a model id first"
-                                    : undefined
-                                  : `Set ${p.platform_env_key} in the agent builder service's environment to test this model`
+                                !p.available
+                                  ? "No longer available"
+                                  : p.env_key_set
+                                    ? !line.trim()
+                                      ? "Enter a model id first"
+                                      : undefined
+                                    : `Set ${p.platform_env_key} in the agent builder service's environment to test this model`
                               }
                               onClick={() => testModel(p, line.trim())}
                               className="shrink-0 rounded border border-zinc-300 px-2 py-1 text-[10px] text-zinc-600 transition-colors hover:bg-zinc-50 disabled:opacity-40 dark:border-zinc-700 dark:text-zinc-300 dark:hover:bg-zinc-900"
@@ -740,25 +759,47 @@ export function PlatformAdmin() {
                         );
                       })}
                     </div>
-                    <button
-                      type="button"
-                      disabled={saving}
-                      onClick={() => updateModels(p.slug, (m) => [...m, ""])}
-                      className="mt-2 text-xs font-medium text-blue-600 hover:underline dark:text-blue-400"
-                    >
-                      + Add model id
-                    </button>
-                    {/* Grammar hint — attributes ride on the id after a
-                        colon; "one per line" is meaningless in a list. */}
-                    <p className="mt-1 text-[11px] text-zinc-400 dark:text-zinc-500">
-                      attributes as <code>key=value</code> after a colon, e.g.{" "}
-                      <code>model-id:max_tokens=8192</code>
-                    </p>
-                    {invalid && (
-                      <p className="mt-1 text-xs font-medium text-red-600 dark:text-red-400">
-                        Add at least one model id — an enabled provider with no models
-                        shows nothing in the picker.
-                      </p>
+                    {/* Adding ids to an unavailable provider can only
+                        produce a save the platform rejects (it can't serve
+                        the offering) — dead rows get no Add affordance;
+                        their panel is for clearing. */}
+                    {p.available && (
+                      <>
+                        <button
+                          type="button"
+                          disabled={saving}
+                          onClick={() => updateModels(p.slug, (m) => [...m, ""])}
+                          className="mt-2 text-xs font-medium text-blue-600 hover:underline dark:text-blue-400"
+                        >
+                          + Add model id
+                        </button>
+                        {/* Grammar hint — attributes ride on the id after a
+                            colon; "one per line" is meaningless in a list. */}
+                        <p className="mt-1 text-[11px] text-zinc-400 dark:text-zinc-500">
+                          attributes as <code>key=value</code> after a colon, e.g.{" "}
+                          <code>model-id:max_tokens=8192</code>
+                        </p>
+                      </>
+                    )}
+                    {/* Clear all — shown only when there's something to
+                        clear (no dead affordance on an empty list). No
+                        confirmation: nothing persists until Save, so
+                        not-saving is the undo. The row list IS the draft —
+                        one array holds the saved ids and any in-progress
+                        blanks — so this empties both in one go, and the
+                        derived state follows on its own: an emptied
+                        provider saves disabled (for a dead row, that's the
+                        row-clear path the old checkbox provided). */}
+                    {status.enabled && (
+                      <button
+                        type="button"
+                        disabled={saving}
+                        title="Removes every model id — nothing is saved until you Save"
+                        onClick={() => updateModels(p.slug, () => [])}
+                        className="mt-2 text-xs font-medium text-red-600 hover:underline dark:text-red-400"
+                      >
+                        Clear all
+                      </button>
                     )}
                   </div>
                 )}
@@ -820,15 +861,14 @@ export function PlatformAdmin() {
       </section>
 
       {/* Save — a full-state replace; the platform rebuilds on the next
-          request, so changes go live without restart. Blocked while any
-          enabled provider has no model ids (the AgentOS would 400 anyway). */}
+          request, so changes go live without restart. There is no
+          validity gate here anymore: the draft derives enablement from
+          the id rows, so the states the AgentOS would 400 (enabled with
+          no ids, ids under a disabled provider) can't be built in this
+          UI — the only thing that can block a save is having nothing to
+          save. */}
       <div className="sticky bottom-4 mt-6 flex items-center justify-end gap-3 rounded-xl border border-zinc-200 bg-white/90 p-3 backdrop-blur dark:border-zinc-800 dark:bg-zinc-950/90">
-        {invalidProviders.length > 0 && (
-          <span className="mr-auto text-xs font-medium text-red-600 dark:text-red-400">
-            {invalidProviders.length} enabled {invalidProviders.length === 1 ? "provider needs" : "providers need"} model ids
-          </span>
-        )}
-        {invalidProviders.length === 0 && dirtyCount > 0 && (
+        {dirtyCount > 0 && (
           <span className="mr-auto text-xs text-zinc-500 dark:text-zinc-400">
             {dirtyCount} unsaved {dirtyCount === 1 ? "change" : "changes"}
           </span>
@@ -836,25 +876,9 @@ export function PlatformAdmin() {
         <button
           type="button"
           onClick={save}
-          // Disabled when there's nothing to save, or when an enabled
-          // provider still has no model ids (the file header documents
-          // this as client-side blocking — a save here would PUT the
-          // invalid row anyway, and the platform's 400 would reject the
-          // whole full-state batch, discarding every other valid change).
-          // The inline error on the row says what to repair; the tooltip
-          // names it on hover. Dead-row clearing is unaffected (unavailable
-          // rows are not "invalid").
-          disabled={
-            saving ||
-            providers === null ||
-            invalidProviders.length > 0 ||
-            (invalidProviders.length === 0 && dirtyCount === 0)
-          }
-          title={
-            invalidProviders.length > 0
-              ? "Add at least one model id to every enabled provider first"
-              : undefined
-          }
+          // Disabled only when there's nothing to save — the draft can't
+          // hold an invalid provider state anymore (see the header).
+          disabled={saving || providers === null || dirtyCount === 0}
           className="rounded-lg bg-blue-600 px-4 py-2 text-sm font-medium text-white transition-colors hover:bg-blue-700 disabled:opacity-50"
         >
           {saving ? "Saving…" : dirtyCount > 0 ? `Save ${dirtyCount} ${dirtyCount === 1 ? "change" : "changes"}` : "Save"}
@@ -905,10 +929,12 @@ function ToolRow({
         <input
           type="checkbox"
           checked={checked}
-          // Same as the provider checkbox: an unavailable/undeliverable
-          // toolkit can't be ENABLED, but one that is still enabled must
-          // stay untickable — the backend's dead-row clear path only
-          // fires when the save says enabled:false.
+          // A toolkit is a genuine independent choice (unlike a provider,
+          // whose enablement follows its model-id rows): an
+          // unavailable/undeliverable toolkit can't be ENABLED, but one
+          // that is still enabled must stay untickable — the backend's
+          // dead-row clear path only fires when the save says
+          // enabled:false.
           disabled={saving || (!checked && (!tool.available || !tool.deliverable))}
           title={
             !tool.available

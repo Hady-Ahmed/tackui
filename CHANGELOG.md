@@ -54,6 +54,26 @@ All notable changes to this project will be documented in this file. The format 
   names the destination: "in the agent builder service's environment"
   (matching the service name as `docs/agent-builder.md` uses it). Copy
   only — the probe, its gating, and the `env_key_set` logic are untouched.
+- **Models & tools: a provider's enabled state is derived from its model
+  ids (#83).** The provider checkbox and the model-id list read as two
+  inputs but were one fact — two save-time guards enforced the same
+  diagonal ("provider 'X' is disabled — its model ids were ignored" when
+  ids sat under an unticked provider; a blocked save when a ticked
+  provider listed none), so operators could construct both forbidden
+  states and then get scolded at save time. The checkbox is now a
+  non-interactive status indicator — a filled dot plus the model count
+  when ids exist, a hollow "○ off" when none do (the shape and the text
+  carry the state, not just color) — and enablement follows the rows:
+  adding the first id lights the provider, removing the last dims it,
+  and a new "Clear all" button (shown only when ids exist, no
+  confirmation — nothing persists until Save) empties saved and
+  uncommitted rows in one go. The PUT body derives `enabled` from the id
+  rows, so neither error state can be constructed from this UI anymore,
+  let alone sent; the backend guards remain as defense-in-depth. A dead
+  ("No longer available") provider keeps its clear path — its panel
+  opens read-only with Clear all, and saving sends `enabled: false`,
+  exactly as unticking used to. Toolkits are unchanged: their checkbox
+  is a genuine independent choice.
 - **Agent builder tool palette: readable rows, palette search, honest
   tool cap.** Palette rows were a single flex line where the key badge
   crushed both the tool name ("Gen…") and the description into
