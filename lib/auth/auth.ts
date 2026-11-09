@@ -5,6 +5,7 @@ import { EMAIL_ENABLED, sendEmail } from "@/lib/email/client";
 import { verificationEmail, passwordResetEmail, invitationEmail } from "@/lib/email/templates";
 import { getMembershipLimit } from "@/lib/billing/subscription-store";
 import { TRUST_CF_CONNECTING_IP } from "@/lib/ratelimit/client-ip";
+import { maxFromEnv } from "@/lib/ratelimit/limits";
 
 const AUTH_DISABLED = process.env.AUTH_DISABLED === "true";
 
@@ -198,7 +199,14 @@ export const auth = betterAuth({
     window: 60,
     max: 100,
     customRules: {
-      "/sign-in/email": { window: 60, max: 10 },
+      // Better-auth's in-memory limiter only resets its counter after a full
+      // quiet gap > window (now - lastRequest > window), not on a rolling
+      // schedule — sustained sub-rate traffic accumulates forever. That makes
+      // the 10/min default unfittable for a busy shared deployment or the E2E
+      // suite (many distinct users + retries from one IP); AUTH_SIGNIN_RATE_MAX
+      // relaxes it (read once at boot, same contract as AGENT_READ_RATE_MAX —
+      // see lib/ratelimit/limits.ts). Sign-up stays at 5: it must stay tight.
+      "/sign-in/email": { window: 60, max: maxFromEnv("AUTH_SIGNIN_RATE_MAX", 10) },
       "/sign-up/email": { window: 60, max: 5 },
     },
   },
