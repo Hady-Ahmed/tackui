@@ -16,23 +16,23 @@ dependencies = [
     # workspace lock was tested against — this codebase moved repos
     # without a functional change, so it moves with its proven dependency
     # matrix rather than re-floating to whatever is newest.
-    "fastapi==0.141.1",
-    "pyjwt==2.14.0",
-    "python-dotenv==1.2.3",
+    "fastapi==0.162.0",
+    "pyjwt==2.15.1",
+    "python-dotenv==1.2.4",
     # AG-UI protocol types (ag_ui.*) — formerly pulled in via the shared
     # package's dependency list; the dispatcher imports it directly.
     "ag-ui-protocol==1.0.0",
     # mcp extra: the dispatcher imports agno.tools.mcp lazily per run (a
     # core feature) — without the extra the MCP tooling resolves only
     # transitively and `uv sync` yields a broken MCP feature.
-    "agno[mcp,tavily,website]==3.0.10",
-    "openai==3.16.2",
-    "sqlalchemy==2.0.54",
+    "agno[mcp,tavily,website]==3.1.12",
+    "openai==3.46.0",
+    "sqlalchemy==2.1.8",
     # Postgres: psycopg3 everywhere — the catalog layer (catalog.py, with the
     # `pool` extra for its connection pool) AND agno's PostgresDb engine
     # (agno rewrites postgresql:// to the sqlalchemy postgresql+psycopg
     # dialect, which is psycopg3 — no psycopg2 anywhere).
-    "psycopg[binary,pool]==3.3.6",
+    "psycopg[binary,pool]==3.3.8",
     # agno's PostgresDb can resolve the plain postgresql:// URL to the
     # legacy psycopg2 dialect on some paths (the catalog uses psycopg3).
     # In the old monorepo this arrived transitively via the sibling
@@ -42,14 +42,14 @@ dependencies = [
     # Observability: env-driven Sentry init (SENTRY_DSN) — a no-op when the
     # DSN is unset (self-host deployments don't need it). The FastAPI
     # integration captures route-level exceptions with the request context.
-    "sentry-sdk[fastapi]==2.73.0",
+    "sentry-sdk[fastapi]==2.74.0",
     # Keyless DuckDuckGo search. agno's DDG toolkit imports this
     # unconditionally, so it must be present.
-    "ddgs==9.16.0",
+    "ddgs==9.16.1",
     # Tier 1 model providers (direct SDKs — Anthropic, Google, Groq);
     # everything else is reached through OpenRouter, which needs no extra
     # dependency. Versions pinned to the resolution uv add produced.
-    "anthropic==2.5.0",
+    "anthropic==2.6.0",
     "google-genai==2.34.0",
     "groq==1.7.0",
     # Tier 2 toolkits: analysis/visualization, productivity, research,
@@ -66,13 +66,13 @@ dependencies = [
     "pytz==2026.6",
     "arxiv==4.0.2",
     "wikipedia==1.4.0",
-    "youtube-transcript-api==1.2.4",
+    "youtube-transcript-api==1.2.5",
     "trafilatura==2.3.1",
     "exa-py==2.27.0",
     "firecrawl-py==4.55.0",
-    "resend==2.51.0",
+    "resend==2.52.0",
     "elevenlabs==2.76.0",
-    "twilio==9.12.0",
+    "twilio==9.13.0",
 ]
 
 # Virtual project: uv installs only the third-party dependencies into the
@@ -87,12 +87,12 @@ dev = [
     # Formerly in the agent-warehouse root manifest's shared dev group —
     # declared here now that this project stands alone. Pinned to the
     # warehouse lock's tested versions (see the note above).
-    "pytest==9.1.1",
-    "pytest-asyncio==1.4.0",
+    "pytest==9.2.0",
+    "pytest-asyncio==1.4.1.post1",
     # tests/test_platform_os.py imports fastmcp directly (live MCP server
     # fixture). agno's mcp extra brings it transitively; the dev dep pins
     # the import the tests actually make.
-    "fastmcp==4.0.5",
+    "fastmcp==4.1.6",
     # tests/conftest.py boots a throwaway Postgres via testcontainers (the
     # agno db + catalog both need a real server now that sqlite is gone).
     "testcontainers[postgres]==4.15.0",
