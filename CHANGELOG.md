@@ -4,6 +4,25 @@ All notable changes to this project will be documented in this file. The format 
 
 ## [Unreleased]
 
+- **E2E Tier 2D — catalog install** (`e2e/catalog.spec.ts`): the full
+  documented catalog lifecycle (docs/catalog.md) driven through the real
+  UI — the journey that closes the pure-app Tier 2 ladder. A template is
+  seeded through the real admin catalog route (`POST /api/catalog`, the
+  wire path the `/admin` Catalog section drives — auth + SSRF guard
+  included), installed through the real `/app/catalog` card ("Add to
+  workspace" → "✓ Added to workspace"), lands in `/agents` as a managed
+  row (Catalog chip, "Managed by catalog", no Edit/Test — Remove only),
+  is pointed at the mock agent by editing the TEMPLATE (the managed copy
+  is an entitlement, not a config copy — live propagation), passes the
+  real connection check via the admin row probe (driven red first
+  against a dead endpoint, so green is earned), and the template's
+  deletion tombstones the installed copy — "Removed" chip, still
+  endpoint-less, the blast-radius warning in the delete confirm — before
+  the workspace cleans the tombstone up via Remove. Tier 1's catalog
+  smoke assertion is now seeding-agnostic (the suite can no longer
+  assume an empty catalog); the suite stands at 17 paced sign-ins. See
+  #104 and `docs/e2e.md`.
+
 - **E2E Tier 2E — auth journeys** (`e2e/auth.spec.ts`): signup, email
   verification, and password reset driven end-to-end through the real
   forms and better-auth's real endpoints — the pure-app journeys Tier 1's

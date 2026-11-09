@@ -6,8 +6,9 @@ chat) work end-to-end. Eight tests, one file (`e2e/smoke.spec.ts`), ~6s of
 browser time. Deeper journeys live in sibling specs that reuse the same
 harness — Tier 2 so far: `e2e/chat.spec.ts` (chat depth),
 `e2e/agents.spec.ts` (agent CRUD), `e2e/orgs.spec.ts` (orgs &
-invitations), and `e2e/auth.spec.ts` (auth journeys — signup, email
-verification, password reset), below. Run
+invitations), `e2e/auth.spec.ts` (auth journeys — signup, email
+verification, password reset), and `e2e/catalog.spec.ts` (catalog
+install — the journey that closes the pure-app tier), below. Run
 with `npm run test:e2e` (builds first) — or `npm run test:e2e:local` to
 reuse an existing build.
 
@@ -129,7 +130,7 @@ In CI this is the second half of the `image` job (below).
 | login works, session persists | Real better-auth email/password login through the page, redirect to `/app`, session survives a full reload (exercises the `proxy.ts` cookie gate). |
 | chat journey completes | A message sent in the chat UI produces the mock agent's reply — the full run path works (plain-reply; also the regression guard for the mock agent's unchanged plain path). |
 | agent list renders | `/agents` lists the seeded agent. |
-| catalog renders | `/app/catalog` renders its header + empty state. |
+| catalog renders | `/app/catalog` renders — header + the settled body, seeding-agnostic since #104: the empty state or template cards, whichever the shared DB holds. |
 | builder renders | The add-agent entry point is present. |
 | platform admin renders | `/admin` is reachable for the seeded platform admin. |
 
@@ -176,7 +177,7 @@ Every test pays one real login (`helpers.ts` `login()`), and better-auth
 caps sign-in at 10/min per IP (`lib/auth/auth.ts` — in production this is
 the brute-force guard; the harness runs with it fully enabled). A suite
 that grows one login per test therefore hits a hard ceiling: at Tier 2's
-16 paced sign-ins, a fast machine compresses the whole run into ~60s and
+17 paced sign-ins, a fast machine compresses the whole run into ~60s and
 the limiter's counter overflows — the last login wave 429s ("Too many
 requests") and tests die in `login()`. Found exactly that way when the
 agent-CRUD spec joined the suite (#102).
@@ -241,8 +242,8 @@ Three conventions keep the suite under the cap as Tier 2 grows:
   the original navigation timeout. Jitter keeps parallel workers from
   retrying in lockstep.
 
-The pacer's queue is paid for in test time — 16 sign-ins at ≥7s spacing
-puts the last slot up to ~105s out — so the Playwright test timeout is
+The pacer's queue is paid for in test time — 17 sign-ins at ≥7s spacing
+puts the last slot up to ~112s out — so the Playwright test timeout is
 150s, not 60s (bumped from 120s when the auth-journeys spec joined,
 #107): the wait happens inside the test, and the queue is
 suite-wide (every spec's logins draw from the same slots, so a test
@@ -273,14 +274,23 @@ clicks it and waits for rows instead of failing on a transient
 overflow — read-only specs keep their plain assertions, since their
 failures under sustained overflow are real signals, not noise.
 
+The mutation bucket needed the same relaxation when the catalog spec
+joined (#104): `agentMutate` (10/min per user) is charged by agent CRUD
+AND the catalog's template routes + install, so the combined run's
+mutations — agents.spec's create/edit/delete plus the catalog lifecycle's
+seed/install/edit/delete/remove — land in the same window as ONE user,
+exactly at the preset (observed live: a 429ed agent DELETE). The preset
+is now `AGENT_MUTATE_RATE_MAX`-overridable the same way (default stays
+10 in prod; the harness sets 60).
+
 Two more budgets saturated the same way when the orgs spec doubled the
 login count (#103), and the harness raises both the same way — app env
 in `e2e/web-server.mjs`, prod defaults untouched:
 
 - **The Better Auth sign-in cap** (10/min per IP, `lib/auth/auth.ts`
-  `customRules` → `AUTH_SIGNIN_RATE_MAX=30` in the harness). With 16
-  sign-ins in the five-file run, the gap-based reset above makes the
-  counter climb for the entire ~105s login queue — no spacing fits under
+  `customRules` → `AUTH_SIGNIN_RATE_MAX=30` in the harness). With 17
+  sign-ins in the six-file run, the gap-based reset above makes the
+  counter climb for the entire ~112s login queue — no spacing fits under
   10. The knob gives headroom for further Tier 2 files without
   re-litigating the pacer's grid math every time one joins; sign-up
   stays at 5 and the auth spec (#107) spends it once — its journeys
@@ -509,10 +519,66 @@ Notes:
   in-memory spool) are read by nobody, and the smoke suite's /admin
   assertion is a render, not a user census.
 
+## Tier 2 — catalog install (built: `e2e/catalog.spec.ts`, #104)
+
+The fifth Tier 2 file and the journey that closes the pure-app tier: the
+catalog — the monetization surface (docs/catalog.md: templates vs.
+installed copies, live propagation, tombstones) the smoke suite could
+only read empty — driven through its full documented lifecycle. The
+template is seeded through the documented admin capability (the real
+`POST /api/catalog` route — the same wire path the `/admin` Catalog
+section drives, auth + SSRF guard included; the issue scopes seeding to
+the store/API so the template's lifecycle stays inside this file, not a
+`seed.mjs` fixture). Everything after that is UI.
+
+| Test | Proves |
+| --- | --- |
+| a published template installs into the workspace through the real catalog card | The `/app/catalog` card (name + tagline) installs through the real one-click affordance — POST `/api/catalog/[id]/install`, `canManageAgents`-gated — flips to "✓ Added to workspace", and the installed copy lands in `/agents` as a MANAGED row: the "Catalog" chip, the endpoint cell reading "Managed by catalog" (the curator's URL never leaves the server — `GET /api/agents` strips it), and the fully-locked action set (no Edit, no Test; Remove only). |
+| the installed copy follows the template — pointing it at the mock agent passes the connection check | A managed copy has no endpoint of its own (it is an entitlement, not a config copy — docs/catalog.md): "pointing the installed copy" happens by editing the TEMPLATE's endpoint through the real `/admin` form, and the connection check is the admin row's Test button — the real reachability probe route 2B drives. The template is born pointing at a dead loopback port, so the check is driven RED first ("✗ Cannot reach server: unreachable") and only goes green ("✓ Server reachable (HTTP 405)") once the edit lands — the probe isn't vacuous, and the managed row in `/agents` still exposes no endpoint after the edit (live propagation, no copy). |
+| deleting the template tombstones the installed copy — the workspace removes it from there | The admin delete confirm carries the documented blast-radius warning ("1 workspace has installed it — their installed copies will be removed from those workspaces (past chats stay viewable)"). After deletion the installed copy STAYS in `/agents` — the tombstone: rows survive so past conversations remain viewable, "Removed" chip, still endpoint-less and locked to Remove-only — and the workspace cleans it up via the normal Remove (its own agent DELETE), leaving the seeded agent untouched. |
+
+Notes:
+
+- **The dead endpoint is deliberate.** The template is born pointing at
+  a loopback port the harness runs nothing on, so "installed ≠ broken"
+  has to be earned: the connection check fails until the template is
+  pointed at the mock agent, then passes. The mock agent's plain path is
+  untouched — the template's install/run never goes through it; only the
+  reachability probe does (a GET, answered 405).
+- **The mutation budget grew a knob** (see "The auth budget" above):
+  joining this file put the combined run's `agentMutate` charges exactly
+  at the 10/min preset, and a delete 429ed live — the preset is now
+  `AGENT_MUTATE_RATE_MAX`-overridable (harness: 60, prod default
+  untouched).
+- **Dialog confirms are awaited as events** (`page.waitForEvent`),
+  not asserted from a `once`-listener's side effect: `await click()`
+  resolves when the input was dispatched, before the renderer's
+  `confirm()` has necessarily emitted the dialog event — a same-tick
+  assert raced it under full-suite load and read `null`.
+- **One real login** (`beforeAll`, the auth budget) — the three serial
+  tests share the session state like the agent-CRUD file. The file spends
+  one sign-in total.
+- **Parallel mutation with a sweep.** The template + installed copy carry
+  a unique name prefix per test execution, and `beforeAll` deletes any
+  leftovers from a crashed earlier attempt (an ACTIVE leftover template
+  would otherwise render a second card on `/app/catalog` and make the
+  install test's card-scoped locators ambiguous). The one real install
+  lands in the shared org, but no other spec asserts on agent-list
+  counts, and the file ends with both its rows deleted (asserted).
+- **No teardown beyond that** — a fresh DB is seeded per run; what a
+  mid-test crash leaves behind is inert (a tombstoned or orphaned row
+  under a unique name) and swept at the next attempt.
+
 ## Tier 2 (not built)
 
-Deeper journeys belong in new files, not grown into the smoke suite:
-catalog install flow, builder flows, billing.
+Deeper journeys belong in new files, not grown into the smoke suite —
+and with catalog install landed (#104) the **pure-app tier is closed**:
+what's left doesn't fit this harness. Billing flows are Stripe-driven —
+their enforcement logic belongs in the vitest tier, where the Stripe
+boundary is mockable (a browser e2e can only reach the marketing
+shells, not the subscription state machine). Builder flows need an
+AGENTOS harness — the builder is its own Python service with per-run
+dependency delivery, a second live backend the e2e stack doesn't run.
 Same harness (`web-server.mjs` lifecycle, helpers, seeding), more tests
 per area — and every one of them that mutates data binds itself to the
 parallel-mutation rule (above).
