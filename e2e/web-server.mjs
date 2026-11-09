@@ -37,6 +37,7 @@ import { exec, execSync, spawn } from "node:child_process";
 import net from "node:net";
 import { Pool } from "pg";
 import { startMockAgent } from "./mock-agent.mjs";
+import { EMAIL_CATCHER_PORT, startEmailCatcher } from "./email-catcher.mjs";
 
 const APP_PORT = Number(process.env.E2E_APP_PORT || 3990);
 const APP_URL = `http://127.0.0.1:${APP_PORT}`;
@@ -241,6 +242,20 @@ async function main() {
   cleanup.push(() => mockServer.close());
   log(`mock agent listening on 127.0.0.1:${mockPort}`);
 
+  // 3b. Email catcher — loopback-only, the mail transport's local target.
+  //     The app env below sets RESEND_API_KEY (flips the app's EMAIL_ENABLED
+  //     on, so the email-verification and password-reset flows EXIST here as
+  //     they do in production with SMTP) and RESEND_BASE_URL pointing at
+  //     this catcher (the Resend SDK resolves its endpoint from that env
+  //     var) — so the app's real sendEmail delivers every email here and
+  //     the auth-journeys spec drives the real links, verbatim, through
+  //     the real UI. Nothing about the app is stubbed; only where the
+  //     transport sends changed, like the mock agent for the model.
+  log("starting local email catcher...");
+  const mailServer = await startEmailCatcher();
+  cleanup.push(() => mailServer.close());
+  log(`email catcher listening on 127.0.0.1:${EMAIL_CATCHER_PORT}`);
+
   // 4. The app under test — two modes, one env:
   //      default:  spawn the standalone build's server.js (the same binary
   //                the Dockerfile ships)
@@ -267,12 +282,14 @@ async function main() {
     // relaxation shape as ALLOW_PRIVATE_ENDPOINTS above: a harness env,
     // not a test-if.
     AGENT_READ_RATE_MAX: "600",
-    // 12 paced logins across the 4-spec suite trip better-auth's sign-in cap
-    // (10/min, and its counter only resets after a >60s quiet gap — sustained
-    // sub-rate traffic accumulates forever), and the aggregate /api traffic of
-    // 4 workers + 2 chat runs saturates the 300/min per-IP flood cap. Both
-    // knobs are the same harness-relaxation shape as AGENT_READ_RATE_MAX above;
-    // prod defaults are untouched (docs/e2e.md "The auth budget").
+    // 16 paced sign-ins across the 5-spec suite trip better-auth's sign-in
+    // cap (10/min, and its counter only resets after a >60s quiet gap —
+    // sustained sub-rate traffic accumulates forever; #107 added the auth
+    // spec's two real logins + two expected-rejection gate checks), and the
+    // aggregate /api traffic of 4 workers + 2 chat runs saturates the
+    // 300/min per-IP flood cap. Both knobs are the same harness-relaxation
+    // shape as AGENT_READ_RATE_MAX above; prod defaults are untouched
+    // (docs/e2e.md "The auth budget").
     AUTH_SIGNIN_RATE_MAX: "30",
     GLOBAL_IP_RATE_MAX: "1200",
     SAAS_MODE: "false",
@@ -287,6 +304,18 @@ async function main() {
     // doesn't need them; keeps boot free of platform warnings.
     AGENTOS_BASE_URL: "",
     NEXT_TELEMETRY_DISABLED: "1",
+    // Email features ON for the harness (Tier 2E, #107): RESEND_API_KEY
+    // flips lib/email/client.ts EMAIL_ENABLED, which turns on
+    // requireEmailVerification + the sendVerificationEmail/sendResetPassword
+    // callbacks — the signup/verification/reset journeys the auth spec
+    // drives. The key is a throwaway; the SDK's RESEND_BASE_URL env var
+    // points delivery at the local catcher above, so no internet and no
+    // real Resend account are involved. The seeded users are verified via
+    // SQL (e2e/seed.mjs) and unaffected; the orgs spec's invitation email
+    // now lands in the catcher too (the badge discovery path it tests
+    // does not read mail).
+    RESEND_API_KEY: "e2e-only-throwaway-resend-key",
+    RESEND_BASE_URL: `http://127.0.0.1:${EMAIL_CATCHER_PORT}`,
   };
 
   if (APP_IMAGE) {
