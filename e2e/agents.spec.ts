@@ -26,10 +26,11 @@
  * Auth budget: better-auth caps sign-in at 10/min per IP
  * (lib/auth/auth.ts), and the suite spends one login per real page flow.
  * This file therefore runs its four tests SERIALLY in a single worker
- * behind one real login (a worker-scoped fixture performs the genuine
- * login-page flow once and hands the session state to each test's fresh
- * context — the cookies are the ones the real login issued; each test
- * still gets its own page, so console-error watching stays per-test).
+ * behind one real login (a `test.beforeAll` hook performs the genuine
+ * login-page flow once and stores the session state at module level
+ * for each test's fresh context — the cookies are the ones the real
+ * login issued; each test still gets its own page, so console-error
+ * watching stays per-test).
  * The first test of a growing Tier 2 must not cost four more sign-ins —
  * see docs/e2e.md "The auth budget".
  *
@@ -163,6 +164,9 @@ async function createCustomAgent(
     .fill(MOCK_ENDPOINT);
   // Selecting the auth mode remounts (and clears) the secret + scopes
   // fields — select first, fill after.
+  // Not exact: the wrapping <label> folds the field's hint text into the
+  // accessible name, and the hint changes with the selected auth mode —
+  // only the "Auth mode" prefix is stable (Field in app/agents/page.tsx).
   await page
     .getByRole("combobox", { name: /^Auth mode/ })
     .selectOption({ label: "JWT (HS256)" });
@@ -197,7 +201,7 @@ async function openEdit(page: Page, name: string) {
  * destructive action must name its victim) are handled INSIDE the dialog
  * listener: a click that opens a modal does not resolve until the dialog
  * is handled, so awaiting the click first and the dialog after deadlocks
- * both (the 60s test timeout, observed). Auto-dismissal — Playwright's
+ * both (until the test timeout — observed). Auto-dismissal — Playwright's
  * behavior without a listener — means CANCEL, which would silently
  * abort the delete.
  */
