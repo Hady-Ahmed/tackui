@@ -21,7 +21,7 @@ describe("LIMITS env overrides", () => {
     expect(LIMITS.agentRead.max).toBe(600);
   });
 
-  it("ignores junk, zero, and negative overrides — a typo can't disable a limit", async () => {
+  it("ignores junk, zero, negative, fractional, and empty overrides — a typo can't disable a limit", async () => {
     vi.stubEnv("AGENT_READ_RATE_MAX", "banana");
     const { LIMITS } = await import("./limits");
     expect(LIMITS.agentRead.max).toBe(60);
@@ -35,5 +35,15 @@ describe("LIMITS env overrides", () => {
     vi.resetModules();
     const { LIMITS: negative } = await import("./limits");
     expect(negative.agentRead.max).toBe(60);
+
+    vi.stubEnv("AGENT_READ_RATE_MAX", "60.5");
+    vi.resetModules();
+    const { LIMITS: fractional } = await import("./limits");
+    expect(fractional.agentRead.max).toBe(60);
+
+    vi.stubEnv("AGENT_READ_RATE_MAX", "");
+    vi.resetModules();
+    const { LIMITS: empty } = await import("./limits");
+    expect(empty.agentRead.max).toBe(60);
   });
 });
