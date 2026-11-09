@@ -273,3 +273,46 @@ describe("getEnabledProviders — synthetic admin in solo mode", () => {
     expect(config.user).toBeNull();
   });
 });
+
+describe("rateLimit.customRules — the AUTH_SIGNIN_RATE_MAX override", () => {
+  afterEach(() => {
+    vi.unstubAllEnvs();
+    vi.resetModules();
+  });
+
+  // The sign-in rule the freshly constructed Better Auth instance carries.
+  // customRules is evaluated at module load (maxFromEnv reads the env once
+  // at boot), so each case re-imports ./auth after stubbing the env — the
+  // same boot-time contract the limits tests exercise, one layer up: this
+  // pins the WIRING (the env read actually feeds better-auth's rule),
+  // not just the parser.
+  async function signInRule() {
+    const { auth: fresh } = await import("./auth");
+    const rule = fresh.options.rateLimit?.customRules?.["/sign-in/email"];
+    if (!rule) throw new Error("/sign-in/email rule missing from auth.options");
+    return rule;
+  }
+
+  it("keeps 10/min when AUTH_SIGNIN_RATE_MAX is unset", async () => {
+    // Guard against a leaked env from the invoking shell — the preset
+    // only holds when the override is genuinely absent.
+    delete process.env.AUTH_SIGNIN_RATE_MAX;
+    expect(await signInRule()).toEqual({ window: 60, max: 10 });
+  });
+
+  it("reads AUTH_SIGNIN_RATE_MAX when it is a positive integer", async () => {
+    vi.stubEnv("AUTH_SIGNIN_RATE_MAX", "30");
+    expect(await signInRule()).toEqual({ window: 60, max: 30 });
+  });
+
+  it("ignores junk, zero, negative, fractional, and empty overrides — a typo can't disable the cap", async () => {
+    for (const junk of ["banana", "0", "-5", "60.5", ""]) {
+      vi.stubEnv("AUTH_SIGNIN_RATE_MAX", junk);
+      vi.resetModules();
+      expect(await signInRule(), `AUTH_SIGNIN_RATE_MAX=${junk}`).toEqual({
+        window: 60,
+        max: 10,
+      });
+    }
+  });
+});
