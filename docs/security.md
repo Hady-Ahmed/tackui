@@ -259,7 +259,10 @@ Two-layer rate limiting protects the server from abuse and floods.
   integer; see `lib/ratelimit/limits.ts` `maxFromEnv`) — for deployments where
   many humans share one public IP and the bucket sees the aggregate of all
   their traffic. Raising it weakens flood protection only for a trusted,
-  single-IP deployment; there is no per-user bypass.
+  single-IP deployment; there is no per-user bypass. The override is
+  bidirectional — any positive integer replaces the preset, tightening as
+  readily as raising it — and only a positive integer passes the guard
+  (anything else keeps the preset), so a typo can't disable a limit outright.
 - Enforced in the proxy (pre-auth). IP resolution honors `CF-Connecting-IP`
   (set by Cloudflare to the real client IP — Traefik/Coolify overwrites
   `X-Forwarded-For` with the Cloudflare edge IP, splitting the counter across

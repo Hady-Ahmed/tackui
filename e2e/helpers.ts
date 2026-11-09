@@ -33,8 +33,8 @@ export const E2E_MEMBER_PASSWORD = "e2e-member-password";
  * "now" — but now snaps to the same grid point, the O_EXCL create lets
  * exactly one worker win it, and a loser advances a full step and
  * retries. Distinct claims are therefore ≥ SPACING apart however the
- * reads raced, which bounds any 60s window to 9 sign-ins against the
- * 10 cap. (Reconciling `last` upward alone would NOT do it: two cold
+ * reads raced, which bounds any 60s window to 9 sign-ins. (Reconciling
+ * `last` upward alone would NOT do it: two cold
  * readers still aim at near-simultaneous but DISTINCT timestamps, both
  * win, both sign at once.) After winning, the claimant reconciles
  * `last` upward to its target so late readers skip straight past
@@ -43,9 +43,17 @@ export const E2E_MEMBER_PASSWORD = "e2e-member-password";
  * Slots older than an hour are pruned at claim time so a crashed run
  * leaves no permanent residue, and anything but a lost race is
  * rethrown: a persistent failure must fail loudly, not spin into the
- * test timeout. 60s window / 7s spacing ⇒ at most 9 sign-ins in any
- * window, so the cap is never tripped and every login still goes
- * through the real page.
+ * test timeout. 60s window / 7s spacing bounds any single window to 9
+ * sign-ins — but that is NOT "under the cap": better-auth's counter
+ * resets only after a quiet gap longer than the whole window, and a
+ * sustained 7s cadence never accumulates one, so the counter climbs
+ * monotonically for as long as the suite keeps logging in and hits the
+ * cap no matter how tightly it is paced. The pacer still earns its
+ * keep — an orderly opening wave, and a 429 that is known and
+ * transient (ridden out below) instead of a burst overflow — and every
+ * sign-in still goes through the real page; the cap itself is raised
+ * on the harness side (AUTH_SIGNIN_RATE_MAX — docs/e2e.md "The auth
+ * budget").
  */
 const SIGNIN_SPACING_MS = 7_000;
 const SIGNIN_DIR = path.join(os.tmpdir(), "tackui-e2e-signin");

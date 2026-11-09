@@ -206,7 +206,7 @@ Three conventions keep the suite under the cap as Tier 2 grows:
   window (`now - lastRequest > windowInMs` in its `decideConsume`), not on
   a rolling schedule. A sustained 7s cadence never accumulates a 60s
   quiet gap, so the counter climbs monotonically across the whole run and
-  the 12th login trips the 10 cap no matter how it is paced (verified
+  the 11th login trips the 10 cap no matter how it is paced (verified
   against a live stack when the orgs spec added the second user, #103).
   The pacer still earns its keep — it keeps the opening wave orderly and
   makes any 429 a known, transient event instead of a burst overflow —
@@ -242,7 +242,12 @@ fix an aggregate this tight, so the harness raises the read cap the same
 way it allows loopback endpoints: `AGENT_READ_RATE_MAX=600` in the app
 env (lib/ratelimit/limits.ts `maxFromEnv` — default stays 60 in prod;
 the knob exists for busy self-hosted instances, the harness is just its
-loudest user; documented in `.env.example`). Specs that need a table still carry the belt: the page's
+loudest user; documented in `.env.example`). One contract covers every
+env knob on this page, including the two below: the override works in
+BOTH directions — any positive integer replaces the preset, tightening
+as readily as relaxing — and only a positive integer passes the guard
+(junk, zero, negative, fractional keep the preset), so a typo can't
+disable a limit outright. Specs that need a table still carry the belt: the page's
 own Retry button re-fetches, and `openAgents` (e2e/agents.spec.ts)
 clicks it and waits for rows instead of failing on a transient
 overflow — read-only specs keep their plain assertions, since their
