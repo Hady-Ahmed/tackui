@@ -36,6 +36,7 @@ import Link from "next/link";
 import type { PublicAgent } from "@/lib/agents/agents.config";
 import type { PublicConnector } from "@/lib/connectors/connector-store";
 import { UpgradeDialog } from "@/components/upgrade-dialog";
+import { ExpandableText } from "@/components/expandable-text";
 import { authClient } from "@/lib/auth/auth-client";
 import { useAuthConfig } from "@/lib/auth/use-auth-config";
 import { useCanManageAgents } from "@/lib/auth/use-can-manage-agents";
@@ -48,20 +49,22 @@ import {
   createBlockedByEmptyModels,
   buildEditPayload,
   extractErrorMessage,
+  filterTools,
   findModel,
   groupModelsByProvider,
   modelKeyState,
   pickDefaultModel,
   prettySlug,
-  providerForDepKeyInCatalog,
   providerMeta,
   staleModelCopy,
+  sortTools,
   toolKeyState,
   validateBuilderForm,
   type BuilderFormState,
   type BuilderToolOption,
   type CredentialCatalog,
   type PlatformModel,
+  type ToolKeyState,
 } from "./builder-config";
 
 export function BuilderForm({
@@ -97,6 +100,9 @@ export function BuilderForm({
   const [modelsError, setModelsError] = useState<string | null>(null);
   const [tools, setTools] = useState<BuilderToolOption[] | null>(null);
   const [toolsError, setToolsError] = useState<string | null>(null);
+  // Palette search — filters the rendered rows only. Selections live in
+  // form.tools, so hiding a row never drops it from the agent's payload.
+  const [toolQuery, setToolQuery] = useState("");
   // The catalog-failure Retry button's in-flight flag — without it the
   // click gives no feedback and a double-click fires duplicate fetches.
   const [retryingCatalog, setRetryingCatalog] = useState(false);
@@ -188,7 +194,9 @@ export function BuilderForm({
         setToolsError(extractErrorMessage(data, `Failed to load tools (${res.status})`));
         return;
       }
-      setTools(Array.isArray(data.tools) ? data.tools : []);
+      // Sorted at load (not per render): the palette renders in the
+      // deterministic (toolkit, label) order for the whole session.
+      setTools(Array.isArray(data.tools) ? sortTools(data.tools) : []);
     } catch {
       // Own-proxy failure — without this the toolkit list sits empty forever.
       setToolsError("Couldn't reach the server — try again shortly.");
@@ -317,6 +325,12 @@ export function BuilderForm({
   const createDisabled = createBlockedByEmptyModels(mode, models, modelsError);
   const modelsEmptyCopy = catalogEmptyCopy("models", models, modelsError);
   const toolsEmptyCopy = catalogEmptyCopy("tools", tools, toolsError);
+  // The palette's rendered rows — the loaded catalog under the search
+  // query. Empty list ≠ empty catalog: the no-match state is its own copy.
+  const visibleTools = tools ? filterTools(tools, toolQuery) : [];
+  // Cap reached — unchecked rows disable (the click would otherwise
+  // silently no-op in toggleTool).
+  const atToolCap = form.tools.length >= BUILDER_TOOLS_MAX;
 
   // The edit-mode baseline: the agent's stored definition (instructions
   // prefill means the diff is computed against the real current value).
@@ -791,50 +805,59 @@ export function BuilderForm({
 
         {/* Tool palette — the platform's tool catalog (GET /api/tools,
             proxied from the AgentOS /platform/tools). Adding a tool to
-            the platform's allowlist shows up here with zero code. */}
+            the platform's allowlist shows up here with zero code.
+            Search filters the rendered rows; the selection (form.tools)
+            is unaffected — a hidden tool keeps its payload slot. */}
         <Field
           label="Tools"
           asGroup
-          hint={`Up to ${BUILDER_TOOLS_MAX} — the agent can use them at run time.`}
+          hint={
+            form.tools.length > 0
+              ? `${form.tools.length} of ${BUILDER_TOOLS_MAX} selected — the agent can use them at run time.`
+              : `Up to ${BUILDER_TOOLS_MAX} — the agent can use them at run time.`
+          }
           error={errors.tools}
         >
           <div className="space-y-2">
-            {(tools ?? []).map((tool) => {
+            {(tools ?? []).length > 0 && (
+              <input
+                type="search"
+                value={toolQuery}
+                onChange={(e) => setToolQuery(e.target.value)}
+                placeholder="Search tools…"
+                aria-label="Search tools"
+                className={inputClass()}
+              />
+            )}
+            {visibleTools.map((tool) => {
               const checked = form.tools.includes(tool.name);
-              const depProvider = tool.requiresKey
-                ? tool.toolkit ||
-                  providerForDepKeyInCatalog(credentials?.catalog ?? {}, tool.requiresKey)
-                : null;
+              const keyState = toolKeyState(tool, credentials);
               return (
-                <label
+                <BuilderToolRow
                   key={tool.name}
-                  className="flex cursor-pointer items-center gap-2 rounded-lg border border-zinc-200 px-3 py-2 text-sm transition-colors hover:bg-zinc-50 dark:border-zinc-700 dark:hover:bg-zinc-900"
-                >
-                  <input
-                    type="checkbox"
-                    checked={checked}
-                    onChange={() => toggleTool(tool.name)}
-                    className="h-4 w-4 rounded border-zinc-300 text-blue-600 dark:border-zinc-600"
-                  />
-                  <span className="min-w-0 truncate font-medium text-zinc-900 dark:text-zinc-50">
-                    {tool.label}
-                  </span>
-                  {tool.description ? (
-                    <span className="min-w-0 truncate text-xs text-zinc-400">
-                      {tool.description}
-                    </span>
-                  ) : null}
-                  <KeyBadge
-                    state={toolKeyState(tool, credentials)}
-                    onConnect={() => {
-                      if (depProvider) openKeyForm(depProvider);
-                    }}
-                  />
-                </label>
+                  tool={tool}
+                  checked={checked}
+                  disabled={!checked && atToolCap}
+                  keyState={keyState}
+                  onToggle={() => toggleTool(tool.name)}
+                  onConnect={() => {
+                    // Same guard KeyBadge renders by — only a catalog-known
+                    // provider gets a Connect flow (a drifted slug would
+                    // open an empty KeyForm).
+                    if (keyState.status === "missing" && keyState.provider) {
+                      openKeyForm(keyState.provider);
+                    }
+                  }}
+                />
               );
             })}
             {toolsEmptyCopy && (
               <p className="text-xs text-zinc-500 dark:text-zinc-400">{toolsEmptyCopy}</p>
+            )}
+            {tools !== null && tools.length > 0 && visibleTools.length === 0 && (
+              <p className="text-xs text-zinc-500 dark:text-zinc-400">
+                No tools match &ldquo;{toolQuery.trim()}&rdquo;.
+              </p>
             )}
           </div>
         </Field>
@@ -1025,6 +1048,89 @@ function ModelKeyBadge({
         </button>
       ) : null}
     </span>
+  );
+}
+
+/**
+ * One palette row — two lines: checkbox + full name + key badge on the
+ * first, the description clamped at two lines (ExpandableText — "Show
+ * more / Show less" renders only when the text actually overflows)
+ * indented beneath. The old single-line row squeezed name + description
+ * against the key badge and truncated both into unreadable slivers;
+ * stacking gives each its own room, and the checked-row border (the
+ * platform-admin ToolRow's visual language) makes selections scan.
+ *
+ * Still one <label>: click anywhere toggles. The Show more/less and
+ * Connect buttons are interactive content, which label activation
+ * skips — they can't toggle the checkbox. The checkbox carries an
+ * explicit aria-label so its accessible name is just the tool (the
+ * label-derived name would read the whole description and the
+ * expander's text aloud).
+ *
+ * `disabled` is the cap state — unchecked rows at BUILDER_TOOLS_MAX.
+ * The checkbox disables with an explanatory title (the click would
+ * otherwise silently no-op) and the row drops its pointer/hover
+ * affordances since clicking it does nothing.
+ */
+function BuilderToolRow({
+  tool,
+  checked,
+  disabled,
+  keyState,
+  onToggle,
+  onConnect,
+}: {
+  tool: BuilderToolOption;
+  checked: boolean;
+  disabled: boolean;
+  keyState: ToolKeyState;
+  onToggle: () => void;
+  onConnect: () => void;
+}) {
+  return (
+    <label
+      className={`flex items-start gap-2 rounded-lg border px-3 py-2 text-sm transition-colors ${
+        disabled
+          ? "cursor-not-allowed border-zinc-200 dark:border-zinc-700"
+          : `cursor-pointer hover:bg-zinc-50 dark:hover:bg-zinc-900 ${
+              checked
+                ? "border-blue-200 dark:border-blue-900"
+                : "border-zinc-200 dark:border-zinc-700"
+            }`
+      }`}
+    >
+      <input
+        type="checkbox"
+        checked={checked}
+        disabled={disabled}
+        title={
+          disabled
+            ? `Tool cap reached (${BUILDER_TOOLS_MAX}) — uncheck one to add another`
+            : undefined
+        }
+        aria-label={tool.label}
+        onChange={onToggle}
+        className="mt-0.5 h-4 w-4 shrink-0 rounded border-zinc-300 text-blue-600 dark:border-zinc-600"
+      />
+      <div className="min-w-0 flex-1">
+        {/* Name + key badge share the first line — the badge pins right
+            and wraps below on a narrow row instead of squeezing the
+            name, which never truncates. */}
+        <div className="flex min-w-0 flex-wrap items-center gap-x-2 gap-y-1">
+          <span className="min-w-0 break-words font-medium text-zinc-900 dark:text-zinc-50">
+            {tool.label}
+          </span>
+          <KeyBadge state={keyState} onConnect={onConnect} />
+        </div>
+        {tool.description ? (
+          <ExpandableText
+            text={tool.description}
+            lines={2}
+            className="mt-0.5 text-xs text-zinc-500 dark:text-zinc-400"
+          />
+        ) : null}
+      </div>
+    </label>
   );
 }
 

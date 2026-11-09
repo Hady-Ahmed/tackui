@@ -8,12 +8,14 @@ import {
   catalogEmptyCopy,
   createBlockedByEmptyModels,
   extractErrorMessage,
+  filterTools,
   findModel,
   groupModelsByProvider,
   modelKeyState,
   pickDefaultModel,
   providerForDepKeyInCatalog,
   staleModelCopy,
+  sortTools,
   toolKeyState,
   validateBuilderForm,
   type BuilderFormState,
@@ -377,6 +379,104 @@ describe("toolKeyState", () => {
       providerLabel: "Ghost Toolkit",
       provider: null,
     });
+  });
+});
+
+describe("sortTools", () => {
+  it("groups toolkit-mates and alphabetizes within each toolkit", () => {
+    // Deliberately upstream-shaped: toolkits out of order, labels
+    // unalphabetized within a toolkit — the AgentOS allowlist's append
+    // order, not the display order.
+    const shuffled: BuilderToolOption[] = [
+      { ...TOOLS[2] }, // tavily — "Web search (Tavily)"
+      { ...TOOLS[1], label: "List links (DuckDuckGo)" }, // duckduckgo, later label
+      { ...TOOLS[3] }, // x — "Search X posts"
+      { ...TOOLS[0], label: "Web search (DuckDuckGo)" }, // duckduckgo, earlier label
+    ];
+    const sorted = sortTools(shuffled);
+    expect(sorted.map((t) => `${t.toolkit}/${t.label}`)).toEqual([
+      "duckduckgo/List links (DuckDuckGo)",
+      "duckduckgo/Web search (DuckDuckGo)",
+      "tavily/Web search (Tavily)",
+      "x/Search X posts",
+    ]);
+  });
+
+  it("sorts by label within a toolkit regardless of input order", () => {
+    const a: BuilderToolOption = {
+      name: "z_tool", label: "Zebra tool", requiresKey: null, platformFallback: false, toolkit: "kit", credentials: [],
+    };
+    const b: BuilderToolOption = {
+      name: "a_tool", label: "Alpha tool", requiresKey: null, platformFallback: false, toolkit: "kit", credentials: [],
+    };
+    expect(sortTools([a, b]).map((t) => t.label)).toEqual(["Alpha tool", "Zebra tool"]);
+  });
+
+  it("does not mutate the input array", () => {
+    const input = [{ ...TOOLS[2] }, { ...TOOLS[0] }];
+    const originalOrder = [...input];
+    sortTools(input);
+    expect(input).toEqual(originalOrder);
+  });
+
+  it("returns an empty array for an empty catalog", () => {
+    expect(sortTools([])).toEqual([]);
+  });
+});
+
+describe("filterTools", () => {
+  const catalog: BuilderToolOption[] = [
+    {
+      name: "generate_sound_effect",
+      label: "Generate sound effect",
+      description: "Generate a sound effect from a text description. Args: prompt (str): What to generate.",
+      requiresKey: "elevenlabs_api_key",
+      platformFallback: false,
+      toolkit: "elevenlabs",
+      credentials: [{ depKey: "elevenlabs_api_key", label: "Elevenlabs api key" }],
+    },
+    {
+      name: "text_to_speech",
+      label: "Text to speech",
+      description: "Convert text to speech. Args: prompt (str): Text to generate audio from.",
+      requiresKey: "elevenlabs_api_key",
+      platformFallback: false,
+      toolkit: "elevenlabs",
+      credentials: [{ depKey: "elevenlabs_api_key", label: "Elevenlabs api key" }],
+    },
+    { ...TOOLS[0] }, // keyless DuckDuckGo search — no description on the fixture
+  ];
+
+  it("matches the label case-insensitively", () => {
+    expect(filterTools(catalog, "SOUND EFFECT").map((t) => t.name)).toEqual([
+      "generate_sound_effect",
+    ]);
+  });
+
+  it("matches the description (so arg-name searches hit too)", () => {
+    expect(filterTools(catalog, "convert text to speech")).toHaveLength(1);
+    expect(filterTools(catalog, "prompt (str)").map((t) => t.name)).toEqual([
+      "generate_sound_effect",
+      "text_to_speech",
+    ]);
+  });
+
+  it("is whitespace-insensitive: an all-space query matches everything", () => {
+    expect(filterTools(catalog, "   ")).toBe(catalog);
+  });
+
+  it("returns the input unchanged for an empty query", () => {
+    expect(filterTools(catalog, "")).toBe(catalog);
+  });
+
+  it("returns an empty list when nothing matches", () => {
+    expect(filterTools(catalog, "elevenlabs-piano")).toEqual([]);
+  });
+
+  it("does not mutate the input", () => {
+    const snapshot = catalog.map((t) => t.name);
+    filterTools(catalog, "sound");
+    expect(catalog.map((t) => t.name)).toEqual(snapshot);
   });
 });
 
