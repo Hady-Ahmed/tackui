@@ -761,6 +761,28 @@ The admin UI is the Connectors section on `/agents`
   — the server-side proxy to the AgentOS `/platform/tools` catalog —
   with key-state badges) + connector palette. `GET /api/credentials`
   and `GET /api/connectors` feed the badges.
+- **Tool palette rows** (`BuilderToolRow` in the form component) are
+  two-line: the first line carries the checkbox, the full untruncated
+  tool name, and the key badge (pinned right, wrapping to its own line
+  on narrow rows); the second carries the description clamped at two
+  lines with a "Show more / Show less" toggle that renders only when
+  the text actually overflows (the shared `ExpandableText`). Checked
+  rows get a blue border — the same visual language as the
+  platform-admin `ToolRow`. Each row is still one `<label>` (click
+  anywhere toggles; the Show more/less and Connect buttons are
+  interactive content, which label activation skips), and the checkbox
+  carries an explicit `aria-label` so its accessible name is the tool
+  name rather than the whole description read aloud.
+- **Palette search + honest cap:** a search input filters the rendered
+  rows (case-insensitive on label + description — descriptions carry
+  the arg/return docs, so arg-name searches hit) with its own "No tools
+  match" state, distinct from the empty-catalog copy. Filtering is
+  display-only: selections live in the form state, so a row hidden by
+  the search keeps its slot in the payload. The cap hint counts live
+  ("3 of 10 selected"), and at the cap the unchecked checkboxes disable
+  with an explanatory `title` instead of the click silently no-op'ing.
+  Rows render in a deterministic `(toolkit, label)` order (`sortTools`)
+  regardless of the upstream allowlist's append order.
 - **Disabled state:** when `GET /api/models` or `GET /api/tools` fails
   because the platform is unreachable, the form renders a notice banner
   and disables submit — the definition would be validated against a
