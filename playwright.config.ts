@@ -24,9 +24,9 @@ export default defineConfig({
   //
   // 120s, not 60s — the sign-in pacer's queue is suite-wide, not a
   // per-spec cost (e2e/helpers.ts, "The auth budget" in docs/e2e.md):
-  // all 10 real logins across smoke + chat + agents draw from one
+  // all 12 real logins across smoke + chat + agents + orgs draw from one
   // ≥7s-spaced slot queue, so a test whose login joins the opening
-  // burst can queue for up to ~63s (9 queued claims) before the login
+  // burst can queue for up to ~84s (11 queued claims) before the login
   // page is even touched, and that wait counts against this timeout.
   // Strictness survives the bump: past the queue, a hung journey still
   // fails within two minutes.

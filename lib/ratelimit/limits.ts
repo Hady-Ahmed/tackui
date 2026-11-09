@@ -9,7 +9,7 @@
  * Only a positive integer overrides; junk, zero, and negatives keep the
  * preset so a typo can't silently disable a limit.
  */
-function maxFromEnv(envName: string, fallback: number): number {
+export function maxFromEnv(envName: string, fallback: number): number {
   const raw = Number(process.env[envName]);
   return Number.isInteger(raw) && raw > 0 ? raw : fallback;
 }
@@ -52,8 +52,14 @@ export const LIMITS = {
   authIp: { max: 10, windowMs: 60_000 },
   /** Per-IP: global flood protection on all /api/* routes. 300/min.
    *  Generous enough for active use (page refreshes, CopilotKit connect/info
-   *  streams, conversation switching) while still blocking flood attacks. */
-  globalIp: { max: 300, windowMs: 60_000 },
+   *  streams, conversation switching) while still blocking flood attacks.
+   *  GLOBAL_IP_RATE_MAX-overridable for the same busy-deployment case as
+   *  agentRead above — the aggregate of many humans (or the E2E suite's
+   *  concurrent browser workers) is one IP's worth of /api traffic. */
+  globalIp: {
+    max: maxFromEnv("GLOBAL_IP_RATE_MAX", 300),
+    windowMs: 60_000,
+  },
   /** PUT/DELETE /api/credentials — BYOK key upserts/removals. */
   credentialMutate: { max: 20, windowMs: 60_000 },
   /** PUT/DELETE /api/connectors — org connector upserts/removals. */

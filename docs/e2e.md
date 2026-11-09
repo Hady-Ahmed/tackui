@@ -4,8 +4,9 @@ The CI canary that proves the app actually runs: the built Next.js server
 boots, every surface renders, and the two most important journeys (login,
 chat) work end-to-end. Eight tests, one file (`e2e/smoke.spec.ts`), ~6s of
 browser time. Deeper journeys live in sibling specs that reuse the same
-harness — Tier 2 so far: `e2e/chat.spec.ts` (chat depth) and
-`e2e/agents.spec.ts` (agent CRUD), below. Run
+harness — Tier 2 so far: `e2e/chat.spec.ts` (chat depth),
+`e2e/agents.spec.ts` (agent CRUD), and `e2e/orgs.spec.ts` (orgs &
+invitations), below. Run
 with `npm run test:e2e` (builds first) — or `npm run test:e2e:local` to
 reuse an existing build.
 
@@ -95,8 +96,15 @@ In CI this is the second half of the `image` job (below).
 - **Platform admin** — created through `auth.api.signUpEmail` (the real
   better-auth flow), then `role = 'admin'` + verified email via SQL, the same
   shape `scripts/create-admin.ts` produces.
-- **Personal org + owner membership** — inserted directly, mimicking what
-  `lib/auth/auth.ts`'s session hook does on first login.
+- **Second user** (`e2e-member@test.local`, #103) — created the same way
+  (real signup + verified email via SQL) but left a plain user: no role
+  update and no personal org — the app's session hook creates that on the
+  member's first login, which is the journey `e2e/orgs.spec.ts` tests.
+  Shared fixture like the admin: every spec treats both seeded users as
+  read-only (the orgs spec logs into the member; nothing mutates either
+  user's row).
+- **Personal org + owner membership** — inserted directly for the admin,
+  mimicking what `lib/auth/auth.ts`'s session hook does on first login.
 - **One agent** — id `e2e-mock-agent`, auth mode `jwt`, endpoint
   `http://127.0.0.1:3999/` (the mock agent).
 
@@ -157,13 +165,14 @@ caps sign-in at 10/min per IP (`lib/auth/auth.ts` — in production this is
 the brute-force guard; the harness runs with it fully enabled). A suite
 that grows one login per test therefore hits a hard ceiling: at Tier 2's
 15 tests, a fast machine compresses the whole run into ~60s and the
-rolling window overflows — the last login wave 429s ("Too many requests")
-and tests die in `login()`. Found exactly that way when the agent-CRUD
-spec joined the suite (#102).
+limiter's counter overflows — the last login wave 429s ("Too many
+requests") and tests die in `login()`. Found exactly that way when the
+agent-CRUD spec joined the suite (#102).
 
 Three conventions keep the suite under the cap as Tier 2 grows:
 
-- **A mutating Tier 2 file spends ONE login.** The file declares
+- **A mutating Tier 2 file spends ONE login — or one per distinct
+  user.** The file declares
   `test.describe.configure({ mode: "serial" })` — its tests run
   back-to-back in a single worker — and a `test.beforeAll` hook performs
   the one real login-page flow, keeping the session state in a
@@ -172,7 +181,13 @@ Three conventions keep the suite under the cap as Tier 2 grows:
   test still gets its own page, so console-error watching stays
   per-test. See `e2e/agents.spec.ts` — the read-only specs
   (smoke, chat depth) keep the per-test login because each is testing a
-  fresh-session journey, not CRUD.
+  fresh-session journey, not CRUD. The exception is `e2e/orgs.spec.ts`:
+  a two-session journey by definition, it spends one login PER USER
+  (admin + seeded member, both in `beforeAll`, both through the pacer —
+  `helpers.ts` grew a parameterized `loginAs()` that shares the
+  parameter-free `login()`'s pacer and 429 ride-out verbatim; the
+  chat-input assertion stays in `login()` because a member with zero
+  agents never sees it).
 - **`login()` never bursts the cap.** Playwright workers are separate OS
   processes with no shared lock, so sign-ins are paced through the
   filesystem: each login claims a slot on a 7s grid (`slot-<grid
@@ -185,9 +200,18 @@ Three conventions keep the suite under the cap as Tier 2 grows:
   reconciles `last` upward so late readers skip ahead, claims older
   than an hour are pruned, and anything but a lost race is rethrown (a
   broken pacer must fail loudly, not spin into the timeout). 60s
-  window / 7s spacing ⇒ at most 9 sign-ins in any window against the
-  10 cap: the limiter is never tripped, and every login still goes
-  through the real page. Without the pacer the retry below is
+  window / 7s spacing ⇒ at most 9 sign-ins in any window — but "against
+  the 10 cap" is not the guarantee it looks like: better-auth's in-memory
+  limiter only RESETS its counter after a full quiet gap larger than the
+  window (`now - lastRequest > windowInMs` in its `decideConsume`), not on
+  a rolling schedule. A sustained 7s cadence never accumulates a 60s
+  quiet gap, so the counter climbs monotonically across the whole run and
+  the 11th login trips the 10 cap no matter how it is paced (verified
+  against a live stack when the orgs spec added the second user, #103).
+  The pacer still earns its keep — it keeps the opening wave orderly and
+  makes any 429 a known, transient event instead of a burst overflow —
+  but the hard ceiling is raised on the harness side instead (below).
+  Without the pacer the retry below is
   self-defeating — each 429ed attempt also consumes limiter budget, so
   the tail can't out-wait a 60s window from inside a 60s test timeout.
 - **`login()` rides out 429s anyway.** On the rate limiter's "Too many
@@ -198,11 +222,11 @@ Three conventions keep the suite under the cap as Tier 2 grows:
   the original navigation timeout. Jitter keeps parallel workers from
   retrying in lockstep.
 
-The pacer's queue is paid for in test time — 10 logins at ≥7s spacing
-puts the last slot up to ~63s out — so the Playwright test timeout is
+The pacer's queue is paid for in test time — 12 logins at ≥7s spacing
+puts the last slot up to ~84s out — so the Playwright test timeout is
 120s, not 60s: the wait happens inside the test, and the queue is
 suite-wide (every spec's logins draw from the same slots, so a test
-joining the opening burst can queue ~60s regardless of which spec it
+joining the opening burst can queue ~84s regardless of which spec it
 belongs to). Still a strict ceiling: a hung journey fails within two
 minutes.
 
@@ -218,11 +242,36 @@ fix an aggregate this tight, so the harness raises the read cap the same
 way it allows loopback endpoints: `AGENT_READ_RATE_MAX=600` in the app
 env (lib/ratelimit/limits.ts `maxFromEnv` — default stays 60 in prod;
 the knob exists for busy self-hosted instances, the harness is just its
-loudest user; documented in `.env.example`). Specs that need a table still carry the belt: the page's
+loudest user; documented in `.env.example`). One contract covers every
+env knob on this page, including the two below: the override works in
+BOTH directions — any positive integer replaces the preset, tightening
+as readily as relaxing — and only a positive integer passes the guard
+(junk, zero, negative, fractional keep the preset), so a typo can't
+disable a limit outright. Specs that need a table still carry the belt: the page's
 own Retry button re-fetches, and `openAgents` (e2e/agents.spec.ts)
 clicks it and waits for rows instead of failing on a transient
 overflow — read-only specs keep their plain assertions, since their
 failures under sustained overflow are real signals, not noise.
+
+Two more budgets saturated the same way when the orgs spec doubled the
+login count (#103), and the harness raises both the same way — app env
+in `e2e/web-server.mjs`, prod defaults untouched:
+
+- **The Better Auth sign-in cap** (10/min per IP, `lib/auth/auth.ts`
+  `customRules` → `AUTH_SIGNIN_RATE_MAX=30` in the harness). With 12
+  logins in the four-file run, the gap-based reset above makes the
+  counter climb for the entire ~84s login queue — no spacing fits under
+  10. The knob gives headroom for further Tier 2 files without
+  re-litigating the pacer's grid math every time one joins; sign-up
+  stays at 5.
+- **The per-IP flood cap** (300/min on all `/api/*`, the proxy's
+  `globalIp` preset → `GLOBAL_IP_RATE_MAX=1200` in the harness). A true
+  fixed window, but the aggregate trips it: 4 parallel workers' page
+  loads plus two live chat runs (connect/info requests, SSE frames,
+  thread fetches) charge one IP's bucket several hundred times a
+  minute. The failure shape was real app breakage, not a test error —
+  an agent list 429ed into its error pane and a chat run never settled
+  — which is exactly why this is a harness env, not a test-side retry.
 
 ## Canaries must die
 
@@ -350,10 +399,52 @@ Notes:
   machine. Serialization also makes the CRUD mutations never interleave
   with each other, on top of the create-own/mutate-own/delete-own rule.
 
+## Tier 2 — orgs & invitations (built: `e2e/orgs.spec.ts`, #103)
+
+The third Tier 2 file and the first multi-user journey: everything before
+it ran as the single seeded admin. The invite → accept handoff runs across
+two isolated browser contexts (separate cookie jars — no session leakage)
+against the real better-auth organization flow, and the assertions are the
+org scoping memberships exist to provide.
+
+| Test | Proves |
+| --- | --- |
+| the owner invites the member by email through the account menu | The seed admin's real invite dialog ("Invite member" — visible because the admin manages the org and the harness runs self-host, seats unlimited): a probe thread is created first (owner-side fixture for the isolation tests), a stale pending invitation from a retried earlier attempt is cancelled, the invite is sent to the seeded member's email, and the pending row (email + "Invited as member" + `pending` badge + cancel affordance) shows on `/app/members`. |
+| before accepting, the member sees none of the owner's org | The member's first login creates their personal workspace via the app's session hook; on `/agents` the workspace agent is absent (org-scoped list, empty state renders) and the chat surface shows "No agents yet." with no trace of the owner's probe thread. The pending invitation surfaces through the app's own no-email discovery path: the account-menu badge ("Pending invitations 1"). |
+| the member accepts the invitation and joins the owner's workspace | The real acceptance UI (`/app/invitations` → Accept → `authClient.organization.acceptInvitation` — the invitation id travels through the authenticated `listUserInvitations` response; nothing is stubbed or forged). After accepting, the pending list empties; the org switcher self-renders (the member now belongs to two workspaces) and switching hard-navigates into the owner's workspace — the workspace agent appears in `/agents` and the chat surface (org scoping with a real membership), the owner's probe thread does NOT (threads are scoped per user inside the org), and the member's own probe thread is created by a real chat run. |
+| membership is visible to the owner; threads stay scoped to their creator | Back as the owner: the conversation list gains nothing from the member (owner's probe visible, member's probe absent — per-user scoping in both directions), and the members roster shows the joined member with the role the invitation carried ("member" badge) next to the "(you)" owner row; the invitation is no longer pending. |
+
+Notes:
+
+- **No email transport is faked.** The harness sets no mail provider, so
+  better-auth's `sendInvitationEmail` stays undefined — exactly the
+  production-without-SMTP configuration, where the invitee discovers the
+  invitation via the pending-invitations badge (docs/auth-and-orgs.md).
+  That badge → `/app/invitations` → Accept path IS the app's real flow;
+  there is no mail token to reconstruct and nothing to substitute.
+- **Two real logins, one per user** (the auth budget exception, above):
+  both happen in `beforeAll` through the shared pacer — `login()` for the
+  admin and the new `loginAs()` for the member, which is the same paced
+  body parameterized. `login()` keeps the chat-input assertion; the
+  member's empty personal workspace renders "No agents yet." instead of
+  the input, so `loginAs` asserts only the /app redirect and lets each
+  user's first surface assert its own settled state.
+- **Seeding grew a second user** (`e2e-member@test.local`, verified,
+  plain role, no personal org pre-created) — same creation path as the
+  admin (`auth.api.signUpEmail` + verified-email SQL). It is shared
+  fixture: the orgs spec only ever logs into it; no spec mutates it.
+- **No teardown.** Each run reseeds a fresh database, and the journey's
+  artifacts are inert to other specs: the member's thread is invisible to
+  the admin (per-user scoping — the very thing under test), the
+  accepted invitation is no longer pending anywhere, and the membership
+  only widens a roster nothing else reads. The invite test still
+  cancel-owns a stale pending invitation before sending, so a CI retry
+  cannot accumulate invites.
+
 ## Tier 2 (not built)
 
 Deeper journeys belong in new files, not grown into the smoke suite:
-catalog install flow, builder flows, org/invitation management, billing.
+catalog install flow, builder flows, billing.
 Same harness (`web-server.mjs` lifecycle, helpers, seeding), more tests
 per area — and every one of them that mutates data binds itself to the
 parallel-mutation rule (above).

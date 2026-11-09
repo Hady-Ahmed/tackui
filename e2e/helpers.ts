@@ -12,6 +12,10 @@ import { expect, type Page } from "@playwright/test";
 
 export const E2E_ADMIN_EMAIL = "e2e-admin@test.local";
 export const E2E_ADMIN_PASSWORD = "e2e-admin-password";
+// The seeded second user (e2e/seed.mjs) — the orgs spec's invitee. Kept
+// alongside the admin's constants here the same way: fixed, disposable.
+export const E2E_MEMBER_EMAIL = "e2e-member@test.local";
+export const E2E_MEMBER_PASSWORD = "e2e-member-password";
 
 /**
  * Sign-ins are a shared budget: better-auth caps them at 10/min per IP
@@ -29,8 +33,8 @@ export const E2E_ADMIN_PASSWORD = "e2e-admin-password";
  * "now" — but now snaps to the same grid point, the O_EXCL create lets
  * exactly one worker win it, and a loser advances a full step and
  * retries. Distinct claims are therefore ≥ SPACING apart however the
- * reads raced, which bounds any 60s window to 9 sign-ins against the
- * 10 cap. (Reconciling `last` upward alone would NOT do it: two cold
+ * reads raced, which bounds any 60s window to 9 sign-ins. (Reconciling
+ * `last` upward alone would NOT do it: two cold
  * readers still aim at near-simultaneous but DISTINCT timestamps, both
  * win, both sign at once.) After winning, the claimant reconciles
  * `last` upward to its target so late readers skip straight past
@@ -39,9 +43,17 @@ export const E2E_ADMIN_PASSWORD = "e2e-admin-password";
  * Slots older than an hour are pruned at claim time so a crashed run
  * leaves no permanent residue, and anything but a lost race is
  * rethrown: a persistent failure must fail loudly, not spin into the
- * test timeout. 60s window / 7s spacing ⇒ at most 9 sign-ins in any
- * window, so the cap is never tripped and every login still goes
- * through the real page.
+ * test timeout. 60s window / 7s spacing bounds any single window to 9
+ * sign-ins — but that is NOT "under the cap": better-auth's counter
+ * resets only after a quiet gap longer than the whole window, and a
+ * sustained 7s cadence never accumulates one, so the counter climbs
+ * monotonically for as long as the suite keeps logging in and hits the
+ * cap no matter how tightly it is paced. The pacer still earns its
+ * keep — an orderly opening wave, and a 429 that is known and
+ * transient (ridden out below) instead of a burst overflow — and every
+ * sign-in still goes through the real page; the cap itself is raised
+ * on the harness side (AUTH_SIGNIN_RATE_MAX — docs/e2e.md "The auth
+ * budget").
  */
 const SIGNIN_SPACING_MS = 7_000;
 const SIGNIN_DIR = path.join(os.tmpdir(), "tackui-e2e-signin");
@@ -140,8 +152,12 @@ async function reserveSigninSlot(): Promise<number> {
 }
 
 /**
- * Log in through the real login page. The test asserts the redirect to
- * /app — the app's own session-cookie contract — not a faked cookie.
+ * Log in as a specific seeded user through the real login page — the
+ * shared body behind `login()`. The pacer and the 429 ride-out are the
+ * budget for EVERY sign-in in the suite, so the parameterized form exists
+ * (multi-user journeys, e2e/orgs.spec.ts) rather than a second,
+ * unpaced path. Asserts only the redirect to /app — the app's own
+ * session-cookie contract — not a faked cookie.
  *
  * Behind the pacer above, the remaining limiter risk is a genuinely
  * transient 429 (a concurrent run sharing the IP): on the rate limiter's
@@ -152,11 +168,18 @@ async function reserveSigninSlot(): Promise<number> {
  * false pass.
  */
 const LOGIN_ATTEMPTS = 3;
-const LOGIN_WAIT_URL_MS = 8_000;
+// The redirect wait, not the pacer: the slot was already claimed (the
+// wait above) before the form is even submitted. 8s was enough when the
+// suite spent 10 logins; at 12 (#103 — the orgs spec logs in two users)
+// plus two real chat runs competing for CPU, the tail logins' /app load
+// event could miss an 8s window under full-suite load and die WITHOUT
+// the 429 banner (so the ride-out below never fired). 15s still fails a
+// genuinely broken login page within the 120s test timeout.
+const LOGIN_WAIT_URL_MS = 15_000;
 const LOGIN_RETRY_MIN_MS = 6_000;
 const LOGIN_RETRY_JITTER_MS = 4_000;
 
-export async function login(page: Page) {
+export async function loginAs(page: Page, email: string, password: string) {
   const waitForMs = await reserveSigninSlot();
   if (waitForMs > 0) {
     await new Promise((resolve) => setTimeout(resolve, waitForMs));
@@ -165,8 +188,8 @@ export async function login(page: Page) {
     await page.goto("/login");
     // exact: placeholder matching is substring by default — "Email" would
     // also match a renamed "Broken Email Field", blinding the canary.
-    await page.getByPlaceholder("Email", { exact: true }).fill(E2E_ADMIN_EMAIL);
-    await page.getByPlaceholder("Password", { exact: true }).fill(E2E_ADMIN_PASSWORD);
+    await page.getByPlaceholder("Email", { exact: true }).fill(email);
+    await page.getByPlaceholder("Password", { exact: true }).fill(password);
     await page.getByRole("button", { name: /sign in/i }).click();
     try {
       await page.waitForURL(/\/app/, { timeout: LOGIN_WAIT_URL_MS });
@@ -181,6 +204,17 @@ export async function login(page: Page) {
       );
     }
   }
+}
+
+/**
+ * The seed admin's login: the real page flow, then the chat input — the
+ * admin's org always has the seeded agent, so the input is the settled
+ * state. The assertion lives HERE and not in `loginAs` because a member
+ * with zero agents (the orgs spec's invitee, pre-acceptance) never sees
+ * the chat input — their /app shows the "No agents yet." empty state.
+ */
+export async function login(page: Page) {
+  await loginAs(page, E2E_ADMIN_EMAIL, E2E_ADMIN_PASSWORD);
   await expect(page.getByPlaceholder("Type a message...", { exact: true })).toBeVisible();
 }
 

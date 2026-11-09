@@ -17,8 +17,22 @@ import { randomUUID } from "node:crypto";
 
 export const E2E_ADMIN_EMAIL = "e2e-admin@test.local";
 export const E2E_ADMIN_PASSWORD = "e2e-admin-password";
+// The second seeded user — the orgs/invitations spec's invitee (2C, #103).
+// A regular verified user: NOT promoted to admin, no personal org
+// pre-created (the app's session hook creates it on the first real login,
+// which is the journey under test). Shared fixture by definition — other
+// specs must only ever read it (they never touch it at all today).
+export const E2E_MEMBER_EMAIL = "e2e-member@test.local";
+export const E2E_MEMBER_PASSWORD = "e2e-member-password";
 
-export async function seed(pool, { adminEmail, adminPassword, mockAgentUrl, mockAgentJwtSecret }) {
+export async function seed(pool, {
+  adminEmail,
+  adminPassword,
+  memberEmail = E2E_MEMBER_EMAIL,
+  memberPassword = E2E_MEMBER_PASSWORD,
+  mockAgentUrl,
+  mockAgentJwtSecret,
+}) {
   const auth = (await import("better-auth")).betterAuth({
     database: pool,
     emailAndPassword: { enabled: true },
@@ -96,6 +110,21 @@ export async function seed(pool, { adminEmail, adminPassword, mockAgentUrl, mock
     );
   }
 
+  // 3. The second user — same creation path as the admin (real signup +
+  //    verified email via SQL), but a plain user: no role update, no
+  //    personal org here. The app's session hook (lib/auth/auth.ts)
+  //    creates the personal org on the user's first login in the app's
+  //    process — exactly the multi-user journey the orgs spec drives.
+  //    Idempotent like the admin's signup.
+  try {
+    await auth.api.signUpEmail({
+      body: { email: memberEmail, password: memberPassword, name: "E2E Member" },
+    });
+  } catch (err) {
+    if (!String(err?.message).includes("already")) throw err;
+  }
+  await pool.query(`UPDATE "user" SET "emailVerified" = TRUE WHERE email = $1`, [memberEmail]);
+
   const agentCount = await pool.query(`SELECT count(*)::int AS n FROM agents`);
   const agentId = "e2e-mock-agent";
   await pool.query(
@@ -119,6 +148,8 @@ export async function seed(pool, { adminEmail, adminPassword, mockAgentUrl, mock
   return {
     adminEmail,
     adminPassword,
+    memberEmail,
+    memberPassword,
     orgId,
     agents: [
       {

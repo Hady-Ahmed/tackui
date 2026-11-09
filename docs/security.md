@@ -255,6 +255,14 @@ Two-layer rate limiting protects the server from abuse and floods.
 
 - 300 requests/min per IP on all `/api/*` routes (except `/api/health` which
   is unlimited, and `/api/auth/*` which has its own Better Auth limiter).
+  The 300 preset is overridable at boot with `GLOBAL_IP_RATE_MAX` (a positive
+  integer; see `lib/ratelimit/limits.ts` `maxFromEnv`) — for deployments where
+  many humans share one public IP and the bucket sees the aggregate of all
+  their traffic. Raising it weakens flood protection only for a trusted,
+  single-IP deployment; there is no per-user bypass. The override is
+  bidirectional — any positive integer replaces the preset, tightening as
+  readily as raising it — and only a positive integer passes the guard
+  (anything else keeps the preset), so a typo can't disable a limit outright.
 - Enforced in the proxy (pre-auth). IP resolution honors `CF-Connecting-IP`
   (set by Cloudflare to the real client IP — Traefik/Coolify overwrites
   `X-Forwarded-For` with the Cloudflare edge IP, splitting the counter across
@@ -298,6 +306,19 @@ static presets (exact caps: [saas-mode.md](./saas-mode.md#plan-enforcement-saas-
 
 Sign-in: 10/min per IP. Sign-up: 5/min per IP. Configured via
 `rateLimit.customRules` in the `betterAuth()` call. Disabled in solo mode.
+
+Two properties of the built-in limiter are worth knowing before tuning:
+
+- **The counter resets only after a quiet gap larger than the whole
+  window** (`now - lastRequest > windowInMs`), not on a rolling schedule.
+  Sustained sub-rate traffic (say, one sign-in every 7s) never accumulates
+  a 60s quiet gap, so the counter climbs until it trips — stricter than a
+  rolling window for brute-force purposes, but it means legitimate
+  long-lived-but-slow traffic is not actually exempt.
+- **Sign-in's max is boot-overridable** with `AUTH_SIGNIN_RATE_MAX` (a
+  positive integer; see `lib/ratelimit/limits.ts` `maxFromEnv`) — the same
+  override contract as `AGENT_READ_RATE_MAX`/`GLOBAL_IP_RATE_MAX` above.
+  Sign-up stays fixed at 5: account creation is the higher-value target.
 
 ### Concurrent SSE stream cap
 
