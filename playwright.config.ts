@@ -21,7 +21,12 @@ export default defineConfig({
   testDir: "./e2e",
   // The smoke suite is a canary: one file, ~8 tests. Keep it strict —
   // a failing test must fail the suite, not hang.
-  timeout: 60_000,
+  //
+  // 120s, not 60s: tests queue behind the sign-in pacer (e2e/helpers.ts,
+  // "The auth budget" in docs/e2e.md) — 12 real logins at ≥7s spacing
+  // means the last test waits up to ~80s before its login even starts.
+  // The budget is the reason; the canary still fails fast once past it.
+  timeout: 120_000,
   expect: { timeout: 10_000 },
   fullyParallel: true,
   forbidOnly: !!process.env.CI,

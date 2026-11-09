@@ -4,7 +4,8 @@ The CI canary that proves the app actually runs: the built Next.js server
 boots, every surface renders, and the two most important journeys (login,
 chat) work end-to-end. Eight tests, one file (`e2e/smoke.spec.ts`), ~6s of
 browser time. Deeper journeys live in sibling specs that reuse the same
-harness — Tier 2 starts with `e2e/chat.spec.ts` (chat depth, below). Run
+harness — Tier 2 so far: `e2e/chat.spec.ts` (chat depth) and
+`e2e/agents.spec.ts` (agent CRUD), below. Run
 with `npm run test:e2e` (builds first) — or `npm run test:e2e:local` to
 reuse an existing build.
 
@@ -131,6 +132,89 @@ to succeed asserts on the UI outcome instead.
   (`copilot-chat-textarea`, `copilot-assistant-message`, …) — prefer them over
   styling-coupled selectors.
 
+## The parallel-mutation rule
+
+`fullyParallel` workers share ONE seeded database per run. The smoke suite
+only *reads*; Tier 2 specs *mutate*. So every mutating test obeys
+**create-own / mutate-own / delete-own**:
+
+- Every mutation targets an agent (thread, row, …) that the test created
+  itself, under a unique name per run (a random suffix is enough — the
+  shared fixtures have fixed names, everything else must be unambiguous).
+- Never touch the seeded fixtures: the `e2e-mock-agent` agent, the seed
+  admin's credentials, or anything another spec reads — other workers run
+  concurrently against the same rows.
+- Never assert on global counts (another worker may add rows while the
+  test runs) — scope every assertion to the rows the test owns.
+- Clean up (delete) everything the test created before it ends where
+  practical — and assert the final state within the test's own
+  assertions rather than relying on teardown.
+
+## The auth budget
+
+Every test pays one real login (`helpers.ts` `login()`), and better-auth
+caps sign-in at 10/min per IP (`lib/auth/auth.ts` — in production this is
+the brute-force guard; the harness runs with it fully enabled). A suite
+that grows one login per test therefore hits a hard ceiling: at Tier 2's
+15 tests, a fast machine compresses the whole run into ~60s and the
+rolling window overflows — the last login wave 429s ("Too many requests")
+and tests die in `login()`. Found exactly that way when the agent-CRUD
+spec joined the suite (#102).
+
+Three conventions keep the suite under the cap as Tier 2 grows:
+
+- **A mutating Tier 2 file spends ONE login.** The file declares
+  `test.describe.configure({ mode: "serial" })` — its tests run
+  back-to-back in a single worker — and a worker-scoped fixture performs
+  the one real login-page flow, handing the session state to each test's
+  fresh context. Cookies are the ones the real login issued (nothing is
+  faked); each test still gets its own page, so console-error watching
+  stays per-test. See `e2e/agents.spec.ts` — the read-only specs
+  (smoke, chat depth) keep the per-test login because each is testing a
+  fresh-session journey, not CRUD.
+- **`login()` never bursts the cap.** Playwright workers are separate OS
+  processes with no shared lock, so sign-ins are paced through the
+  filesystem: each login claims the next slot ≥ 7s after the last
+  claimed one (an atomic `wx` create in a shared temp dir — a losing
+  claimant simply aims for the next slot) and waits for it before
+  touching the login page. 60s window / 7s spacing ⇒ at most 9 sign-ins
+  in any window against the 10 cap: the limiter is never tripped, and
+  every login still goes through the real page. Without the pacer the
+  retry below is self-defeating — each 429ed attempt also consumes
+  limiter budget, so the tail can't out-wait a 60s window from inside a
+  60s test timeout.
+- **`login()` rides out 429s anyway.** On the rate limiter's "Too many
+  requests" banner it waits a jittered interval and retries (bounded) —
+  the fallback for the genuinely transient (a concurrent run sharing
+  the IP), not the primary defense. A broken login page is not
+  transient, and the retry must not mask it: anything else surfaces as
+  the original navigation timeout. Jitter keeps parallel workers from
+  retrying in lockstep.
+
+The pacer's queue is paid for in test time — 12 logins at ≥7s spacing
+puts the last slot up to ~80s out — so the Playwright test timeout is
+120s, not 60s: the wait happens inside the test, and a test must not
+die of its own suite's scheduling. Still a strict ceiling: a hung
+journey fails within two minutes.
+
+Sign-ins aren't the only shared budget. `agentRead` (60/min per user)
+is charged by ten routes — the agents list on every sidebar and /agents
+load, `can-manage-agents` on every page that shows an add affordance,
+the catalog, models, tools, connectors, credentials. Every test IS the
+same seeded admin, so the full run's read demand (~66 charges in the
+first fixed window, measured) sits right at the cap and pages render
+their error panes ("Couldn't load your agents — check your connection
+and try again.") at the tail. Squeezing test-side can't deterministically
+fix an aggregate this tight, so the harness raises the read cap the same
+way it allows loopback endpoints: `AGENT_READ_RATE_MAX=600` in the app
+env (lib/ratelimit/limits.ts `maxFromEnv` — default stays 60 in prod;
+the knob exists for busy self-hosted instances, the harness is just its
+loudest user). Specs that need a table still carry the belt: the page's
+own Retry button re-fetches, and `openAgents` (e2e/agents.spec.ts)
+clicks it and waits for rows instead of failing on a transient
+overflow — read-only specs keep their plain assertions, since their
+failures under sustained overflow are real signals, not noise.
+
 ## Canaries must die
 
 A smoke suite is only worth its CI minutes if it fails when the app breaks.
@@ -221,9 +305,46 @@ Notes:
 - Each spec file (and test) keeps to its own thread; unique first messages
   keep the shared seeded DB's sidebar listings unambiguous across the suite.
 
+## Tier 2 — agent CRUD (built: `e2e/agents.spec.ts`, #102)
+
+The second Tier 2 file: four tests driving the `/agents` surface — the
+core operator workflow — end to end. This is the spec the
+parallel-mutation rule (above) was written for: it creates, edits, and
+deletes while the smoke and chat specs read the same DB concurrently.
+
+| Test | Proves |
+| --- | --- |
+| an agent can be created through the add form | The add panel's "Connect an existing agent" form (name, description, endpoint, auth mode, JWT secret) POSTs to `/api/agents` and the row lands in the table with its endpoint. The endpoint is the mock agent on loopback — the SSRF guard runs on every create and passes because the harness sets `ALLOW_PRIVATE_ENDPOINTS=true`: the private-endpoint allowance is exercised on purpose. |
+| editing with a blank secret preserves the stored secret | The write-only `jwtSecret` contract through the UI: the edit form opens with a BLANK secret field (the stored value is never echoed — GET responses carry `hasJwtSecret` instead), a blank submit PATCHes without the key, and the stored secret survives — asserted via the `hasJwtSecret`-driven "Key set ✓" hint still rendering on re-open plus the connection check succeeding after the save. |
+| the form's Test connection probe reaches the mock agent | The form's Test connection button runs the real reachability-probe route (`POST /api/agents/reachability-probe`) against the typed endpoint. Nothing is submitted — the test creates no agent and cancels the panel. |
+| deleting an agent removes it — and only it — from the list | The `confirm()`-guarded delete (the dialog copy must name its victim) removes the created agent; the seeded agent the smoke suite reads is still in the table. |
+
+Notes:
+
+- The write-only semantic is asserted without the secret ever appearing
+  anywhere: the chain is (field blank on open) → (blank submit) →
+  ("Key set ✓" persists on re-open — `hasJwtSecret` stayed true) →
+  (connection check succeeding). The hint is the only UI surface of
+  `hasJwtSecret`: a blank save that wiped the secret would flip it to
+  the create-variant hint ("Shared HS256 secret …"), which is exactly
+  what the assertion catches.
+- The mock agent answers GET with 405 (it is POST-only), so the probe
+  badge reads "✓ Server reachable (HTTP 405)" — the probe asserts
+  reachability, not protocol compliance (`TEST_HELP` says the same in
+  the UI).
+- The row-level Test badge and the form-level badge are both covered:
+  the edit test uses the row action (the issue's post-save connection
+  check), this file's probe test the form button.
+- The four tests run serially in one worker behind one real login —
+  the auth budget (above): four more sign-ins per run would breach the
+  10/min sign-in cap when the suite compresses into a minute on a fast
+  machine. Serialization also makes the CRUD mutations never interleave
+  with each other, on top of the create-own/mutate-own/delete-own rule.
+
 ## Tier 2 (not built)
 
-Deeper journeys belong in new files, not grown into the smoke suite: agent
-CRUD through the UI, catalog install flow, builder flows, org/invitation
-management, billing. Same harness (`web-server.mjs` lifecycle, helpers,
-seeding), more tests per area.
+Deeper journeys belong in new files, not grown into the smoke suite:
+catalog install flow, builder flows, org/invitation management, billing.
+Same harness (`web-server.mjs` lifecycle, helpers, seeding), more tests
+per area — and every one of them that mutates data binds itself to the
+parallel-mutation rule (above).
