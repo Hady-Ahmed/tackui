@@ -87,13 +87,18 @@ test.beforeAll(async ({ browser }) => {
 /** The mock agent's URL — what the installed copy ends up running on. */
 const MOCK_ENDPOINT = `http://127.0.0.1:${MOCK_AGENT_PORT}/`;
 
-/** A loopback port the harness runs NOTHING on (app 3990, mail catcher
- * 3998, mock agent 3999): the template is born pointing here so test 2's
- * connection check starts red and only goes green once the template is
- * pointed at the mock agent. The SSRF guard allows it for the same
- * reason it allows the mock agent — the harness sets
- * ALLOW_PRIVATE_ENDPOINTS=true. */
-const DEAD_ENDPOINT = "http://127.0.0.1:3991/";
+/** A loopback port the harness runs NOTHING on, chosen deliberately
+ * OUTSIDE the port map (app 3990, mail catcher 3998, mock agent 3999 —
+ * 3977 sits nowhere near any of them): the template is born pointing
+ * here so test 2's connection check starts red and only goes green once
+ * the template is pointed at the mock agent. A neighbor of a mapped
+ * port would collide with whatever a developer happens to run locally —
+ * the old 3991 sat one above the app's 3990 and could have flipped the
+ * red-first check spuriously (CI is unaffected either way, but the port
+ * keeps its distance). The SSRF guard allows it for the same reason it
+ * allows the mock agent — the harness sets ALLOW_PRIVATE_ENDPOINTS=true.
+ */
+const DEAD_ENDPOINT = "http://127.0.0.1:3977/";
 
 /**
  * Identity per test execution (the auth-spec lesson): a CI retry re-runs
@@ -149,6 +154,27 @@ function catalogCard(page: Page, name: string) {
   return page.locator("div.grid > div").filter({ hasText: name });
 }
 
+/** One sweep GET, asserted: a 429 or an error-JSON body here must fail
+ * naming the real cause, not surface downstream as "t.filter is not a
+ * function". The body is read once — it feeds both the failure message
+ * and the parse. */
+async function sweepList(
+  request: APIRequestContext,
+  url: string,
+): Promise<Array<{ id: string; name: string }>> {
+  const res = await request.get(url);
+  const text = await res.text();
+  expect(
+    res.ok(),
+    `sweep GET ${url} failed: HTTP ${res.status()} — ${text.slice(0, 200)}`,
+  ).toBe(true);
+  const rows: unknown = JSON.parse(text);
+  if (!Array.isArray(rows)) {
+    throw new Error(`sweep GET ${url}: expected a JSON array of rows`);
+  }
+  return rows as Array<{ id: string; name: string }>;
+}
+
 /**
  * Delete everything this file created on an EARLIER attempt (best
  * effort): templates under this file's name prefix, and any installed
@@ -159,17 +185,13 @@ function catalogCard(page: Page, name: string) {
  * tombstones a previous attempt's template delete already left behind.
  */
 async function sweepOwnLeftovers(request: APIRequestContext) {
-  const templates = (await (
-    await request.get("/api/catalog?all=1")
-  ).json()) as Array<{ id: string; name: string }>;
+  const templates = await sweepList(request, "/api/catalog?all=1");
   for (const template of templates.filter((t) =>
     t.name.startsWith(OWN_PREFIX),
   )) {
     await request.delete(`/api/catalog/${template.id}`);
   }
-  const agents = (await (
-    await request.get("/api/agents")
-  ).json()) as Array<{ id: string; name: string }>;
+  const agents = await sweepList(request, "/api/agents");
   for (const agent of agents.filter((a) => a.name.startsWith(OWN_PREFIX))) {
     await request.delete(`/api/agents/${agent.id}`);
   }
