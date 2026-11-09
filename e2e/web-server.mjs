@@ -256,6 +256,12 @@ async function main() {
     BETTER_AUTH_SECRET: AUTH_SECRET,
     BETTER_AUTH_URL: APP_URL,
     ALLOW_PRIVATE_ENDPOINTS: "true",
+    // The suite is ONE shared user charging the agentRead bucket from ten
+    // routes on every surface load — the 15-test run would trip the
+    // 60/min read cap by design (docs/e2e.md "The auth budget"). Same
+    // relaxation shape as ALLOW_PRIVATE_ENDPOINTS above: a harness env,
+    // not a test-if.
+    AGENT_READ_RATE_MAX: "600",
     SAAS_MODE: "false",
     // The app's boot guard requires DB_ENCRYPTION_KEY when auth is
     // enabled (agent JWT secrets are encrypted at rest). A throwaway

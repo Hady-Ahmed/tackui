@@ -21,7 +21,16 @@ export default defineConfig({
   testDir: "./e2e",
   // The smoke suite is a canary: one file, ~8 tests. Keep it strict —
   // a failing test must fail the suite, not hang.
-  timeout: 60_000,
+  //
+  // 120s, not 60s — the sign-in pacer's queue is suite-wide, not a
+  // per-spec cost (e2e/helpers.ts, "The auth budget" in docs/e2e.md):
+  // all 10 real logins across smoke + chat + agents draw from one
+  // ≥7s-spaced slot queue, so a test whose login joins the opening
+  // burst can queue for up to ~63s (9 queued claims) before the login
+  // page is even touched, and that wait counts against this timeout.
+  // Strictness survives the bump: past the queue, a hung journey still
+  // fails within two minutes.
+  timeout: 120_000,
   expect: { timeout: 10_000 },
   fullyParallel: true,
   forbidOnly: !!process.env.CI,

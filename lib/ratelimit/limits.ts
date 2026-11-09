@@ -1,4 +1,20 @@
 /**
+ * Numeric env override for one limit's max — e.g. AGENT_READ_RATE_MAX.
+ * Self-hosters with many humans on one busy single-instance deployment
+ * legitimately outgrow per-user read presets; the E2E harness sets this
+ * because its entire suite is ONE shared user charging the same buckets
+ * from ten routes (see docs/e2e.md "The auth budget" — without it the
+ * 15-test run trips the agentRead cap by design). Read once at module
+ * load (the same boot-time contract as lib/config) — never per request.
+ * Only a positive integer overrides; junk, zero, and negatives keep the
+ * preset so a typo can't silently disable a limit.
+ */
+function maxFromEnv(envName: string, fallback: number): number {
+  const raw = Number(process.env[envName]);
+  return Number.isInteger(raw) && raw > 0 ? raw : fallback;
+}
+
+/**
  * Named rate-limit presets. Each defines a max count and a window in ms.
  * Used by the route handlers and proxy to enforce consistent limits.
  *
@@ -14,8 +30,14 @@ export const LIMITS = {
   reachabilityProbe: { max: 30, windowMs: 60_000 },
   /** Per-user: agent mutations (POST/PATCH/DELETE /api/agents). 10/min. */
   agentMutate: { max: 10, windowMs: 60_000 },
-  /** Per-user: agent reads (GET /api/agents). 60/min. */
-  agentRead: { max: 60, windowMs: 60_000 },
+  /** Per-user: agent reads (GET /api/agents — and the ten other routes
+   *  that charge this bucket: agent detail, catalog, connectors,
+   *  credentials, models, tools, can-manage-agents). 60/min by default,
+   *  AGENT_READ_RATE_MAX-overridable (see maxFromEnv above). */
+  agentRead: {
+    max: maxFromEnv("AGENT_READ_RATE_MAX", 60),
+    windowMs: 60_000,
+  },
   /**
    * Per-user: platform-admin catalog writes (PUT catalog, POST test-model).
    * Separate from agentMutate: admin configuration legitimately bursts

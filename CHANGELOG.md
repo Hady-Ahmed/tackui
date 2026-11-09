@@ -19,6 +19,35 @@ All notable changes to this project will be documented in this file. The format 
   the click silently no-op'ing. Rows render in a deterministic
   (toolkit, label) order instead of the upstream allowlist's append
   order. See #106.
+- **E2E Tier 2B — agent CRUD** (`e2e/agents.spec.ts`, new Tier 2 spec along
+  the frozen smoke suite): the core operator workflow driven end-to-end
+  through the real `/agents` UI — create a custom-endpoint agent aimed at
+  the mock agent (the SSRF guard's private-endpoint allowance exercised on
+  purpose via the harness's `ALLOW_PRIVATE_ENDPOINTS=true`), the write-only
+  `jwtSecret` semantic (the edit form opens blank — the secret is never
+  echoed; a blank submit preserves the stored secret, asserted via the
+  `hasJwtSecret`-driven "Key set ✓" hint surviving a re-open plus the
+  connection check succeeding after save), the real reachability probe
+  (form button and row action), and the confirm-guarded delete scoped to
+  the test's own agent. `docs/e2e.md` gains two rules the joining spec
+  forced into the open: the parallel-mutation rule (`fullyParallel`
+  workers share one seeded DB, so mutating specs create-own /
+  mutate-own / delete-own — the seeded fixtures are read-only to every
+  test) and the auth budget: better-auth caps sign-in at 10/min per IP,
+  so a mutating Tier 2 file spends ONE real login (serial mode plus a
+  single `test.beforeAll` login shared through module-level session
+  state), cross-worker sign-in pacing (filesystem slot claims on a 7s
+  grid — spaced ≥ 7s apart from the opening wave on) keeps every login
+  under the limiter's 10/min cap with a bounded 429 retry as the
+  fallback, and
+  the test timeout rises to 120s to absorb the paced tail. The ten
+  routes charging the `agentRead` bucket put the full run's read demand
+  right at its 60/min cap, so that limit gains an operator-facing env
+  override (`AGENT_READ_RATE_MAX`, positive integers only; `lib/ratelimit/
+  limits.ts`) and the harness sets 600 — same relaxation shape as
+  `ALLOW_PRIVATE_ENDPOINTS` — while specs needing a table click the
+  pages' own Retry pane on transient overflows. See #102 and
+  `docs/e2e.md`.
 
 - **E2E Tier 2A — chat depth** (`e2e/chat.spec.ts`, new alongside the frozen
   8-test smoke suite): thread persistence across a real reload (send → reply
