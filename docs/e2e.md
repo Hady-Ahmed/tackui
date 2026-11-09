@@ -176,7 +176,7 @@ Every test pays one real login (`helpers.ts` `login()`), and better-auth
 caps sign-in at 10/min per IP (`lib/auth/auth.ts` — in production this is
 the brute-force guard; the harness runs with it fully enabled). A suite
 that grows one login per test therefore hits a hard ceiling: at Tier 2's
-19 paced sign-ins, a fast machine compresses the whole run into ~60s and
+16 paced sign-ins, a fast machine compresses the whole run into ~60s and
 the limiter's counter overflows — the last login wave 429s ("Too many
 requests") and tests die in `login()`. Found exactly that way when the
 agent-CRUD spec joined the suite (#102).

@@ -70,6 +70,12 @@ export function startEmailCatcher(port = EMAIL_CATCHER_PORT) {
             html: parsed.html ?? "",
           });
           if (mail.length > MAX_MAIL) mail.splice(0, mail.length - MAX_MAIL);
+          // The response id is the post-trim spool length, so it diverges
+          // from the stored `id` once the spool exceeds MAX_MAIL (200) and
+          // ids get reused. Unreachable in practice — every e2e run sends a
+          // handful of mails — and the only consumer excludes by
+          // `m.id !== signupMail.id` rather than trusting the value; a bulk
+          // mail future would warrant a real redesign here anyway.
           res.writeHead(200, { "content-type": "application/json" });
           res.end(JSON.stringify({ id: String(mail.length) }));
         } catch {

@@ -67,10 +67,12 @@ export async function catchEmail(
  * The first http(s) URL in the email's text part containing `marker`
  * (e.g. "/verify-email?token=" or "/reset-password/") — the plain-text
  * template embeds the raw URL on its own line (lib/email/templates.ts).
- * `id`-anchored: throw instead of returning a wrong link.
+ * Every URL is scanned (`/g`), not just the first one, so an email that
+ * gains a second link (footer, unsubscribe) still resolves. `id`-anchored:
+ * throw instead of returning a wrong link.
  */
 export function emailLink(mail: CaughtEmail, marker: string): string {
-  const link = mail.text.match(/https?:\/\/\S+/u)?.find((url) =>
+  const link = mail.text.match(/https?:\/\/\S+/gu)?.find((url) =>
     url.includes(marker),
   );
   if (!link) {
