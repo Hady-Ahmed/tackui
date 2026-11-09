@@ -20,9 +20,11 @@ All notable changes to this project will be documented in this file. The format 
   mutate-own / delete-own — the seeded fixtures are read-only to every
   test) and the auth budget: better-auth caps sign-in at 10/min per IP,
   so a mutating Tier 2 file spends ONE real login (serial mode plus a
-  worker-scoped session fixture), cross-worker sign-in pacing
-  (filesystem slot claims, ≥ 7s apart) keeps every login under the
-  limiter's 10/min cap with a bounded 429 retry as the fallback, and
+  single `test.beforeAll` login shared through module-level session
+  state), cross-worker sign-in pacing (filesystem slot claims on a 7s
+  grid — spaced ≥ 7s apart from the opening wave on) keeps every login
+  under the limiter's 10/min cap with a bounded 429 retry as the
+  fallback, and
   the test timeout rises to 120s to absorb the paced tail. The ten
   routes charging the `agentRead` bucket put the full run's read demand
   right at its 60/min cap, so that limit gains an operator-facing env

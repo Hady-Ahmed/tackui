@@ -165,24 +165,31 @@ Three conventions keep the suite under the cap as Tier 2 grows:
 
 - **A mutating Tier 2 file spends ONE login.** The file declares
   `test.describe.configure({ mode: "serial" })` — its tests run
-  back-to-back in a single worker — and a worker-scoped fixture performs
-  the one real login-page flow, handing the session state to each test's
-  fresh context. Cookies are the ones the real login issued (nothing is
-  faked); each test still gets its own page, so console-error watching
-  stays per-test. See `e2e/agents.spec.ts` — the read-only specs
+  back-to-back in a single worker — and a `test.beforeAll` hook performs
+  the one real login-page flow, keeping the session state in a
+  module-level variable that each test's fresh context starts from.
+  Cookies are the ones the real login issued (nothing is faked); each
+  test still gets its own page, so console-error watching stays
+  per-test. See `e2e/agents.spec.ts` — the read-only specs
   (smoke, chat depth) keep the per-test login because each is testing a
   fresh-session journey, not CRUD.
 - **`login()` never bursts the cap.** Playwright workers are separate OS
   processes with no shared lock, so sign-ins are paced through the
-  filesystem: each login claims the next slot ≥ 7s after the last
-  claimed one (an atomic `wx` create in a shared temp dir — a losing
-  claimant simply aims for the next slot) and waits for it before
-  touching the login page. 60s window / 7s spacing ⇒ at most 9 sign-ins
-  in any window against the 10 cap: the limiter is never tripped, and
-  every login still goes through the real page. Without the pacer the
-  retry below is self-defeating — each 429ed attempt also consumes
-  limiter budget, so the tail can't out-wait a 60s window from inside a
-  60s test timeout.
+  filesystem: each login claims a slot on a 7s grid (`slot-<grid
+  point>`, an atomic O_EXCL create in a shared temp dir — a losing
+  claimant aims a full step later). The grid is what paces the opening
+  wave: workers that all read the shared `last` file before any winner
+  wrote it aim at the same grid point, so the create itself arbitrates
+  — exactly one wins and the rest queue behind it, instead of each
+  claiming a distinct "now + ε" slot and bursting. The winner
+  reconciles `last` upward so late readers skip ahead, claims older
+  than an hour are pruned, and anything but a lost race is rethrown (a
+  broken pacer must fail loudly, not spin into the timeout). 60s
+  window / 7s spacing ⇒ at most 9 sign-ins in any window against the
+  10 cap: the limiter is never tripped, and every login still goes
+  through the real page. Without the pacer the retry below is
+  self-defeating — each 429ed attempt also consumes limiter budget, so
+  the tail can't out-wait a 60s window from inside a 60s test timeout.
 - **`login()` rides out 429s anyway.** On the rate limiter's "Too many
   requests" banner it waits a jittered interval and retries (bounded) —
   the fallback for the genuinely transient (a concurrent run sharing
@@ -191,11 +198,13 @@ Three conventions keep the suite under the cap as Tier 2 grows:
   the original navigation timeout. Jitter keeps parallel workers from
   retrying in lockstep.
 
-The pacer's queue is paid for in test time — 12 logins at ≥7s spacing
-puts the last slot up to ~80s out — so the Playwright test timeout is
-120s, not 60s: the wait happens inside the test, and a test must not
-die of its own suite's scheduling. Still a strict ceiling: a hung
-journey fails within two minutes.
+The pacer's queue is paid for in test time — 10 logins at ≥7s spacing
+puts the last slot up to ~63s out — so the Playwright test timeout is
+120s, not 60s: the wait happens inside the test, and the queue is
+suite-wide (every spec's logins draw from the same slots, so a test
+joining the opening burst can queue ~60s regardless of which spec it
+belongs to). Still a strict ceiling: a hung journey fails within two
+minutes.
 
 Sign-ins aren't the only shared budget. `agentRead` (60/min per user)
 is charged by ten routes — the agents list on every sidebar and /agents
@@ -209,7 +218,7 @@ fix an aggregate this tight, so the harness raises the read cap the same
 way it allows loopback endpoints: `AGENT_READ_RATE_MAX=600` in the app
 env (lib/ratelimit/limits.ts `maxFromEnv` — default stays 60 in prod;
 the knob exists for busy self-hosted instances, the harness is just its
-loudest user). Specs that need a table still carry the belt: the page's
+loudest user; documented in `.env.example`). Specs that need a table still carry the belt: the page's
 own Retry button re-fetches, and `openAgents` (e2e/agents.spec.ts)
 clicks it and waits for rows instead of failing on a transient
 overflow — read-only specs keep their plain assertions, since their

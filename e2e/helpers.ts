@@ -20,38 +20,123 @@ export const E2E_ADMIN_PASSWORD = "e2e-admin-password";
  * limiter's 60s window and the tail tests die in login() (observed when
  * the agent-CRUD file joined the suite, #102). The pacer prevents the
  * burst instead of recovering from it: workers are separate OS processes
- * with no shared lock, so slots are coordinated through the filesystem —
- * a login claims (atomic `wx` create) the next slot ≥ SPACING after the
- * last claimed one and waits for it before touching the login page.
- * 60s window / 7s spacing ⇒ at most 9 sign-ins in any window, so the cap
- * is never tripped and every login still goes through the real page.
+ * with no shared lock, so slots are coordinated through the filesystem.
+ *
+ * A claim is an atomic O_EXCL create of `slot-<T>`, with T snapped to a
+ * grid of SIGNIN_SPACING_MS multiples. The grid is what paces the
+ * OPENING wave: every worker reads the shared `last` file before any
+ * winner has written it, so on a cold or stale dir they all aim at
+ * "now" — but now snaps to the same grid point, the O_EXCL create lets
+ * exactly one worker win it, and a loser advances a full step and
+ * retries. Distinct claims are therefore ≥ SPACING apart however the
+ * reads raced, which bounds any 60s window to 9 sign-ins against the
+ * 10 cap. (Reconciling `last` upward alone would NOT do it: two cold
+ * readers still aim at near-simultaneous but DISTINCT timestamps, both
+ * win, both sign at once.) After winning, the claimant reconciles
+ * `last` upward to its target so late readers skip straight past
+ * settled slots instead of burning failed creates on them — the grid +
+ * O_EXCL pair carries the invariant; `last` is only a skip-ahead hint.
+ * Slots older than an hour are pruned at claim time so a crashed run
+ * leaves no permanent residue, and anything but a lost race is
+ * rethrown: a persistent failure must fail loudly, not spin into the
+ * test timeout. 60s window / 7s spacing ⇒ at most 9 sign-ins in any
+ * window, so the cap is never tripped and every login still goes
+ * through the real page.
  */
 const SIGNIN_SPACING_MS = 7_000;
 const SIGNIN_DIR = path.join(os.tmpdir(), "tackui-e2e-signin");
+/** A `last` dated further ahead than this is corruption, not a claim —
+ * honest writers date their target at most ~2 grid steps past their own
+ * clock. Honoring it would park a worker on an absurd wait. */
+const LAST_SANITY_SLACK_MS = 60_000;
+/** Contended-claim bound. Every EEXIST is a real competing claim, so a
+ * runaway run of them means the shared dir is broken — fail with a name
+ * instead of spinning silently into the test timeout. */
+const MAX_CLAIM_ATTEMPTS = 1_000;
+/** Slot residue older than this is pruned at claim time. */
+const SLOT_MAX_AGE_MS = 3_600_000;
+
+/** Snap to the spacing grid (see the module comment for why the grid). */
+function gridFloor(ms: number): number {
+  return Math.floor(ms / SIGNIN_SPACING_MS) * SIGNIN_SPACING_MS;
+}
+
+/** The newest claim on record — or 0 when there is none, the file is
+ * unparseable, or it is implausibly future-dated (corruption). A claim
+ * is safe on 0: it contends on the grid instead of bursting. */
+async function readLastClaim(): Promise<number> {
+  return fs
+    .readFile(path.join(SIGNIN_DIR, "last"), "utf8")
+    .then((raw) => {
+      const last = Number(raw) || 0;
+      return last > Date.now() + LAST_SANITY_SLACK_MS ? 0 : last;
+    })
+    .catch(() => 0);
+}
+
+/** True only for the one benign claim collision: the slot name is taken. */
+function isEexist(err: unknown): boolean {
+  return (err as NodeJS.ErrnoException | null)?.code === "EEXIST";
+}
+
+/** Prune slot files from runs that ended over an hour ago. Pure hygiene
+ * — pacing anchors claims at now, never at old slots — so a failed
+ * prune must never fail the run. */
+async function pruneStaleSlots(): Promise<void> {
+  const cutoff = Date.now() - SLOT_MAX_AGE_MS;
+  const names = await fs.readdir(SIGNIN_DIR).catch(() => [] as string[]);
+  await Promise.all(
+    names
+      .map((name) => /^slot-(\d+)$/.exec(name))
+      .filter((m): m is RegExpExecArray => m !== null)
+      .filter((m) => Number(m[1]) < cutoff)
+      .map((m) =>
+        fs.rm(path.join(SIGNIN_DIR, m[0]), { force: true }).catch(() => {}),
+      ),
+  );
+}
 
 /** Claim the next free sign-in slot; resolves to how long to wait until
  * it opens. Losing a claim just means another worker took that slot —
- * aim for the next one. A stale timestamp from an earlier run is always
- * in the past, so it costs nothing. */
+ * aim a full grid step later. */
 async function reserveSigninSlot(): Promise<number> {
   await fs.mkdir(SIGNIN_DIR, { recursive: true });
-  const last = await fs
-    .readFile(path.join(SIGNIN_DIR, "last"), "utf8")
-    .then((raw) => Number(raw) || 0)
-    .catch(() => 0);
-  let target = Math.max(last + SIGNIN_SPACING_MS, Date.now());
-  for (;;) {
+  await pruneStaleSlots();
+  const last = await readLastClaim();
+  let target = gridFloor(Math.max(last + SIGNIN_SPACING_MS, Date.now()));
+  for (let attempt = 0; ; attempt++) {
     try {
       await fs.writeFile(path.join(SIGNIN_DIR, `slot-${target}`), "", {
         flag: "wx",
       });
-      await fs.writeFile(path.join(SIGNIN_DIR, "last"), String(target));
-      return Math.max(0, target - Date.now());
-    } catch {
-      // Slot already claimed — take the next one.
+      break;
+    } catch (err) {
+      if (!isEexist(err)) {
+        // Not contention — a real failure (read-only tmp, ENOSPC, …).
+        // Surface it here rather than spinning to the test timeout.
+        throw err;
+      }
+      if (attempt >= MAX_CLAIM_ATTEMPTS) {
+        throw new Error(
+          `sign-in pacer: ${MAX_CLAIM_ATTEMPTS} contended claim attempts — ${SIGNIN_DIR} looks corrupt`,
+        );
+      }
+      // Slot already claimed — take the next one on the grid.
       target += SIGNIN_SPACING_MS;
     }
   }
+  // Reconcile the shared floor upward so workers that read `last` before
+  // this claim skip past it. Re-reading immediately before the write
+  // keeps an already-higher value from regressing; a write lost to a
+  // still-higher concurrent one is harmless — the grid arbitrates the
+  // claims themselves.
+  const settled = await readLastClaim();
+  if (target > settled) {
+    await fs
+      .writeFile(path.join(SIGNIN_DIR, "last"), String(target))
+      .catch(() => {});
+  }
+  return Math.max(0, target - Date.now());
 }
 
 /**
