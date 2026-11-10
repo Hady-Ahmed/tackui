@@ -4,6 +4,17 @@ All notable changes to this project will be documented in this file. The format 
 
 ## [Unreleased]
 
+- **Fresh workspaces no longer log a console error on every page load
+  (#74).** `getAgents()` used to throw when an org had zero agents, so the
+  CopilotKit runtime answered `GET /api/copilotkit/info` with a 500 and the
+  browser logged `runtime_info_fetch_failed` on every page load of a brand-
+  new workspace — a completely normal state. An empty workspace now resolves
+  to an empty registry: `/info` returns 200 with no agents (the existing
+  "No agents yet" empty state renders with a clean console), unauthenticated
+  callers still error, and runs against unknown agent ids fail closed with
+  the runtime's 404. The two e2e console-noise filters that existed solely
+  to swallow `runtime_info_fetch_failed` are deleted with it — the error
+  source no longer exists, so they'd only mask a future /info regression.
 - **`clearThreads()` is a deliberate no-op (#99).** The runner's
   interface-required clear method used to fire-and-forget an unscoped
   DELETE across all four persistence tables — unreachable today (the

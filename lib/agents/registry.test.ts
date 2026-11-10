@@ -203,11 +203,16 @@ describe("getAgents", () => {
     });
   });
 
-  it("throws the no-agents copy when the org has zero agents", async () => {
+  it("returns an EMPTY registry when the org has zero agents (a fresh workspace is not an error)", async () => {
+    // Issue #74: an empty workspace is a normal state. The registry must
+    // resolve to {} — which the CopilotKit runtime serves as a 200 /info
+    // with zero agents — rather than throw (a throw here surfaces as a
+    // 500 + console error on every page load of a fresh org). Genuinely
+    // broken conditions (unauthenticated) still throw; the test below
+    // pins that.
     vi.mocked(listAgents).mockResolvedValue([]);
-    await expect(getAgents(new Request("http://localhost"))).rejects.toThrow(
-      /No agents are set up in this workspace yet/,
-    );
+    const map = await getAgents(new Request("http://localhost"));
+    expect(map).toEqual({});
   });
 
   it("throws 'not authenticated' when getRequestUser returns null", async () => {

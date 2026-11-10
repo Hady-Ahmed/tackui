@@ -49,6 +49,12 @@ runtime via the `/agents` admin page (sidebar + icon or `/agents?add=1`) or
 the `/api/agents` REST API. No restart is needed when adding, editing, or
 removing agents — `CopilotRuntime` receives `getAgents` as a factory function,
 called per-request, so DB changes reflect immediately on the next `/run`.
+An org with zero agents resolves to an EMPTY registry, not an error: `/info`
+answers 200 with no agents (the client shows its "No agents yet" empty state
+with a clean console), and any run/stop/connect against an unknown agent id
+fails closed with the runtime's 404 "Agent not found". Only genuinely broken
+conditions throw — chiefly an unauthenticated caller, for which no org exists
+to scope the registry by.
 
 CRUD, REST smoke tests, per-agent auth, and identity forwarding are documented
 in [agent-registry.md](./agent-registry.md).
