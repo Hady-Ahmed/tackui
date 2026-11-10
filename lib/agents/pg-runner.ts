@@ -155,7 +155,8 @@ export function redactReservedEvent<E extends object>(
  *   RUN_STARTED is kept — multi-run histories (RUN_FINISHED → RUN_STARTED)
  *   are the normal shape, so the cut is scoped to the run that ended, not
  *   to the whole history. The verifier rejects every event except
- *   RUN_STARTED after a RUN_FINISHED ("The run has already finished with
+ *   RUN_STARTED (and RUN_ERROR, which replay filters out) after a
+ *   RUN_FINISHED ("The run has already finished with
  *   'RUN_FINISHED'. Start a new run with 'RUN_STARTED'."), so replaying
  *   strays would make the reconnect replay un-consumable.
  * - An unterminated run is closed with a synthetic RUN_FINISHED **only
@@ -180,8 +181,12 @@ export function redactReservedEvent<E extends object>(
  *   the same stream. The bridge supplies the "later RUN_STARTED" the
  *   synthesis exists for — it just isn't in the persisted history list.
  *
- * The failure flavor is preserved in the synthesized tool-call results
- * (status "error") so replayed history reads as failed, not completed.
+ * The synthesized tool-call results carry status "error": for an errored
+ * run that reads as failed, as intended. For a finished run whose record
+ * left a tool call unended, the same synthesis is a repair — the run
+ * succeeded, but the dangling call still needs a result before the
+ * verifier will accept the terminator, so "error" is the conservative
+ * placeholder.
  */
 function buildReplayEvents(
   events: BaseEvent[],
@@ -289,7 +294,16 @@ function buildReplayEvents(
       // RUN_STARTED) and the terminal of a run whose RUN_STARTED carried
       // no ids are kept — both preserve prior behavior. A RUN_FINISHED
       // trailing an already-finished run is stray bookkeeping — dropped.
-      if (!runFinished) out.push(event);
+      if (!runFinished) {
+        // Same shaping as the openRun branch: close whatever the id-less
+        // run left open (a no-op for well-formed runs), then treat the
+        // segment as finished so post-terminal strays are dropped and
+        // stale ids can't leak into the next segment's synthesized
+        // closures.
+        closeOpenSequences();
+        out.push(event);
+        runFinished = true;
+      }
       continue;
     }
     if (!runOpened) {

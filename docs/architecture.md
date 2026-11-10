@@ -117,7 +117,8 @@ the consumer's business, and re-presenting the failure as a completed turn
 would erase what the live client actually watched. Replay history also stops
 at each run's first surviving terminal event: stray bookkeeping recorded
 after a `RUN_FINISHED` (duplicate terminators, trailing traffic) is dropped —
-the verifier rejects everything but `RUN_STARTED` after a `RUN_FINISHED` —
+the verifier rejects everything but `RUN_STARTED` (and `RUN_ERROR`, which
+replay filters) after a `RUN_FINISHED` —
 while the next run's own `RUN_STARTED` is kept. A `RUN_ERROR` is deliberately
 NOT such a cut point: `compactEvents` persists an errored run's buffered
 message/tool-call traffic after the `RUN_ERROR` (unclosed sequences are

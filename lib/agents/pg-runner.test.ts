@@ -565,8 +565,9 @@ describe("PostgresAgentRunner — connect() smart replay", () => {
     ctx.skip(!pgStarted, "Real Postgres (Docker) unavailable");
     // A backend that keeps recording after its terminal (a duplicate
     // RUN_FINISHED, trailing message traffic) poisons the replay: the
-    // verifier rejects every event except RUN_STARTED after a RUN_FINISHED
-    // ("The run has already finished with 'RUN_FINISHED'"). The stray tail
+    // verifier rejects every event except RUN_STARTED (and RUN_ERROR,
+    // which replay filters) after a RUN_FINISHED ("The run has already
+    // finished with 'RUN_FINISHED'"). The stray tail
     // must not be re-emitted on reconnect.
     const events: BaseEvent[] = [
       { type: EventType.RUN_STARTED, threadId: "t-stray", runId: "run-stray" } as unknown as BaseEvent,
@@ -619,8 +620,9 @@ describe("PostgresAgentRunner — connect() smart replay", () => {
       { type: EventType.RUN_FINISHED, threadId: "t-two-runs", runId: "run-b" } as unknown as BaseEvent,
     ];
     await insertRun("t-two-runs", "run-a", runA);
-    // The parent chain pins the replay order independently of created_at
-    // clock resolution.
+    // The two awaited inserts run in separate transactions, so each gets
+    // a distinct created_at — that's what pins run-b after run-a under
+    // getHistoricRuns' ORDER BY created_at.
     await insertRun("t-two-runs", "run-b", runB, "run-a");
 
     const received = await collectReplay("t-two-runs");
