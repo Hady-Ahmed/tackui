@@ -4,6 +4,23 @@ All notable changes to this project will be documented in this file. The format 
 
 ## [Unreleased]
 
+- **Short `X-Forwarded-For` headers no longer mint spoofable rate-limit
+  buckets (#68).** When the header carries FEWER entries than
+  `TRUSTED_PROXY_HOPS`, the IP resolver used to clamp to its LEFTMOST
+  entry — on a misconfigured deployment (hop count set higher than the
+  real proxy chain) that entry is client-suppliable, so a client could
+  rotate a fresh bucket per request through every IP-keyed limiter (the
+  global flood cap, the deep health probe, Better Auth's sign-in
+  limiter). Short headers now fail closed to the shared `unknown` bucket:
+  all such requests mutually throttle instead, and the fix for the
+  operator is correcting the env var. Headers carrying exactly enough
+  hops — and the default single-hop self-host topology — still resolve
+  exactly as before. The same change completes the rate-limit docs: every
+  per-user route limit is now enumerated in `docs/security.md` and the
+  README (the admin-platform and catalog rows were missing), and the
+  install / connector-delete route families gain the route-level 429
+  tests the other families already had, alongside a new `client-ip`
+  resolver test file covering the spoof attempt itself.
 - **Fresh workspaces no longer log a console error on every page load
   (#74).** `getAgents()` used to throw when an org had zero agents, so the
   CopilotKit runtime answered `GET /api/copilotkit/info` with a 500 and the
