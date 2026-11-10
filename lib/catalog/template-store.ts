@@ -564,6 +564,21 @@ export interface InstallResult {
 }
 
 /**
+ * Thrown by installTemplate when it loses the concurrent-install race
+ * (the partial unique index's 23505) AND the winner's row is still not
+ * visible to two consecutive lookups. The install route maps this to a
+ * 409 — retryable, since a retry takes the plain re-sync path against the
+ * by-then-committed winner — instead of the raw 23505, which surfaced as
+ * a bare 500.
+ */
+export class TemplateInstallConflictError extends Error {
+  constructor(readonly templateId: string) {
+    super("Someone else just installed this template — please try again.");
+    this.name = "TemplateInstallConflictError";
+  }
+}
+
+/**
  * Idempotent install: registers a template as installed in the org's
  * `agents` table.
  *
@@ -623,8 +638,16 @@ export async function installTemplate(
     );
   } catch (err) {
     if (!isUniqueViolation(err)) throw err;
-    const winnerId = await findInstalledAgentId(template.id, orgId);
-    if (!winnerId) throw err;
+    // The winner's row is committed by the time our INSERT conflicts with
+    // it, but our snapshot may predate that commit — the first lookup can
+    // still miss. Retry once on a fresh read; if the row is STILL
+    // invisible, surface a conflict the route maps to 409 (retryable)
+    // rather than rethrowing the raw 23505, which the route's catch-all
+    // turned into a bare 500.
+    const winnerId =
+      (await findInstalledAgentId(template.id, orgId)) ??
+      (await findInstalledAgentId(template.id, orgId));
+    if (!winnerId) throw new TemplateInstallConflictError(template.id);
     return resyncInstalledAgent(winnerId, template, orgId, syncedAt);
   }
   const agent = (await getAgent(id, orgId))!;

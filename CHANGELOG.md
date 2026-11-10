@@ -4,6 +4,19 @@ All notable changes to this project will be documented in this file. The format 
 
 ## [Unreleased]
 
+- **Non-http(s) connector URLs are now rejected at submit with a clear
+  400 (#72).** `PUT /api/connectors` accepted any URL scheme and stored
+  it, failing only later — as the store's generic validation 400 or, once
+  the platform fetched the endpoint at run time, as a 502. The
+  http(s)-only rule now fires at the input boundary with the reason named
+  in the validation error. The SSRF guard's behavior is unchanged.
+- **A lost catalog-install race now answers 409 (retry) instead of a
+  server error (#72).** Two simultaneous installs of the same template
+  are arbitrated by a unique index and the loser re-syncs the winner's
+  copy; in a rare visibility window that fallback could find no winner
+  and fail with a bare 500. The fallback now retries the winner lookup
+  once and, if the winner's row is still invisible, returns 409 —
+  retrying completes the install through the normal re-sync path.
 - **Concurrent template edits can no longer silently lose a just-saved
   secret (#127).** Two admins editing the same catalog template at the
   same instant raced last-write-wins: a rename racing a secret re-save

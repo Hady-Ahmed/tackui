@@ -135,11 +135,24 @@ describe("PUT /api/connectors", () => {
     expect(body.error).toBe("Validation failed");
   });
 
-  it("returns 400 for a non-http(s) url (store schema)", async () => {
+  it("returns 400 for a non-http(s) url (route schema — rejected before any side effect)", async () => {
     const res = await put({ name: "x", url: "ftp://mcp.example.com/x" });
     expect(res.status).toBe(400);
     const body = await res.json();
     expect(body.error).toBe("Validation failed");
+    // The scheme failure is named, not a generic rejection.
+    expect(body.details.fieldErrors.url).toContain("URL must be http(s)");
+    // Rejected at the input boundary: no platform-registry push, nothing
+    // stored (the scheme used to pass the route and fail late — in the
+    // store, or as a run-time 502).
+    expect(mockUpsertPlatformConnector).not.toHaveBeenCalled();
+    expect(await listConnectors(ORG)).toEqual([]);
+  });
+
+  it("returns 400 for a file: url (same scheme boundary)", async () => {
+    const res = await put({ name: "x", url: "file:///etc/agents" });
+    expect(res.status).toBe(400);
+    expect(mockUpsertPlatformConnector).not.toHaveBeenCalled();
   });
 
   it("creates a connector without a token", async () => {

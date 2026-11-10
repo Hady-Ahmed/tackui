@@ -72,8 +72,11 @@ const nameSchema = z
     "Name must be alphanumeric with dashes/underscores",
   );
 // Only http(s): connector URLs are fetched by the AgentOS at run time —
-// other schemes (file:, ftp:, data:) have no legitimate use here.
-const urlSchema = z
+// other schemes (file:, ftp:, data:) have no legitimate use here. Exported
+// for the connectors route's body schema, which must enforce the same
+// scheme boundary at INPUT — a non-http(s) URL that passes the route used
+// to be stored and only fail here (or as a run-time fetch error).
+export const urlSchema = z
   .string()
   .url()
   .max(2000)

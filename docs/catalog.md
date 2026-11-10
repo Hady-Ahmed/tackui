@@ -81,9 +81,13 @@ changes the org's agent list) → `checkTemplateInstall` (plan gate) →
   partial unique index from migration 0015 (`agents_org_template_uniq`
   on `(org_id, source_template_id) WHERE source_template_id IS NOT NULL`)
   makes the second INSERT fail with 23505 — `installTemplate()` catches
-  the violation and falls back to re-syncing the winner's row, so the org
-  always ends up with exactly one installed copy. Manual agents are
-  unaffected (NULL `source_template_id`, NULLs distinct).
+  the violation, re-reads the winner (a fresh read sees its committed
+  row), and falls back to re-syncing that row, so the org always ends up
+  with exactly one installed copy. In the rare case the winner's row is
+  still not visible even to the re-read, the route answers 409 —
+  retryable, since a retry takes the plain re-sync path — instead of a
+  bare 500. Manual agents are unaffected (NULL `source_template_id`,
+  NULLs distinct).
   Known residual edge: `checkAgentCountLimit` is still check-then-act, so
   N concurrent installs of *different* templates at the cap boundary can
   briefly overshoot the plan's agent cap by N−1 rows — accepted (no data

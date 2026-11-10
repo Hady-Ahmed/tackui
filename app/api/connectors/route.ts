@@ -28,12 +28,17 @@ import {
   listConnectors,
   upsertConnector,
   toPublicConnector,
+  urlSchema,
 } from "@/lib/connectors/connector-store";
 import { upsertPlatformConnector } from "@/lib/connectors/platform-sync";
 
 const upsertConnectorBodySchema = z.object({
   name: z.string().trim().min(1).max(100),
-  url: z.string().url(),
+  // The same http(s)-only schema the store enforces — scheme validated
+  // HERE so the caller gets a clean 400 instead of a stored-but-broken
+  // connector (the store's later rejection read as a generic failure,
+  // and the run-time platform fetch would surface as a 502).
+  url: urlSchema,
   /** Omitted → preserve stored token; "" → clear; string → encrypt+store. */
   token: z.string().max(2000).optional(),
 });
@@ -72,7 +77,8 @@ export async function PUT(request: NextRequest) {
 
   // The URL is user-supplied and the AgentOS fetches it at run time with the
   // org's token attached — the SSRF guard applies (same as agent endpoints).
-  // Zod's http(s)-only check governs the scheme; this governs the address.
+  // The body schema's http(s)-only check governs the scheme; this governs
+  // the address.
   try {
     await assertSafeUrl(parsed.data.url);
   } catch (err) {

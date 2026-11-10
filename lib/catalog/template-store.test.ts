@@ -18,25 +18,65 @@ import {
 } from "./template-store";
 import { toPublicAgent } from "@/lib/agents/agent-store";
 import type { CreateTemplateInput } from "./template-store";
+import { TemplateInstallConflictError } from "./template-store";
 import type { AgentTemplate } from "./catalog.config";
 import { runMigrations } from "@/lib/db/migrate";
 import { query, withTransaction } from "@/lib/db/pg";
+import type { PgQueryable } from "@/lib/db/pg";
 import { useRealPostgres } from "@/lib/db/test-postgres";
 import { createAgent, listAgents, deleteAgent } from "@/lib/agents/agent-store";
+import type {
+  QueryConfigValues,
+  QueryResult,
+  QueryResultRow,
+} from "pg";
 
-// Passthrough wrapper around @/lib/db/pg that COUNTS withTransaction
-// calls — proof that updateTemplate's read-merge-write runs inside one
-// transaction (the issue-#127 serialization boundary) without
-// reimplementing the runner. Everything else forwards to the real module
-// untouched.
+// Passthrough wrapper around @/lib/db/pg with two seams:
+//   - pgCounters counts withTransaction calls — proof that
+//     updateTemplate's read-merge-write runs inside one transaction (the
+//     issue-#127 serialization boundary) without reimplementing the runner.
+//   - pgScript arms per-test failure injection: `queryScript` scripts
+//     module-level query() results/throws by SQL text (the installTemplate
+//     lost-race tests), `txFailure` makes ONE matching statement throw
+//     inside the transaction client (the deleteTemplate rollback test —
+//     which runs against real Postgres, since pg-mem cannot roll back
+//     cross-statement mutations). Both default null = full passthrough.
 const pgCounters = vi.hoisted(() => ({ withTransaction: 0 }));
+const pgScript = vi.hoisted(() => ({
+  queryScript: null as null | ((text: string) => unknown),
+  txFailure: null as null | { match: string; error: Error },
+}));
 vi.mock("@/lib/db/pg", async (importOriginal) => {
   const actual = await importOriginal<typeof import("@/lib/db/pg")>();
   return {
     ...actual,
+    query: async <T extends QueryResultRow>(
+      text: string,
+      values?: unknown[],
+    ): Promise<QueryResult<T>> => {
+      const scripted = pgScript.queryScript?.(text);
+      return scripted !== undefined
+        ? (scripted as QueryResult<T>)
+        : actual.query<T>(text, values);
+    },
     withTransaction: (fn: Parameters<typeof actual.withTransaction>[0]) => {
       pgCounters.withTransaction += 1;
-      return actual.withTransaction(fn);
+      const failure = pgScript.txFailure;
+      if (!failure) return actual.withTransaction(fn);
+      // Every statement of the transaction still runs against the real
+      // client — only the one whose SQL matches rejects, so the runner's
+      // own ROLLBACK (not a stub) is what gets exercised.
+      return actual.withTransaction((client) =>
+        fn({
+          query: async <T extends QueryResultRow>(
+            text: string,
+            values?: QueryConfigValues<unknown[]>,
+          ): Promise<QueryResult<T>> => {
+            if (text.includes(failure.match)) throw failure.error;
+            return client.query<T>(text, values);
+          },
+        } as PgQueryable),
+      );
     },
   };
 });
@@ -85,6 +125,8 @@ beforeEach(async () => {
   // Reset AFTER setup: runMigrations itself wraps its run in
   // withTransaction, and the counter must count the test's own calls only.
   pgCounters.withTransaction = 0;
+  pgScript.queryScript = null;
+  pgScript.txFailure = null;
 });
 
 describe("createTemplateBodySchema", () => {
@@ -676,6 +718,54 @@ describe("updateTemplate concurrency (real Postgres)", () => {
   });
 });
 
+describe("deleteTemplate transactional invariant (real Postgres)", () => {
+  it("an error between the DELETE and the tombstone UPDATE rolls BOTH back — no half-deleted state (real Postgres)", async (ctx) => {
+    const restore = await useRealPostgres();
+    if (!restore) {
+      ctx.skip(); // Docker-less local environment only; CI must never skip
+      return;
+    }
+    try {
+      // The container persists across this file's real-PG tests (and
+      // beforeEach's cleanup runs against pg-mem) — clear what this test
+      // touches so its slug and org are free.
+      await query(`DELETE FROM agent_templates`);
+      await query(`DELETE FROM agents WHERE org_id = $1`, [TEST_ORG]);
+      const template = await createTemplate(validInput);
+      const { agent } = await installTemplate(template, TEST_ORG);
+
+      // Make the tombstone UPDATE throw AFTER the template DELETE has
+      // succeeded — the exact mid-transaction window the one-transaction
+      // comment guards against. (pg-mem can't roll back cross-statement
+      // mutations, so this invariant is only provable on real Postgres.)
+      pgScript.txFailure = {
+        match: "template_deleted_at",
+        error: new Error("tombstone update failed"),
+      };
+      try {
+        await expect(deleteTemplate(template.id)).rejects.toThrow(
+          "tombstone update failed",
+        );
+      } finally {
+        pgScript.txFailure = null;
+      }
+
+      // THE assertion: nothing half-applied. The template row survived the
+      // rollback (the delete was undone), and the installed copy carries
+      // NO tombstone — still live and runnable, not a ghost "Removed" copy
+      // referencing a template that no longer exists.
+      expect(await getTemplate(template.id)).not.toBeNull();
+      const after = await query<{ template_deleted_at: Date | string | null }>(
+        `SELECT template_deleted_at FROM agents WHERE id = $1`,
+        [agent.id],
+      );
+      expect(after.rows[0]?.template_deleted_at).toBeNull();
+    } finally {
+      restore();
+    }
+  });
+});
+
 describe("deleteTemplate + countTemplateInstalls", () => {
   it("deletes a template and returns true; false when missing", async () => {
     const created = await createTemplate(validInput);
@@ -825,6 +915,69 @@ describe("installTemplate (idempotent upsert)", () => {
     expect(rows).toHaveLength(1);
     expect(new Set([a.agent.id, b.agent.id]).size).toBe(1);
     expect(await findInstalledAgentId(template.id, TEST_ORG)).toBe(a.agent.id);
+  });
+
+  it("loses-race fallback: the first winner lookup misses, the RETRY sees the winner and re-syncs it", async () => {
+    const template = await createTemplate(validInput);
+    const winner = await installTemplate(template, TEST_ORG);
+    // The race, replayed against the committed winner: the loser's initial
+    // lookup misses (its snapshot predates the winner's commit), the INSERT
+    // hits migration 0015's unique index (23505), the FIRST fallback lookup
+    // misses AGAIN (same stale snapshot) — and the retry, a fresh read,
+    // finally sees the winner. Script: lookups 1-2 miss, lookup 3 hits;
+    // every INSERT raises the unique violation.
+    let lookups = 0;
+    pgScript.queryScript = (text) => {
+      if (text.startsWith("INSERT INTO agents")) {
+        throw Object.assign(
+          new Error('duplicate key value violates unique constraint "agents_org_template_uniq"'),
+          { code: "23505" },
+        );
+      }
+      if (text.includes("source_template_id = $2")) {
+        lookups += 1;
+        return lookups < 3 ? { rows: [] } : { rows: [{ id: winner.agent.id }] };
+      }
+      return undefined;
+    };
+    try {
+      const result = await installTemplate(template, TEST_ORG);
+      expect(lookups).toBe(3); // initial miss + fallback miss + retry hit
+      expect(result.installed).toBe(false);
+      expect(result.agent.id).toBe(winner.agent.id);
+    } finally {
+      pgScript.queryScript = null;
+    }
+    // Still exactly one row — the loser joined the winner, no duplicate.
+    expect(await listAgents(TEST_ORG)).toHaveLength(1);
+  });
+
+  it("loses-race fallback: a winner that stays invisible to BOTH lookups surfaces as a typed conflict, not the raw 23505", async () => {
+    const template = await createTemplate(validInput);
+    // The pathological visibility race: the 23505 PROVES the winner's row
+    // is committed, yet it never becomes visible to the loser's reads —
+    // the first fallback lookup AND its retry both miss. This used to
+    // rethrow the raw 23505, which the route's catch-all turned into a
+    // bare 500.
+    pgScript.queryScript = (text) => {
+      if (text.startsWith("INSERT INTO agents")) {
+        throw Object.assign(
+          new Error('duplicate key value violates unique constraint "agents_org_template_uniq"'),
+          { code: "23505" },
+        );
+      }
+      if (text.includes("source_template_id = $2")) return { rows: [] };
+      return undefined;
+    };
+    try {
+      await expect(installTemplate(template, TEST_ORG)).rejects.toBeInstanceOf(
+        TemplateInstallConflictError,
+      );
+    } finally {
+      pgScript.queryScript = null;
+    }
+    // No half-installed row either: the INSERT failed and no fallback ran.
+    expect(await listAgents(TEST_ORG)).toHaveLength(0);
   });
 
   it("the partial unique index blocks duplicates at the DB level but not manual agents", async () => {
