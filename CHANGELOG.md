@@ -4,6 +4,13 @@ All notable changes to this project will be documented in this file. The format 
 
 ## [Unreleased]
 
+- **Concurrent template edits can no longer silently lose a just-saved
+  secret (#127).** Two admins editing the same catalog template at the
+  same instant raced last-write-wins: a rename racing a secret re-save
+  could land with the rename intact and the brand-new secret destroyed
+  (the rename carried back the stale secret bytes it read before the
+  other save). Template updates now serialize on a row lock — the
+  second edit merges over the first's committed state, so both land.
 - **Undecryptable secrets can no longer be erased by unrelated edits, and
   concurrent credential rotations can no longer silently drop each other
   (#70).** Three secret-handling edges tightened. (1) `updateTemplate`

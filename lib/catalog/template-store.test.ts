@@ -18,9 +18,28 @@ import {
 } from "./template-store";
 import { toPublicAgent } from "@/lib/agents/agent-store";
 import type { CreateTemplateInput } from "./template-store";
+import type { AgentTemplate } from "./catalog.config";
 import { runMigrations } from "@/lib/db/migrate";
-import { query } from "@/lib/db/pg";
+import { query, withTransaction } from "@/lib/db/pg";
+import { useRealPostgres } from "@/lib/db/test-postgres";
 import { createAgent, listAgents, deleteAgent } from "@/lib/agents/agent-store";
+
+// Passthrough wrapper around @/lib/db/pg that COUNTS withTransaction
+// calls — proof that updateTemplate's read-merge-write runs inside one
+// transaction (the issue-#127 serialization boundary) without
+// reimplementing the runner. Everything else forwards to the real module
+// untouched.
+const pgCounters = vi.hoisted(() => ({ withTransaction: 0 }));
+vi.mock("@/lib/db/pg", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("@/lib/db/pg")>();
+  return {
+    ...actual,
+    withTransaction: (fn: Parameters<typeof actual.withTransaction>[0]) => {
+      pgCounters.withTransaction += 1;
+      return actual.withTransaction(fn);
+    },
+  };
+});
 
 const TEST_ORG = "test-org-id";
 const OTHER_ORG = "other-org-id";
@@ -63,6 +82,9 @@ async function cleanup() {
 beforeEach(async () => {
   await runMigrations();
   await cleanup();
+  // Reset AFTER setup: runMigrations itself wraps its run in
+  // withTransaction, and the counter must count the test's own calls only.
+  pgCounters.withTransaction = 0;
 });
 
 describe("createTemplateBodySchema", () => {
@@ -555,6 +577,102 @@ describe("updateTemplate", () => {
     await expect(
       updateTemplate(created.id, { requiredPlan: "pro" }),
     ).rejects.toThrow();
+  });
+
+  it("runs the read-merge-write inside ONE transaction (withTransaction per update)", async () => {
+    const created = await createTemplate(validInput);
+    const updated = await updateTemplate(created.id, { name: "Renamed" });
+    expect(updated?.name).toBe("Renamed");
+    expect(pgCounters.withTransaction).toBe(1);
+  });
+});
+
+describe("updateTemplate concurrency (real Postgres)", () => {
+  it("serializes a concurrent rename + secret re-save — both survive (real Postgres)", async (ctx) => {
+    const restore = await useRealPostgres();
+    if (!restore) {
+      ctx.skip(); // Docker-less local environment only; CI must never skip
+      return;
+    }
+    try {
+      // The container persists across this file's tests (beforeEach's
+      // cleanup runs against pg-mem, not here) — clear the table so
+      // validInput's unique slug is free.
+      await query(`DELETE FROM agent_templates`);
+      const created = await createTemplate({
+        ...validInput,
+        authMode: "jwt",
+        jwtSecret: "s".repeat(32),
+      });
+
+      // Hold the template row's lock from OUTSIDE both updates so each
+      // one's read-merge-write QUEUES behind it. Under the fix each call
+      // blocks at its SELECT ... FOR UPDATE and reads only after the
+      // previous writer committed. (Unserialized, both calls read the
+      // ORIGINAL row before either write — the rename's write-back then
+      // carries the stale pre-save secret bytes and the just-saved secret
+      // is silently destroyed.)
+      let pending!: Promise<(AgentTemplate | null)[]>;
+      await withTransaction(async (holder) => {
+        await holder.query(
+          `SELECT id FROM agent_templates WHERE id = $1 FOR UPDATE`,
+          [created.id],
+        );
+        pending = Promise.all([
+          updateTemplate(created.id, { name: "Renamed" }),
+          updateTemplate(created.id, { jwtSecret: "t".repeat(32) }),
+        ]);
+        // Give both updates time to reach their lock wait, then release
+        // the holder (COMMIT) — from here the updates proceed one at a
+        // time, the second merging over the first's committed row.
+        await new Promise((resolve) => setTimeout(resolve, 150));
+      });
+
+      const [renamed, secreted] = await pending;
+      expect(renamed).not.toBeNull();
+      expect(secreted).not.toBeNull();
+      // THE assertion: both concurrent edits landed — the rename AND the
+      // new secret decrypt (the rename didn't carry back the old secret).
+      const after = await getTemplate(created.id);
+      expect(after?.name).toBe("Renamed");
+      expect(after?.jwtSecret).toBe("t".repeat(32));
+    } finally {
+      restore();
+    }
+  });
+
+  it("the template row lock is a real serialization point: a competing FOR UPDATE waits, then times out (real Postgres)", async (ctx) => {
+    const restore = await useRealPostgres();
+    if (!restore) {
+      ctx.skip();
+      return;
+    }
+    try {
+      await query(`DELETE FROM agent_templates`);
+      const created = await createTemplate(validInput);
+      // tx1 takes updateTemplate's lock and holds it; tx2 — the same
+      // shape of statement the update runs — must block on that row.
+      // Proves FOR UPDATE genuinely conflicts across connections (pg-mem
+      // has no locking, so only real Postgres can answer this).
+      await withTransaction(async (holder) => {
+        await holder.query(
+          `SELECT id FROM agent_templates WHERE id = $1 FOR UPDATE`,
+          [created.id],
+        );
+        await expect(
+          withTransaction(async (competing) => {
+            // Transaction-local so nothing outlives this tx.
+            await competing.query(`SET LOCAL lock_timeout = '250ms'`);
+            await competing.query(
+              `SELECT id FROM agent_templates WHERE id = $1 FOR UPDATE`,
+              [created.id],
+            );
+          }),
+        ).rejects.toMatchObject({ code: "55P03" }); // lock_not_available
+      });
+    } finally {
+      restore();
+    }
   });
 });
 
