@@ -4,6 +4,14 @@ All notable changes to this project will be documented in this file. The format 
 
 ## [Unreleased]
 
+- **`clearThreads()` is a deliberate no-op (#99).** The runner's
+  interface-required clear method used to fire-and-forget an unscoped
+  DELETE across all four persistence tables — unreachable today (the
+  copilotkit route 403s the demo's `POST /threads/clear`), but capable
+  of erasing a live run's `run_state` lock row if it ever ran mid-run
+  (interleaved history + unstoppable stop). The method now does nothing
+  by design; a real "clear everything" feature needs deliberate scoping,
+  auth, and live-run handling.
 - **Agent builder tool palette: readable rows, palette search, honest
   tool cap.** Palette rows were a single flex line where the key badge
   crushed both the tool name ("Gen…") and the description into

@@ -99,9 +99,10 @@ async function seedThread(
 
 beforeEach(async () => {
   await runMigrations();
-  // Clear PG state for the next test. We do this directly rather than
-  // via runner.clearThreads() (which is sync + fire-and-forget async DB
-  // delete) to ensure PG is clean before the test starts.
+  // Clear PG state for the next test. We do this directly via awaited
+  // deletes — runner.clearThreads() is a deliberate no-op (#99) and won't
+  // isolate state between tests — to ensure PG is clean before the test
+  // starts.
   await query("DELETE FROM agent_runs");
   await query("DELETE FROM run_state");
   await query("DELETE FROM thread_messages");
@@ -116,9 +117,10 @@ describe("PostgresAgentRunner — thread scoping (cache-based listThreads)", () 
     // Wait for the constructor's fire-and-forget refreshCacheFromDB() to
     // finish. Without this, the refresh could fire AFTER test seeding and
     // overwrite the cache with stale (empty) data. No runner.clearThreads()
-    // here — see the stop-first suite's beforeEach (#97): its
-    // fire-and-forget clearThreadsAsync() deletes every table
-    // unconditionally and can land mid-test.
+    // here — it's a deliberate no-op (#99) and won't isolate state between
+    // tests, so fixtures wipe PG directly via awaited query() (see the
+    // stop-first suite's beforeEach for the #97 flake history behind that
+    // pattern).
     await runner.awaitRefreshed();
   });
 
@@ -311,9 +313,10 @@ describe("PostgresAgentRunner — thread reads + stop (cross-tenant IDOR guards)
 
   beforeEach(async () => {
     runner = makeRunner();
-    // No runner.clearThreads() here — see the stop-first suite's
-    // beforeEach (#97): its fire-and-forget clearThreadsAsync() deletes
-    // every table unconditionally and can land mid-test.
+    // No runner.clearThreads() here — it's a deliberate no-op (#99) and
+    // won't isolate state between tests, so fixtures wipe PG directly via
+    // awaited query() (see the stop-first suite's beforeEach for the #97
+    // flake history behind that pattern).
     await runner.awaitRefreshed();
   });
 
@@ -377,9 +380,10 @@ describe("PostgresAgentRunner — connect() smart replay", () => {
 
   beforeEach(async () => {
     runner = makeRunner();
-    // No runner.clearThreads() here — see the stop-first suite's
-    // beforeEach (#97): its fire-and-forget clearThreadsAsync() deletes
-    // every table unconditionally and can land mid-test.
+    // No runner.clearThreads() here — it's a deliberate no-op (#99) and
+    // won't isolate state between tests, so fixtures wipe PG directly via
+    // awaited query() (see the stop-first suite's beforeEach for the #97
+    // flake history behind that pattern).
     await runner.awaitRefreshed();
   });
 
@@ -481,9 +485,10 @@ describe("PostgresAgentRunner — isRunning / stop", () => {
 
   beforeEach(async () => {
     runner = makeRunner();
-    // No runner.clearThreads() here — see the stop-first suite's
-    // beforeEach (#97): its fire-and-forget clearThreadsAsync() deletes
-    // every table unconditionally and can land mid-test.
+    // No runner.clearThreads() here — it's a deliberate no-op (#99) and
+    // won't isolate state between tests, so fixtures wipe PG directly via
+    // awaited query() (see the stop-first suite's beforeEach for the #97
+    // flake history behind that pattern).
     await runner.awaitRefreshed();
   });
 
@@ -509,13 +514,17 @@ describe("PostgresAgentRunner — stop during a thread's FIRST in-flight run", (
 
   beforeEach(async () => {
     runner = makeRunner();
-    // No runner.clearThreads() here: its fire-and-forget clearThreadsAsync()
-    // deletes EVERY table unconditionally, and under CI load it landed
-    // after this suite's run had claimed the run_state lock — wiping the
-    // fresh row mid-test, so stop() read not-running and denied the owner
-    // (#97, CI run 42444771100). The file-level beforeEach already clears
+    // No runner.clearThreads() here — it's a deliberate no-op (#99) and
+    // won't isolate state between tests, so fixtures wipe PG directly via
+    // awaited query(). Incident that settled the awaited-delete rule
+    // (#97, CI run 42444771100): the since-removed fire-and-forget
+    // clearThreadsAsync() deleted EVERY table unconditionally, and under
+    // CI load it landed after this suite's run had claimed the run_state
+    // lock — wiping the fresh row mid-test, so stop() read not-running
+    // and denied the owner. The file-level beforeEach already clears
     // every table with awaited deletes, and the fresh runner's refresh
-    // sees an empty DB — the async delete was pure overhead plus hazard.
+    // sees an empty DB — the async delete was pure overhead plus hazard,
+    // which is why #99 removed it outright.
     await runner.awaitRefreshed();
   });
 
@@ -703,11 +712,10 @@ describe("PostgresAgentRunner — run/connect cross-tenant guards", () => {
 
   beforeEach(async () => {
     runner = makeRunner();
-    // No runner.clearThreads() here: it's fire-and-forget async DB work
-    // that can land AFTER this test's seeded rows and wipe them (source
-    // of a rare flake). The file-level beforeEach already clears every
-    // table with awaited deletes, and the fresh runner's refresh sees an
-    // empty DB.
+    // No runner.clearThreads() here — it's a deliberate no-op (#99) and
+    // won't isolate state between tests. The file-level beforeEach already
+    // clears every table with awaited deletes, and the fresh runner's
+    // refresh sees an empty DB.
     await runner.awaitRefreshed();
   });
 
@@ -844,8 +852,8 @@ describe("PostgresAgentRunner — run lock + teardown lifecycle", () => {
 
   beforeEach(async () => {
     runner = makeRunner();
-    // No fire-and-forget clearThreads() — same flake reasoning as the
-    // cross-tenant guards suite above.
+    // No runner.clearThreads() here — it's a deliberate no-op (#99), same
+    // reasoning as the cross-tenant guards suite above.
     await runner.awaitRefreshed();
   });
 
@@ -1577,9 +1585,10 @@ describe("PostgresAgentRunner — sync cache reads (getThreadMessages / getThrea
 
   beforeEach(async () => {
     runner = makeRunner();
-    // No runner.clearThreads() here — see the stop-first suite's
-    // beforeEach (#97): its fire-and-forget clearThreadsAsync() deletes
-    // every table unconditionally and can land mid-test.
+    // No runner.clearThreads() here — it's a deliberate no-op (#99) and
+    // won't isolate state between tests, so fixtures wipe PG directly via
+    // awaited query() (see the stop-first suite's beforeEach for the #97
+    // flake history behind that pattern).
     await runner.awaitRefreshed();
   });
 
@@ -1627,22 +1636,64 @@ describe("PostgresAgentRunner — sync cache reads (getThreadMessages / getThrea
     expect(runner.getThreadState("t-state")).toEqual({ step: 2, final: true });
   });
 
-  it("clearThreads clears all 3 caches synchronously", () => {
-    caches(runner).threadCache.set("t1", {
-      id: "t1", name: "T1", agentId: "a", organizationId: "",
-      createdById: "", archived: false, createdAt: "", updatedAt: "",
-    });
-    caches(runner).messageCache.set("t1", [{ id: "m1", role: "user", content: "x" } as Message]);
-    caches(runner).eventsCache.set("t1", [
-      { type: EventType.RUN_STARTED, threadId: "t1" } as unknown as BaseEvent,
+  it("clearThreads is a deliberate no-op — nothing deleted, nothing mutated", async () => {
+    // #99: the old body cleared all 3 caches and fire-and-forget an
+    // unscoped DELETE-all (clearThreadsAsync()); landing mid-run it erased
+    // the live run's run_state lock row — enabling concurrent-run history
+    // interleaving and wedging stop(). The interface method must now do
+    // NOTHING: a global wipe has no legitimate owner in a multi-tenant DB,
+    // and the only HTTP path is 403'd at the copilotkit route. Seeding a
+    // thread + live lock row and asserting every row and cache entry
+    // survives makes this the anti-regression guard — restore any delete
+    // or cache-clear body and it fails.
+    await seedThread(runner, "t-noop", "agent-a", "Keeper", user1.id);
+    await query(
+      `INSERT INTO run_state (thread_id, is_running, current_run_id)
+       VALUES ('t-noop', true, 'run-t-noop')`,
+    );
+    await query(
+      `INSERT INTO thread_messages (thread_id, messages)
+       VALUES ($1, $2::jsonb)`,
+      ["t-noop", JSON.stringify([{ id: "m1", role: "user", content: "hi" }])],
+    );
+    caches(runner).messageCache.set("t-noop", [
+      { id: "m1", role: "user", content: "hi" } as Message,
+    ]);
+    caches(runner).eventsCache.set("t-noop", [
+      { type: EventType.STATE_SNAPSHOT, snapshot: { step: 1 } } as unknown as BaseEvent,
     ]);
 
     runner.clearThreads();
 
-    expect(runner.listThreads()).toHaveLength(0);
-    expect(runner.getThreadMessages("t1")).toEqual([]);
-    expect(runner.getThreadEvents("t1")).toEqual([]);
-    expect(runner.getThreadState("t1")).toBeNull();
+    // No cache mutation either — a cache-only clear would be equally
+    // wrong: the caches are read-through from PG, so the "clear"
+    // un-clears itself on the next refreshCacheFromDB().
+    expect(runner.listThreads()).toHaveLength(1);
+    expect(runner.getThreadMessages("t-noop")).toHaveLength(1);
+    expect(runner.getThreadEvents("t-noop")).toHaveLength(1);
+    expect(runner.getThreadState("t-noop")).toEqual({ step: 1 });
+
+    // Every row of every table survives — above all the live run's lock
+    // row in run_state.
+    const runs = await query<{ c: number }>("SELECT count(*)::int as c FROM agent_runs");
+    // The lock row verbatim — a bare-column select, not an aggregate (the
+    // count(*) forms below can't carry it; pg-mem nulls bare columns).
+    const lockRow = await query<{
+      thread_id: string;
+      is_running: boolean;
+      current_run_id: string | null;
+    }>("SELECT thread_id, is_running, current_run_id FROM run_state");
+    const msgs = await query<{ c: number }>("SELECT count(*)::int as c FROM thread_messages");
+    const meta = await query<{ c: number }>("SELECT count(*)::int as c FROM thread_metadata");
+    expect(runs.rows[0]?.c).toBe(1);
+    expect(lockRow.rows).toHaveLength(1);
+    expect(lockRow.rows[0]).toMatchObject({
+      thread_id: "t-noop",
+      is_running: true,
+      current_run_id: "run-t-noop",
+    });
+    expect(msgs.rows[0]?.c).toBe(1);
+    expect(meta.rows[0]?.c).toBe(1);
   });
 });
 
@@ -1722,9 +1773,10 @@ describe("PostgresAgentRunner — redaction chain integration (live ALS → stre
 
   beforeEach(async () => {
     runner = makeRunner();
-    // No runner.clearThreads() here — see the stop-first suite's
-    // beforeEach (#97): its fire-and-forget clearThreadsAsync() deletes
-    // every table unconditionally and can land mid-test.
+    // No runner.clearThreads() here — it's a deliberate no-op (#99) and
+    // won't isolate state between tests, so fixtures wipe PG directly via
+    // awaited query() (see the stop-first suite's beforeEach for the #97
+    // flake history behind that pattern).
     await runner.awaitRefreshed();
   });
 

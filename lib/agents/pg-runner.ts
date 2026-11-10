@@ -940,19 +940,19 @@ export class PostgresAgentRunner extends AgentRunner {
   }
 
   clearThreads(): void {
-    // Sync cache clear — the user sees an empty sidebar immediately.
-    this.threadCache.clear();
-    this.messageCache.clear();
-    this.eventsCache.clear();
-    // Fire-and-forget the DB delete. If it fails, PG still has the rows
-    // and they'll reappear on the next refreshCacheFromDB() (e.g. on
-    // server restart). Trade-off: brief cache/DB inconsistency is
-    // acceptable for a clearThreads() call (admin-only operation).
-    this.clearThreadsAsync().catch((err) => {
-      console.error("[runner] clearThreads DB delete failed", {
-        error: err instanceof Error ? err.message : String(err),
-      });
-    });
+    // Deliberate no-op.
+    //
+    // CopilotKit's LocalThreadEndpointRunner interface requires this
+    // method (it powers the demo's POST /threads/clear "Clear button"),
+    // but a global wipe is not a meaningful operation for this runner:
+    // PG is multi-tenant, the runner has no caller identity to scope a
+    // delete by, and wiping run_state would delete live runs' lock rows
+    // (concurrent-run corruption + unstoppable runs — see #97/#99). The
+    // library itself documents that real-DB history "must not be wiped
+    // this way". The HTTP path is refused at the copilotkit route (403,
+    // test-pinned). If a real "clear everything" product need ever
+    // appears, design it deliberately — scoping, auth, live-run handling
+    // — rather than restoring this body.
   }
 
   // ─── Async cache helpers (called from async paths) ────────────────────
@@ -1009,15 +1009,6 @@ export class PostgresAgentRunner extends AgentRunner {
       [threadId],
     );
     return result.rows[0]?.messages ?? [];
-  }
-
-  private async clearThreadsAsync(): Promise<void> {
-    await withTransaction(async (client) => {
-      await client.query("DELETE FROM agent_runs");
-      await client.query("DELETE FROM run_state");
-      await client.query("DELETE FROM thread_messages");
-      await client.query("DELETE FROM thread_metadata");
-    });
   }
 
   // ─── Thread mutations (used by /api/threads/[id] route) ───────────────
