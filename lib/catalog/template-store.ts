@@ -404,92 +404,91 @@ export async function createTemplate(
  * the existing secret (blank-preserve, same as agents) — including an
  * UNDECRYPTABLE stored ciphertext, which is written back raw
  * (byte-for-byte): a decrypt failure is never silently upgraded to "no
- * secret" (see storedRawJwtSecret).
+ * secret".
+ *
+ * The read-merge-write runs inside ONE transaction holding the row's
+ * `SELECT ... FOR UPDATE` lock (same pattern as the credentials PUT).
+ * Unserialized, two concurrent updates both read the same base and last
+ * write wins: a rename racing a secret re-save would write back the
+ * stale pre-save secret bytes and silently destroy the just-saved
+ * secret. The lock serializes the pair, so the second writer's locked
+ * read sees the first writer's committed row and merges over it.
  */
 export async function updateTemplate(
   id: string,
   patch: UpdateTemplateInput,
 ): Promise<AgentTemplate | null> {
-  const existing = await getTemplate(id);
-  if (!existing) return null;
-  const merged = {
-    id,
-    name: existing.name,
-    slug: existing.slug,
-    tagline: existing.tagline,
-    description: existing.description,
-    category: existing.category ?? null,
-    icon: existing.icon ?? null,
-    endpoint: existing.endpoint,
-    authMode: existing.authMode,
-    jwtSecret: existing.jwtSecret,
-    jwtScopes: existing.jwtScopes,
-    requiredPlan: existing.requiredPlan ?? null,
-    freeDailyQuota: existing.freeDailyQuota ?? null,
-    paidDailyQuota: existing.paidDailyQuota ?? null,
-    sortOrder: existing.sortOrder,
-    isActive: existing.isActive,
-    ...patch,
-  };
-  const parsed = templateRowSchema.parse(merged);
-  // Re-encrypt (fresh IV) when the merged row carries a usable secret —
-  // same behavior as agent-store's updateAgent. When it doesn't, DON'T
-  // write NULL: `existing.jwtSecret` is undefined both for "no secret
-  // stored" and for "stored but undecryptable" (rowToTemplate degrades a
-  // decrypt failure to secret-less), and nulling the latter would
-  // silently destroy the stored ciphertext on an unrelated edit (a
-  // rename), unrecoverable even after the encryption key is restored.
-  // An update that supplies no secret preserves the raw stored value.
-  const jwtSecretForDb = parsed.jwtSecret
-    ? encryptSecret(parsed.jwtSecret)
-    : await storedRawJwtSecret(id);
-  const result = await query<TemplateRow>(
-    `UPDATE agent_templates
-     SET name = $1, slug = $2, tagline = $3, description = $4,
-         category = $5, icon = $6, endpoint = $7, auth_mode = $8,
-         jwt_secret = $9, jwt_scopes = $10, required_plan = $11,
-         free_daily_quota = $12, paid_daily_quota = $13,
-         sort_order = $14, is_active = $15, updated_at = now()
-     WHERE id = $16
-     RETURNING ${TEMPLATE_COLUMNS}`,
-    [
-      parsed.name,
-      parsed.slug,
-      parsed.tagline,
-      parsed.description,
-      parsed.category ?? null,
-      parsed.icon ?? null,
-      parsed.endpoint,
-      parsed.authMode,
-      jwtSecretForDb,
-      parsed.jwtScopes?.join(",") ?? null,
-      parsed.requiredPlan ?? null,
-      parsed.freeDailyQuota ?? null,
-      parsed.paidDailyQuota ?? null,
-      parsed.sortOrder,
-      parsed.isActive,
+  return withTransaction(async (tx) => {
+    const locked = await tx.query<TemplateRow>(
+      `SELECT ${TEMPLATE_COLUMNS} FROM agent_templates WHERE id = $1 FOR UPDATE`,
+      [id],
+    );
+    const storedRow = locked.rows[0];
+    if (!storedRow) return null;
+    const existing = rowToTemplate(storedRow);
+    const merged = {
       id,
-    ],
-  );
-  return result.rows[0] ? rowToTemplate(result.rows[0]) : null;
-}
-
-/**
- * The raw stored `jwt_secret` for an update that supplies no new secret.
- * `rowToTemplate` degrades an undecryptable ciphertext to secret-less, so
- * the mapped row can't distinguish "no secret stored" from "stored but
- * undecryptable" (key rotation / backup mismatch) — the raw column read
- * can. This branch is only reached for those two cases: a decryptable
- * secret (including legacy plaintext) surfaces on the mapped row and the
- * update re-encrypts it with a fresh IV instead. Returned unchanged: the
- * undecryptable ciphertext is preserved byte-for-byte.
- */
-async function storedRawJwtSecret(id: string): Promise<string | null> {
-  const result = await query<{ jwt_secret: string | null }>(
-    `SELECT jwt_secret FROM agent_templates WHERE id = $1`,
-    [id],
-  );
-  return result.rows[0]?.jwt_secret ?? null;
+      name: existing.name,
+      slug: existing.slug,
+      tagline: existing.tagline,
+      description: existing.description,
+      category: existing.category ?? null,
+      icon: existing.icon ?? null,
+      endpoint: existing.endpoint,
+      authMode: existing.authMode,
+      jwtSecret: existing.jwtSecret,
+      jwtScopes: existing.jwtScopes,
+      requiredPlan: existing.requiredPlan ?? null,
+      freeDailyQuota: existing.freeDailyQuota ?? null,
+      paidDailyQuota: existing.paidDailyQuota ?? null,
+      sortOrder: existing.sortOrder,
+      isActive: existing.isActive,
+      ...patch,
+    };
+    const parsed = templateRowSchema.parse(merged);
+    // Re-encrypt (fresh IV) when the merged row carries a usable secret —
+    // same behavior as agent-store's updateAgent. When it doesn't, DON'T
+    // write NULL: `existing.jwtSecret` is undefined both for "no secret
+    // stored" and for "stored but undecryptable" (rowToTemplate degrades a
+    // decrypt failure to secret-less), and nulling the latter would
+    // silently destroy the stored ciphertext on an unrelated edit (a
+    // rename), unrecoverable even after the encryption key is restored.
+    // An update that supplies no secret preserves the raw stored value —
+    // read from the same locked row (a second, unlocked round-trip could
+    // pair one writer's fields with a concurrent writer's secret bytes).
+    const jwtSecretForDb = parsed.jwtSecret
+      ? encryptSecret(parsed.jwtSecret)
+      : (storedRow.jwt_secret ?? null);
+    const result = await tx.query<TemplateRow>(
+      `UPDATE agent_templates
+       SET name = $1, slug = $2, tagline = $3, description = $4,
+           category = $5, icon = $6, endpoint = $7, auth_mode = $8,
+           jwt_secret = $9, jwt_scopes = $10, required_plan = $11,
+           free_daily_quota = $12, paid_daily_quota = $13,
+           sort_order = $14, is_active = $15, updated_at = now()
+       WHERE id = $16
+       RETURNING ${TEMPLATE_COLUMNS}`,
+      [
+        parsed.name,
+        parsed.slug,
+        parsed.tagline,
+        parsed.description,
+        parsed.category ?? null,
+        parsed.icon ?? null,
+        parsed.endpoint,
+        parsed.authMode,
+        jwtSecretForDb,
+        parsed.jwtScopes?.join(",") ?? null,
+        parsed.requiredPlan ?? null,
+        parsed.freeDailyQuota ?? null,
+        parsed.paidDailyQuota ?? null,
+        parsed.sortOrder,
+        parsed.isActive,
+        id,
+      ],
+    );
+    return result.rows[0] ? rowToTemplate(result.rows[0]) : null;
+  });
 }
 
 /**

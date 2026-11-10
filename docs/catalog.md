@@ -28,6 +28,13 @@ there is no path from a builder agent to a template.
   (nullable — `pro`/`team`), `free_daily_quota` + `paid_daily_quota`
   (nullable ints — per-tier rolling-24h run caps, see Monetization
   gates), `sort_order`, `is_active`.
+- **Concurrent template edits serialize.** `updateTemplate` runs its
+  read-merge-write in one transaction holding the row's
+  `SELECT … FOR UPDATE` lock (same pattern as the credentials PUT): two
+  admins editing the same template merge over each other's committed
+  state instead of last-write-wins silently dropping an edit (a rename
+  racing a secret re-save could write back the stale secret bytes and
+  destroy the just-saved secret).
 - Installing creates an org-scoped `agents` row via `installTemplate()`
   — but the row is an **entitlement/reference, not a config copy**.
   The runtime resolves endpoint/auth **live from the template** on every
