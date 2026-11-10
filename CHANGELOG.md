@@ -4,6 +4,24 @@ All notable changes to this project will be documented in this file. The format 
 
 ## [Unreleased]
 
+- **A client-supplied run id reused on a different thread no longer drops
+  the run from history (#65).** The event log's `run_id` column carried a
+  global unique constraint, so a client that legitimately supplies its own
+  run ids and reuses one on another thread hit a uniqueness violation at
+  persist — the run streamed fine but was silently missing from history on
+  reconnect. Uniqueness is now scoped per thread (`(thread_id, run_id)`,
+  migration 0016): the same run id may appear on different threads, while a
+  duplicate within one thread is still rejected as before. Strictly weaker
+  than the old constraint, so no existing data can violate the new index.
+- **Deleting a thread no longer races a starting run into resurrecting it
+  (#65).** Deleting a thread while a run on it was starting could leave the
+  run persisting rows for the deleted thread afterwards — the thread
+  reappeared in the sidebar holding only that run's data, orphaning rows
+  against a deleted id. Deletions now record a tombstone in the same
+  transaction (migration 0017, new `deleted_threads` table): runs on a
+  tombstoned thread are refused at start, and an in-flight run's final
+  persistence skips writing, so a deleted thread stays deleted. Tombstones
+  older than 30 days are pruned on each delete.
 - **Non-http(s) connector URLs are now rejected at submit with a clear
   400 (#72).** `PUT /api/connectors` accepted any URL scheme and stored
   it, failing only later — as the store's generic validation 400 or, once

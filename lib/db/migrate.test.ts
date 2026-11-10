@@ -25,9 +25,9 @@ afterEach(async () => {
 });
 
 describe("runMigrations", () => {
-  it("applies 0001–0015 migrations, creates all expected tables", async () => {
+  it("applies 0001–0017 migrations, creates all expected tables", async () => {
     const result = await runMigrations();
-    expect(result.applied).toEqual(["0001", "0002", "0003", "0004", "0006", "0007", "0008", "0009", "0010", "0011", "0012", "0013", "0014", "0015"]);
+    expect(result.applied).toEqual(["0001", "0002", "0003", "0004", "0006", "0007", "0008", "0009", "0010", "0011", "0012", "0013", "0014", "0015", "0016", "0017"]);
     expect(result.skipped).toEqual([]);
 
     const tables = await query<{ table_name: string }>(`
@@ -44,6 +44,7 @@ describe("runMigrations", () => {
     expect(names).toContain("run_state");
     expect(names).toContain("thread_messages");
     expect(names).toContain("thread_metadata");
+    expect(names).toContain("deleted_threads");
     expect(names).toContain("subscriptions");
     expect(names).toContain("credentials");
     expect(names).toContain("connectors");
@@ -52,7 +53,7 @@ describe("runMigrations", () => {
   it("records each applied migration in schema_migrations", async () => {
     await runMigrations();
     const applied = await listAppliedMigrations();
-    expect(applied).toHaveLength(14);
+    expect(applied).toHaveLength(16);
     expect(applied[0].id).toBe("0001");
     expect(applied[0].filename).toBe("0001_init.sql");
     expect(applied[1].id).toBe("0002");
@@ -79,6 +80,10 @@ describe("runMigrations", () => {
     expect(applied[11].filename).toBe("0013_agent_builder.sql");
     expect(applied[13].id).toBe("0015");
     expect(applied[13].filename).toBe("0015_template_install_unique.sql");
+    expect(applied[14].id).toBe("0016");
+    expect(applied[14].filename).toBe("0016_run_id_unique_per_thread.sql");
+    expect(applied[15].id).toBe("0017");
+    expect(applied[15].filename).toBe("0017_deleted_threads_tombstones.sql");
     // applied_at is returned as a Date by pg-mem and as an ISO string by real
     // pg (depending on driver parsing). Accept both.
     const appliedAt = applied[0].applied_at;
@@ -89,12 +94,12 @@ describe("runMigrations", () => {
   it("is idempotent — second run reports skipped, no new inserts", async () => {
     const first = await runMigrations();
     const second = await runMigrations();
-    expect(first.applied).toEqual(["0001", "0002", "0003", "0004", "0006", "0007", "0008", "0009", "0010", "0011", "0012", "0013", "0014", "0015"]);
+    expect(first.applied).toEqual(["0001", "0002", "0003", "0004", "0006", "0007", "0008", "0009", "0010", "0011", "0012", "0013", "0014", "0015", "0016", "0017"]);
     expect(second.applied).toEqual([]);
-    expect(second.skipped).toEqual(["0001", "0002", "0003", "0004", "0006", "0007", "0008", "0009", "0010", "0011", "0012", "0013", "0014", "0015"]);
+    expect(second.skipped).toEqual(["0001", "0002", "0003", "0004", "0006", "0007", "0008", "0009", "0010", "0011", "0012", "0013", "0014", "0015", "0016", "0017"]);
 
     const applied = await listAppliedMigrations();
-    expect(applied).toHaveLength(14);
+    expect(applied).toHaveLength(16);
   });
 
   it("creates the agents table with the documented columns", async () => {

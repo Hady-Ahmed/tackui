@@ -49,7 +49,8 @@ async function retryPg<T>(
  * to run on every boot:
  *   1. Sentry server-side SDK init (nodejs + edge runtimes)
  *   2. `runMigrations()` — creates/updates app tables (agents, agent_runs,
- *      run_state, thread_messages, thread_metadata) from lib/db/migrations/*.sql
+ *      run_state, thread_messages, thread_metadata, deleted_threads) from
+ *      lib/db/migrations/*.sql
  *   3. `ensureAuthTables()` — creates Better Auth tables (user, session,
  *      account, verification, organization, member, invitation) via Better
  *      Auth's getMigrations() API

@@ -48,6 +48,13 @@ interface ActiveConnectionContext {
    * cache) containing only the in-flight run's data, silently undoing
    * the deletion. The flag dies with the connection object at teardown,
    * so a later run on a re-created thread (same id) persists normally.
+   *
+   * First line of defense only: it covers runs whose connection was
+   * already registered when deleteThread read the map. A run that
+   * registers after that read never sees the flag — the deleted_threads
+   * tombstone (committed atomically with the delete) is the DB-level
+   * backstop those runs hit at their persistence window and at the
+   * startRun gate.
    */
   threadDeleted?: boolean;
 }
@@ -71,6 +78,18 @@ const SCHEMA_VERSION = 1;
  * best-effort); it is not a run timeout.
  */
 const STALE_LOCK_GRACE_MS = 10_000;
+
+/**
+ * How long a deleted_threads tombstone is kept. The tombstone gates runs
+ * (startRun refuses the id; the persistence window skips writing), and a
+ * run's persistence lands at most minutes after its thread was deleted —
+ * the retention exists to bound the table, not to re-enable ids (thread
+ * ids are client-generated UUIDs, so no legitimate flow re-creates a
+ * deleted one). Pruned opportunistically inside deleteThread's
+ * transaction: every delete sweeps rows older than this — no background
+ * timer.
+ */
+const TOMBSTONE_RETENTION_MS = 30 * 24 * 60 * 60 * 1000;
 
 /**
  * Defense in depth against secret persistence: the AG-UI schema allows
@@ -239,8 +258,8 @@ function syntheticRunFinished(run: { threadId: string; runId: string }): BaseEve
  * SqliteAgentRunner for this app — speaks to the same `pg.Pool` that
  * Better Auth and the agent store use (see lib/db/pg.ts).
  *
- * Schema lives in lib/db/migrations/0001_init.sql (tables: agent_runs,
- * run_state, thread_messages, thread_metadata). Tables are created by
+ * Schema lives in lib/db/migrations/ (tables: agent_runs, run_state,
+ * thread_messages, thread_metadata, deleted_threads). Tables are created by
  * `npm run migrate` — the runner does not own schema creation.
  *
  * `connect()` uses smart replay: filters RUN_ERROR events from the raw
@@ -373,6 +392,25 @@ export class PostgresAgentRunner extends AgentRunner {
     );
     if (!acquired) {
       throw new Error("Thread already running");
+    }
+
+    // Deleted-mid-start gate. The thread may have been deleted while this
+    // run was starting: the ownership check above read pre-delete state,
+    // and acquireRunState's INSERT can wait out the delete transaction's
+    // row lock (its ON CONFLICT targets the run_state row the delete is
+    // removing) and claim a FRESH lock row on a thread that no longer
+    // exists. A tombstoned thread id is dead — release the just-claimed
+    // row and refuse. Without this the run streams to completion into a
+    // thread the user deleted and its persistence window silently drops
+    // it (the tombstone checks below), leaving the user watching a run
+    // whose history will never exist. "Thread not found" is honest in
+    // both orderings: the id no longer resolves to a live thread.
+    if (await this.isThreadTombstoned(request.threadId)) {
+      await query(
+        `DELETE FROM run_state WHERE thread_id = $1 AND current_run_id = $2`,
+        [request.threadId, request.input.runId],
+      );
+      throw new Error("Thread not found");
     }
 
     const seenMessageIds = new Set<string>();
@@ -1050,6 +1088,25 @@ export class PostgresAgentRunner extends AgentRunner {
         `DELETE FROM thread_metadata WHERE thread_id = $1`,
         [threadId],
       );
+      // Tombstone in the SAME transaction: from this commit on, the
+      // deleted id is dead at the DB level — startRun refuses it and the
+      // persistence window (storeRun + captureThreadData) skips writing —
+      // closing the windows the in-memory marker below cannot see (a run
+      // that registers after this method's map read, and a run that
+      // starts after this commit and would otherwise pass the ownership
+      // gate as a "creatable" brand-new thread). Opportunistic retention
+      // sweep: every delete prunes tombstones past the retention window —
+      // no background timer. The cutoff is computed in JS and passed as a
+      // parameter (clock arithmetic in one place; pg-mem-compatible).
+      await client.query(
+        `INSERT INTO deleted_threads (thread_id) VALUES ($1)
+         ON CONFLICT (thread_id) DO NOTHING`,
+        [threadId],
+      );
+      await client.query(
+        `DELETE FROM deleted_threads WHERE deleted_at < $1`,
+        [new Date(Date.now() - TOMBSTONE_RETENTION_MS)],
+      );
       deleted = (r1.rowCount ?? 0) > 0 || (r4.rowCount ?? 0) > 0;
     });
 
@@ -1071,7 +1128,10 @@ export class PostgresAgentRunner extends AgentRunner {
     // teardown, so a later run on a re-created thread id persists
     // normally. (In-process signal: on a multi-instance deploy a run
     // streaming on another instance would still resurrect — the same
-    // single-instance assumption as the run-state boot reset.)
+    // single-instance assumption as the run-state boot reset.) The
+    // tombstone committed above is the DB-level backstop for the runs
+    // this marker cannot reach: one that registers its connection after
+    // this map read, and one that starts after this commit.
     const active = ACTIVE_CONNECTIONS.get(threadId);
     if (active) active.threadDeleted = true;
     return deleted || active != null;
@@ -1137,9 +1197,17 @@ export class PostgresAgentRunner extends AgentRunner {
       redactReservedEvent(event as { input?: { context?: unknown } }, reserved) as BaseEvent,
     );
     const safeInput = redactReservedContext(input as { context?: unknown }, reserved) as RunAgentInput;
-    await query(
+    // The INSERT is conditional on the deleted_threads tombstone's
+    // absence — one atomic statement, so a delete that committed before
+    // this statement starts is honored even when the in-memory marker
+    // above missed the run (a run that registered its connection after
+    // deleteThread's map read). rowCount 0 = tombstoned: skip the
+    // persistence AND the cache merge below (merging would re-seed the
+    // sidebar with a thread that no longer exists in PG).
+    const result = await query(
       `INSERT INTO agent_runs (thread_id, run_id, parent_run_id, events, input, version)
-       VALUES ($1, $2, $3, $4::jsonb, $5::jsonb, $6)`,
+       SELECT $1, $2, $3, $4::jsonb, $5::jsonb, $6::int
+       WHERE NOT EXISTS (SELECT 1 FROM deleted_threads WHERE thread_id = $1)`,
       [
         threadId,
         runId,
@@ -1149,6 +1217,7 @@ export class PostgresAgentRunner extends AgentRunner {
         SCHEMA_VERSION,
       ],
     );
+    if ((result.rowCount ?? 0) === 0) return;
     // Read-through refresh: the sync readers (CopilotKit's runtime exposes
     // /threads/:id/events and /threads/:id/state backed by the caches) used
     // to serve the PRE-RUN history after a run — eventsCache was only ever
@@ -1429,6 +1498,10 @@ export class PostgresAgentRunner extends AgentRunner {
     // Deleted-mid-run guard (see storeRun): a thread deleted while this
     // run streamed must not be resurrected by the run's final write.
     if (ACTIVE_CONNECTIONS.get(request.threadId)?.threadDeleted) return;
+    // DB-level backstop for the runs the in-memory marker cannot reach
+    // (a connection registered after deleteThread's map read): a
+    // tombstoned thread id is dead — no snapshot writes, no cache re-seed.
+    if (await this.isThreadTombstoned(request.threadId)) return;
 
     const agentId = request.agent.agentId ?? "default";
     const messages = (request.agent as unknown as { messages?: Message[] }).messages;
@@ -1491,5 +1564,21 @@ export class PostgresAgentRunner extends AgentRunner {
       typeof firstUser?.content === "string" ? firstUser.content : null;
     if (!content) return null;
     return content.length > 50 ? content.slice(0, 50) + "..." : content;
+  }
+
+  /**
+   * Whether the thread id carries a deleted_threads tombstone — the
+   * DB-level fact (committed atomically with deleteThread's row deletes)
+   * that the id is dead. Gates the run start (startRun refuses the id)
+   * and the persistence window (storeRun's conditional INSERT,
+   * captureThreadData's skip) so a delete vs. run race can neither
+   * resurrect the thread nor leave orphan rows behind it.
+   */
+  private async isThreadTombstoned(threadId: string): Promise<boolean> {
+    const result = await query(
+      `SELECT 1 FROM deleted_threads WHERE thread_id = $1`,
+      [threadId],
+    );
+    return result.rows.length > 0;
   }
 }
