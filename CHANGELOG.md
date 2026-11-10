@@ -40,6 +40,20 @@ All notable changes to this project will be documented in this file. The format 
   (interleaved history + unstoppable stop). The method now does nothing
   by design; a real "clear everything" feature needs deliberate scoping,
   auth, and live-run handling.
+- **The disabled-builder banner renders its message once (#81).** With
+  `AGENTOS_BASE_URL` unset, both catalog loads fail with the identical
+  `AgentosError` message, and the builder form joined the two error slots
+  verbatim — the same sentence twice, dot-separated. The join now dedupes
+  (`catalogErrorCopy`, alongside the form's other pure copy helpers):
+  identical messages collapse to one, while genuinely distinct failures
+  (one catalog 503, the other 502) still both display.
+- **The admin model Test-button tooltip names where the key goes (#84).**
+  The `env_key_set: false` hint read "Set `OPENAI_API_KEY` on the platform
+  to test this model" — "on the platform" could mean the Next.js app, the
+  builder, or the host, leaving the operator to guess. The tooltip now
+  names the destination: "in the agent builder service's environment"
+  (matching the service name as `docs/agent-builder.md` uses it). Copy
+  only — the probe, its gating, and the `env_key_set` logic are untouched.
 - **Agent builder tool palette: readable rows, palette search, honest
   tool cap.** Palette rows were a single flex line where the key badge
   crushed both the tool name ("Gen…") and the description into

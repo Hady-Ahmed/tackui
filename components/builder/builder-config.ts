@@ -163,6 +163,25 @@ export function catalogEmptyCopy(
 }
 
 /**
+ * The disabled-builder banner copy — the models and tools catalog loads
+ * fail independently (one 503, one 502), so genuinely distinct errors
+ * join with the "·" separator and both display. But a single shared
+ * failure (one 503 from agentosRequest) sets BOTH state slots to the
+ * identical AgentosError message, and joining it twice renders the same
+ * sentence twice — so identical messages collapse to one. Null when
+ * nothing failed.
+ */
+export function catalogErrorCopy(
+  modelsError: string | null,
+  toolsError: string | null,
+): string | null {
+  const messages = [
+    ...new Set([modelsError, toolsError].filter((e): e is string => e !== null)),
+  ];
+  return messages.length > 0 ? messages.join(" · ") : null;
+}
+
+/**
  * Whether create must stay disabled because the model catalog is empty —
  * the model field is required, so an empty catalog can't produce a valid
  * create. Edit mode is unaffected: the model is only sent when it changes.
