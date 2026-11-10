@@ -122,6 +122,15 @@ history. It exposes
 local SSE runner doesn't support CopilotKit's Intelligence-platform-only
 `useThreads` mutations.
 
+Persisted history is keyed by thread: each run's raw event stream lives in
+`agent_runs` under `(thread_id, run_id)`, unique **per thread** since
+migration 0016. The original global unique constraint on `run_id` alone
+dropped a run whose client-supplied id was reused on a different thread (the
+persist raised a uniqueness violation and the stream completed without a
+persisted row); the composite scopes the guarantee to what history is keyed
+by. A duplicate run id within one thread is still rejected — duplicate
+detection is unchanged, only the cross-thread case was relaxed.
+
 ### Run lock lifecycle
 
 The per-thread run lock lives in the `run_state` table
@@ -203,7 +212,17 @@ always the source of truth:**
    `threadDeleted` when a run is still streaming: the run's persistence
    window (`storeRun` + `captureThreadData`) checks the marker and skips
    writing, so a delete racing a run cannot resurrect the thread — the
-   marker dies with the connection at teardown.
+   marker dies with the connection at teardown. The marker is only the
+   first line of defense: it cannot reach a run that registers its
+   connection after the delete's map read, or one that starts after the
+   delete commits (to the ownership gate a deleted thread reads as a
+   "creatable" brand-new thread). The same transaction therefore writes a
+   `deleted_threads` tombstone: `startRun` refuses a tombstoned thread id
+   right after its lock claim, `storeRun`'s INSERT is conditional on the
+   tombstone's absence, and `captureThreadData` skips entirely — a deleted
+   thread stays deleted. Tombstones older than 30 days are pruned inside
+   each delete's transaction (no background timer; thread ids are
+   client-generated UUIDs, so no legitimate flow re-creates a deleted id).
 2. **Read-through on async paths:** `connect()` and `run()` (both async via
    fire-and-forget Observable pattern) fetch from PG INTO the cache before
    completing, and `storeRun` merges each run's persisted events into

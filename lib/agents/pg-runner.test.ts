@@ -3,7 +3,7 @@ import { EventType, type BaseEvent, type Message } from "@ag-ui/core";
 import type { AbstractAgent } from "@ag-ui/client";
 import { PostgresAgentRunner, redactReservedContext, redactReservedEvent } from "./pg-runner";
 import { runWithUser, runWithRunnerContext, type RequestUser } from "@/lib/auth/request-context";
-import { query } from "@/lib/db/pg";
+import { query, withTransaction } from "@/lib/db/pg";
 import { runMigrations } from "@/lib/db/migrate";
 import { useRealPostgres } from "@/lib/db/test-postgres";
 
@@ -107,6 +107,7 @@ beforeEach(async () => {
   await query("DELETE FROM run_state");
   await query("DELETE FROM thread_messages");
   await query("DELETE FROM thread_metadata");
+  await query("DELETE FROM deleted_threads");
 });
 
 describe("PostgresAgentRunner — thread scoping (cache-based listThreads)", () => {
@@ -1577,6 +1578,354 @@ describe("PostgresAgentRunner — run lock + teardown lifecycle", () => {
     // No terminator: the run stays visibly incomplete.
     expect(cached.some((e) => e.type === EventType.RUN_FINISHED)).toBe(false);
     expect(cached.some((e) => e.type === EventType.RUN_STARTED)).toBe(true);
+  });
+});
+
+describe("PostgresAgentRunner — run_id uniqueness scoped per thread", () => {
+  // Issue #65 item 1: agent_runs.run_id carried a GLOBAL unique constraint
+  // (0001's inline UNIQUE), so a client reusing its own run_id on a second
+  // run — on another thread — hit 23505 at storeRun and the run was
+  // silently dropped from history. Migration 0016 replaced the global
+  // constraint with a composite unique (thread_id, run_id). Uniqueness
+  // semantics can only be pinned on REAL Postgres — pg-mem does not
+  // enforce CREATE UNIQUE INDEX — so the same skip discipline as the
+  // suites above applies.
+  let runner: PostgresAgentRunner;
+
+  beforeEach(async () => {
+    runner = makeRunner();
+    await runner.awaitRefreshed();
+  });
+
+  let pgStarted = false;
+  let restorePg: (() => void) | null = null;
+
+  beforeAll(async () => {
+    restorePg = await useRealPostgres();
+    pgStarted = restorePg !== null;
+  });
+
+  afterAll(() => {
+    restorePg?.();
+    restorePg = null;
+  });
+
+  // storeRun is private; the file's established cast pattern reaches it
+  // directly. It is the only INSERT into agent_runs in the runner.
+  function storeRun(threadId: string, runId: string): Promise<void> {
+    return runWithUser(user1, () =>
+      (
+        runner as unknown as {
+          storeRun: (
+            t: string,
+            r: string,
+            e: BaseEvent[],
+            i: ReturnType<typeof runInput>,
+            p: string | null,
+          ) => Promise<void>;
+        }
+      ).storeRun(threadId, runId, [], runInput(threadId, runId), null),
+    );
+  }
+
+  it("rejects a duplicate run_id within the same thread with 23505 (intended duplicate detection)", async (ctx) => {
+    ctx.skip(!pgStarted, "Real Postgres (Docker) unavailable");
+    await storeRun("t-uniq", "run-x");
+    // Within ONE thread the (thread_id, run_id) pair is still unique — a
+    // second persist of the same run is a hard duplicate, exactly as the
+    // old global constraint treated it. The semantics that changed are
+    // cross-thread only.
+    await expect(storeRun("t-uniq", "run-x")).rejects.toMatchObject({
+      code: "23505",
+    });
+    const rows = await query<{ c: number }>(
+      `SELECT count(*)::int AS c FROM agent_runs WHERE thread_id = 't-uniq' AND run_id = 'run-x'`,
+    );
+    expect(rows.rows[0]?.c).toBe(1);
+  });
+
+  it("persists the same run_id on a different thread — the case the global constraint dropped", async (ctx) => {
+    ctx.skip(!pgStarted, "Real Postgres (Docker) unavailable");
+    // Pre-migration this second INSERT raised 23505 (the global UNIQUE on
+    // run_id ignores thread_id) and the run was lost from history.
+    await storeRun("t-uniq-a", "run-shared");
+    await storeRun("t-uniq-b", "run-shared");
+    const rows = await query<{ thread_id: string }>(
+      `SELECT thread_id FROM agent_runs WHERE run_id = 'run-shared' ORDER BY thread_id`,
+    );
+    expect(rows.rows.map((r) => r.thread_id)).toEqual(["t-uniq-a", "t-uniq-b"]);
+    // The second thread's run merged into the sync readers' cache (the
+    // rowCount gate only skips merge for tombstoned threads).
+    expect(caches(runner).eventsCache.has("t-uniq-b")).toBe(true);
+  });
+
+  it("the schema carries the composite unique index and no global run_id unique index", async (ctx) => {
+    ctx.skip(!pgStarted, "Real Postgres (Docker) unavailable");
+    const indexes = await query<{ indexname: string; indexdef: string }>(
+      `SELECT indexname, indexdef FROM pg_indexes WHERE tablename = 'agent_runs'`,
+    );
+    // The old global constraint (agent_runs_run_id_key) is gone; the only
+    // unique indexes left are the primary key and the composite.
+    const uniqueNames = indexes.rows
+      .filter((r) => r.indexdef.includes("UNIQUE"))
+      .map((r) => r.indexname)
+      .sort();
+    expect(uniqueNames).toEqual(["agent_runs_pkey", "agent_runs_thread_run_uniq"]);
+    const composite = indexes.rows.find(
+      (r) => r.indexname === "agent_runs_thread_run_uniq",
+    );
+    expect(composite?.indexdef).toContain("(thread_id, run_id)");
+  });
+});
+
+describe("PostgresAgentRunner — deleted-thread tombstones (delete vs run)", () => {
+  // Issue #65 item 2. deleteThread deletes the four tables in one
+  // transaction and marks the live connection (ACTIVE_CONNECTIONS) — but
+  // the marker only reaches runs whose connection was registered BEFORE
+  // the delete's map read. Two windows remained: a run that registers
+  // after that read (its acquire can wait out the delete transaction's
+  // run_state row lock), and a run that starts after the commit (the
+  // ownership gate reads a deleted thread as a "creatable" brand-new
+  // thread). deleteThread now writes a deleted_threads tombstone in the
+  // same transaction; startRun refuses a tombstoned id and the
+  // persistence window (storeRun + captureThreadData) skips writing.
+  // Real Postgres: row locks, upserts and the recursive-CTE historic read.
+  let runner: PostgresAgentRunner;
+
+  beforeEach(async () => {
+    runner = makeRunner();
+    await runner.awaitRefreshed();
+  });
+
+  let pgStarted = false;
+  let restorePg: (() => void) | null = null;
+
+  beforeAll(async () => {
+    restorePg = await useRealPostgres();
+    pgStarted = restorePg !== null;
+  });
+
+  afterAll(() => {
+    restorePg?.();
+    restorePg = null;
+  });
+
+  interface RunRequestShaped {
+    threadId: string;
+    agent: AbstractAgent;
+    input: ReturnType<typeof runInput>;
+  }
+
+  it("a run started after the delete commits is refused and persists nothing (delete-then-start)", async (ctx) => {
+    ctx.skip(!pgStarted, "Real Postgres (Docker) unavailable");
+    await seedThread(runner, "t-dts", "agent-a", "Doomed chat", user1.id);
+
+    const deleted = await runWithUser(user1, () =>
+      runner.deleteThread("t-dts", user1.id, user1.orgId),
+    );
+    expect(deleted).toBe(true);
+    // The tombstone committed atomically with the row deletes.
+    const tomb = await query<{ c: number }>(
+      `SELECT count(*)::int AS c FROM deleted_threads WHERE thread_id = 't-dts'`,
+    );
+    expect(tomb.rows[0]?.c).toBe(1);
+
+    // A run on the now-deleted id: the ownership gate reads it as
+    // non-existent ("creatable"), the lock is claimed, then the tombstone
+    // gate releases the lock and refuses.
+    const result = await runAs(runner, user1, "t-dts", "run-after");
+    expect((result.error as Error).message).toBe("Thread not found");
+
+    // Nothing was written: no history, no snapshot, no lock row, no
+    // sidebar cache entry — the deletion stands.
+    const runs = await query<{ c: number }>(
+      `SELECT count(*)::int AS c FROM agent_runs WHERE thread_id = 't-dts'`,
+    );
+    const meta = await query<{ c: number }>(
+      `SELECT count(*)::int AS c FROM thread_metadata WHERE thread_id = 't-dts'`,
+    );
+    const state = await query<{ c: number }>(
+      `SELECT count(*)::int AS c FROM run_state WHERE thread_id = 't-dts'`,
+    );
+    expect(runs.rows[0]?.c).toBe(0);
+    expect(meta.rows[0]?.c).toBe(0);
+    expect(state.rows[0]?.c).toBe(0);
+    expect(runner.getThreadMessages("t-dts")).toEqual([]);
+    expect(runner.getThreadEvents("t-dts")).toEqual([]);
+  });
+
+  it("a run whose acquire was in flight when the delete committed is refused cleanly (start-then-delete)", async (ctx) => {
+    ctx.skip(!pgStarted, "Real Postgres (Docker) unavailable");
+    // Holder-transaction interleaving (the credentials-route pattern): the
+    // holder replicates deleteThread's transaction but stays OPEN, holding
+    // the run_state row's lock. The run fires into that state — its
+    // ownership check reads pre-delete data, then acquireRunState's
+    // conditional upsert BLOCKS on the locked row. The holder commits, the
+    // delete wins, and the acquire returns having claimed a fresh lock row
+    // on a thread that no longer exists — the registration-late state the
+    // in-memory marker cannot reach. The tombstone gate must refuse it.
+    // No sleeps: the row lock, not timing, forces the interleaving.
+    await seedThread(runner, "t-race", "agent-a", "Race chat", user1.id);
+    await query(
+      `INSERT INTO run_state (thread_id, is_running, current_run_id)
+       VALUES ('t-race', false, NULL)`,
+    );
+
+    // Plain spy — call-through with call tracking only.
+    const ownershipSpy = vi.spyOn(
+      runner as unknown as {
+        getThreadOwnership: (t: string) => Promise<unknown>;
+      },
+      "getThreadOwnership",
+    );
+
+    let outcome: Promise<{
+      events: BaseEvent[];
+      error: unknown;
+      completed: boolean;
+    }> | null = null;
+    await withTransaction(async (holder) => {
+      // deleteThread's transaction, held open.
+      await holder.query(`DELETE FROM agent_runs WHERE thread_id = $1`, ["t-race"]);
+      await holder.query(`DELETE FROM run_state WHERE thread_id = $1`, ["t-race"]);
+      await holder.query(`DELETE FROM thread_messages WHERE thread_id = $1`, ["t-race"]);
+      await holder.query(`DELETE FROM thread_metadata WHERE thread_id = $1`, ["t-race"]);
+      await holder.query(
+        `INSERT INTO deleted_threads (thread_id) VALUES ($1) ON CONFLICT (thread_id) DO NOTHING`,
+        ["t-race"],
+      );
+      // The run starts INSIDE the held-delete window; the spy confirms it
+      // passed the ownership check (and is now blocked at the lock).
+      outcome = runAs(runner, user1, "t-race", "run-late");
+      await vi.waitFor(() => expect(ownershipSpy).toHaveBeenCalled());
+    });
+    ownershipSpy.mockRestore();
+
+    const result = await outcome!;
+    expect((result.error as Error).message).toBe("Thread not found");
+
+    // The holder replicates only deleteThread's SQL; its post-commit cache
+    // clears are replicated here so the assertion below checks what the
+    // real interleaving leaves: the run must not have re-seeded anything.
+    caches(runner).threadCache.delete("t-race");
+    caches(runner).messageCache.delete("t-race");
+    caches(runner).eventsCache.delete("t-race");
+
+    // The gate released the just-claimed lock row (no orphan) and nothing
+    // was persisted — the delete's cleanup stands.
+    const runs = await query<{ c: number }>(
+      `SELECT count(*)::int AS c FROM agent_runs WHERE thread_id = 't-race'`,
+    );
+    const meta = await query<{ c: number }>(
+      `SELECT count(*)::int AS c FROM thread_metadata WHERE thread_id = 't-race'`,
+    );
+    const state = await query<{ c: number }>(
+      `SELECT count(*)::int AS c FROM run_state WHERE thread_id = 't-race'`,
+    );
+    expect(runs.rows[0]?.c).toBe(0);
+    expect(meta.rows[0]?.c).toBe(0);
+    expect(state.rows[0]?.c).toBe(0);
+    expect(runner.listThreads().some((t) => t.id === "t-race")).toBe(false);
+  });
+
+  it("the persistence window skips writes for a tombstoned thread even without the connection marker", async (ctx) => {
+    ctx.skip(!pgStarted, "Real Postgres (Docker) unavailable");
+    // Deterministic seam for the marker-miss interleaving: the tombstone
+    // is committed and NO connection marker exists — precisely the state
+    // a run lands in when it registers its ACTIVE_CONNECTIONS entry after
+    // deleteThread's map read. storeRun + captureThreadData are driven
+    // directly (the file's established private-method pattern); a true
+    // concurrent replay of that registration race would only re-derive
+    // this same state.
+    await query(`INSERT INTO deleted_threads (thread_id) VALUES ($1)`, ["t-tomb"]);
+
+    const request = {
+      threadId: "t-tomb",
+      agent: {
+        agentId: "agent-a",
+        messages: [{ id: "m1", role: "user", content: "hello" }],
+      },
+      input: runInput("t-tomb", "run-tomb"),
+    } as unknown as RunRequestShaped;
+
+    await runWithUser(user1, () =>
+      (
+        runner as unknown as {
+          storeRun: (
+            t: string,
+            r: string,
+            e: BaseEvent[],
+            i: ReturnType<typeof runInput>,
+            p: string | null,
+          ) => Promise<void>;
+        }
+      ).storeRun("t-tomb", "run-tomb", [], runInput("t-tomb", "run-tomb"), null),
+    );
+    await runWithUser(user1, () =>
+      (
+        runner as unknown as {
+          captureThreadData: (r: RunRequestShaped) => Promise<void>;
+        }
+      ).captureThreadData(request),
+    );
+
+    // No rows resurrected, no caches re-seeded.
+    const runs = await query<{ c: number }>(
+      `SELECT count(*)::int AS c FROM agent_runs WHERE thread_id = 't-tomb'`,
+    );
+    const msgs = await query<{ c: number }>(
+      `SELECT count(*)::int AS c FROM thread_messages WHERE thread_id = 't-tomb'`,
+    );
+    const meta = await query<{ c: number }>(
+      `SELECT count(*)::int AS c FROM thread_metadata WHERE thread_id = 't-tomb'`,
+    );
+    expect(runs.rows[0]?.c).toBe(0);
+    expect(msgs.rows[0]?.c).toBe(0);
+    expect(meta.rows[0]?.c).toBe(0);
+    expect(caches(runner).eventsCache.has("t-tomb")).toBe(false);
+    expect(caches(runner).threadCache.has("t-tomb")).toBe(false);
+
+    // Positive control: the same writes on a NON-tombstoned thread land —
+    // the skip is tombstone-driven, not a broken write path.
+    await runWithUser(user1, () =>
+      (
+        runner as unknown as {
+          storeRun: (
+            t: string,
+            r: string,
+            e: BaseEvent[],
+            i: ReturnType<typeof runInput>,
+            p: string | null,
+          ) => Promise<void>;
+        }
+      ).storeRun("t-live", "run-live", [], runInput("t-live", "run-live"), null),
+    );
+    const live = await query<{ c: number }>(
+      `SELECT count(*)::int AS c FROM agent_runs WHERE thread_id = 't-live' AND run_id = 'run-live'`,
+    );
+    expect(live.rows[0]?.c).toBe(1);
+    // The merge into the sync readers' cache ran (rowCount 1 path).
+    expect(caches(runner).eventsCache.has("t-live")).toBe(true);
+  });
+
+  it("deleteThread prunes tombstones past the retention window", async (ctx) => {
+    ctx.skip(!pgStarted, "Real Postgres (Docker) unavailable");
+    // A tombstone older than the retention is swept by the delete
+    // transaction's opportunistic prune; recent ones survive.
+    await query(
+      `INSERT INTO deleted_threads (thread_id, deleted_at)
+       VALUES ('t-ancient', now() - interval '40 days')`,
+    );
+    await seedThread(runner, "t-sweep", "agent-a", "Sweep chat", user1.id);
+    const deleted = await runWithUser(user1, () =>
+      runner.deleteThread("t-sweep", user1.id, user1.orgId),
+    );
+    expect(deleted).toBe(true);
+
+    const rows = await query<{ thread_id: string }>(
+      `SELECT thread_id FROM deleted_threads`,
+    );
+    expect(rows.rows.map((r) => r.thread_id)).toEqual(["t-sweep"]);
   });
 });
 
