@@ -202,8 +202,10 @@ operators.
 ## Models & tools — the admin page (`/admin/platform`)
 
 What the agent builder offers is a **deployment decision**, made in one
-place with zero code: the platform admin ticks model providers and
-toolkits on `/admin/platform` (`components/platform-admin.tsx`,
+place with zero code: the platform admin lists model ids under providers
+(a provider is enabled exactly when it lists at least one — there is no
+separate toggle) and ticks toolkits on `/admin/platform`
+(`components/platform-admin.tsx`,
 gated to platform admins only — `role === "admin"`, identical to
 `/admin`; org owners/admins must not set platform-wide policy, and the
 catalog is global so who edits it must be too). Everything else on the
@@ -223,7 +225,9 @@ a per-provider column when the Phase 3 tier/publishing wakes.
   never reaches the browser.
 - **Model editing is a per-provider row editor** — each model id is its
   own input with inline Test/remove, `+ Add model id` appends, and
-  multi-line pastes split into rows; grammar
+  multi-line pastes split into rows; `Clear all` empties a provider's
+  rows in one click (rendered only when ids exist, no confirmation —
+  nothing persists until Save). Grammar
   `model-id[:key=value …]` (bare ids inside a provider's own
   block). The UI no longer advertises the dormant `:tier` segment, but
   the parser still accepts it for Phase 3 publishing, and stored values
@@ -232,6 +236,15 @@ a per-provider column when the Phase 3 tier/publishing wakes.
   text reaches the admin through `AgentosError.detail` — rendered as a
   clean second line, no transport framing — while member surfaces only
   ever see the sanitized message.
+- **A provider's enabled state is derived from its model ids** — the
+  header shows a status dot + count label (● n models / ○ off; shape and
+  text carry the state, not just color) instead of a checkbox. Adding
+  the first id enables the provider, removing the last disables it, and
+  the PUT body derives `enabled` from the rows — so the two states the
+  backend guards reject (enabled with no ids; ids under a disabled
+  provider) can't be constructed from this UI. The backend guards stay
+  as defense-in-depth; the derivation lives in the pure helper
+  `components/platform-admin-catalog.ts`.
 - **Test button** — one "hi" completion straight to the provider through
   the platform's own env key, answering "does this model id exist and
   does the platform key work?" before the admin enables it. Disabled
@@ -243,7 +256,9 @@ a per-provider column when the Phase 3 tier/publishing wakes.
   offering that still has enabled rows clears them; disabling a
   provider/toolkit the deployment can no longer produce (an agno
   upgrade dropped it) is accepted as the legit dead-row clear — enabling
-  one is a 400. "No longer available" rows render non-editable.
+  one is a 400. "No longer available" provider rows render non-editable
+  and offer no "Add model id" — their ids can only be cleared (per-row
+  ✕ or Clear all), which saves as `enabled: false` and clears the row.
 - **Soft warnings on a successful save:** the PUT response can carry a
   `warnings` array — the platform's soft notes (skipped rows, normalized
   entries). Hard failures 400 with full detail; warnings are the
