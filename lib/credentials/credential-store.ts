@@ -24,7 +24,7 @@
 
 import { randomUUID } from "node:crypto";
 import { z } from "zod";
-import { query } from "@/lib/db/pg";
+import { query, type PgQueryable } from "@/lib/db/pg";
 import { decryptSecret, encryptSecret } from "@/lib/crypto/encrypt";
 
 export type CredentialKind = "llm" | "tool";
@@ -91,9 +91,14 @@ export interface SetCredentialInput {
  * very next run uses the new values (per-run delivery — nothing is cached
  * agent-side). Every field must be non-empty: a partial contract would
  * pass the run gate and fail mid-run.
+ *
+ * `tx` runs the upsert on a caller-owned transaction client (the route's
+ * locked read-merge-write; the lock is worthless if the write escapes the
+ * transaction). Omitted → the shared pool, the standalone default.
  */
 export async function setCredential(
   input: SetCredentialInput,
+  tx?: PgQueryable,
 ): Promise<StoredCredential> {
   const provider = providerSchema.parse(input.provider);
   const kind = kindSchema.parse(input.kind);
@@ -114,14 +119,15 @@ export async function setCredential(
   const encrypted = Object.fromEntries(
     Object.entries(cleaned).map(([field, secret]) => [field, encryptSecret(secret)]),
   );
-  const result = await query<CredentialRow>(
-    `INSERT INTO credentials (id, user_id, provider, kind, fields)
+  const upsert = `INSERT INTO credentials (id, user_id, provider, kind, fields)
      VALUES ($1, $2, $3, $4, $5)
      ON CONFLICT (user_id, provider)
      DO UPDATE SET fields = EXCLUDED.fields, kind = EXCLUDED.kind, updated_at = now()
-     RETURNING ${CREDENTIAL_SELECT}`,
-    [randomUUID(), input.userId, provider, kind, JSON.stringify(encrypted)],
-  );
+     RETURNING ${CREDENTIAL_SELECT}`;
+  const params = [randomUUID(), input.userId, provider, kind, JSON.stringify(encrypted)];
+  const result = tx
+    ? await tx.query<CredentialRow>(upsert, params)
+    : await query<CredentialRow>(upsert, params);
   return rowToCredential(result.rows[0]);
 }
 
@@ -165,15 +171,20 @@ export async function getCredentialSecrets(
  * nothing is saved, or when nothing decrypts (same fail-closed treatment
  * as the run path: an undecryptable row is treated as absent, forcing a
  * full re-entry rather than silently keeping garbage).
+ *
+ * `tx` reads on a caller-owned transaction client (the route reads the
+ * merge base under the same row lock it writes under). Omitted → the
+ * shared pool, the standalone default.
  */
 export async function getCredentialDecrypted(
   userId: string,
   provider: string,
+  tx?: PgQueryable,
 ): Promise<Record<string, string> | null> {
-  const result = await query<{ fields: Record<string, string> | null }>(
-    `SELECT fields FROM credentials WHERE user_id = $1 AND provider = $2`,
-    [userId, provider],
-  );
+  const select = `SELECT fields FROM credentials WHERE user_id = $1 AND provider = $2`;
+  const result = tx
+    ? await tx.query<{ fields: Record<string, string> | null }>(select, [userId, provider])
+    : await query<{ fields: Record<string, string> | null }>(select, [userId, provider]);
   const row = result.rows[0];
   if (!row?.fields) return null;
   return decryptFields(row.fields, provider);

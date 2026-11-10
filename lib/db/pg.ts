@@ -1,6 +1,5 @@
 import {
   Pool,
-  type PoolClient,
   type QueryResult,
   type QueryResultRow,
   type QueryConfig,
@@ -55,13 +54,14 @@ export function getPoolOrTestClient(): Pool {
   return pool;
 }
 
+const DATABASE_URL_HINT =
+  "DATABASE_URL is not set. Set it to a Postgres connection string " +
+  "(e.g. postgres://user:pass@localhost:5432/dbname) or run the app " +
+  "with docker-compose, which provides one automatically.";
+
 export function getPool(): Pool {
   if (!process.env.DATABASE_URL) {
-    throw new Error(
-      "DATABASE_URL is not set. Set it to a Postgres connection string " +
-        "(e.g. postgres://user:pass@localhost:5432/dbname) or run the app " +
-        "with docker-compose, which provides one automatically.",
-    );
+    throw new Error(DATABASE_URL_HINT);
   }
   return getPoolOrTestClient();
 }
@@ -72,11 +72,7 @@ export async function query<T extends QueryResultRow = QueryResultRow>(
 ): Promise<QueryResult<T>> {
   if (testClient) return testClient.query<T>(text, values);
   if (!process.env.DATABASE_URL) {
-    throw new Error(
-      "DATABASE_URL is not set. Set it to a Postgres connection string " +
-        "(e.g. postgres://user:pass@localhost:5432/dbname) or run the app " +
-        "with docker-compose, which provides one automatically.",
-    );
+    throw new Error(DATABASE_URL_HINT);
   }
   return getPoolOrTestClient().query<T>(text, values);
 }
@@ -84,19 +80,17 @@ export async function query<T extends QueryResultRow = QueryResultRow>(
 export async function withTransaction<T>(
   fn: (client: PgQueryable) => Promise<T>,
 ): Promise<T> {
-  if (testClient) {
-    await testClient.query("BEGIN");
-    try {
-      const result = await fn(testClient);
-      await testClient.query("COMMIT");
-      return result;
-    } catch (err) {
-      await testClient.query("ROLLBACK");
-      throw err;
-    }
+  if (!testClient && !process.env.DATABASE_URL) {
+    throw new Error(DATABASE_URL_HINT);
   }
-  const p = getPool();
-  const client = (await p.connect()) as unknown as PoolClient & PgClient;
+  // ONE pinned connection per transaction: BEGIN, the callback's
+  // statements, and COMMIT must share a session. The client is checked
+  // out with connect() rather than fired through pool.query(), which
+  // takes a fresh client per call — under concurrency that would scatter
+  // one transaction's statements across connections (a COMMIT could land
+  // on a session that never saw the BEGIN). In tests the injected client
+  // IS the connection; its connect() just yields itself.
+  const client = await getPoolOrTestClient().connect();
   try {
     await client.query("BEGIN");
     try {

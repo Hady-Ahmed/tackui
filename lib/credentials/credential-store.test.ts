@@ -7,7 +7,8 @@ import {
   deleteCredential,
 } from "./credential-store";
 import { runMigrations } from "@/lib/db/migrate";
-import { query } from "@/lib/db/pg";
+import { query, withTransaction } from "@/lib/db/pg";
+import { useRealPostgres } from "@/lib/db/test-postgres";
 
 const USER = "cred-user-1";
 const OTHER_USER = "cred-user-2";
@@ -323,5 +324,42 @@ describe("deleteCredential", () => {
     });
     expect(await deleteCredential(USER, "tavily")).toBe(false);
     expect(await storedFields(OTHER_USER, "tavily")).toEqual({ api_key: "x" });
+  });
+});
+
+describe("explicit transaction client (the route's locked read-merge-write)", () => {
+  it("setCredential + getCredentialDecrypted run on a caller-owned tx and commit with it", async () => {
+    await withTransaction(async (tx) => {
+      await setCredential({ userId: USER, provider: "openai", kind: "llm", fields: { api_key: "sk-tx" } }, tx);
+      // Read-your-write INSIDE the same tx — the merge sees its own base.
+      expect(await getCredentialDecrypted(USER, "openai", tx)).toEqual({
+        api_key: "sk-tx",
+      });
+    });
+    // And the write committed with the transaction.
+    expect(await getCredentialDecrypted(USER, "openai")).toEqual({ api_key: "sk-tx" });
+  });
+
+  it("a failed tx rolls the tx-scoped write back — the write cannot escape the lock", async (ctx) => {
+    const restore = await useRealPostgres();
+    if (!restore) {
+      ctx.skip();
+      return;
+    }
+    try {
+      await query(`DELETE FROM credentials WHERE user_id = ANY($1)`, [[USER, OTHER_USER]]);
+      await expect(
+        withTransaction(async (tx) => {
+          await setCredential({ userId: USER, provider: "openai", kind: "llm", fields: { api_key: "sk-doomed" } }, tx);
+          throw new Error("simulated failure mid-merge");
+        }),
+      ).rejects.toThrow("simulated failure mid-merge");
+      // The route's discipline: if the upsert had escaped the transaction
+      // (written on the shared pool instead of the locked client), the
+      // rollback couldn't undo it and a HALF-written merge would survive.
+      expect(await getCredentialDecrypted(USER, "openai")).toBeNull();
+    } finally {
+      restore();
+    }
   });
 });

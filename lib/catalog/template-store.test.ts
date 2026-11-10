@@ -305,6 +305,11 @@ describe("updateTemplateBodySchema", () => {
       updateTemplateBodySchema.safeParse({ paidDailyQuota: 100, freeDailyQuota: null }).success,
     ).toBe(false);
   });
+
+  it("rejects a sub-minimum jwtSecret (write-only — blank means keep, not clear)", () => {
+    expect(updateTemplateBodySchema.safeParse({ jwtSecret: "" }).success).toBe(false);
+    expect(updateTemplateBodySchema.safeParse({ jwtSecret: "short" }).success).toBe(false);
+  });
 });
 
 describe("createTemplate / getTemplate / listTemplates", () => {
@@ -411,6 +416,76 @@ describe("updateTemplate", () => {
     });
     const updated = await updateTemplate(created.id, { jwtSecret: "t".repeat(40) });
     expect(updated?.jwtSecret).toBe("t".repeat(40));
+  });
+
+  it("preserves UNDECRYPTABLE stored ciphertext byte-for-byte when the patch omits jwtSecret", async () => {
+    // SECURITY rule: test the bypass attempt. The old behavior wrote NULL
+    // whenever the merged row had no USABLE secret — and rowToTemplate
+    // degrades an undecryptable ciphertext to secret-less — so an
+    // unrelated edit (a rename) silently DESTROYED the stored ciphertext
+    // (key rotation / backup mismatch), unrecoverable even after the
+    // key is restored. The fixture below never decrypts under the test
+    // key, so under the old behavior this assertion fails: the column
+    // would read NULL instead of the preserved bytes.
+    const errSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    const created = await createTemplate({
+      ...validInput,
+      authMode: "jwt",
+      jwtSecret: "s".repeat(32),
+    });
+    const GARBAGE = "enc:v1:AAAAAAAAAAAAAAAA:AAAA:AAAAAAAAAAAAAAAAAAAAAA==";
+    await query(
+      `UPDATE agent_templates SET jwt_secret = $1 WHERE id = $2`,
+      [GARBAGE, created.id],
+    );
+
+    const updated = await updateTemplate(created.id, { name: "Renamed" });
+    expect(updated?.name).toBe("Renamed");
+
+    // Byte-for-byte preserved — NOT nulled, NOT re-encrypted.
+    const raw = await query<{ jwt_secret: string | null }>(
+      `SELECT jwt_secret FROM agent_templates WHERE id = $1`,
+      [created.id],
+    );
+    expect(raw.rows[0].jwt_secret).toBe(GARBAGE);
+    // And the read-path contract is unchanged: the row still DEGRADES to
+    // secret-less rather than surfacing garbage as a secret.
+    expect((await getTemplate(created.id))?.jwtSecret).toBeUndefined();
+    errSpy.mockRestore();
+  });
+
+  it("a patch supplying a new secret REPLACES undecryptable ciphertext (recovery path)", async () => {
+    // Preservation must not be a trap: entering a fresh secret is the
+    // documented recovery from an undecryptable row, and it must win.
+    const errSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    const created = await createTemplate({
+      ...validInput,
+      authMode: "jwt",
+      jwtSecret: "s".repeat(32),
+    });
+    await query(
+      `UPDATE agent_templates SET jwt_secret = 'enc:v1:AAAAAAAAAAAAAAAA:AAAA:AAAAAAAAAAAAAAAAAAAAAA==' WHERE id = $1`,
+      [created.id],
+    );
+    const newSecret = "t".repeat(32);
+    const updated = await updateTemplate(created.id, { jwtSecret: newSecret });
+    expect(updated?.jwtSecret).toBe(newSecret);
+    expect((await getTemplate(created.id))?.jwtSecret).toBe(newSecret);
+    errSpy.mockRestore();
+  });
+
+  it("a patch on a secret-less template still stores NULL (no accidental write)", async () => {
+    // The preservation path reads the raw column and writes it back — for
+    // a template that never had a secret that must stay NULL, not become
+    // some sentinel value.
+    const created = await createTemplate(validInput);
+    const updated = await updateTemplate(created.id, { name: "Renamed" });
+    expect(updated?.jwtSecret).toBeUndefined();
+    const raw = await query<{ jwt_secret: string | null }>(
+      `SELECT jwt_secret FROM agent_templates WHERE id = $1`,
+      [created.id],
+    );
+    expect(raw.rows[0].jwt_secret).toBeNull();
   });
 
   it("clears clearable fields on explicit null, preserves on absent", async () => {

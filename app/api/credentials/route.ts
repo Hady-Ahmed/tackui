@@ -29,11 +29,17 @@
  * A wholly-blank update (nothing to merge in) is rejected: the UI only
  * enables Save when at least one field is filled, and a no-op write would
  * silently look like a rotation.
+ *
+ * The update merge is serialized per (user, provider) row — the
+ * read-merge-write runs in a transaction holding the row's lock, so two
+ * concurrent rotations can't silently drop each other's field
+ * (last-write-wins on the WHOLE map was the lost-update bug).
  */
 import { NextRequest, NextResponse } from "next/server";
 import { z } from "zod";
 import { getCurrentUser } from "@/lib/auth/context";
 import { checkUserLimit } from "@/lib/ratelimit/middleware";
+import { withTransaction } from "@/lib/db/pg";
 import {
   fetchCredentialsCatalog,
   type CredentialCatalogEntry,
@@ -165,30 +171,49 @@ export async function PUT(request: NextRequest) {
   // that the provider's contract no longer declares (catalog changed,
   // stale row) must not ride along into the new write — the saved row
   // should never accumulate fields outside the contract.
-  const stored = await getCredentialDecrypted(user.id, parsed.data.provider);
-  const storedInContract = Object.fromEntries(
-    Object.entries(stored ?? {}).filter(([k]) => contractKeys.includes(k)),
-  );
-  const fields = { ...storedInContract, ...provided };
-  const absent = contractKeys.filter((k) => !(k in fields));
-  if (absent.length > 0) {
-    const labels = entry.fields
-      .filter((f) => absent.includes(f.key))
-      .map((f) => f.label)
-      .join(", ");
-    return NextResponse.json(
-      { error: `${entry.label} needs all of its fields: ${labels}` },
-      { status: 400 },
-    );
-  }
-
+  //
+  // The read-merge-write runs inside ONE transaction holding the provider
+  // row's lock (SELECT ... FOR UPDATE). Unserialized, two concurrent PUTs
+  // for the same provider are a classic lost update: both read the stored
+  // map, both write their own merge, and the last write silently drops
+  // the field the first writer just rotated. The lock serializes the pair
+  // and makes the second writer's post-lock read see the first writer's
+  // committed map, so both rotations survive. A provider with no row yet
+  // has nothing to lock — and no merge hazard: with no stored row the
+  // completeness check below forces a FULL contract map, so concurrent
+  // first-writes are complete maps whose upsert (unique on
+  // user_id+provider) commits atomically either way.
   try {
-    const storedRecord = await setCredential({
-      userId: user.id,
-      provider: parsed.data.provider,
-      kind: entry.kind,
-      fields,
+    const outcome = await withTransaction(async (tx) => {
+      await tx.query(
+        `SELECT fields FROM credentials WHERE user_id = $1 AND provider = $2 FOR UPDATE`,
+        [user.id, parsed.data.provider],
+      );
+      const stored = await getCredentialDecrypted(user.id, parsed.data.provider, tx);
+      const storedInContract = Object.fromEntries(
+        Object.entries(stored ?? {}).filter(([k]) => contractKeys.includes(k)),
+      );
+      const fields = { ...storedInContract, ...provided };
+      const absent = contractKeys.filter((k) => !(k in fields));
+      if (absent.length > 0) {
+        const labels = entry.fields
+          .filter((f) => absent.includes(f.key))
+          .map((f) => f.label)
+          .join(", ");
+        return { ok: false as const, error: `${entry.label} needs all of its fields: ${labels}` };
+      }
+      return {
+        ok: true as const,
+        record: await setCredential(
+          { userId: user.id, provider: parsed.data.provider, kind: entry.kind, fields },
+          tx,
+        ),
+      };
     });
+    if (!outcome.ok) {
+      return NextResponse.json({ error: outcome.error }, { status: 400 });
+    }
+    const storedRecord = outcome.record;
     return NextResponse.json({
       provider: storedRecord.provider,
       kind: storedRecord.kind,

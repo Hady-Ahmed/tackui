@@ -187,7 +187,12 @@ expose backend JWT verification keys.
 - **Graceful decrypt failure:** a rotated/missing key or tampered value
   logs `[agent-store] failed to decrypt jwt_secret` and treats that
   agent as secret-less (backend returns 401) — other agents and the
-  rest of the app keep working.
+  rest of the app keep working. Degrading a READ must never degrade the
+  STORED value: template updates (`updateTemplate`) preserve the raw
+  stored ciphertext byte-for-byte when a patch supplies no new secret,
+  so an unrelated edit (a rename) can't turn a key-rotation mismatch
+  into permanent secret loss — entering a fresh secret remains the
+  recovery path.
 - **Key rotation:** changing `DB_ENCRYPTION_KEY` invalidates existing
   ciphertexts (GCM auth fails). Re-save each agent's JWT secret after
   rotation (the value itself doesn't change — only the encryption key).

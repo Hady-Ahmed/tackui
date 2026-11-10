@@ -91,7 +91,11 @@ secret stores whose boundaries are worth stating explicitly:
   never returned — same boundary discipline as `agents.jwtSecret`. PUT
   update semantics mirror the connectors' position-aware merge: blank or
   omitted fields keep the stored values when a row exists; a new
-  provider requires the full contract (all-or-nothing). The
+  provider requires the full contract (all-or-nothing). That merge is
+  SERIALIZED: the read-merge-write runs in one transaction holding the
+  provider row's `SELECT … FOR UPDATE` lock, so two concurrent
+  single-field rotations can't read the same base and silently drop
+  each other's field (the last-write-wins lost update). The
   decrypted key is consumed exclusively by the run path and delivered
   per-run as an AG-UI context item — never persisted AgentOS-side, never
   cached agent-side. Rows are scoped `UNIQUE (user_id, provider)`; no FK
