@@ -139,18 +139,39 @@ export function redactReservedEvent<E extends object>(
  *
  * - RUN_ERROR events are removed (the documented replay filter — AG-UI's
  *   verifier locks on a replayed RUN_ERROR mid-stream, making failed-run
- *   threads permanently unreadable on reconnect).
+ *   threads permanently unreadable on reconnect). A RUN_ERROR is NOT a
+ *   stray-drop boundary: `compactEvents` persists an errored run's
+ *   buffered message/tool-call traffic AFTER the RUN_ERROR (it flushes
+ *   unclosed sequences at stream end), so events following a RUN_ERROR in
+ *   the record were, in real time, emitted BEFORE it — dropping
+ *   "post-terminal" events there would erase the run's real partial
+ *   history. The run simply stays open; the next RUN_STARTED (or a
+ *   trailing terminator) closes its sequences and synthesizes the
+ *   RUN_FINISHED.
+ * - A run's history stops at its first surviving terminal event
+ *   (RUN_FINISHED). Events the backend recorded after it (stray
+ *   bookkeeping: a duplicate RUN_FINISHED, message/tool-call traffic
+ *   trailing the terminator) are dropped, while the NEXT run's own
+ *   RUN_STARTED is kept — multi-run histories (RUN_FINISHED → RUN_STARTED)
+ *   are the normal shape, so the cut is scoped to the run that ended, not
+ *   to the whole history. The verifier rejects every event except
+ *   RUN_STARTED (and RUN_ERROR, which replay filters out) after a
+ *   RUN_FINISHED ("The run has already finished with
+ *   'RUN_FINISHED'. Start a new run with 'RUN_STARTED'."), so replaying
+ *   strays would make the reconnect replay un-consumable.
  * - An unterminated run is closed with a synthetic RUN_FINISHED **only
  *   when a later RUN_STARTED follows it in the same history** — the next
  *   run's RUN_STARTED would otherwise trip the verifier ("Cannot send
  *   'RUN_STARTED' while a run is still active") and the whole connect
- *   replay would be rejected. Before the terminator, any message or
- *   tool-call sequence the errored run left open is CLOSED first: AG-UI
- *   requires a producer to close what it opened before RUN_FINISHED, and
- *   @copilotkit/shared's finalizeRunEvents deliberately skips closure
- *   when a RUN_ERROR is present — so persisted errored runs keep open
- *   sequences that a bare synthetic terminator would leave dangling
- *   (permanently-spinning tool calls on reconnect).
+ *   replay would be rejected. Before the terminator, any message,
+ *   tool-call, or REASONING sequence the errored run left open is CLOSED
+ *   first: AG-UI requires a producer to close what it opened before
+ *   RUN_FINISHED, and @copilotkit/shared's finalizeRunEvents deliberately
+ *   skips closure when a RUN_ERROR is present (and tracks only
+ *   TEXT_MESSAGE_* and TOOL_CALL_* — a REASONING_* sequence is never
+ *   closed by it) — so persisted errored runs keep open sequences that a bare
+ *   synthetic terminator would leave dangling (permanently-spinning tool
+ *   calls on reconnect).
  * - A run left unterminated at the END of the history is left
  *   unresolved — UNLESS the caller is about to append a live bridge to
  *   the same verified stream (`opts.terminateTrailing`, set by
@@ -160,8 +181,12 @@ export function redactReservedEvent<E extends object>(
  *   the same stream. The bridge supplies the "later RUN_STARTED" the
  *   synthesis exists for — it just isn't in the persisted history list.
  *
- * The failure flavor is preserved in the synthesized tool-call results
- * (status "error") so replayed history reads as failed, not completed.
+ * The synthesized tool-call results carry status "error": for an errored
+ * run that reads as failed, as intended. For a finished run whose record
+ * left a tool call unended, the same synthesis is a repair — the run
+ * succeeded, but the dangling call still needs a result before the
+ * verifier will accept the terminator, so "error" is the conservative
+ * placeholder.
  */
 function buildReplayEvents(
   events: BaseEvent[],
@@ -169,10 +194,33 @@ function buildReplayEvents(
 ): BaseEvent[] {
   const out: BaseEvent[] = [];
   let openRun: { threadId: string; runId: string } | null = null;
+  // A RUN_STARTED has been seen — the history is inside/at a run. Events
+  // before the first RUN_STARTED are pre-run bookkeeping (hand-seeded
+  // history) and are never treated as strays.
+  let runOpened = false;
+  // The current run segment emitted its RUN_FINISHED. Everything recorded
+  // after it is stray bookkeeping and is dropped until the next RUN_STARTED
+  // (see the doc comment's terminal rule).
+  let runFinished = false;
   const openMessageIds = new Set<string>();
   const openToolCalls = new Map<string, { hasEnd: boolean; hasResult: boolean }>();
+  // Open REASONING_* sequences. REASONING_START opens a reasoning block
+  // identified by its messageId; REASONING_MESSAGE_START opens a reasoning
+  // message INSIDE the block under its own messageId (the runtime's
+  // THINKING_* → REASONING_* transformer gives the block and the message
+  // different ids), so both ids must be tracked separately. Closure mirrors
+  // the nesting: REASONING_MESSAGE_END for each open message, then
+  // REASONING_END for each open block.
+  const openReasoningMessages = new Set<string>();
+  const openReasoningBlocks = new Set<string>();
 
   const closeOpenSequences = (): void => {
+    for (const messageId of openReasoningMessages) {
+      out.push({ type: EventType.REASONING_MESSAGE_END, messageId } as unknown as BaseEvent);
+    }
+    for (const messageId of openReasoningBlocks) {
+      out.push({ type: EventType.REASONING_END, messageId } as unknown as BaseEvent);
+    }
     for (const messageId of openMessageIds) {
       out.push({ type: EventType.TEXT_MESSAGE_END, messageId } as unknown as BaseEvent);
     }
@@ -194,26 +242,89 @@ function buildReplayEvents(
         } as unknown as BaseEvent);
       }
     }
+    openReasoningMessages.clear();
+    openReasoningBlocks.clear();
     openMessageIds.clear();
     openToolCalls.clear();
   };
 
   for (const event of events) {
-    if (event.type === EventType.RUN_ERROR) continue;
+    if (event.type === EventType.RUN_ERROR) {
+      // Filtered from the replay stream — and deliberately NOT a
+      // stray-drop boundary: compactEvents persists an errored run's
+      // buffered message/tool-call traffic AFTER the RUN_ERROR (it
+      // flushes unclosed sequences at stream end), so those events were
+      // emitted BEFORE the error in real time. The run stays open: the
+      // next RUN_STARTED (or a trailing terminator) closes its open
+      // sequences and synthesizes the RUN_FINISHED the verifier requires.
+      continue;
+    }
     if (event.type === EventType.RUN_STARTED) {
       if (openRun) {
         closeOpenSequences();
         out.push(syntheticRunFinished(openRun));
       }
+      runOpened = true;
+      runFinished = false;
       const started = event as { threadId?: string; runId?: string };
       openRun =
         started.threadId && started.runId
           ? { threadId: started.threadId, runId: started.runId }
           : null;
-    } else if (event.type === EventType.RUN_FINISHED) {
-      openRun = null;
-      openMessageIds.clear();
-      openToolCalls.clear();
+      out.push(event);
+      continue;
+    }
+    if (event.type === EventType.RUN_FINISHED) {
+      if (openRun) {
+        // Close anything the run left open before its terminator — a
+        // no-op for well-formed runs (their sequences are already closed)
+        // and a repair for records where open traffic precedes the
+        // terminator.
+        closeOpenSequences();
+        out.push(event);
+        openRun = null;
+        openMessageIds.clear();
+        openToolCalls.clear();
+        openReasoningMessages.clear();
+        openReasoningBlocks.clear();
+        runFinished = true;
+        continue;
+      }
+      // No open run: pre-run bookkeeping (history seeded before any
+      // RUN_STARTED) and the terminal of a run whose RUN_STARTED carried
+      // no ids are kept — both preserve prior behavior. A RUN_FINISHED
+      // trailing an already-finished run is stray bookkeeping — dropped.
+      if (!runFinished) {
+        // Same shaping as the openRun branch: close whatever the id-less
+        // run left open (a no-op for well-formed runs), then treat the
+        // segment as finished so post-terminal strays are dropped and
+        // stale ids can't leak into the next segment's synthesized
+        // closures.
+        closeOpenSequences();
+        out.push(event);
+        runFinished = true;
+      }
+      continue;
+    }
+    if (!runOpened) {
+      // Pre-run bookkeeping — preserved as before.
+      out.push(event);
+      continue;
+    }
+    if (runFinished) continue; // stray post-terminal bookkeeping — dropped
+
+    if (event.type === EventType.REASONING_START) {
+      const id = (event as { messageId?: unknown }).messageId;
+      if (typeof id === "string") openReasoningBlocks.add(id);
+    } else if (event.type === EventType.REASONING_MESSAGE_START) {
+      const id = (event as { messageId?: unknown }).messageId;
+      if (typeof id === "string") openReasoningMessages.add(id);
+    } else if (event.type === EventType.REASONING_MESSAGE_END) {
+      const id = (event as { messageId?: unknown }).messageId;
+      if (typeof id === "string") openReasoningMessages.delete(id);
+    } else if (event.type === EventType.REASONING_END) {
+      const id = (event as { messageId?: unknown }).messageId;
+      if (typeof id === "string") openReasoningBlocks.delete(id);
     } else if (event.type === EventType.TEXT_MESSAGE_START) {
       const id = (event as { messageId?: unknown }).messageId;
       if (typeof id === "string") openMessageIds.add(id);
@@ -413,7 +524,6 @@ export class PostgresAgentRunner extends AgentRunner {
       throw new Error("Thread not found");
     }
 
-    const seenMessageIds = new Set<string>();
     const currentRunEvents: BaseEvent[] = [];
 
     const nextSubject = new ReplaySubject<BaseEvent>(Infinity);
@@ -537,20 +647,6 @@ export class PostgresAgentRunner extends AgentRunner {
             runSubject.next(processedEvent);
             nextSubject.next(processedEvent);
             currentRunEvents.push(processedEvent);
-          },
-          onNewMessage: ({ message }) => {
-            if (!seenMessageIds.has(message.id)) {
-              seenMessageIds.add(message.id);
-            }
-          },
-          onRunStartedEvent: () => {
-            if (request.input.messages) {
-              for (const message of request.input.messages) {
-                if (!seenMessageIds.has(message.id)) {
-                  seenMessageIds.add(message.id);
-                }
-              }
-            }
           },
         });
 
@@ -1303,12 +1399,6 @@ export class PostgresAgentRunner extends AgentRunner {
   }
 
   /**
-   * Atomically claim the run lock for a thread. The conditional upsert
-   * only takes the lock when the stored state says not-running (the
-   * ON CONFLICT ... WHERE guard), and RETURNING tells whether THIS call
-   * won it — false means another run holds the lock (or won the race).
-   */
-  /**
    * Whether the events cache contains a runId the given snapshot lacks —
    * i.e. a storeRun merged a run committed AFTER the snapshot was read,
    * so the snapshot is stale and must not overwrite the cache (see the
@@ -1329,6 +1419,12 @@ export class PostgresAgentRunner extends AgentRunner {
     return false;
   }
 
+  /**
+   * Atomically claim the run lock for a thread. The conditional upsert
+   * only takes the lock when the stored state says not-running (the
+   * ON CONFLICT ... WHERE guard), and RETURNING tells whether THIS call
+   * won it — false means another run holds the lock (or won the race).
+   */
   private async acquireRunState(
     threadId: string,
     runId: string,
@@ -1359,11 +1455,6 @@ export class PostgresAgentRunner extends AgentRunner {
     // clobbered (0 rows updated → someone else changed the state → not
     // ours to take).
     //
-    // The liveness check is in-process by design: run_state is shared PG,
-    // but a multi-instance deploy would need shared state for this (see
-    // the class doc on the future Redis migration) — today the app is
-    // single-instance, the same assumption the boot-time run-state reset
-    // already makes.
     // The liveness check is in-process by design: run_state is shared PG,
     // but a multi-instance deploy would need shared state for this (see
     // the class doc on the future Redis migration) — today the app is

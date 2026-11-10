@@ -479,6 +479,317 @@ describe("PostgresAgentRunner — connect() smart replay", () => {
     });
     expect(completed).toBe(true);
   });
+
+  it("never clobbers an events cache holding a run the DB snapshot lacks", async (ctx) => {
+    ctx.skip(!pgStarted, "Real Postgres (Docker) unavailable");
+    // The capture-vs-connect invariant behind cacheHoldsRunOutsideSnapshot:
+    // a run's storeRun merge can land in eventsCache AFTER a concurrent
+    // connect() read its historic snapshot — the snapshot then cannot cover
+    // that run. Overwriting the cache with the snapshot-shaped replay would
+    // regress the sync readers (getThreadEvents/getThreadState) to pre-run
+    // history until the next write on the thread. Simulated deterministically:
+    // the cache is seeded the way storeRun's read-through merge leaves it
+    // (run-1 from PG plus the freshly merged run-2), while PG itself holds
+    // only run-1 — exactly the (cache, snapshot) pair the guard arbitrates.
+    const run1Events: BaseEvent[] = [
+      { type: EventType.RUN_STARTED, threadId: "t-cache-guard", runId: "run-1" } as unknown as BaseEvent,
+      { type: EventType.RUN_FINISHED, threadId: "t-cache-guard", runId: "run-1" } as unknown as BaseEvent,
+    ];
+    await query(
+      `INSERT INTO agent_runs (thread_id, run_id, events, input, version)
+       VALUES ($1, $2, $3::jsonb, $4::jsonb, 1)`,
+      ["t-cache-guard", "run-1", JSON.stringify(run1Events), JSON.stringify({})],
+    );
+    caches(runner).eventsCache.set("t-cache-guard", [
+      ...run1Events,
+      { type: EventType.RUN_STARTED, threadId: "t-cache-guard", runId: "run-2" } as unknown as BaseEvent,
+      { type: EventType.RUN_FINISHED, threadId: "t-cache-guard", runId: "run-2" } as unknown as BaseEvent,
+    ]);
+
+    const received: BaseEvent[] = [];
+    await new Promise<void>((resolve) => {
+      runner.connect({ threadId: "t-cache-guard" }).subscribe({
+        next: (e) => received.push(e),
+        complete: () => resolve(),
+        error: () => resolve(),
+      });
+    });
+
+    // The replay covers the snapshot only — run-2 is not in PG.
+    expect(
+      received.some(
+        (e) =>
+          e.type === EventType.RUN_STARTED &&
+          (e as { runId?: string }).runId === "run-2",
+      ),
+    ).toBe(false);
+    // The cache keeps the fresher merge: run-2 must survive the connect.
+    expect(
+      caches(runner)
+        .eventsCache.get("t-cache-guard")!
+        .some(
+          (e) =>
+            e.type === EventType.RUN_STARTED &&
+            (e as { runId?: string }).runId === "run-2",
+        ),
+    ).toBe(true);
+  });
+
+  // Collect the full replay of a connect() — the subscription pattern the
+  // tests above inline, factored out for the replay-shaping suite below.
+  function collectReplay(threadId: string): Promise<BaseEvent[]> {
+    return new Promise((resolve) => {
+      const received: BaseEvent[] = [];
+      runner.connect({ threadId }).subscribe({
+        next: (e) => received.push(e),
+        complete: () => resolve(received),
+        error: () => resolve(received),
+      });
+    });
+  }
+
+  function insertRun(
+    threadId: string,
+    runId: string,
+    events: BaseEvent[],
+    parentRunId: string | null = null,
+  ): Promise<unknown> {
+    return query(
+      `INSERT INTO agent_runs (thread_id, run_id, parent_run_id, events, input, version)
+       VALUES ($1, $2, $3, $4::jsonb, $5::jsonb, 1)`,
+      [threadId, runId, parentRunId, JSON.stringify(events), JSON.stringify({})],
+    );
+  }
+
+  it("replay drops stray events recorded after a run's terminal event", async (ctx) => {
+    ctx.skip(!pgStarted, "Real Postgres (Docker) unavailable");
+    // A backend that keeps recording after its terminal (a duplicate
+    // RUN_FINISHED, trailing message traffic) poisons the replay: the
+    // verifier rejects every event except RUN_STARTED (and RUN_ERROR,
+    // which replay filters) after a RUN_FINISHED ("The run has already
+    // finished with 'RUN_FINISHED'"). The stray tail
+    // must not be re-emitted on reconnect.
+    const events: BaseEvent[] = [
+      { type: EventType.RUN_STARTED, threadId: "t-stray", runId: "run-stray" } as unknown as BaseEvent,
+      { type: EventType.TEXT_MESSAGE_START, messageId: "m1", role: "assistant" } as unknown as BaseEvent,
+      { type: EventType.TEXT_MESSAGE_CONTENT, messageId: "m1", delta: "hello" } as unknown as BaseEvent,
+      { type: EventType.TEXT_MESSAGE_END, messageId: "m1" } as unknown as BaseEvent,
+      { type: EventType.RUN_FINISHED, threadId: "t-stray", runId: "run-stray" } as unknown as BaseEvent,
+      // Stray bookkeeping recorded after the terminal:
+      { type: EventType.TEXT_MESSAGE_START, messageId: "m-stray", role: "assistant" } as unknown as BaseEvent,
+      { type: EventType.TEXT_MESSAGE_END, messageId: "m-stray" } as unknown as BaseEvent,
+      { type: EventType.RUN_FINISHED, threadId: "t-stray", runId: "run-stray" } as unknown as BaseEvent,
+    ];
+    await insertRun("t-stray", "run-stray", events);
+
+    const received = await collectReplay("t-stray");
+
+    expect(received.filter((e) => e.type === EventType.RUN_FINISHED)).toHaveLength(1);
+    expect(
+      received.some((e) => (e as { messageId?: string }).messageId === "m-stray"),
+    ).toBe(false);
+    // The legitimate message survived, and the stream ends at the terminal.
+    expect(
+      received.some(
+        (e) =>
+          e.type === EventType.TEXT_MESSAGE_CONTENT &&
+          (e as { delta?: string }).delta === "hello",
+      ),
+    ).toBe(true);
+    expect(received[received.length - 1]?.type).toBe(EventType.RUN_FINISHED);
+  });
+
+  it("replay preserves a run that legitimately starts after a finished one", async (ctx) => {
+    ctx.skip(!pgStarted, "Real Postgres (Docker) unavailable");
+    // RUN_FINISHED → RUN_STARTED is the NORMAL multi-run shape — the
+    // stop-at-terminal cut is scoped to the run that ended, never to the
+    // whole history. A naive "truncate at the first terminal event" would
+    // drop run-b entirely.
+    const runA: BaseEvent[] = [
+      { type: EventType.RUN_STARTED, threadId: "t-two-runs", runId: "run-a" } as unknown as BaseEvent,
+      { type: EventType.TEXT_MESSAGE_START, messageId: "m-a", role: "assistant" } as unknown as BaseEvent,
+      { type: EventType.TEXT_MESSAGE_CONTENT, messageId: "m-a", delta: "first" } as unknown as BaseEvent,
+      { type: EventType.TEXT_MESSAGE_END, messageId: "m-a" } as unknown as BaseEvent,
+      { type: EventType.RUN_FINISHED, threadId: "t-two-runs", runId: "run-a" } as unknown as BaseEvent,
+    ];
+    const runB: BaseEvent[] = [
+      { type: EventType.RUN_STARTED, threadId: "t-two-runs", runId: "run-b" } as unknown as BaseEvent,
+      { type: EventType.TEXT_MESSAGE_START, messageId: "m-b", role: "assistant" } as unknown as BaseEvent,
+      { type: EventType.TEXT_MESSAGE_CONTENT, messageId: "m-b", delta: "second" } as unknown as BaseEvent,
+      { type: EventType.TEXT_MESSAGE_END, messageId: "m-b" } as unknown as BaseEvent,
+      { type: EventType.RUN_FINISHED, threadId: "t-two-runs", runId: "run-b" } as unknown as BaseEvent,
+    ];
+    await insertRun("t-two-runs", "run-a", runA);
+    // The two awaited inserts run in separate transactions, so each gets
+    // a distinct created_at — that's what pins run-b after run-a under
+    // getHistoricRuns' ORDER BY created_at.
+    await insertRun("t-two-runs", "run-b", runB, "run-a");
+
+    const received = await collectReplay("t-two-runs");
+    const runIdOf = (e: BaseEvent) => (e as { runId?: string }).runId;
+    const idxOf = (type: EventType, runId: string) =>
+      received.findIndex((e) => e.type === type && runIdOf(e) === runId);
+
+    expect(received.filter((e) => e.type === EventType.RUN_STARTED).map(runIdOf)).toEqual([
+      "run-a",
+      "run-b",
+    ]);
+    expect(received.filter((e) => e.type === EventType.RUN_FINISHED).map(runIdOf)).toEqual([
+      "run-a",
+      "run-b",
+    ]);
+    expect(received.some((e) => (e as { delta?: string }).delta === "first")).toBe(true);
+    expect(received.some((e) => (e as { delta?: string }).delta === "second")).toBe(true);
+    expect(idxOf(EventType.RUN_STARTED, "run-a")).toBeLessThan(idxOf(EventType.RUN_FINISHED, "run-a"));
+    expect(idxOf(EventType.RUN_FINISHED, "run-a")).toBeLessThan(idxOf(EventType.RUN_STARTED, "run-b"));
+    expect(idxOf(EventType.RUN_STARTED, "run-b")).toBeLessThan(idxOf(EventType.RUN_FINISHED, "run-b"));
+  });
+
+  it("replay closes a REASONING_* sequence an errored run left open, before the next run", async (ctx) => {
+    ctx.skip(!pgStarted, "Real Postgres (Docker) unavailable");
+    // agno backends can leave a reasoning block open on exception paths —
+    // finalizeRunEvents only tracks TEXT_MESSAGE_*/TOOL_CALL_*, so nothing
+    // else closes REASONING_*. The replay's synthetic terminator must close
+    // the open block (message end, then block end) before the retry's
+    // RUN_STARTED, or the reconnect shows a dangling reasoning sequence.
+    const runErr: BaseEvent[] = [
+      { type: EventType.RUN_STARTED, threadId: "t-reason", runId: "run-err" } as unknown as BaseEvent,
+      { type: EventType.REASONING_START, messageId: "block-1" } as unknown as BaseEvent,
+      { type: EventType.REASONING_MESSAGE_START, messageId: "msg-1", role: "reasoning" } as unknown as BaseEvent,
+      { type: EventType.REASONING_MESSAGE_CONTENT, messageId: "msg-1", delta: "thinking…" } as unknown as BaseEvent,
+      { type: EventType.RUN_ERROR, message: "boom" } as unknown as BaseEvent,
+    ];
+    const runOk: BaseEvent[] = [
+      { type: EventType.RUN_STARTED, threadId: "t-reason", runId: "run-ok" } as unknown as BaseEvent,
+      { type: EventType.TEXT_MESSAGE_START, messageId: "m-ok", role: "assistant" } as unknown as BaseEvent,
+      { type: EventType.TEXT_MESSAGE_CONTENT, messageId: "m-ok", delta: "answer" } as unknown as BaseEvent,
+      { type: EventType.TEXT_MESSAGE_END, messageId: "m-ok" } as unknown as BaseEvent,
+      { type: EventType.RUN_FINISHED, threadId: "t-reason", runId: "run-ok" } as unknown as BaseEvent,
+    ];
+    await insertRun("t-reason", "run-err", runErr);
+    await insertRun("t-reason", "run-ok", runOk, "run-err");
+
+    const received = await collectReplay("t-reason");
+    const idxOf = (predicate: (e: BaseEvent) => boolean) => received.findIndex(predicate);
+    const withId = (type: EventType, id: string) => (e: BaseEvent) =>
+      e.type === type &&
+      ((e as { messageId?: string }).messageId === id ||
+        (e as { runId?: string }).runId === id);
+
+    const msgEndIdx = idxOf(withId(EventType.REASONING_MESSAGE_END, "msg-1"));
+    const blockEndIdx = idxOf(withId(EventType.REASONING_END, "block-1"));
+    const synthFinishIdx = idxOf(withId(EventType.RUN_FINISHED, "run-err"));
+    const retryStartIdx = idxOf(withId(EventType.RUN_STARTED, "run-ok"));
+
+    expect(received.some((e) => e.type === EventType.RUN_ERROR)).toBe(false);
+    // The open reasoning sequence is closed — message end, then block end —
+    // and both closures precede the synthetic terminator and the retry.
+    expect(msgEndIdx).toBeGreaterThanOrEqual(0);
+    expect(blockEndIdx).toBeGreaterThan(msgEndIdx);
+    expect(synthFinishIdx).toBeGreaterThan(blockEndIdx);
+    expect(retryStartIdx).toBeGreaterThan(synthFinishIdx);
+    // Exactly one terminal for the errored run — the synthetic one.
+    expect(
+      received.filter(
+        (e) =>
+          e.type === EventType.RUN_FINISHED &&
+          (e as { runId?: string }).runId === "run-err",
+      ),
+    ).toHaveLength(1);
+    // The retry's own history is intact.
+    expect(received.some((e) => (e as { delta?: string }).delta === "answer")).toBe(true);
+  });
+
+  it("replay leaves a trailing open REASONING_* sequence unresolved when no bridge follows", async (ctx) => {
+    ctx.skip(!pgStarted, "Real Postgres (Docker) unavailable");
+    // The terminateTrailing contract extends to reasoning: a run left
+    // unterminated at the END of the history with no live bridge following
+    // stays unresolved — no synthetic RUN_FINISHED, no synthesized
+    // closures (re-presenting the failure as a completed turn would erase
+    // what the live client actually watched).
+    const events: BaseEvent[] = [
+      { type: EventType.RUN_STARTED, threadId: "t-tail", runId: "run-tail" } as unknown as BaseEvent,
+      { type: EventType.REASONING_START, messageId: "block-9" } as unknown as BaseEvent,
+      { type: EventType.REASONING_MESSAGE_START, messageId: "msg-9", role: "reasoning" } as unknown as BaseEvent,
+      { type: EventType.REASONING_MESSAGE_CONTENT, messageId: "msg-9", delta: "thinking…" } as unknown as BaseEvent,
+      { type: EventType.RUN_ERROR, message: "boom" } as unknown as BaseEvent,
+    ];
+    await insertRun("t-tail", "run-tail", events);
+
+    const received = await collectReplay("t-tail");
+
+    expect(received.map((e) => e.type)).toEqual([
+      EventType.RUN_STARTED,
+      EventType.REASONING_START,
+      EventType.REASONING_MESSAGE_START,
+      EventType.REASONING_MESSAGE_CONTENT,
+    ]);
+  });
+
+  it("replay preserves an errored run's traffic the record places after its RUN_ERROR", async (ctx) => {
+    ctx.skip(!pgStarted, "Real Postgres (Docker) unavailable");
+    // compactEvents persists an errored run's buffered message/tool-call
+    // traffic AFTER the RUN_ERROR (it flushes unclosed sequences at stream
+    // end), so events following a RUN_ERROR in the record were emitted
+    // BEFORE it in real time. The replay keeps them — the run stays open
+    // (trailing, no bridge), so no terminal is synthesized either.
+    const events: BaseEvent[] = [
+      { type: EventType.RUN_STARTED, threadId: "t-err-stray", runId: "run-e" } as unknown as BaseEvent,
+      { type: EventType.RUN_ERROR, message: "boom" } as unknown as BaseEvent,
+      { type: EventType.TEXT_MESSAGE_START, messageId: "m1", role: "assistant" } as unknown as BaseEvent,
+      {
+        type: EventType.TOOL_CALL_START,
+        toolCallId: "tc1",
+        toolCallName: "search",
+        parentMessageId: "m1",
+      } as unknown as BaseEvent,
+    ];
+    await insertRun("t-err-stray", "run-e", events);
+
+    const received = await collectReplay("t-err-stray");
+
+    expect(received.some((e) => e.type === EventType.RUN_ERROR)).toBe(false);
+    expect(received.some((e) => e.type === EventType.RUN_FINISHED)).toBe(false);
+    expect(
+      received.some(
+        (e) =>
+          e.type === EventType.TEXT_MESSAGE_START &&
+          (e as { messageId?: string }).messageId === "m1",
+      ),
+    ).toBe(true);
+    expect(
+      received.some(
+        (e) =>
+          e.type === EventType.TOOL_CALL_START &&
+          (e as { toolCallId?: string }).toolCallId === "tc1",
+      ),
+    ).toBe(true);
+  });
+
+  it("replay closes an errored run's open message before a RUN_FINISHED recorded after the RUN_ERROR", async (ctx) => {
+    ctx.skip(!pgStarted, "Real Postgres (Docker) unavailable");
+    // A producer must close what it opened before RUN_FINISHED. When the
+    // record places open traffic before a terminator (hand-seeded or
+    // uncompacted histories), the replay closes the sequence first instead
+    // of replaying a dangling TEXT_MESSAGE_START ahead of RUN_FINISHED.
+    const events: BaseEvent[] = [
+      { type: EventType.RUN_STARTED, threadId: "t-err-finish", runId: "run-ef" } as unknown as BaseEvent,
+      { type: EventType.TEXT_MESSAGE_START, messageId: "m1", role: "assistant" } as unknown as BaseEvent,
+      { type: EventType.RUN_ERROR, message: "boom" } as unknown as BaseEvent,
+      { type: EventType.RUN_FINISHED, threadId: "t-err-finish", runId: "run-ef" } as unknown as BaseEvent,
+    ];
+    await insertRun("t-err-finish", "run-ef", events);
+
+    const received = await collectReplay("t-err-finish");
+    const types = received.map((e) => e.type);
+
+    expect(types).toEqual([
+      EventType.RUN_STARTED,
+      EventType.TEXT_MESSAGE_START,
+      EventType.TEXT_MESSAGE_END,
+      EventType.RUN_FINISHED,
+    ]);
+  });
 });
 
 describe("PostgresAgentRunner — isRunning / stop", () => {
