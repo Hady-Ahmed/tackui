@@ -104,18 +104,26 @@ strategy it uses so users know whether server-side session storage is required.
 and shapes replay through `buildReplayEvents`: persisted `RUN_ERROR` events
 are filtered out (the AG-UI verifier locks on them mid-stream, making
 failed-run threads permanently unreadable on reconnect), and an unterminated
-run is closed with a synthetic `RUN_FINISHED` — closing any message/tool-call
-sequences the errored run left open first — when a later `RUN_STARTED` would
-otherwise follow in the same verified stream: either a later run's
-`RUN_STARTED` already in the history (the next run's start would otherwise
-trip the verifier's "run still active" lock and reject the whole replay), or
-a live bridge about to append an in-flight run's buffered events (whose
-first event is that run's `RUN_STARTED`) to the same stream. A run left
-unterminated at the END of the history with no bridge following stays
-unresolved: the spec makes resolving a truncated final run the consumer's
-business, and re-presenting the failure as a completed turn would erase
-what the live client actually watched. The same shaping applies when a run
-is merged into
+run is closed with a synthetic `RUN_FINISHED` — closing any message,
+tool-call, or `REASONING_*` sequences the errored run left open first — when
+a later `RUN_STARTED` would otherwise follow in the same verified stream:
+either a later run's `RUN_STARTED` already in the history (the next run's
+start would otherwise trip the verifier's "run still active" lock and reject
+the whole replay), or a live bridge about to append an in-flight run's
+buffered events (whose first event is that run's `RUN_STARTED`) to the same
+stream. A run left unterminated at the END of the history with no bridge
+following stays unresolved: the spec makes resolving a truncated final run
+the consumer's business, and re-presenting the failure as a completed turn
+would erase what the live client actually watched. Replay history also stops
+at each run's first surviving terminal event: stray bookkeeping recorded
+after a `RUN_FINISHED` (duplicate terminators, trailing traffic) is dropped —
+the verifier rejects everything but `RUN_STARTED` after a `RUN_FINISHED` —
+while the next run's own `RUN_STARTED` is kept. A `RUN_ERROR` is deliberately
+NOT such a cut point: `compactEvents` persists an errored run's buffered
+message/tool-call traffic after the `RUN_ERROR` (unclosed sequences are
+flushed at stream end), so events following it in the record were emitted
+before it in real time, and dropping them would erase the run's real partial
+history. The same shaping applies when a run is merged into
 the events cache, so sync reads (`/threads/:id/events`) get identical
 history. It exposes
 `renameThread`/`deleteThread`, used by `PATCH/DELETE /api/threads/[id]` — the

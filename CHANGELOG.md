@@ -4,6 +4,17 @@ All notable changes to this project will be documented in this file. The format 
 
 ## [Unreleased]
 
+- **Reconnect replay no longer replays post-terminal strays or dangling
+  sequences (#67).** A backend that records events after its `RUN_FINISHED`
+  (duplicate terminators, trailing traffic) poisoned reconnect replay — the
+  AG-UI verifier rejects every event but `RUN_STARTED` after a terminal, so
+  the whole history was refused. Replay now stops at each run's first
+  surviving terminal event while keeping the next run's own `RUN_STARTED`.
+  Errored runs also close what they left open: a synthetic terminator now
+  closes open `REASONING_*` sequences (`REASONING_MESSAGE_END` per open
+  message, then `REASONING_END` per block) alongside the existing
+  message/tool-call closures, so reconnects no longer show permanently
+  spinning reasoning blocks or tool calls.
 - **A client-supplied run id reused on a different thread no longer drops
   the run from history (#65).** The event log's `run_id` column carried a
   global unique constraint, so a client that legitimately supplies its own
