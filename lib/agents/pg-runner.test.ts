@@ -479,6 +479,61 @@ describe("PostgresAgentRunner — connect() smart replay", () => {
     });
     expect(completed).toBe(true);
   });
+
+  it("never clobbers an events cache holding a run the DB snapshot lacks", async (ctx) => {
+    ctx.skip(!pgStarted, "Real Postgres (Docker) unavailable");
+    // The capture-vs-connect invariant behind cacheHoldsRunOutsideSnapshot:
+    // a run's storeRun merge can land in eventsCache AFTER a concurrent
+    // connect() read its historic snapshot — the snapshot then cannot cover
+    // that run. Overwriting the cache with the snapshot-shaped replay would
+    // regress the sync readers (getThreadEvents/getThreadState) to pre-run
+    // history until the next write on the thread. Simulated deterministically:
+    // the cache is seeded the way storeRun's read-through merge leaves it
+    // (run-1 from PG plus the freshly merged run-2), while PG itself holds
+    // only run-1 — exactly the (cache, snapshot) pair the guard arbitrates.
+    const run1Events: BaseEvent[] = [
+      { type: EventType.RUN_STARTED, threadId: "t-cache-guard", runId: "run-1" } as unknown as BaseEvent,
+      { type: EventType.RUN_FINISHED, threadId: "t-cache-guard", runId: "run-1" } as unknown as BaseEvent,
+    ];
+    await query(
+      `INSERT INTO agent_runs (thread_id, run_id, events, input, version)
+       VALUES ($1, $2, $3::jsonb, $4::jsonb, 1)`,
+      ["t-cache-guard", "run-1", JSON.stringify(run1Events), JSON.stringify({})],
+    );
+    caches(runner).eventsCache.set("t-cache-guard", [
+      ...run1Events,
+      { type: EventType.RUN_STARTED, threadId: "t-cache-guard", runId: "run-2" } as unknown as BaseEvent,
+      { type: EventType.RUN_FINISHED, threadId: "t-cache-guard", runId: "run-2" } as unknown as BaseEvent,
+    ]);
+
+    const received: BaseEvent[] = [];
+    await new Promise<void>((resolve) => {
+      runner.connect({ threadId: "t-cache-guard" }).subscribe({
+        next: (e) => received.push(e),
+        complete: () => resolve(),
+        error: () => resolve(),
+      });
+    });
+
+    // The replay covers the snapshot only — run-2 is not in PG.
+    expect(
+      received.some(
+        (e) =>
+          e.type === EventType.RUN_STARTED &&
+          (e as { runId?: string }).runId === "run-2",
+      ),
+    ).toBe(false);
+    // The cache keeps the fresher merge: run-2 must survive the connect.
+    expect(
+      caches(runner)
+        .eventsCache.get("t-cache-guard")!
+        .some(
+          (e) =>
+            e.type === EventType.RUN_STARTED &&
+            (e as { runId?: string }).runId === "run-2",
+        ),
+    ).toBe(true);
+  });
 });
 
 describe("PostgresAgentRunner — isRunning / stop", () => {
