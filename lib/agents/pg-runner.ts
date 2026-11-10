@@ -510,7 +510,6 @@ export class PostgresAgentRunner extends AgentRunner {
       throw new Error("Thread not found");
     }
 
-    const seenMessageIds = new Set<string>();
     const currentRunEvents: BaseEvent[] = [];
 
     const nextSubject = new ReplaySubject<BaseEvent>(Infinity);
@@ -634,20 +633,6 @@ export class PostgresAgentRunner extends AgentRunner {
             runSubject.next(processedEvent);
             nextSubject.next(processedEvent);
             currentRunEvents.push(processedEvent);
-          },
-          onNewMessage: ({ message }) => {
-            if (!seenMessageIds.has(message.id)) {
-              seenMessageIds.add(message.id);
-            }
-          },
-          onRunStartedEvent: () => {
-            if (request.input.messages) {
-              for (const message of request.input.messages) {
-                if (!seenMessageIds.has(message.id)) {
-                  seenMessageIds.add(message.id);
-                }
-              }
-            }
           },
         });
 
@@ -1400,12 +1385,6 @@ export class PostgresAgentRunner extends AgentRunner {
   }
 
   /**
-   * Atomically claim the run lock for a thread. The conditional upsert
-   * only takes the lock when the stored state says not-running (the
-   * ON CONFLICT ... WHERE guard), and RETURNING tells whether THIS call
-   * won it — false means another run holds the lock (or won the race).
-   */
-  /**
    * Whether the events cache contains a runId the given snapshot lacks —
    * i.e. a storeRun merged a run committed AFTER the snapshot was read,
    * so the snapshot is stale and must not overwrite the cache (see the
@@ -1426,6 +1405,12 @@ export class PostgresAgentRunner extends AgentRunner {
     return false;
   }
 
+  /**
+   * Atomically claim the run lock for a thread. The conditional upsert
+   * only takes the lock when the stored state says not-running (the
+   * ON CONFLICT ... WHERE guard), and RETURNING tells whether THIS call
+   * won it — false means another run holds the lock (or won the race).
+   */
   private async acquireRunState(
     threadId: string,
     runId: string,
@@ -1456,11 +1441,6 @@ export class PostgresAgentRunner extends AgentRunner {
     // clobbered (0 rows updated → someone else changed the state → not
     // ours to take).
     //
-    // The liveness check is in-process by design: run_state is shared PG,
-    // but a multi-instance deploy would need shared state for this (see
-    // the class doc on the future Redis migration) — today the app is
-    // single-instance, the same assumption the boot-time run-state reset
-    // already makes.
     // The liveness check is in-process by design: run_state is shared PG,
     // but a multi-instance deploy would need shared state for this (see
     // the class doc on the future Redis migration) — today the app is
