@@ -12,6 +12,9 @@ const eslintConfig = defineConfig([
     "out/**",
     "build/**",
     "next-env.d.ts",
+    // Untracked Python virtualenv — vendored wheel JS (e.g. matplotlib bundles)
+    // trips lint rules and poisons the local lint baseline.
+    "agent-builder/.venv/**",
   ]),
 ]);
 
