@@ -4,6 +4,7 @@ import {
   findInstalledAgentId,
   installTemplate,
   toPublicTemplate,
+  TemplateInstallConflictError,
 } from "@/lib/catalog/template-store";
 import { toPublicAgent } from "@/lib/agents/agent-store";
 import { getCurrentUser, canManageAgents } from "@/lib/auth/context";
@@ -80,6 +81,12 @@ export async function POST(
       { status: result.installed ? 201 : 200 },
     );
   } catch (err) {
+    // A lost install race whose fallback couldn't see the winner's row —
+    // a 409 tells the client this is transient (a retry takes the plain
+    // re-sync path against the by-then-committed winner), not broken.
+    if (err instanceof TemplateInstallConflictError) {
+      return NextResponse.json({ error: err.message }, { status: 409 });
+    }
     console.error("[catalog] install failed", {
       templateId: id,
       orgId: user.orgId,

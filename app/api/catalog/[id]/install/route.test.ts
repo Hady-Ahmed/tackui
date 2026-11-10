@@ -20,6 +20,24 @@ vi.mock("@/lib/plans/enforcement", () => ({
   checkAgentCountLimit: vi.fn().mockResolvedValue(null),
 }));
 
+// Passthrough wrapper so ONE test can force installTemplate to reject
+// with the typed conflict error (a lost install race whose fallback can't
+// see the winner's row) — the route must map THAT to a 409, not the
+// catch-all 500. Every other export forwards untouched.
+const installOverride = vi.hoisted(() => ({
+  impl: null as null | (() => Promise<never>),
+}));
+vi.mock("@/lib/catalog/template-store", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("@/lib/catalog/template-store")>();
+  return {
+    ...actual,
+    installTemplate: (...args: Parameters<typeof actual.installTemplate>) =>
+      installOverride.impl
+        ? installOverride.impl()
+        : actual.installTemplate(...args),
+  };
+});
+
 import { POST } from "./route";
 import {
   createTemplate,
@@ -27,6 +45,7 @@ import {
   getTemplate,
   listTemplates,
   deleteTemplate,
+  TemplateInstallConflictError,
 } from "@/lib/catalog/template-store";
 import { listAgents, deleteAgent, getAgent } from "@/lib/agents/agent-store";
 import { runMigrations } from "@/lib/db/migrate";
@@ -65,6 +84,7 @@ function ctx(id: string) {
 
 beforeEach(async () => {
   vi.clearAllMocks();
+  installOverride.impl = null;
   await runMigrations();
   await cleanup();
   mockGetCurrentUser.mockImplementation(async () => managerUser());
@@ -146,6 +166,26 @@ describe("POST /api/catalog/[id]/install", () => {
     const tpl = await createTemplate(validInput);
     const res = await POST(new Request("http://localhost/x", { method: "POST" }), ctx(tpl.id));
     expect(res.status).toBe(403);
+    expect(await listAgents("org-1")).toHaveLength(0);
+  });
+
+  it("maps a lost install race (typed conflict) to 409, not the catch-all 500", async () => {
+    const tpl = await createTemplate(validInput);
+    // The store throws the typed conflict when the race fallback can't see
+    // the winner's row even after a retry — transient by definition (the
+    // winner is already committed; a retry re-syncs it), so the route
+    // must surface it as 409, not the generic 500.
+    installOverride.impl = () =>
+      Promise.reject(new TemplateInstallConflictError(tpl.id));
+    try {
+      const res = await POST(new Request("http://localhost/x", { method: "POST" }), ctx(tpl.id));
+      expect(res.status).toBe(409);
+      const data = await res.json();
+      expect(data.error).toContain("try again");
+    } finally {
+      installOverride.impl = null;
+    }
+    // Nothing was installed — the conflicting request didn't create a row.
     expect(await listAgents("org-1")).toHaveLength(0);
   });
 
