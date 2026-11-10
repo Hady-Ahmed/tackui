@@ -197,23 +197,30 @@ async function openEdit(page: Page, name: string) {
 
 /**
  * Delete one agent through the UI: row Delete → the real confirm()
- * dialog → accept → row gone. The acceptance and the dialog copy (the
- * destructive action must name its victim) are handled INSIDE the dialog
- * listener: a click that opens a modal does not resolve until the dialog
- * is handled, so awaiting the click first and the dialog after deadlocks
- * both (until the test timeout — observed). Auto-dismissal — Playwright's
- * behavior without a listener — means CANCEL, which would silently
- * abort the delete.
+ * dialog → accept → row gone. The dialog is awaited as an EVENT
+ * (waitForEvent), not asserted from a once-listener's side effect:
+ * `await click()` resolves when the input was dispatched, before the
+ * renderer's confirm() has necessarily emitted the dialog event, so a
+ * same-tick assert races the dialog (observed under full-suite load —
+ * the message read null). Both invariants of the listener shape still
+ * hold: the promise is registered BEFORE the click — a modal-opening
+ * click does not resolve until the dialog is handled, so awaiting the
+ * click first and the dialog after deadlocks both (until the test
+ * timeout — observed) — and the acceptance happens inside the .then,
+ * because Playwright without a listener auto-dismisses — CANCEL, which
+ * would silently abort the delete.
  */
 async function deleteOwnAgent(page: Page, name: string) {
   const row = agentRow(page, name);
-  let dialogMessage: string | null = null;
-  page.once("dialog", (dialog: Dialog) => {
-    dialogMessage = dialog.message();
-    void dialog.accept();
-  });
+  const dialogPromise = page
+    .waitForEvent("dialog", { timeout: 10_000 })
+    .then((dialog: Dialog) => {
+      const message = dialog.message();
+      void dialog.accept();
+      return message;
+    });
   await row.getByRole("button", { name: "Delete", exact: true }).click();
-  expect(dialogMessage).toBe(
+  expect(await dialogPromise).toBe(
     `Delete agent "${name}"? This cannot be undone.`,
   );
   await expect(row).toHaveCount(0);
