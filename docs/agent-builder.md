@@ -271,8 +271,10 @@ a per-provider column when the Phase 3 tier/publishing wakes.
   arg) stays visible but can't be enabled.
 - The underlying AgentOS surface is `GET /platform/available` (the
   discovery scan) + `GET/PUT /platform/catalog/{models,tools}` +
-  `POST /platform/test/model` — admin-scope only, documented in the
-  service's README (`agent-builder/README.md`).
+  `POST /platform/test/model` + the connector registry
+  (`GET /platform/connectors`, `PUT|DELETE /platform/connectors/{id}`) —
+  admin-scope only, documented in the service's README
+  (`agent-builder/README.md`).
 
 ## The tool palette — the platform tools catalog
 
