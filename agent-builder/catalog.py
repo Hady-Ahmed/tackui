@@ -131,6 +131,30 @@ def _pool_for(db_url: str) -> psycopg_pool.ConnectionPool:
                     # cap fails fast with a clear PoolTimeout instead (the
                     # route surfaces a 5xx and the client retries).
                     timeout=10.0,
+                    # Liveness probe at handout (the psycopg_pool analog of
+                    # SQLAlchemy's pool_pre_ping). Neon's compute suspends
+                    # after ~5 min of activity-based idle — open-but-idle
+                    # connections do NOT count as activity — and suspension
+                    # kills every pooled connection. Without a check, the
+                    # next request after a quiet gap is handed a corpse and
+                    # the first query dies with "SSL connection has been
+                    # closed unexpectedly". With it, the ~1ms SELECT 1
+                    # fails on the dead conn, the pool discards it and
+                    # hands out a fresh one (which wakes the compute) —
+                    # the request succeeds and the failure never escapes
+                    # the pool. Discard-and-replace semantics verified
+                    # against the pinned psycopg_pool 3.3.3 source; the
+                    # dead-then-live cycle is pinned by test in
+                    # tests/test_catalog_pool.py.
+                    check=lambda conn: conn.execute("SELECT 1"),
+                    # Complementary knob: proactively close idle pool
+                    # connections (down to min_size) before Neon's ~5-min
+                    # suspend reaps them server-side, so the check above
+                    # rarely has to eat the wake-up latency at all. The
+                    # pool's shrinker runs on this interval and closes one
+                    # idle connection above min_size per tick; the default
+                    # is 10 min — longer than Neon's suspend timeout.
+                    max_idle=60,
                     kwargs={"connect_timeout": 5},
                     open=True,
                 )
