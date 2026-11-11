@@ -101,7 +101,7 @@ dev = [
     # tests/test_platform_os.py imports fastmcp directly (live MCP server
     # fixture). agno's mcp extra brings it transitively; the dev dep pins
     # the import the tests actually make.
-    "fastmcp==4.0.5",
+    "fastmcp==4.1.2",
     # tests/conftest.py boots a throwaway Postgres via testcontainers (the
     # agno db + catalog both need a real server now that sqlite is gone).
     "testcontainers[postgres]==4.15.0",
