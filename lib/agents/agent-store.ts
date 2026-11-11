@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import { query } from "@/lib/db/pg";
+import { query, withTransaction } from "@/lib/db/pg";
 import { decryptSecret, encryptSecret } from "@/lib/crypto/encrypt";
 import { z } from "zod";
 import type {
@@ -422,7 +422,11 @@ export async function createAgent(
 /**
  * Update an agent scoped to an org. Platform admins can bypass the org
  * filter to update agents in any org. The `id` comes from the URL path
- * param (never from the patch body).
+ * param (never from the patch body). Omitting jwtSecret preserves the
+ * existing secret (blank-preserve) — including an UNDECRYPTABLE stored
+ * ciphertext, which is written back raw (byte-for-byte): a decrypt
+ * failure is never silently upgraded to "no secret" (same shape as
+ * updateTemplate).
  */
 export async function updateAgent(
   id: string,
@@ -432,36 +436,76 @@ export async function updateAgent(
   orgId: string,
   opts?: { bypassOrgScope?: boolean },
 ): Promise<AgentEntry | null> {
-  const existing = await getAgent(id, orgId, opts);
-  if (!existing) return null;
-  const merged = {
-    id,
-    name: existing.name,
-    description: existing.description,
-    endpoint: existing.endpoint,
-    authMode: existing.authMode,
-    jwtSecret: existing.jwtSecret,
-    jwtScopes: existing.jwtScopes,
-    origin: existing.origin,
-    authorUserId: existing.authorUserId,
-    remoteAgentId: existing.remoteAgentId,
-    requirements: existing.requirements,
-    ...patch,
-  };
-  const parsed = agentRowSchema.parse(merged);
-  // Encrypt at the write boundary. `merged.jwtSecret` is the decrypted
-  // plaintext (existing value re-encrypted with a fresh IV when the
-  // patch omits it — blank-preserve still works). No-op passthrough
-  // when DB_ENCRYPTION_KEY is unset.
-  const jwtSecretForDb = parsed.jwtSecret ? encryptSecret(parsed.jwtSecret) : null;
-  if (opts?.bypassOrgScope) {
-    const result = await query<AgentRow>(
+  return withTransaction(async (tx) => {
+    const locked = await tx.query<AgentRow>(
+      opts?.bypassOrgScope
+        ? `SELECT ${AGENT_SELECT_COLUMNS} FROM agents WHERE id = $1 FOR UPDATE`
+        : `SELECT ${AGENT_SELECT_COLUMNS} FROM agents WHERE id = $1 AND org_id = $2 FOR UPDATE`,
+      opts?.bypassOrgScope ? [id] : [id, orgId],
+    );
+    const storedRow = locked.rows[0];
+    if (!storedRow) return null;
+    const existing = rowToEntry(storedRow);
+    const merged = {
+      id,
+      name: existing.name,
+      description: existing.description,
+      endpoint: existing.endpoint,
+      authMode: existing.authMode,
+      jwtSecret: existing.jwtSecret,
+      jwtScopes: existing.jwtScopes,
+      origin: existing.origin,
+      authorUserId: existing.authorUserId,
+      remoteAgentId: existing.remoteAgentId,
+      requirements: existing.requirements,
+      ...patch,
+    };
+    const parsed = agentRowSchema.parse(merged);
+    // Re-encrypt (fresh IV) when the merged row carries a usable secret —
+    // same behavior as updateTemplate. When it doesn't, DON'T write NULL:
+    // `existing.jwtSecret` is undefined both for "no secret stored" and
+    // for "stored but undecryptable" (rowToEntry degrades a decrypt
+    // failure to secret-less), and nulling the latter would silently
+    // destroy the stored ciphertext on an unrelated edit (a rename),
+    // unrecoverable even after the encryption key is restored. An update
+    // that supplies no secret preserves the raw stored value — read from
+    // the same locked row (a second, unlocked round-trip could pair one
+    // writer's fields with a concurrent writer's secret bytes).
+    const jwtSecretForDb = parsed.jwtSecret
+      ? encryptSecret(parsed.jwtSecret)
+      : (storedRow.jwt_secret ?? null);
+    if (opts?.bypassOrgScope) {
+      const result = await tx.query<AgentRow>(
+        `UPDATE agents
+         SET name = $1, description = $2, endpoint = $3,
+             auth_mode = $4, jwt_secret = $5, jwt_scopes = $6,
+             origin = $7, author_user_id = $8, remote_agent_id = $9, requirements = $10,
+             updated_at = now()
+         WHERE id = $11
+         RETURNING ${AGENT_SELECT_COLUMNS}`,
+        [
+          parsed.name,
+          parsed.description,
+          parsed.endpoint,
+          parsed.authMode,
+          jwtSecretForDb,
+          parsed.jwtScopes?.join(",") ?? null,
+          parsed.origin ?? "manual",
+          parsed.authorUserId ?? null,
+          parsed.remoteAgentId ?? null,
+          parsed.requirements ? JSON.stringify(parsed.requirements) : null,
+          id,
+        ],
+      );
+      return result.rows[0] ? rowToEntry(result.rows[0]) : null;
+    }
+    const result = await tx.query<AgentRow>(
       `UPDATE agents
        SET name = $1, description = $2, endpoint = $3,
            auth_mode = $4, jwt_secret = $5, jwt_scopes = $6,
            origin = $7, author_user_id = $8, remote_agent_id = $9, requirements = $10,
            updated_at = now()
-       WHERE id = $11
+       WHERE id = $11 AND org_id = $12
        RETURNING ${AGENT_SELECT_COLUMNS}`,
       [
         parsed.name,
@@ -475,34 +519,11 @@ export async function updateAgent(
         parsed.remoteAgentId ?? null,
         parsed.requirements ? JSON.stringify(parsed.requirements) : null,
         id,
+        orgId,
       ],
     );
     return result.rows[0] ? rowToEntry(result.rows[0]) : null;
-  }
-  const result = await query<AgentRow>(
-    `UPDATE agents
-     SET name = $1, description = $2, endpoint = $3,
-         auth_mode = $4, jwt_secret = $5, jwt_scopes = $6,
-         origin = $7, author_user_id = $8, remote_agent_id = $9, requirements = $10,
-         updated_at = now()
-     WHERE id = $11 AND org_id = $12
-     RETURNING ${AGENT_SELECT_COLUMNS}`,
-    [
-      parsed.name,
-      parsed.description,
-      parsed.endpoint,
-      parsed.authMode,
-      jwtSecretForDb,
-      parsed.jwtScopes?.join(",") ?? null,
-      parsed.origin ?? "manual",
-      parsed.authorUserId ?? null,
-      parsed.remoteAgentId ?? null,
-      parsed.requirements ? JSON.stringify(parsed.requirements) : null,
-      id,
-      orgId,
-    ],
-  );
-  return result.rows[0] ? rowToEntry(result.rows[0]) : null;
+  });
 }
 
 /**

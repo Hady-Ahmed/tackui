@@ -4,6 +4,15 @@ All notable changes to this project will be documented in this file. The format 
 
 ## [Unreleased]
 
+- **Editing an agent no longer wipes its stored JWT secret when the
+  encryption key can't decrypt it (#125).** `updateAgent` rebuilt the row
+  from its read mapping, which degrades an undecryptable `jwt_secret`
+  (rotated/lost `DB_ENCRYPTION_KEY`) to secret-less — so a rename or
+  model change permanently destroyed the stored ciphertext, unrecoverable
+  even after the key is restored. An update that supplies no new secret
+  now writes the stored bytes back byte-for-byte (same fix shape as the
+  template store); entering a fresh secret remains the recovery path.
+
 - **Re-syncing a template install whose agent row just vanished no longer
   500s (#135).** If the org deleted the installed agent between the
   lookup and the re-sync read, the install route surfaced the missing row
