@@ -4,6 +4,12 @@ All notable changes to this project will be documented in this file. The format 
 
 ## [Unreleased]
 
+- **Re-syncing a template install whose agent row just vanished no longer
+  500s (#135).** If the org deleted the installed agent between the
+  lookup and the re-sync read, the install route surfaced the missing row
+  as a bare 500. It now answers 409 with a retryable message — a retry
+  takes the fresh-install path and recreates the copy.
+
 - **Connector names are slug-validated at the route before any side
   effect (#136).** `PUT /api/connectors` reused the store's http(s)-only
   URL schema but kept a looser name check, so a non-slug name passed the

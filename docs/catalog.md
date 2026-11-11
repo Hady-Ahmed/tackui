@@ -88,6 +88,12 @@ changes the org's agent list) → `checkTemplateInstall` (plan gate) →
   retryable, since a retry takes the plain re-sync path — instead of a
   bare 500. Manual agents are unaffected (NULL `source_template_id`,
   NULLs distinct).
+- **The installed row can vanish mid-call** (its org deletes the agent
+  between the lookup that produced the id and the re-sync's final read —
+  nothing holds the row). The re-sync surfaces that as a typed error the
+  route maps to 409, retryable: the retry's lookup now returns null, so
+  it takes the fresh-install path and creates a new copy. Previously the
+  missing row surfaced as a bare 500.
   Known residual edge: `checkAgentCountLimit` is still check-then-act, so
   N concurrent installs of *different* templates at the cap boundary can
   briefly overshoot the plan's agent cap by N−1 rows — accepted (no data

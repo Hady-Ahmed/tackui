@@ -579,6 +579,21 @@ export class TemplateInstallConflictError extends Error {
 }
 
 /**
+ * Thrown by installTemplate when the installed agent row it was about to
+ * re-sync vanishes mid-call (its org deletes the agent between the lookup
+ * that produced the id and the final read — nothing holds the row). The
+ * install route maps this to a 409 — retryable, since a retry re-runs
+ * findInstalledAgentId, which now returns null, so the retry takes the
+ * fresh-install path — instead of surfacing the missing row as a 500.
+ */
+export class TemplateInstallVanishedError extends Error {
+  constructor(readonly templateId: string) {
+    super("The installed copy of this template was just removed — please try again.");
+    this.name = "TemplateInstallVanishedError";
+  }
+}
+
+/**
  * Idempotent install: registers a template as installed in the org's
  * `agents` table.
  *
@@ -698,7 +713,12 @@ async function resyncInstalledAgent(
       orgId,
     ],
   );
-  const agent = (await getAgent(existingId, orgId))!;
+  const agent = await getAgent(existingId, orgId);
+  // The row can be deleted by its org at any moment — including between
+  // the lookup that produced existingId and this final read. Surface the
+  // vanish as a typed error the route maps to 409 (retryable) instead of
+  // letting the missing row become a bare 500.
+  if (!agent) throw new TemplateInstallVanishedError(template.id);
   const changed = previousSyncedAt === null || template.updatedAt > previousSyncedAt;
   return { agent, installed: false, updated: changed };
 }
