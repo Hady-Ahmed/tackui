@@ -4,6 +4,27 @@ All notable changes to this project will be documented in this file. The format 
 
 ## [Unreleased]
 
+- **The e2e harness fails safely when a port is held or a battery is
+  already running (#138).** Two startup hazards, both hit live: (1) a
+  leftover process on a fixed harness port (3990 app, 3998 email catcher,
+  3999 mock agent) killed a child with a raw `EADDRINUSE` stack and no
+  actionable output — the harness now pre-checks all three ports with a
+  dependency-free loopback bind and exits with a one-line message naming
+  the port, the holder (best-effort via `ss -ltnp`, falling back to
+  `lsof`; missing tooling degrades the message, not the run), and the
+  remedy. (2) The startup sweep `docker rm -f`'d every
+  `tackui-e2e-pg-*`/`tackui-e2e-app-*` container, so booting a second
+  battery destroyed the LIVE battery's DB container mid-run (idle client
+  errors, then connection-refused timeouts on every test) — the sweep is
+  now pid-liveness-gated: container names embed the creating harness's
+  pid, and only containers whose pid is provably dead are removed, so
+  crash residue is still swept but a concurrently running battery's
+  containers are never touched. "One battery at a time" remains the rule
+  (ports, seeded DB and the login budget are still shared) — breaking it
+  now fails the second run fast instead of killing the first. Helpers are
+  pure and unit-tested (`e2e/harness-safety.mjs` + `.test.ts`); behavior
+  documented in docs/e2e.md.
+
 - **Hot-row writes no longer pin pool connections while waiting on the
   row lock (#133).** `updateTemplate` (#127) and the credentials PUT
   (#124) do their read-merge-write inside one transaction holding the

@@ -33,14 +33,21 @@
  * database is a disposable container; the mock agent is loopback-only.
  * Nothing here can touch prod or a real deployment.
  */
-import { exec, execSync, spawn } from "node:child_process";
+import { execFile, execSync, spawn } from "node:child_process";
 import net from "node:net";
 import { Pool } from "pg";
 import { startMockAgent } from "./mock-agent.mjs";
 import { EMAIL_CATCHER_PORT, startEmailCatcher } from "./email-catcher.mjs";
+import {
+  parseLsofListeners,
+  parseSsListeners,
+  probePort,
+  selectStaleContainers,
+} from "./harness-safety.mjs";
 
 const APP_PORT = Number(process.env.E2E_APP_PORT || 3990);
 const APP_URL = `http://127.0.0.1:${APP_PORT}`;
+const MOCK_PORT = Number(process.env.E2E_MOCK_AGENT_PORT || 3999);
 
 // Image mode (stretch, #96): when E2E_APP_IMAGE names a built image, the
 // app under test is that container instead of a local spawn of the
@@ -93,6 +100,60 @@ function run(cmd, args) {
   });
 }
 
+/** Run a command and capture stdout (utf8); rejects on a non-zero exit. */
+function runOut(cmd, args) {
+  return new Promise((resolve, reject) => {
+    execFile(cmd, args, { encoding: "utf8" }, (err, stdout) => {
+      if (err) reject(err);
+      else resolve(stdout);
+    });
+  });
+}
+
+/**
+ * Is a harness pid alive? `kill -0` semantics: signal 0 is delivered
+ * nowhere but probes permission — ESRCH means the process is gone,
+ * EPERM means it runs but belongs to another user (alive), anything
+ * else we also treat as alive: the only dead verdict is certainty.
+ * This is the predicate the container sweep trusts a live battery's
+ * DB container to.
+ */
+function pidAlive(pid) {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (err) {
+    // Fail toward residue: only ESRCH (no such process) marks a pid dead —
+    // any other error (EPERM = foreign-owned, or exotic) counts as alive,
+    // so an ambiguous verdict can never gate a `docker rm -f`.
+    return err.code !== "ESRCH";
+  }
+}
+
+/**
+ * Best-effort: ask ss (preferred) then lsof who listens on the port.
+ * Missing tooling, a foreign-owned listener (ss hides other users'
+ * process names without root), or any probe failure degrades to an
+ * empty list — the startup message then names the port and the generic
+ * remedy instead of hard-failing on a missing diagnostic tool.
+ */
+async function identifyPortHolder(port) {
+  try {
+    const holders = parseSsListeners(await runOut("ss", ["-ltnp"]), port);
+    if (holders.length) return holders;
+  } catch {
+    // ss missing or failed — fall through to lsof
+  }
+  try {
+    return parseLsofListeners(
+      await runOut("lsof", [`-iTCP:${port}`, "-sTCP:LISTEN", "-P", "-n"]),
+      port,
+    );
+  } catch {
+    return [];
+  }
+}
+
 /** Grab a free loopback port for the container's host-side mapping. */
 function freePort() {
   return new Promise((resolve, reject) => {
@@ -141,15 +202,39 @@ function startReaper() {
   spawn("sh", ["-c", cmd], { detached: true, stdio: "ignore" }).unref();
 }
 
-/** Remove stale containers from previous runs (crash residue, etc.). */
+/**
+ * Remove stale containers from previous runs (crash residue, etc.) — and
+ * ONLY those (issue #138). The container names embed the pid of the
+ * harness that created them, so a container is removed only when that
+ * pid is provably dead: a second harness booting while a battery runs
+ * used to `docker rm -f` the LIVE battery's DB container here, whose
+ * symptoms (`[pg] idle client error … Connection terminated unexpectedly`,
+ * then ECONNREFUSED / navigation timeouts on every test) looked like an
+ * app bug. A container whose pid was recycled by an unrelated process
+ * counts as alive — the safe direction: the residue lingers until
+ * removed by hand (`docker rm -f tackui-e2e-pg-<pid>`) instead of a live
+ * run being destroyed. The detached reaper still owns a live harness's
+ * own teardown.
+ */
 async function sweepStaleContainers() {
-  await new Promise((resolve) => {
-    exec(
-      `docker ps -aq --filter name=tackui-e2e-pg- --filter name=tackui-e2e-app- | xargs -r docker rm -f`,
-      { stdio: "ignore" },
-      () => resolve(),
-    );
-  });
+  let names;
+  try {
+    names = (
+      await runOut("docker", [
+        "ps", "-a", "--format", "{{.Names}}",
+        // Repeated `name` filters are OR'd ("match any") per docker's
+        // filter docs — this lists both prefixes, not the intersection.
+        // Even if a docker version AND'd them, the sweep would find
+        // nothing and residue would linger — the safe direction.
+        "--filter", "name=tackui-e2e-pg-",
+        "--filter", "name=tackui-e2e-app-",
+      ])
+    ).split("\n").filter(Boolean);
+  } catch {
+    return; // docker unreachable — nothing to sweep; the boot will fail loudly anyway
+  }
+  const stale = selectStaleContainers(names, pidAlive);
+  if (stale.length) await run("docker", ["rm", "-f", ...stale]);
 }
 
 async function main() {
@@ -168,9 +253,33 @@ async function main() {
   };
   process.on("SIGTERM", () => exitNow("SIGTERM"));
   process.on("SIGINT", () => exitNow("SIGINT"));
-  process.on("SIGTERM", exitNow);
-  process.on("SIGINT", exitNow);
   process.on("exit", teardownStack);
+
+  // 0. Port pre-check — fail here with an actionable one-liner instead
+  //    of a raw EADDRINUSE unhandled-error stack from a dying child
+  //    (issue #138). The Postgres port is deliberately NOT checked: it is
+  //    picked free at boot below.
+  for (const { label, port, envVar } of [
+    { label: "app", port: APP_PORT, envVar: "E2E_APP_PORT" },
+    { label: "mock agent", port: MOCK_PORT, envVar: "E2E_MOCK_AGENT_PORT" },
+    { label: "email catcher", port: EMAIL_CATCHER_PORT, envVar: "E2E_EMAIL_CATCHER_PORT" },
+  ]) {
+    let free;
+    try {
+      free = await probePort(port);
+    } catch (err) {
+      log(`FATAL: could not probe port ${port} (${label}): ${err instanceof Error ? err.message : err}`);
+      process.exit(1);
+    }
+    if (free) continue;
+    const holders = await identifyPortHolder(port);
+    const who = holders.length
+      ? holders.map((h) => `${h.name} (pid ${h.pid})`).join(", ")
+      : "an unidentified process (ss/lsof found none — run `ss -ltnp` or `sudo lsof -iTCP:<port> -sTCP:LISTEN` for a root-owned holder)";
+    log(`FATAL: port ${port} (${label}) is already in use by ${who} — the harness cannot start.`);
+    log(`Stop that process (kill <pid>, or pkill -f next-server for a leftover app) or move this run with ${envVar}=<port>, then re-run.`);
+    process.exit(1);
+  }
 
   // 1. Postgres — throwaway container, bound to loopback only.
   await sweepStaleContainers();
@@ -229,18 +338,17 @@ async function main() {
     adminPassword: E2E_ADMIN_PASSWORD,
     memberEmail: E2E_MEMBER_EMAIL,
     memberPassword: E2E_MEMBER_PASSWORD,
-    mockAgentUrl: `http://127.0.0.1:${Number(process.env.E2E_MOCK_AGENT_PORT || 3999)}/`,
+    mockAgentUrl: `http://127.0.0.1:${MOCK_PORT}/`,
     mockAgentJwtSecret: MOCK_AGENT_JWT_SECRET,
   });
   log(`seeded: ${seedInfo.adminEmail} + ${seedInfo.memberEmail} + ${seedInfo.agents.length} agent(s)`);
   await pool.end();
 
   // 3. Mock AG-UI agent — loopback-only, the seeded agent's endpoint.
-  const mockPort = Number(process.env.E2E_MOCK_AGENT_PORT || 3999);
   log("starting mock AG-UI agent...");
-  const mockServer = await startMockAgent(mockPort);
+  const mockServer = await startMockAgent(MOCK_PORT);
   cleanup.push(() => mockServer.close());
-  log(`mock agent listening on 127.0.0.1:${mockPort}`);
+  log(`mock agent listening on 127.0.0.1:${MOCK_PORT}`);
 
   // 3b. Email catcher — loopback-only, the mail transport's local target.
   //     The app env below sets RESEND_API_KEY (flips the app's EMAIL_ENABLED
