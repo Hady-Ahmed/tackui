@@ -4,6 +4,27 @@ All notable changes to this project will be documented in this file. The format 
 
 ## [Unreleased]
 
+- **Hot-row writes no longer pin pool connections while waiting on the
+  row lock (#133).** `updateTemplate` (#127) and the credentials PUT
+  (#124) do their read-merge-write inside one transaction holding the
+  row's `SELECT … FOR UPDATE` lock — so every writer BLOCKED on that
+  lock held a checked-out pool connection for the duration of the wait,
+  and more than `PG_POOL_MAX` (default 10) concurrent writers to the
+  SAME row would exhaust the pool (the excess timing out waiting for a
+  connection instead of queueing on the row lock). Both hot paths now
+  acquire a per-key in-process FIFO semaphore (`withKeyedLock`,
+  `lib/db/keyed-lock.ts`) BEFORE the transaction opens: blocked writers
+  queue in-process holding no pool connection, at most one writer per
+  row is inside `withTransaction`, and writers to different rows (other
+  template ids / other user+provider pairs) never block each other —
+  the row lock stays the serialization point (multi-process correctness
+  is unchanged); the semaphore is pool protection. Proven on real
+  Postgres: 8 concurrent same-row writers against a pool shrunk to 2
+  (`PG_POOL_MAX=2` set inline in the test files; harness pool now
+  honors `PG_POOL_MAX`/`PG_CONNECT_TIMEOUT`) all complete — both tests
+  fail with the semaphore bypassed. Backlog insurance per the #99
+  convention: reachability today is effectively nil.
+
 - **Reconnect replay now closes an open `STEP_*` sequence before a run's
   terminator (#142).** `closeOpenSequences` tracked open
   `REASONING_*`/`TEXT_MESSAGE_*`/`TOOL_CALL_*` sequences but not

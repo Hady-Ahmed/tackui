@@ -138,6 +138,13 @@ async function del(provider: string, caller?: string) {
 beforeEach(async () => {
   vi.clearAllMocks();
   vi.stubEnv("DB_ENCRYPTION_KEY", ENCRYPTION_TEST_KEY);
+  // Inline test env (never env files): shrink the REAL-Postgres harness
+  // pool below the PUT count of the hot-row pool-exhaustion test so the
+  // no-pinned-connections invariant is proven deterministically. afterEach's
+  // unstubAllEnvs keeps a reused vitest worker from leaking them into
+  // other files.
+  vi.stubEnv("PG_POOL_MAX", "2");
+  vi.stubEnv("PG_CONNECT_TIMEOUT", "750");
   await runMigrations();
   // Reset AFTER migrations: runMigrations itself wraps its run in
   // withTransaction, and the counter must count the ROUTE's calls only.
@@ -510,6 +517,56 @@ describe("PUT /api/credentials", () => {
       restore();
     }
   });
+
+  it("more concurrent same-row PUTs than PG_POOL_MAX all complete — blocked writers queue in-process, never pinning a pool connection (real Postgres)", async (ctx) => {
+    const restore = await useRealPostgres();
+    if (!restore) {
+      ctx.skip(); // Docker-less local environment only; CI must never skip
+      return;
+    }
+    try {
+      await query(`DELETE FROM credentials WHERE user_id = ANY($1)`, [
+        [USER_ID, OTHER_USER_ID],
+      ]);
+      await setCredential({
+        userId: USER_ID,
+        provider: "openai",
+        kind: "llm",
+        fields: { api_key: "sk-seed" },
+      });
+      // 4x the shrunken harness pool (PG_POOL_MAX=2, stubbed in beforeEach).
+      const WRITERS = 8;
+
+      let pending!: Promise<number[]>;
+      await withTransaction(async (holder) => {
+        await holder.query(
+          `SELECT fields FROM credentials WHERE user_id = $1 AND provider = $2 FOR UPDATE`,
+          [USER_ID, "openai"],
+        );
+        pending = Promise.all(
+          Array.from({ length: WRITERS }, (_, i) =>
+            put({ provider: "openai", fields: { api_key: `sk-${i}` } }).then((r) => r.status),
+          ),
+        );
+        // Hold the row lock LONGER than PG_CONNECT_TIMEOUT (750ms, also
+        // stubbed in beforeEach). Without the per-key semaphore, every PUT
+        // opens its transaction up front: 2 connections get granted and
+        // block on the row lock, so the other 6 time out waiting for a
+        // connection before the holder commits at 1.5s. With the
+        // semaphore (acquired BEFORE the transaction), a PUT only touches
+        // the pool once admitted — all 8 complete.
+        await new Promise((resolve) => setTimeout(resolve, 1500));
+      });
+
+      // THE assertion: no PUT timed out waiting for a connection — all 8
+      // (pool max 2) came back 200.
+      expect(await pending).toEqual(Array(WRITERS).fill(200));
+      const stored = (await getCredentialSecrets(USER_ID)).openai;
+      expect(stored?.api_key).toMatch(/^sk-\d$/);
+    } finally {
+      restore();
+    }
+  }, 30_000);
 
   it("rejects a field value over the 500-char body bound (400, nothing stored)", async () => {
     const res = await put({ provider: "openai", fields: { api_key: "k".repeat(501) } });

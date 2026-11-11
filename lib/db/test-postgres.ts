@@ -60,7 +60,18 @@ async function ensureStarted(): Promise<boolean> {
         const { PostgreSqlContainer } = await import("@testcontainers/postgresql");
         const c = await new PostgreSqlContainer("postgres:16-alpine").start();
         const { Pool } = await import("pg");
-        const p = new Pool({ connectionString: c.getConnectionUri() });
+        // Pool sizing honors PG_POOL_MAX / PG_CONNECT_TIMEOUT when a test
+        // file sets them inline (never env files) to prove pool-exhaustion
+        // behavior deterministically — e.g. the hot-row semaphore tests
+        // shrink the pool below the writer count. Defaults mirror pg
+        // (max 10, no connect timeout).
+        const p = new Pool({
+          connectionString: c.getConnectionUri(),
+          max: process.env.PG_POOL_MAX ? Number(process.env.PG_POOL_MAX) : undefined,
+          connectionTimeoutMillis: process.env.PG_CONNECT_TIMEOUT
+            ? Number(process.env.PG_CONNECT_TIMEOUT)
+            : undefined,
+        });
         container = c;
         pool = p;
         return true;
