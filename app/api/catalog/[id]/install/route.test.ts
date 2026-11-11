@@ -46,6 +46,7 @@ import {
   listTemplates,
   deleteTemplate,
   TemplateInstallConflictError,
+  TemplateInstallVanishedError,
 } from "@/lib/catalog/template-store";
 import { listAgents, deleteAgent, getAgent } from "@/lib/agents/agent-store";
 import { runMigrations } from "@/lib/db/migrate";
@@ -187,6 +188,25 @@ describe("POST /api/catalog/[id]/install", () => {
     }
     // Nothing was installed — the conflicting request didn't create a row.
     expect(await listAgents("org-1")).toHaveLength(0);
+  });
+
+  it("maps a vanished installed row (typed error) to 409, not the catch-all 500", async () => {
+    const tpl = await createTemplate(validInput);
+    // The installed row was deleted by its org between the lookup that
+    // produced the id and the re-sync's final read. The store throws the
+    // typed vanish error — transient (a retry takes the fresh-install path,
+    // since the lookup now returns null), so the route must surface 409,
+    // not the generic 500.
+    installOverride.impl = () =>
+      Promise.reject(new TemplateInstallVanishedError(tpl.id));
+    try {
+      const res = await POST(new Request("http://localhost/x", { method: "POST" }), ctx(tpl.id));
+      expect(res.status).toBe(409);
+      const data = await res.json();
+      expect(data.error).toContain("try again");
+    } finally {
+      installOverride.impl = null;
+    }
   });
 
   it("passes through the plan gate 402 (PLAN_AGENT_LOCKED)", async () => {

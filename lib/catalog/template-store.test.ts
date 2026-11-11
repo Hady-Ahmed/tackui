@@ -18,7 +18,7 @@ import {
 } from "./template-store";
 import { toPublicAgent } from "@/lib/agents/agent-store";
 import type { CreateTemplateInput } from "./template-store";
-import { TemplateInstallConflictError } from "./template-store";
+import { TemplateInstallConflictError, TemplateInstallVanishedError } from "./template-store";
 import type { AgentTemplate } from "./catalog.config";
 import { runMigrations } from "@/lib/db/migrate";
 import { query, withTransaction } from "@/lib/db/pg";
@@ -978,6 +978,67 @@ describe("installTemplate (idempotent upsert)", () => {
     }
     // No half-installed row either: the INSERT failed and no fallback ran.
     expect(await listAgents(TEST_ORG)).toHaveLength(0);
+  });
+
+  it("re-sync: the installed row vanishing mid-call surfaces as a typed error, not a 500", async () => {
+    const template = await createTemplate(validInput);
+    const { agent } = await installTemplate(template, TEST_ORG);
+    // The lookup that produced existingId saw the row; its org then deleted
+    // the agent before the re-sync's reads (nothing holds the row). Script:
+    // the lookup still hands back the now-stale id; everything downstream
+    // runs against the real DB where the row is gone. This used to blow up
+    // on a non-null assertion — getAgent returned null, the route's
+    // catch-all turned the missing agent into a bare 500.
+    await deleteAgent(agent.id, TEST_ORG, { bypassOrgScope: true });
+    pgScript.queryScript = (text) => {
+      if (text.includes("source_template_id = $2")) {
+        return { rows: [{ id: agent.id }] };
+      }
+      return undefined;
+    };
+    try {
+      await expect(installTemplate(template, TEST_ORG)).rejects.toBeInstanceOf(
+        TemplateInstallVanishedError,
+      );
+    } finally {
+      pgScript.queryScript = null;
+    }
+  });
+
+  it("loses-race fallback: the winner's row vanishing mid-call surfaces as the same typed error", async () => {
+    const template = await createTemplate(validInput);
+    const winner = await installTemplate(template, TEST_ORG);
+    await deleteAgent(winner.agent.id, TEST_ORG, { bypassOrgScope: true });
+    // The full race, replayed with the winner's row already deleted: the
+    // loser's initial lookup misses (lookups 1), the INSERT raises the
+    // unique violation, and the first fallback lookup returns the now-stale
+    // winner id (lookups 2 — enough for the `??` to short-circuit, so the
+    // retry lookup never runs). The re-sync's reads then find nothing.
+    // Used to 500.
+    let lookups = 0;
+    pgScript.queryScript = (text) => {
+      if (text.startsWith("INSERT INTO agents")) {
+        throw Object.assign(
+          new Error('duplicate key value violates unique constraint "agents_org_template_uniq"'),
+          { code: "23505" },
+        );
+      }
+      if (text.includes("source_template_id = $2")) {
+        lookups += 1;
+        return lookups === 1
+          ? { rows: [] }
+          : { rows: [{ id: winner.agent.id }] };
+      }
+      return undefined;
+    };
+    try {
+      await expect(installTemplate(template, TEST_ORG)).rejects.toBeInstanceOf(
+        TemplateInstallVanishedError,
+      );
+      expect(lookups).toBe(2);
+    } finally {
+      pgScript.queryScript = null;
+    }
   });
 
   it("the partial unique index blocks duplicates at the DB level but not manual agents", async () => {
