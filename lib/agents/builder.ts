@@ -336,19 +336,36 @@ const builderCreateFields = {
     provider: z.string().trim().min(1).max(120),
     id: z.string().trim().min(1).max(200),
   }),
-  /** Tool names only — parameters come from the registry server-side. */
+  /** Tool names only — parameters come from the registry server-side.
+   *  Shape shared by create and update; the DEFAULT belongs to create
+   *  only (a fresh config starts with none). */
   tools: z
     .array(z.object({ name: z.string().trim().min(1).max(200) }))
-    .max(10)
-    .default([]),
-  /** Org connector names (lib/connectors store). */
-  connectors: z.array(z.string().trim().min(1).max(120)).max(10).default([]),
+    .max(10),
+  /** Org connector names (lib/connectors store). Same default split. */
+  connectors: z.array(z.string().trim().min(1).max(120)).max(10),
 };
 
-export const builderCreateBodySchema = z.object(builderCreateFields);
+export const builderCreateBodySchema = z.object({
+  ...builderCreateFields,
+  // zod 4 note: a defaulted field MATERIALIZES for absent keys, so the
+  // create schema defaults tools/connectors to [] here, at the leaf —
+  // the update schema below must keep them plain-optional.
+  tools: builderCreateFields.tools.default([]),
+  connectors: builderCreateFields.connectors.default([]),
+});
 export type BuilderCreateInput = z.infer<typeof builderCreateBodySchema>;
 
-/** All fields optional; model/tools/connectors replace wholesale. */
+/** All fields optional; model/tools/connectors replace wholesale.
+ *
+ *  The tools/connectors entries are deliberately NOT the create fields'
+ *  `.default([])` versions: under zod 4 a defaulted field materializes
+ *  for absent keys, which would (a) defeat the "at least one field"
+ *  refine on an empty patch (tools/connectors would count as provided)
+ *  and (b) make the route treat unpatched tools/connectors as patched —
+ *  re-deriving the config with wiped lists (the exact regression the
+ *  builder route tests pin: 400-on-empty and 409-on-partial). Under zod
+ *  3 absent keys stayed absent either way, so this is a no-op there. */
 export const builderUpdateBodySchema = z
   .object({
     name: builderCreateFields.name.optional(),
