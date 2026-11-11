@@ -4,6 +4,14 @@ All notable changes to this project will be documented in this file. The format 
 
 ## [Unreleased]
 
+- **Connector names are slug-validated at the route before any side
+  effect (#136).** `PUT /api/connectors` reused the store's http(s)-only
+  URL schema but kept a looser name check, so a non-slug name passed the
+  route, completed the platform-registry push (not rolled back), then
+  400'd at the store — leaving an orphaned registry entry. The route now
+  reuses the store's exported `nameSchema`, so the 400 fires before the
+  push (same single-source pattern as the URL fix).
+
 - **Local lint ignores a root-level `.venv` too (#131).** `uv sync` run at the
   repo root (not just in `agent-builder/`) creates a `.venv` whose vendored
   wheel JS trips lint rules and made `npm run lint` exit 1. The flat-config

@@ -28,12 +28,16 @@ import {
   listConnectors,
   upsertConnector,
   toPublicConnector,
+  nameSchema,
   urlSchema,
 } from "@/lib/connectors/connector-store";
 import { upsertPlatformConnector } from "@/lib/connectors/platform-sync";
 
 const upsertConnectorBodySchema = z.object({
-  name: z.string().trim().min(1).max(100),
+  // The same slug pattern the store enforces — validated HERE so the
+  // caller gets a clean 400 before the platform-registry push, not a
+  // completed push followed by a store 400 (an orphaned registry entry).
+  name: nameSchema,
   // The same http(s)-only schema the store enforces — scheme validated
   // HERE so the caller gets a clean 400 instead of a stored-but-broken
   // connector (the store's later rejection read as a generic failure,

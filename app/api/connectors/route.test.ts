@@ -155,6 +155,23 @@ describe("PUT /api/connectors", () => {
     expect(mockUpsertPlatformConnector).not.toHaveBeenCalled();
   });
 
+  it("returns 400 for a non-slug name (route schema — rejected before the platform push)", async () => {
+    const res = await put({ name: "Not Valid!", url: "https://mcp.example.com/x" });
+    expect(res.status).toBe(400);
+    const body = await res.json();
+    expect(body.error).toBe("Validation failed");
+    // The pattern failure is named, not a generic rejection.
+    expect(body.details.fieldErrors.name).toContain(
+      "Name must be alphanumeric with dashes/underscores",
+    );
+    // Rejected at the input boundary: the platform push never fires
+    // (it used to complete — an unrolled-back side effect — before the
+    // store's own rejection 400'd, orphaning the registry entry), and
+    // nothing is stored.
+    expect(mockUpsertPlatformConnector).not.toHaveBeenCalled();
+    expect(await listConnectors(ORG)).toEqual([]);
+  });
+
   it("creates a connector without a token", async () => {
     const res = await put({ name: "notion", url: "https://mcp.example.com/notion" });
     expect(res.status).toBe(200);
