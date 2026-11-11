@@ -13,7 +13,9 @@ import {
 } from "./agent-store";
 import type { CreateAgentInput } from "./agent-store";
 import { runMigrations } from "@/lib/db/migrate";
-import { query } from "@/lib/db/pg";
+import { query, withTransaction } from "@/lib/db/pg";
+import { useRealPostgres } from "@/lib/db/test-postgres";
+import type { AgentEntry } from "./agents.config";
 
 const TEST_ORG = "test-org-id";
 const OTHER_ORG = "other-org-id";
@@ -675,5 +677,147 @@ describe("jwt secret preservation on update (undecryptable ciphertext)", () => {
     const updated = await updateAgent(created.id, { jwtSecret: newSecret }, TEST_ORG);
     expect(updated?.jwtSecret).toBe(newSecret);
     expect((await getAgent(created.id, TEST_ORG))?.jwtSecret).toBe(newSecret);
+  });
+});
+
+describe("updateAgent concurrency (real Postgres)", () => {
+  // pg-mem has no row locking, so only real Postgres can prove that
+  // updateAgent's SELECT ... FOR UPDATE is a real serialization point
+  // (same shape as the updateTemplate tests these are ported from).
+  it("serializes concurrent renames of the same agent — both survive (real Postgres)", async (ctx) => {
+    const restore = await useRealPostgres();
+    if (!restore) {
+      ctx.skip(); // Docker-less local environment only; CI must never skip
+      return;
+    }
+    try {
+      // The container persists across this file's real-PG tests (and
+      // beforeEach's cleanup runs against pg-mem, not here) — clear the
+      // table this test touches.
+      await query(`DELETE FROM agents`);
+      const created = await createAgent(
+        { ...validInput, authMode: "jwt", jwtSecret: "s".repeat(32) },
+        TEST_ORG,
+      );
+
+      // Hold the agent row's lock from OUTSIDE both renames so each one's
+      // read-merge-write QUEUES behind it. Under the fix each call blocks
+      // at its SELECT ... FOR UPDATE and reads only after the previous
+      // writer committed — both resolve (no 55P03 lock-timeout failure)
+      // and the final row is one complete serialized write, with the
+      // stored secret intact. NOTE: for two same-field renames this is a
+      // concurrency smoke test, not a lost-update detector — two unlocked
+      // renames of the SAME name field happen to converge, and the secret
+      // both writers carry decrypts identically. The test that actually
+      // fails without the FOR UPDATE (stale write-back clobbers a
+      // DIFFERENT field's fresh value) is the rename + secret re-save
+      // case below.
+      let pending!: Promise<(AgentEntry | null)[]>;
+      await withTransaction(async (holder) => {
+        await holder.query(
+          `SELECT id FROM agents WHERE id = $1 AND org_id = $2 FOR UPDATE`,
+          [created.id, TEST_ORG],
+        );
+        pending = Promise.all([
+          updateAgent(created.id, { name: "Rename One" }, TEST_ORG),
+          updateAgent(created.id, { name: "Rename Two" }, TEST_ORG),
+        ]);
+        // Give both updates time to reach their lock wait, then release
+        // the holder (COMMIT) — from here the updates proceed one at a
+        // time, the second merging over the first's committed row.
+        await new Promise((resolve) => setTimeout(resolve, 150));
+      });
+
+      const [one, two] = await pending;
+      expect(one).not.toBeNull();
+      expect(two).not.toBeNull();
+      const after = await getAgent(created.id, TEST_ORG);
+      expect(after?.name === "Rename One" || after?.name === "Rename Two").toBe(true);
+      // THE assertion: the renames' write-backs didn't clobber the stored
+      // secret with stale pre-read bytes.
+      expect(after?.jwtSecret).toBe("s".repeat(32));
+    } finally {
+      restore();
+    }
+  });
+
+  it("serializes a concurrent rename + secret re-save — both survive (real Postgres)", async (ctx) => {
+    const restore = await useRealPostgres();
+    if (!restore) {
+      ctx.skip(); // Docker-less local environment only; CI must never skip
+      return;
+    }
+    try {
+      await query(`DELETE FROM agents`);
+      const created = await createAgent(
+        { ...validInput, authMode: "jwt", jwtSecret: "s".repeat(32) },
+        TEST_ORG,
+      );
+
+      // Hold the agent row's lock from OUTSIDE both updates so each one's
+      // read-merge-write QUEUES behind it. Under the fix each call blocks
+      // at its SELECT ... FOR UPDATE and reads only after the previous
+      // writer committed. (Unserialized, both calls read the ORIGINAL row
+      // before either write — the rename's write-back then carries the
+      // stale pre-save secret bytes and the just-saved secret is silently
+      // destroyed.)
+      let pending!: Promise<(AgentEntry | null)[]>;
+      await withTransaction(async (holder) => {
+        await holder.query(
+          `SELECT id FROM agents WHERE id = $1 AND org_id = $2 FOR UPDATE`,
+          [created.id, TEST_ORG],
+        );
+        pending = Promise.all([
+          updateAgent(created.id, { name: "Renamed" }, TEST_ORG),
+          updateAgent(created.id, { jwtSecret: "t".repeat(32) }, TEST_ORG),
+        ]);
+        await new Promise((resolve) => setTimeout(resolve, 150));
+      });
+
+      const [renamed, secreted] = await pending;
+      expect(renamed).not.toBeNull();
+      expect(secreted).not.toBeNull();
+      // THE assertion: both concurrent edits landed — the rename AND the
+      // new secret decrypt (the rename didn't carry back the old secret).
+      const after = await getAgent(created.id, TEST_ORG);
+      expect(after?.name).toBe("Renamed");
+      expect(after?.jwtSecret).toBe("t".repeat(32));
+    } finally {
+      restore();
+    }
+  });
+
+  it("the agents row lock is a real serialization point: a competing FOR UPDATE waits, then times out (real Postgres)", async (ctx) => {
+    const restore = await useRealPostgres();
+    if (!restore) {
+      ctx.skip(); // Docker-less local environment only; CI must never skip
+      return;
+    }
+    try {
+      await query(`DELETE FROM agents`);
+      const created = await createAgent(validInput, TEST_ORG);
+      // tx1 takes updateAgent's lock and holds it; tx2 — the same shape of
+      // statement the update runs — must block on that row. Proves FOR
+      // UPDATE genuinely conflicts across connections (pg-mem has no
+      // locking, so only real Postgres can answer this).
+      await withTransaction(async (holder) => {
+        await holder.query(
+          `SELECT id FROM agents WHERE id = $1 AND org_id = $2 FOR UPDATE`,
+          [created.id, TEST_ORG],
+        );
+        await expect(
+          withTransaction(async (competing) => {
+            // Transaction-local so nothing outlives this tx.
+            await competing.query(`SET LOCAL lock_timeout = '250ms'`);
+            await competing.query(
+              `SELECT id FROM agents WHERE id = $1 AND org_id = $2 FOR UPDATE`,
+              [created.id, TEST_ORG],
+            );
+          }),
+        ).rejects.toMatchObject({ code: "55P03" }); // lock_not_available
+      });
+    } finally {
+      restore();
+    }
   });
 });
