@@ -3,10 +3,13 @@ import { describe, it, expect, beforeEach, vi } from "vitest";
 // The CopilotKit runtime is a third-party integration — stubbed so the
 // route module boots without it. The inner handler never runs meaningfully
 // in these tests: they exercise the gating wrapper AROUND it.
+// runtimeCapture records the constructor options: the identifyUser wiring
+// (runtime v2's thread-list gate) is tested against the captured callback.
+const runtimeCapture = vi.hoisted(() => ({ options: undefined as unknown }));
 vi.mock("@copilotkit/runtime/v2", () => ({
   CopilotRuntime: class {
-    constructor(_opts: unknown) {
-      void _opts; // construction-only mock — the tests never drive the runtime
+    constructor(opts: unknown) {
+      runtimeCapture.options = opts; // construction-only mock — the tests never drive the runtime
     }
   },
   createCopilotRuntimeHandler: vi.fn(() => () => new Response("ok")),
@@ -22,6 +25,7 @@ vi.mock("@/lib/auth/context", () => ({
   getSyntheticAdmin: vi.fn(),
 }));
 vi.mock("@/lib/auth/request-context", () => ({
+  getRunnerUser: vi.fn(),
   runWithUserAsync: vi.fn(async (_u: unknown, fn: () => Promise<Response>) => fn()),
   // Signature matches the route's call: (user, contextItems, reservedDepKeys, fn).
   // The reservedDepKeys param MUST stay in the list — the first test that
@@ -69,6 +73,7 @@ import { acquireConcurrent, checkUserLimit } from "@/lib/ratelimit/middleware";
 import { wrapStreamWithRelease } from "@/lib/ratelimit/stream-wrap";
 import { checkBuilderRunGate, consumeBuilderRunQuota } from "@/lib/agents/run-gate";
 import {
+  getRunnerUser,
   runWithRunnerContext,
   runWithUserAsync,
 } from "@/lib/auth/request-context";
@@ -494,5 +499,36 @@ describe("copilotkit route — /threads/clear refusal + run-classification exemp
 
     expect(checkUserLimit).toHaveBeenCalledTimes(1);
     expect(acquireConcurrent).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe("copilotkit route — runtime identifyUser wiring", () => {
+  // Runtime v2 gates the local thread LIST route behind caller identity:
+  // without identifyUser the /info capability says list:false and the
+  // client's useThreads() never fetches (the 1.84 E2E sidebar regression).
+  // These tests pin the wiring against the captured constructor options.
+  interface IdentifyUser {
+    (): Promise<{ id: string; name: string }>;
+  }
+  function identifyUser(): IdentifyUser {
+    const opts = runtimeCapture.options as { identifyUser?: IdentifyUser } | undefined;
+    const identify = opts?.identifyUser;
+    expect(identify, "CopilotRuntime must be constructed with identifyUser").toBeTypeOf(
+      "function",
+    );
+    return identify as IdentifyUser;
+  }
+
+  it("resolves the caller from the ALS request user", async () => {
+    vi.mocked(getRunnerUser).mockReturnValue(USER);
+    await expect(identifyUser()()).resolves.toEqual({
+      id: USER.id,
+      name: USER.name,
+    });
+  });
+
+  it("fails closed when no request user is stamped in the context", async () => {
+    vi.mocked(getRunnerUser).mockReturnValue(null);
+    await expect(identifyUser()()).rejects.toThrow(/no request user in context/);
   });
 });

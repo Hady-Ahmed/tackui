@@ -8,7 +8,10 @@ import { getRequestUser, getSyntheticAdmin } from "@/lib/auth/context";
 import { isAuthDisabled } from "@/lib/auth/auth";
 import { SAAS_MODE } from "@/lib/config/saas";
 import type { PlanId } from "@/lib/billing/plans";
-import { runWithUserAsync } from "@/lib/auth/request-context";
+import {
+  getRunnerUser,
+  runWithUserAsync,
+} from "@/lib/auth/request-context";
 import {
   checkUserLimit,
   acquireConcurrent,
@@ -71,6 +74,27 @@ function isRunShapedButUnparseable(pathname: string): boolean {
 const runtime = new CopilotRuntime({
   agents: ({ request }) => getAgents(request),
   runner,
+  // Runtime v2 ≥1.77 gates the local thread LIST route behind caller
+  // identity: without identifyUser, /info advertises
+  // `threadEndpoints.list: false`, the client's useThreads() honors it
+  // and never fetches — the sidebar stays empty forever (E2E
+  // chat/orgs failures against 1.84). The runtime resolves the owner
+  // through this callback once per request (cached in a WeakMap) and
+  // every thread route + run then demands the runner enforce ownership
+  // via isThreadAccessible. The ALS stamped below by
+  // runWithUserAsync/runWithRunnerContext covers EVERY inner-handler
+  // dispatch (auth mode resolves the session user, solo mode the
+  // synthetic admin), so reading getRunnerUser() here is reliable and
+  // free — no second session lookup.
+  identifyUser: async () => {
+    const user = getRunnerUser();
+    if (!user) {
+      throw new Error(
+        "identifyUser: no request user in context (route handler must wrap innerHandler in runWithUserAsync)",
+      );
+    }
+    return { id: user.id, name: user.name };
+  },
 });
 
 const innerHandler = createCopilotRuntimeHandler({

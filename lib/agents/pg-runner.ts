@@ -1119,6 +1119,38 @@ export class PostgresAgentRunner extends AgentRunner {
     // — rather than restoring this body.
   }
 
+  /**
+   * LocalThreadEndpointRunner ownership probe (runtime v2 thread-access
+   * gate, see agent-runner.d.mts): `false` makes the runtime refuse the
+   * caller's run on that thread with an HTTP error BEFORE any runner
+   * state changes. Cache-only and synchronous by design — the declared
+   * contract is a plain `boolean` — while the authoritative PG-backed
+   * check stays in run() (getThreadOwnership): the runtime calls this
+   * split "defense in depth", the handler pre-gates on what the cache
+   * can see, the runner remains the source of truth. A cache miss
+   * therefore returns true: an unknown thread is creatable (InMemory
+   * canClaim semantics), and run()'s own PG check still denies foreign
+   * ids. Post-restart, refreshCacheFromDB() repopulates the cache from
+   * PG so the pre-gate matches the DB within the boot window.
+   *
+   * `scope.ownerId` is the id resolveLocalThreadOwner produced via the
+   * runtime's identifyUser — which reads the same request context this
+   * class scopes by (both come from the ALS stamped in the copilotkit
+   * route handler). A disagreement means the request escaped that
+   * wrapper: fail closed. Inert on runtime 1.65 (no caller) — this
+   * exists for the 1.84 gate that pairs it with identifyUser on the
+   * CopilotRuntime.
+   */
+  isThreadAccessible(threadId: string, scope?: { ownerId?: string }): boolean {
+    const runnerUser = getRunnerUser();
+    if (runnerUser && scope?.ownerId && scope.ownerId !== runnerUser.id) {
+      return false;
+    }
+    const cached = this.threadCache.get(threadId);
+    if (!cached) return true;
+    return this.threadVisible(cached, runnerUser);
+  }
+
   // ─── Async cache helpers (called from async paths) ────────────────────
 
   private async refreshCacheFromDB(): Promise<void> {
