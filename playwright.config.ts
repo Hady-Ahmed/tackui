@@ -19,6 +19,11 @@ const baseURL = `http://127.0.0.1:${PORT}`;
 
 export default defineConfig({
   testDir: "./e2e",
+  // Vitest unit tests for the harness's pure helpers live next to the
+  // harness (e2e/harness-safety.test.ts) — they are NOT Playwright specs
+  // (they import vitest, which Playwright's CJS transpile can't load).
+  // Only the .spec files are the smoke suite.
+  testIgnore: /harness-safety\.test\.ts/,
   // The smoke suite is a canary: one file, ~8 tests. Keep it strict —
   // a failing test must fail the suite, not hang.
   //
