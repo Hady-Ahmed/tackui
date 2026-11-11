@@ -90,6 +90,14 @@ const ENCRYPTION_TEST_KEY = "ab".repeat(32);
 
 beforeAll(() => {
   vi.stubEnv("DB_ENCRYPTION_KEY", ENCRYPTION_TEST_KEY);
+  // Inline test env (never env files): shrink the REAL-Postgres harness
+  // pool below the writer count of the hot-row pool-exhaustion test in
+  // "updateTemplate concurrency" so the no-pinned-connections invariant is
+  // proven deterministically. The harness pool is created lazily on the
+  // first useRealPostgres() call, so these are read then; afterAll's
+  // unstub keeps a reused vitest worker from leaking them into other files.
+  vi.stubEnv("PG_POOL_MAX", "2");
+  vi.stubEnv("PG_CONNECT_TIMEOUT", "750");
 });
 
 afterAll(() => {
@@ -716,6 +724,52 @@ describe("updateTemplate concurrency (real Postgres)", () => {
       restore();
     }
   });
+
+  it("more concurrent same-row writers than PG_POOL_MAX all complete — blocked writers queue in-process, never pinning a pool connection (real Postgres)", async (ctx) => {
+    const restore = await useRealPostgres();
+    if (!restore) {
+      ctx.skip(); // Docker-less local environment only; CI must never skip
+      return;
+    }
+    try {
+      await query(`DELETE FROM agent_templates`);
+      const created = await createTemplate(validInput);
+      // 4x the shrunken harness pool (PG_POOL_MAX=2, stubbed in beforeAll).
+      const WRITERS = 8;
+
+      let pending!: Promise<(AgentTemplate | null)[]>;
+      await withTransaction(async (holder) => {
+        await holder.query(
+          `SELECT id FROM agent_templates WHERE id = $1 FOR UPDATE`,
+          [created.id],
+        );
+        pending = Promise.all(
+          Array.from({ length: WRITERS }, (_, i) =>
+            updateTemplate(created.id, { name: `Writer ${i}` }),
+          ),
+        );
+        // Hold the row lock LONGER than PG_CONNECT_TIMEOUT (750ms, also
+        // stubbed in beforeAll). Without the per-key semaphore, every
+        // writer opens its transaction up front: 2 connections get
+        // granted and immediately block on the row lock, so the other 6
+        // time out waiting for a connection before the holder commits at
+        // 1.5s. With the semaphore (acquired BEFORE the transaction), a
+        // writer only touches the pool once admitted, a connection is
+        // always free for it — all 8 complete.
+        await new Promise((resolve) => setTimeout(resolve, 1500));
+      });
+
+      const results = await pending;
+      // THE assertion: no writer timed out waiting for a connection —
+      // every one of the 8 writers (pool max 2) committed its update.
+      expect(results).toHaveLength(WRITERS);
+      expect(results.every((r) => r !== null)).toBe(true);
+      const after = await getTemplate(created.id);
+      expect(after?.name).toMatch(/^Writer \d$/);
+    } finally {
+      restore();
+    }
+  }, 30_000);
 });
 
 describe("deleteTemplate transactional invariant (real Postgres)", () => {

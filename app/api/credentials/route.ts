@@ -40,6 +40,7 @@ import { z } from "zod";
 import { getCurrentUser } from "@/lib/auth/context";
 import { checkUserLimit } from "@/lib/ratelimit/middleware";
 import { withTransaction } from "@/lib/db/pg";
+import { withKeyedLock } from "@/lib/db/keyed-lock";
 import {
   fetchCredentialsCatalog,
   type CredentialCatalogEntry,
@@ -183,33 +184,47 @@ export async function PUT(request: NextRequest) {
   // completeness check below forces a FULL contract map, so concurrent
   // first-writes are complete maps whose upsert (unique on
   // user_id+provider) commits atomically either way.
+  //
+  // The row lock alone would make every blocked PUT pin a pool
+  // connection for the duration of its wait — more concurrent rotations
+  // of ONE row than PG_POOL_MAX and the excess PUTs time out waiting for
+  // a connection. So the per-key in-process semaphore (`withKeyedLock`,
+  // keyed by user+provider) is acquired BEFORE the transaction opens:
+  // blocked writers queue in-process holding no pool connection, and at
+  // most one writer per row is inside `withTransaction`. Writers to
+  // different rows (or different users' same provider) use different
+  // keys and never block each other.
   try {
-    const outcome = await withTransaction(async (tx) => {
-      await tx.query(
-        `SELECT fields FROM credentials WHERE user_id = $1 AND provider = $2 FOR UPDATE`,
-        [user.id, parsed.data.provider],
-      );
-      const stored = await getCredentialDecrypted(user.id, parsed.data.provider, tx);
-      const storedInContract = Object.fromEntries(
-        Object.entries(stored ?? {}).filter(([k]) => contractKeys.includes(k)),
-      );
-      const fields = { ...storedInContract, ...provided };
-      const absent = contractKeys.filter((k) => !(k in fields));
-      if (absent.length > 0) {
-        const labels = entry.fields
-          .filter((f) => absent.includes(f.key))
-          .map((f) => f.label)
-          .join(", ");
-        return { ok: false as const, error: `${entry.label} needs all of its fields: ${labels}` };
-      }
-      return {
-        ok: true as const,
-        record: await setCredential(
-          { userId: user.id, provider: parsed.data.provider, kind: entry.kind, fields },
-          tx,
-        ),
-      };
-    });
+    const outcome = await withKeyedLock(
+      `credentials:${user.id}:${parsed.data.provider}`,
+      () =>
+        withTransaction(async (tx) => {
+          await tx.query(
+            `SELECT fields FROM credentials WHERE user_id = $1 AND provider = $2 FOR UPDATE`,
+            [user.id, parsed.data.provider],
+          );
+          const stored = await getCredentialDecrypted(user.id, parsed.data.provider, tx);
+          const storedInContract = Object.fromEntries(
+            Object.entries(stored ?? {}).filter(([k]) => contractKeys.includes(k)),
+          );
+          const fields = { ...storedInContract, ...provided };
+          const absent = contractKeys.filter((k) => !(k in fields));
+          if (absent.length > 0) {
+            const labels = entry.fields
+              .filter((f) => absent.includes(f.key))
+              .map((f) => f.label)
+              .join(", ");
+            return { ok: false as const, error: `${entry.label} needs all of its fields: ${labels}` };
+          }
+          return {
+            ok: true as const,
+            record: await setCredential(
+              { userId: user.id, provider: parsed.data.provider, kind: entry.kind, fields },
+              tx,
+            ),
+          };
+        }),
+    );
     if (!outcome.ok) {
       return NextResponse.json({ error: outcome.error }, { status: 400 });
     }

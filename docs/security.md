@@ -96,6 +96,12 @@ secret stores whose boundaries are worth stating explicitly:
   provider row's `SELECT … FOR UPDATE` lock, so two concurrent
   single-field rotations can't read the same base and silently drop
   each other's field (the last-write-wins lost update). The
+  serialization is pool-safe: a per-key in-process semaphore
+  (`withKeyedLock` in `lib/db/keyed-lock.ts`, keyed by user+provider)
+  is acquired BEFORE the transaction, so writers blocked on the row
+  queue in-process without pinning a pool connection (same mechanism as
+  `updateTemplate` — see [catalog.md](./catalog.md) "Concurrent template
+  edits serialize"). The
   decrypted key is consumed exclusively by the run path and delivered
   per-run as an AG-UI context item — never persisted AgentOS-side, never
   cached agent-side. Rows are scoped `UNIQUE (user_id, provider)`; no FK

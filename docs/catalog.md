@@ -34,7 +34,12 @@ there is no path from a builder agent to a template.
   admins editing the same template merge over each other's committed
   state instead of last-write-wins silently dropping an edit (a rename
   racing a secret re-save could write back the stale secret bytes and
-  destroy the just-saved secret).
+  destroy the just-saved secret). A per-key in-process semaphore
+  (`withKeyedLock` in `lib/db/keyed-lock.ts`, keyed by template id) is
+  acquired BEFORE the transaction opens: writers blocked on the row
+  queue in-process holding no pool connection, so a pile-up on one
+  template can't exhaust `PG_POOL_MAX` — writers to different templates
+  never block each other.
 - Installing creates an org-scoped `agents` row via `installTemplate()`
   — but the row is an **entitlement/reference, not a config copy**.
   The runtime resolves endpoint/auth **live from the template** on every
