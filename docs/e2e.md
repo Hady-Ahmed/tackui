@@ -66,8 +66,57 @@ handlers). Instead, right after `docker run` the script spawns a tiny
 detached watchdog (`sh` loop in its own session, invisible to the group kill)
 that polls the harness pid and runs `docker rm -f` the moment the harness is
 gone. Container removal also happens on the direct-signal paths (Ctrl-C,
-normal exit), and every startup first sweeps stale `tackui-e2e-pg-*`
-containers, so a crashed run leaves nothing behind.
+normal exit), and every startup sweeps stale `tackui-e2e-*` containers —
+see "The startup sweep is pid-liveness-gated" below for what that sweep
+may and may not touch.
+
+**Startup port pre-check.** Before anything boots, the harness probes its
+three fixed ports — 3990 (app), 3998 (email catcher), 3999 (mock agent) —
+with a real loopback bind (dependency-free; the Postgres port is picked
+free at boot and not checked). An occupied port exits immediately with a
+two-line message instead of the raw `EADDRINUSE` stack a dying child used
+to produce:
+
+```
+[e2e-server] FATAL: port 3990 (app) is already in use by next-server (pid 41234) — the harness cannot start.
+[e2e-server] Stop that process (kill <pid>, or pkill -f next-server for a leftover app) or move this run with E2E_APP_PORT=<port>, then re-run.
+```
+
+Holder identification (`ss -ltnp`, falling back to
+`lsof -iTCP:<port> -sTCP:LISTEN -P -n`) is best-effort: without root, `ss`
+hides other users' process names, and either tool may be missing — the
+message then says "an unidentified process" and points at the manual
+commands. The port env overrides (`E2E_APP_PORT`, `E2E_EMAIL_CATCHER_PORT`,
+`E2E_MOCK_AGENT_PORT`) are honored in both the probe and the printed remedy.
+
+### The startup sweep is pid-liveness-gated (one battery at a time)
+
+The harness's DB and app containers are named after the pid of the harness
+that created them (`tackui-e2e-pg-<pid>`, `tackui-e2e-app-<pid>`), and the
+startup sweep removes a container **only when that pid is provably dead**
+(`kill -0` semantics — `process.kill(pid, 0)` in the harness). This is the
+concurrency story:
+
+- **A stale container (crashed run) is still swept.** Its creating harness
+  is gone, so the pid is dead and the next startup removes it.
+- **A LIVE battery's container is never touched.** Starting a second
+  battery while one runs used to `docker rm -f` the live run's DB container
+  at sweep time — the app then logged `[pg] idle client error … Connection
+  terminated unexpectedly` / `ECONNREFUSED`, and every subsequent test
+  failed with connection errors or the 150s navigation timeout. Now the
+  second harness leaves the first run's containers alone.
+- **Two batteries at once still don't work.** The protection is against
+  destruction, not contention: concurrent runs share the fixed ports (the
+  pre-check above fails the second run fast), the seeded DB, and the
+  port-pacer's login budget. **"One battery at a time" remains the rule** —
+  the difference is that breaking it no longer kills the running battery;
+  the second run just refuses to start.
+
+Two residual edge cases, both in the safe direction (leftovers linger,
+nothing live is destroyed): a container whose harness pid was recycled by
+an unrelated process counts as alive and is skipped — remove it by hand
+(`docker rm -f tackui-e2e-pg-<pid>`); and a name without an embedded pid
+is never touched at all.
 
 **The standalone static-copy step is load-bearing.** `output: "standalone"`
 does not include `.next/static` — the Dockerfile does the same copy in a
@@ -370,8 +419,14 @@ npm run test:e2e:headed # visible browser for debugging
 ```
 
 Docker must be running (the throwaway Postgres is a container). Ports 3990
-(app) and 3999 (mock agent) are loopback-only; a stray `next-server` from a
-previous run causes `EADDRINUSE` — `pkill -f next-server` clears it.
+(app), 3998 (email catcher) and 3999 (mock agent) are loopback-only; the
+harness pre-checks all three at startup and names the offending process if
+one is held (see "Startup port pre-check" above) — a stray `next-server`
+from a previous run is the usual culprit, and `pkill -f next-server` clears
+it. And run **one battery at a time**: a second harness no longer destroys
+a running battery's containers (the sweep is pid-liveness-gated), but it
+still can't share the ports or the seeded DB — see "The startup sweep is
+pid-liveness-gated" above.
 
 ## Tier 2 — chat depth (built: `e2e/chat.spec.ts`, #101)
 
