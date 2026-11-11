@@ -1,6 +1,7 @@
 import { describe, it, expect, beforeEach, beforeAll, afterAll, vi } from "vitest";
 import { EventType, type BaseEvent, type Message } from "@ag-ui/core";
-import type { AbstractAgent } from "@ag-ui/client";
+import { verifyEvents, type AbstractAgent } from "@ag-ui/client";
+import { from } from "rxjs";
 import { PostgresAgentRunner, redactReservedContext, redactReservedEvent } from "./pg-runner";
 import { runWithUser, runWithRunnerContext, type RequestUser } from "@/lib/auth/request-context";
 import { query, withTransaction } from "@/lib/db/pg";
@@ -789,6 +790,109 @@ describe("PostgresAgentRunner — connect() smart replay", () => {
       EventType.TEXT_MESSAGE_END,
       EventType.RUN_FINISHED,
     ]);
+  });
+
+  // Pipe the replayed stream through the @ag-ui/client verifier (the same
+  // one browsers run on a reconnect replay) and resolve with its rejection
+  // reason, if any. A replay that trips it is un-consumable end to end.
+  function verifierRejection(events: BaseEvent[]): Promise<unknown> {
+    return new Promise((resolve) => {
+      from(events)
+        .pipe(verifyEvents())
+        .subscribe({
+          error: (err: unknown) => resolve(err),
+          complete: () => resolve(null),
+        });
+    });
+  }
+
+  it("replay synthesizes STEP_FINISHED for a step a record left open before its RUN_FINISHED", async (ctx) => {
+    ctx.skip(!pgStarted, "Real Postgres (Docker) unavailable");
+    // #142: closeOpenSequences originally tracked REASONING_*/TEXT_MESSAGE_*/
+    // TOOL_CALL_* but not STEP_STARTED — so a record shaped
+    // RUN_STARTED → STEP_STARTED → RUN_FINISHED replayed the terminator with
+    // the step still active, and the @ag-ui/client verifier rejected it
+    // ("Cannot send 'RUN_FINISHED' while steps are still active"), poisoning
+    // the whole reconnect replay. The replay must close the step before the
+    // terminator and the result must be verifier-clean.
+    // The fixture also leaves a TEXT_MESSAGE open under the step, pinning
+    // the documented inner-first closure order: the message closes before
+    // the outer step (compactEvents would otherwise nest the STEP_FINISHED
+    // inside the still-open message block).
+    const events: BaseEvent[] = [
+      { type: EventType.RUN_STARTED, threadId: "t-step", runId: "run-step" } as unknown as BaseEvent,
+      { type: EventType.STEP_STARTED, stepName: "plan" } as unknown as BaseEvent,
+      { type: EventType.TEXT_MESSAGE_START, messageId: "m1", role: "assistant" } as unknown as BaseEvent,
+      { type: EventType.RUN_FINISHED, threadId: "t-step", runId: "run-step" } as unknown as BaseEvent,
+    ];
+    await insertRun("t-step", "run-step", events);
+
+    const received = await collectReplay("t-step");
+
+    expect(received.map((e) => e.type)).toEqual([
+      EventType.RUN_STARTED,
+      EventType.STEP_STARTED,
+      EventType.TEXT_MESSAGE_START,
+      EventType.TEXT_MESSAGE_END,
+      EventType.STEP_FINISHED,
+      EventType.RUN_FINISHED,
+    ]);
+    // Inner sequence first, then the outer step — the fixture would pass
+    // with STEP_FINISHED emitted before TEXT_MESSAGE_END only if this
+    // ordering assertion were absent.
+    const textEndIdx = received.findIndex((e) => e.type === EventType.TEXT_MESSAGE_END);
+    const stepFinishIdx = received.findIndex((e) => e.type === EventType.STEP_FINISHED);
+    expect(textEndIdx).toBeGreaterThan(0);
+    expect(stepFinishIdx).toBeGreaterThan(textEndIdx);
+    // The synthesized closure names the step it closes — a STEP_FINISHED for
+    // an unstarted name is itself a verifier violation.
+    expect((received[stepFinishIdx] as { stepName?: string }).stepName).toBe("plan");
+    expect(await verifierRejection(received)).toBeNull();
+  });
+
+  it("replay closes an open step before the synthetic terminator preceding the next run", async (ctx) => {
+    ctx.skip(!pgStarted, "Real Postgres (Docker) unavailable");
+    // Same gap, multi-run shape: the errored run's step is still open when
+    // the NEXT run's RUN_STARTED arrives — the synthetic RUN_FINISHED that
+    // keeps that RUN_STARTED verifier-legal must close the step first (after
+    // the inner message/tool sequences), or the whole replay is rejected.
+    const runErr: BaseEvent[] = [
+      { type: EventType.RUN_STARTED, threadId: "t-step-next", runId: "run-err" } as unknown as BaseEvent,
+      { type: EventType.STEP_STARTED, stepName: "plan" } as unknown as BaseEvent,
+      { type: EventType.RUN_ERROR, message: "boom" } as unknown as BaseEvent,
+    ];
+    const runOk: BaseEvent[] = [
+      { type: EventType.RUN_STARTED, threadId: "t-step-next", runId: "run-ok" } as unknown as BaseEvent,
+      { type: EventType.TEXT_MESSAGE_START, messageId: "m-ok", role: "assistant" } as unknown as BaseEvent,
+      { type: EventType.TEXT_MESSAGE_CONTENT, messageId: "m-ok", delta: "answer" } as unknown as BaseEvent,
+      { type: EventType.TEXT_MESSAGE_END, messageId: "m-ok" } as unknown as BaseEvent,
+      { type: EventType.RUN_FINISHED, threadId: "t-step-next", runId: "run-ok" } as unknown as BaseEvent,
+    ];
+    await insertRun("t-step-next", "run-err", runErr);
+    await insertRun("t-step-next", "run-ok", runOk, "run-err");
+
+    const received = await collectReplay("t-step-next");
+    const idxOf = (type: EventType, match: (e: BaseEvent) => boolean) =>
+      received.findIndex((e) => e.type === type && match(e));
+    const stepFinishIdx = idxOf(
+      EventType.STEP_FINISHED,
+      (e) => (e as { stepName?: string }).stepName === "plan",
+    );
+    const synthFinishIdx = idxOf(
+      EventType.RUN_FINISHED,
+      (e) => (e as { runId?: string }).runId === "run-err",
+    );
+    const retryStartIdx = idxOf(
+      EventType.RUN_STARTED,
+      (e) => (e as { runId?: string }).runId === "run-ok",
+    );
+
+    expect(received.some((e) => e.type === EventType.RUN_ERROR)).toBe(false);
+    // Inner sequences close first, then the outer step, then the terminator.
+    expect(stepFinishIdx).toBeGreaterThan(0);
+    expect(synthFinishIdx).toBeGreaterThan(stepFinishIdx);
+    expect(retryStartIdx).toBeGreaterThan(synthFinishIdx);
+    expect(await verifierRejection(received)).toBeNull();
   });
 });
 

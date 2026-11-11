@@ -164,7 +164,8 @@ export function redactReservedEvent<E extends object>(
  *   run's RUN_STARTED would otherwise trip the verifier ("Cannot send
  *   'RUN_STARTED' while a run is still active") and the whole connect
  *   replay would be rejected. Before the terminator, any message,
- *   tool-call, or REASONING sequence the errored run left open is CLOSED
+ *   tool-call, REASONING, or STEP sequence the errored run left open is
+ *   CLOSED
  *   first: AG-UI requires a producer to close what it opened before
  *   RUN_FINISHED, and @copilotkit/shared's finalizeRunEvents deliberately
  *   skips closure when a RUN_ERROR is present (and tracks only
@@ -213,8 +214,26 @@ function buildReplayEvents(
   // REASONING_END for each open block.
   const openReasoningMessages = new Set<string>();
   const openReasoningBlocks = new Set<string>();
+  // Open STEP_* sequences, keyed by stepName. A step groups a phase of a
+  // run — its messages and tool calls — so in closeOpenSequences it is
+  // closed LAST, after the inner sequences it wraps (see the closure-order
+  // note there).
+  const openSteps = new Set<string>();
 
   const closeOpenSequences = (): void => {
+    // Closure order: inner sequences first — reasoning messages, then
+    // reasoning blocks, then text messages, then tool calls — and the
+    // outer STEP_* sequence last, mirroring the nesting (a step wraps a
+    // phase of message/tool traffic). The @ag-ui/client 0.0.57 verifier
+    // is order-agnostic here: it only rejects RUN_FINISHED when any of
+    // its open-step / open-text-message / open-tool-call sets is
+    // non-empty (each with its own error), and accepts a STEP_FINISHED
+    // for any step that was started. Closing the message/tool sequences
+    // first also matters for compactEvents, which runs AFTER
+    // buildReplayEvents in startConnect: it nests trailing events into
+    // any still-open message/tool-call sequence, so a STEP_FINISHED
+    // emitted before those closures would be re-emitted inside one —
+    // flattening the step/message nesting the closure order encodes.
     for (const messageId of openReasoningMessages) {
       out.push({ type: EventType.REASONING_MESSAGE_END, messageId } as unknown as BaseEvent);
     }
@@ -242,10 +261,14 @@ function buildReplayEvents(
         } as unknown as BaseEvent);
       }
     }
+    for (const stepName of openSteps) {
+      out.push({ type: EventType.STEP_FINISHED, stepName } as unknown as BaseEvent);
+    }
     openReasoningMessages.clear();
     openReasoningBlocks.clear();
     openMessageIds.clear();
     openToolCalls.clear();
+    openSteps.clear();
   };
 
   for (const event of events) {
@@ -287,6 +310,7 @@ function buildReplayEvents(
         openToolCalls.clear();
         openReasoningMessages.clear();
         openReasoningBlocks.clear();
+        openSteps.clear();
         runFinished = true;
         continue;
       }
@@ -342,6 +366,12 @@ function buildReplayEvents(
       const id = (event as { toolCallId?: unknown }).toolCallId;
       const info = typeof id === "string" ? openToolCalls.get(id) : undefined;
       if (info) info.hasResult = true;
+    } else if (event.type === EventType.STEP_STARTED) {
+      const name = (event as { stepName?: unknown }).stepName;
+      if (typeof name === "string") openSteps.add(name);
+    } else if (event.type === EventType.STEP_FINISHED) {
+      const name = (event as { stepName?: unknown }).stepName;
+      if (typeof name === "string") openSteps.delete(name);
     }
     out.push(event);
   }
