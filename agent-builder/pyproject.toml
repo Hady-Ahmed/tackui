@@ -17,7 +17,7 @@ dependencies = [
     # without a functional change, so it moves with its proven dependency
     # matrix rather than re-floating to whatever is newest.
     "fastapi==0.141.1",
-    "pyjwt==2.14.0",
+    "pyjwt==2.15.0",
     "python-dotenv==1.2.3",
     # AG-UI protocol types (ag_ui.*) — formerly pulled in via the shared
     # package's dependency list; the dispatcher imports it directly.
