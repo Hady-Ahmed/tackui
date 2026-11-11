@@ -12,9 +12,12 @@ const eslintConfig = defineConfig([
     "out/**",
     "build/**",
     "next-env.d.ts",
-    // Untracked Python virtualenv — vendored wheel JS (e.g. matplotlib bundles)
-    // trips lint rules and poisons the local lint baseline.
+    // Untracked Python virtualenvs — vendored wheel JS (e.g. matplotlib
+    // bundles) trips lint rules and poisons the local lint baseline. The
+    // `.gitignore` `.venv/` entry is unanchored, so `uv sync` can create one
+    // at the repo root as well as in `agent-builder/`.
     "agent-builder/.venv/**",
+    ".venv/**",
   ]),
 ]);
 

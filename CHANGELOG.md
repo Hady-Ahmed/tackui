@@ -4,6 +4,10 @@ All notable changes to this project will be documented in this file. The format 
 
 ## [Unreleased]
 
+- **Local lint ignores a root-level `.venv` too (#131).** `uv sync` run at the
+  repo root (not just in `agent-builder/`) creates a `.venv` whose vendored
+  wheel JS trips lint rules and made `npm run lint` exit 1. The flat-config
+  ignore now covers both locations.
 - **Reconnect replay no longer replays post-terminal strays or dangling
   sequences (#67).** A backend that records events after its `RUN_FINISHED`
   (duplicate terminators, trailing traffic) poisoned reconnect replay — the
