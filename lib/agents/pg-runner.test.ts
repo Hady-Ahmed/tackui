@@ -188,6 +188,64 @@ describe("PostgresAgentRunner — thread scoping (cache-based listThreads)", () 
     });
   });
 
+  describe("isThreadAccessible (runtime v2 pre-run ownership gate)", () => {
+    // The runtime calls this with the identifyUser-derived owner and
+    // refuses the run with an HTTP error on false. It must mirror the
+    // run()'s PG-backed verdict for cache-visible threads, stay
+    // permissive on cache misses (creatable), and fail closed when the
+    // scope's ownerId disagrees with the ALS identity. Inert on runtime
+    // 1.65 (the handler never calls it) — this gate ships for 1.84,
+    // where it pairs with the route's identifyUser to re-open the
+    // thread LIST route (the sidebar's data source).
+    it("allows the owner's own thread", () => {
+      seedThreadCache(runner, "t1", "agent-a", "Alice's chat", user1.id);
+      expect(
+        runWithUser(user1, () => runner.isThreadAccessible("t1", { ownerId: user1.id })),
+      ).toBe(true);
+    });
+
+    it("denies a same-org user's foreign thread", () => {
+      seedThreadCache(runner, "t1", "agent-a", "Alice's chat", user1.id);
+      expect(
+        runWithUser(user2, () => runner.isThreadAccessible("t1", { ownerId: user2.id })),
+      ).toBe(false);
+    });
+
+    it("denies a cross-org user even when the thread has no recorded owner", () => {
+      seedThreadCache(runner, "t1", "agent-a", "Legacy chat", null);
+      expect(
+        runWithUser(user3, () => runner.isThreadAccessible("t1", { ownerId: user3.id })),
+      ).toBe(false);
+    });
+
+    it("treats a cache miss as creatable (InMemory canClaim semantics)", () => {
+      // The deeper PG-backed check in run() remains the authority for
+      // unknown ids — this must not pre-empt it with a denial.
+      expect(
+        runWithUser(user1, () =>
+          runner.isThreadAccessible("never-seen-thread", { ownerId: user1.id }),
+        ),
+      ).toBe(true);
+    });
+
+    it("fails closed when scope.ownerId disagrees with the ALS identity", () => {
+      // A mismatch means the request escaped the wrapper that stamps the
+      // request context — not an access question, a broken request.
+      seedThreadCache(runner, "t1", "agent-a", "Alice's chat", user1.id);
+      expect(
+        runWithUser(
+          user1,
+          () => runner.isThreadAccessible("t1", { ownerId: "someone-else" }),
+        ),
+      ).toBe(false);
+    });
+
+    it("is permissive without an ALS context (direct runner callers)", () => {
+      seedThreadCache(runner, "t1", "agent-a", "Alice's chat", user1.id);
+      expect(runner.isThreadAccessible("t1", { ownerId: user1.id })).toBe(true);
+    });
+  });
+
   describe("deleteThread", () => {
     it("allows owner to delete their thread", async () => {
       await seedThread(runner, "t1", "agent-a", "Alice's chat", user1.id);

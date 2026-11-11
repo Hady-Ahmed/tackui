@@ -4,6 +4,27 @@ All notable changes to this project will be documented in this file. The format 
 
 ## [Unreleased]
 
+- **chat: the sidebar thread list survives the CopilotKit runtime v2
+  ≥1.77 caller-identity gate.** CopilotKit 1.84's runtime advertises
+  `threadEndpoints.list: false` on `/api/copilotkit/info` unless the
+  runtime is constructed with `identifyUser` AND the agent runner
+  implements `isThreadAccessible` — and 1.84's `useThreads()` honors
+  that capability flag by never fetching, so the sidebar showed no
+  conversations at all after a run (E2E: chat thread-persistence,
+  chat multi-turn, org invite all dead in `expectRunSettled`; server
+  persistence was fine, pure client visibility). Fix: construct the
+  `CopilotRuntime` with `identifyUser` reading the request context the
+  copilotkit route already stamps per dispatch (auth mode's session
+  user, solo mode's synthetic admin — no second session lookup, fails
+  closed when unstamped), and implement the sync cache-backed
+  `isThreadAccessible(threadId, { ownerId })` probe on
+  `PostgresAgentRunner` (ownerId/ALS disagreement → deny; cache miss →
+  creatable, matching InMemory canClaim semantics; `run()`'s PG-backed
+  `getThreadOwnership` check remains the deeper authority — the split
+  the runtime documents as defense in depth). Inert on runtime 1.65,
+  which consults neither callback. Pinned by 8 new tests
+  (runner ownership matrix + route identifyUser wiring).
+
 - **agent-builder: the catalog pool survives Neon compute suspension
   (#129).** Neon suspends its compute after ~5 min of activity-based idle —
   open-but-idle pooled connections don't count as activity, and suspension
