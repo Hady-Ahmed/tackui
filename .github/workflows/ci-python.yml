@@ -24,7 +24,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
       # ubuntu-latest ships Docker, so the testcontainers Postgres in
       # conftest.py runs for real here (not skipped).
       - uses: astral-sh/setup-uv@v5
