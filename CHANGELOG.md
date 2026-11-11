@@ -4,6 +4,28 @@ All notable changes to this project will be documented in this file. The format 
 
 ## [Unreleased]
 
+- **agent-builder: the catalog pool survives Neon compute suspension
+  (#129).** Neon suspends its compute after ~5 min of activity-based idle —
+  open-but-idle pooled connections don't count as activity, and suspension
+  kills them server-side. With the builder service now persistent through
+  idle gaps, the next request after a quiet stretch was handed a dead
+  connection from `catalog.py`'s `psycopg_pool.ConnectionPool` and the first
+  query failed with `SSL connection has been closed unexpectedly`
+  (Sentry `AGENT-BUILDER-2`/`-3`, 18+ occurrences, self-healing at
+  quiet-to-active transitions). Fix, at the pool construction site
+  (`_pool_for`): a `check=lambda conn: conn.execute("SELECT 1")` liveness
+  probe at handout — the psycopg_pool analog of SQLAlchemy's
+  `pool_pre_ping` (~1ms warm path; on a dead connection the pool discards it
+  and hands out a fresh one, which wakes the compute, so the request
+  succeeds and the failure never escapes the pool; discard-and-replace
+  semantics verified against the pinned psycopg_pool 3.3.3 source and pinned
+  by test in `agent-builder/tests/test_catalog_pool.py`) plus
+  `max_idle=60`, proactively closing burst-leftover idle connections above
+  `min_size` before Neon's suspend timeout can kill them — under steady
+  single-connection traffic the one `min_size` connection still ages into a
+  suspension, so the probe (not the shrinker) is what absorbs the wake-up.
+  The agno db's own pool is untouched (separate engine, out of scope).
+
 - **The e2e harness fails safely when a port is held or a battery is
   already running (#138).** Two startup hazards, both hit live: (1) a
   leftover process on a fixed harness port (3990 app, 3998 email catcher,
