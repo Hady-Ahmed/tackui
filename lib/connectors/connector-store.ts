@@ -60,7 +60,11 @@ export interface PublicConnector {
   updatedAt: string;
 }
 
-const nameSchema = z
+// Exported for the connectors route's body schema, which must enforce the
+// same pattern at INPUT — a non-slug name that passes the route used to
+// complete the platform-registry push (a side effect nothing rolls back)
+// and only then fail here as a 400, orphaning the registry entry.
+export const nameSchema = z
   .string()
   .trim()
   .min(1, "Name is required")

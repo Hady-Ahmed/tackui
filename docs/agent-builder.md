@@ -698,10 +698,16 @@ connector id the component's config doesn't declare is refused
   param); the admin form mirrors it (blank field = omit, "Clear token"
   checkbox = `""`).
 - **Name vs id:** the org-facing **name** is the human reference
-  (URL/payload-safe pattern `^[a-z0-9][a-z0-9_-]*$`, max 100,
-  immutable after creation — renames create a new connector). The
+  (URL/payload-safe pattern `^[a-z0-9][a-z0-9_-]*$` (case-insensitive),
+  max 100, immutable after creation — renames create a new connector). The
   **id** (server-generated 12-hex) is what agent configs, the wire
-  payload, and the platform registry key on. URLs are http(s)-only
+  payload, and the platform registry key on. Both the name and the URL
+  schemas are single-sourced from the connector store and enforced at
+  the route's input boundary (before the SSRF guard and the
+  platform-registry push): a non-slug name or non-http(s) URL is a
+  clean 400 with no side effects, never a completed push that the
+  store then rejects (which would orphan a registry entry). URLs are
+  http(s)-only
   (`file:`/`ftp:`/`data:` have no legitimate use — they're fetched by
   the AgentOS at run time) **and** must pass `assertSafeUrl` — private/
   internal addresses are a 400 (`ALLOW_PRIVATE_ENDPOINTS=true` opts out
