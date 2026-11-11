@@ -105,7 +105,10 @@ and shapes replay through `buildReplayEvents`: persisted `RUN_ERROR` events
 are filtered out (the AG-UI verifier locks on them mid-stream, making
 failed-run threads permanently unreadable on reconnect), and an unterminated
 run is closed with a synthetic `RUN_FINISHED` — closing any message,
-tool-call, or `REASONING_*` sequences the errored run left open first — when
+tool-call, `REASONING_*`, or `STEP_*` sequences the errored run left open
+first (inner sequences first, the outer step last, mirroring nesting; the
+verifier only checks that all three open-sequence sets are empty at
+`RUN_FINISHED`) — when
 a later `RUN_STARTED` would otherwise follow in the same verified stream:
 either a later run's `RUN_STARTED` already in the history (the next run's
 start would otherwise trip the verifier's "run still active" lock and reject

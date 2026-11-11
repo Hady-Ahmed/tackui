@@ -4,6 +4,22 @@ All notable changes to this project will be documented in this file. The format 
 
 ## [Unreleased]
 
+- **Reconnect replay now closes an open `STEP_*` sequence before a run's
+  terminator (#142).** `closeOpenSequences` tracked open
+  `REASONING_*`/`TEXT_MESSAGE_*`/`TOOL_CALL_*` sequences but not
+  `STEP_STARTED`, so a persisted record shaped
+  `RUN_STARTED → STEP_STARTED → RUN_FINISHED` (no `STEP_FINISHED` — the
+  crash/exception shape) replayed `RUN_FINISHED` with the step still active,
+  and the `@ag-ui/client` 0.0.57 verifier rejected it ("Cannot send
+  'RUN_FINISHED' while steps are still active"), poisoning the entire
+  reconnect replay — the same failure class #67 fixed for
+  reasoning/tool-call sequences. Open steps are now tracked and closed with
+  a synthesized `STEP_FINISHED` after the inner message/tool/reasoning
+  sequences (the verifier is order-agnostic there; closing inner sequences
+  first keeps `compactEvents` from nesting the synthesized step closure
+  into an open sequence). Real-PG replay tests assert the synthesized
+  closure precedes the terminator and the stream is verifier-clean.
+
 - **Editing an agent no longer wipes its stored JWT secret when the
   encryption key can't decrypt it (#125).** `updateAgent` rebuilt the row
   from its read mapping, which degrades an undecryptable `jwt_secret`
