@@ -137,6 +137,20 @@ export const auth = betterAuth({
   // makes the attribute a function of the deployment environment, not
   // of how the proxy forwards headers.
   advanced: {
+    database: {
+      // better-auth 1.7 runs a boot-time schema diff and logs a misleading
+      // "Database schema mismatch … Run npx auth migrate" ERROR whenever the
+      // process boots against a DB whose auth tables don't exist yet — every
+      // fresh deploy, E2E run, and CI container. Our boot order is deliberate:
+      // betterAuth() constructs first, then ensureAuthTables() runs
+      // better-auth's OWN migration machinery (getMigrations + runMigrations)
+      // and creates/repairs the tables. The check can't be satisfied by
+      // reordering (chicken-and-egg: the instance must exist before its
+      // migrator can run), and a real schema failure still fails loudly at
+      // query time. This silences only the redundant advisory — no
+      // enforcement or auth behavior changes.
+      validateSchema: false,
+    },
     defaultCookieAttributes: {
       httpOnly: true,
       sameSite: "lax" as const,
