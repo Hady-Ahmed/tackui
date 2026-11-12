@@ -96,7 +96,12 @@ jobs:
     # SecretsUsedInArgOrEnv warning on the Dockerfile's build-stage
     # AUTH_DISABLED — build-time dummy, not a secret; nothing to fix.)
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    # 30, not 15: attempt-1 of the post-#170 main run (2026-11-11) had every
+    # step green in ~8.5 min, then stalled 10m26s in buildx's cache-export
+    # POST step (GHA cache service latency — nothing our code does) and was
+    # killed at 20m01s. Headroom covers a slow cache day without letting a
+    # genuinely broken image idle forever.
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v7
       # The harness script is stock Node — but pin 24 so every CI job runs
