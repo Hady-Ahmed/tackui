@@ -3,15 +3,16 @@ import { randomUUID } from "node:crypto";
 import { query } from "@/lib/db/pg";
 import { getEnabledProviders } from "./auth";
 
-// Re-extract the databaseHooks from auth.options. We can't import `auth` itself
-// in tests because constructing the Better Auth instance pulls in plugins and
-// expects a real DB schema. Instead, we exercise the hook logic directly by
-// re-declaring the same callbacks and pointing them at pg-mem.
+// The databaseHooks tests below re-extract hook logic and exercise it against
+// pg-mem rather than driving the Better Auth instance: the hooks are small and
+// the tests serve as regression guards on the SQL + branching. A few tests
+// (the rate-limit override, the validateSchema flag) DO import `auth` itself
+// because reading `auth.options` is a static object read — no DB touched.
 //
-// This is a deliberate trade-off: it tests the SQL + branching logic but
-// couples the test to the hook's shape. If `auth.ts` changes a hook, the
-// corresponding test must be updated. That coupling is acceptable — the hooks
-// are small and the tests serve as regression guards.
+// The re-declaration trade-off: it couples the hook tests to the hook's shape.
+// If `auth.ts` changes a hook, the corresponding test must be updated. That
+// coupling is acceptable — the hooks are small and the tests serve as
+// regression guards.
 
 async function runCreateAfterHook(user: { id: string }): Promise<void> {
   const row = await query<{ count: number }>(
@@ -314,5 +315,19 @@ describe("rateLimit.customRules — the AUTH_SIGNIN_RATE_MAX override", () => {
         max: 10,
       });
     }
+  });
+});
+
+describe("advanced.database.validateSchema — boot-time advisory off", () => {
+  // better-auth 1.7's runtime schema check logs a misleading "Database schema
+  // mismatch … Run npx auth migrate" ERROR on every boot against a DB without
+  // auth tables (fresh deploys, E2E, CI). auth.ts disables it and documents
+  // why (chicken-and-egg with ensureAuthTables; real failures still fail at
+  // query time). This pins the flag so an accidental removal — or a "cleanup"
+  // by someone who didn't read the comment — surfaces here instead of
+  // re-adding the noise.
+  it("is explicitly disabled", async () => {
+    const { auth: fresh } = await import("./auth");
+    expect(fresh.options.advanced?.database?.validateSchema).toBe(false);
   });
 });

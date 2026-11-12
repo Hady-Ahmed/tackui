@@ -4,6 +4,16 @@ All notable changes to this project will be documented in this file. The format 
 
 ## [Unreleased]
 
+- **auth: silence better-auth's misleading boot-time schema-mismatch ERROR.**
+  better-auth 1.7's runtime schema check logs "Database schema mismatch …
+  Run npx auth migrate" on every boot against a DB whose auth tables don't
+  exist yet — every fresh deploy, E2E run, and CI container — because
+  `betterAuth()` constructs before `ensureAuthTables()` creates/repairs the
+  tables (the check can't be satisfied by reordering: the migrator lives on
+  the constructed instance). Set `advanced.database.validateSchema: false`;
+  the advisory is redundant with `ensureAuthTables()`, and real schema
+  failures still fail loudly at query time.
+
 - **chat: the sidebar thread list survives the CopilotKit runtime v2
   ≥1.77 caller-identity gate.** CopilotKit 1.84's runtime advertises
   `threadEndpoints.list: false` on `/api/copilotkit/info` unless the
