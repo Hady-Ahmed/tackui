@@ -131,12 +131,30 @@ export function groupModelsByProvider(models: PlatformModel[]): {
 }
 
 /**
- * Default selection: the first model. (TIER DORMANCY — the old "prefer a
- * platform-tier model" default died with the platform-key free tier; builder
- * runs are 100% BYOK, so every model is equal until Phase 3 publishing.)
+ * Key-aware default selection (create mode): the first model whose
+ * provider credential is already connected — catalog order, so the same
+ * catalog yields the same default. A keyed model without its key 402s at
+ * run time (a dead-end preselection), and with NO keys connected there is
+ * no default at all: the select stays on "Select a provider…", because
+ * the user's real next step is connecting a provider (the Connect
+ * affordance is right under the picker). Keyless models (e.g. ollama) are
+ * skipped too — "connected" means a key exists; preselection must always
+ * be a runnable model with its credential in hand. (TIER DORMANCY — the
+ * old "prefer a platform-tier model" default died with the platform-key
+ * free tier; builder runs are 100% BYOK until Phase 3 publishing.)
  */
-export function pickDefaultModel(models: PlatformModel[]): PlatformModel | null {
-  return models[0] ?? null;
+export function pickDefaultModel(
+  models: PlatformModel[],
+  hasKey: Record<string, boolean>,
+): PlatformModel | null {
+  for (const m of models) {
+    if (!m.requiresKey || !m.depKey) continue;
+    // Same vendor rule as modelKeyState: the credential lives under the
+    // VENDOR (the dep key minus its "_api_key" suffix), not the model's
+    // door slug.
+    if (hasKey[m.depKey.replace(/_api_key$/, "")]) return m;
+  }
+  return null;
 }
 
 /**
