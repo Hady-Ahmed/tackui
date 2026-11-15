@@ -21,8 +21,11 @@
  *             the current instructions live in the AgentOS config, not the
  *             local store — the edit GET reads them back for the prefill,
  *             and a blank field preserves them)
- *  - badges  → GET /api/models (platformTier), GET /api/credentials
- *             (hasKey per provider + catalog), GET /api/connectors
+ *  - badges  → GET /api/credentials (hasKey per provider + catalog),
+ *             GET /api/connectors; the models/tools catalogs are lifted
+ *             to the /agents page — fetched once per page visit, passed
+ *             down as props (every panel open and tab flip used to
+ *             re-run all four fetches)
  *
  * The 402s the run gate produces (missing connector, missing BYOK key,
  * daily quota) surface at run time in the chat; this form front-loads
@@ -58,7 +61,6 @@ import {
   prettySlug,
   providerMeta,
   staleModelCopy,
-  sortTools,
   toolKeyState,
   validateBuilderForm,
   type BuilderFormState,
@@ -71,12 +73,30 @@ import {
 export function BuilderForm({
   mode,
   agentId,
+  models,
+  modelsError,
+  tools,
+  toolsError,
+  retryCatalogs,
   onSaved,
   onDeleted,
   onCancel,
 }: {
   mode: "create" | "edit";
   agentId?: string;
+  /**
+   * The platform model/tool catalogs — lifted to the /agents page (they
+   * are admin-controlled, slow-changing, and shared by every panel open
+   * in the visit); null while the page-level fetch is in flight. The two
+   * user-scoped loads (credentials, connectors) stay form-owned: they
+   * change mid-session and the connect flow reloads them.
+   */
+  models: PlatformModel[] | null;
+  modelsError: string | null;
+  tools: BuilderToolOption[] | null;
+  toolsError: string | null;
+  /** Re-fetch the two lifted catalogs — the catalog banner's Retry. */
+  retryCatalogs: () => Promise<void>;
   /**
    * A successful create/save. The panel closes and the parent navigates
    * to /app?agent=<id> — "save & open in chat".
@@ -97,10 +117,6 @@ export function BuilderForm({
   // may edit it.
   const isPlatformAdmin = config?.authDisabled || session?.user?.role === "admin";
 
-  const [models, setModels] = useState<PlatformModel[] | null>(null);
-  const [modelsError, setModelsError] = useState<string | null>(null);
-  const [tools, setTools] = useState<BuilderToolOption[] | null>(null);
-  const [toolsError, setToolsError] = useState<string | null>(null);
   // Palette search — filters the rendered rows only. Selections live in
   // form.tools, so hiding a row never drops it from the agent's payload.
   const [toolQuery, setToolQuery] = useState("");
@@ -144,32 +160,6 @@ export function BuilderForm({
   /* Data loading                                                          */
   /* -------------------------------------------------------------------- */
 
-  const loadModels = useCallback(async () => {
-    try {
-      const res = await fetch("/api/models");
-      const data = await res.json().catch(() => ({}));
-      if (!res.ok) {
-        setModelsError(extractErrorMessage(data, `Failed to load models (${res.status})`));
-        return;
-      }
-      const list = Array.isArray(data.models) ? data.models : [];
-      setModels(list);
-      // Create mode: default to the first model (builder runs are 100% BYOK
-      // — there is no platform-key free tier to prefer). Applied here (not an
-      // effect) so the default lands as soon as the catalog arrives.
-      if (mode === "create") {
-        const def = pickDefaultModel(list);
-        if (def)
-          setForm((prev) =>
-            prev.model ? prev : { ...prev, model: { provider: def.provider, id: def.id } },
-          );
-      }
-    } catch {
-      // Own-proxy failure — without this the dropdowns sit empty forever.
-      setModelsError("Couldn't reach the server — try again shortly.");
-    }
-  }, [mode]);
-
   const loadCredentials = useCallback(async () => {
     try {
       const res = await fetch("/api/credentials");
@@ -184,23 +174,6 @@ export function BuilderForm({
       // Deliberate degradation: on a network failure the key badges read
       // "not saved" instead of stranding the form — the runner can retry
       // from the key form, which has its own error path.
-    }
-  }, []);
-
-  const loadTools = useCallback(async () => {
-    try {
-      const res = await fetch("/api/tools");
-      const data = await res.json().catch(() => ({}));
-      if (!res.ok) {
-        setToolsError(extractErrorMessage(data, `Failed to load tools (${res.status})`));
-        return;
-      }
-      // Sorted at load (not per render): the palette renders in the
-      // deterministic (toolkit, label) order for the whole session.
-      setTools(Array.isArray(data.tools) ? sortTools(data.tools) : []);
-    } catch {
-      // Own-proxy failure — without this the toolkit list sits empty forever.
-      setToolsError("Couldn't reach the server — try again shortly.");
     }
   }, []);
 
@@ -259,19 +232,42 @@ export function BuilderForm({
     }
   }, [agentId]);
 
+  // The key-aware default (create mode) — once BOTH the catalog and the
+  // credentials have arrived, preselect the first model of the first
+  // connected provider (pickDefaultModel; no keys → no default, the
+  // select stays on its placeholder). Lives here, not in a loader: the
+  // catalog is a prop now, and the default must react to a key connected
+  // inside the dialog the same way the loader's version reacted to the
+  // catalog arriving. The setForm guard (prev.model ? prev) keeps user
+  // edits never overridden — the effect only fills an empty selection.
+  useEffect(() => {
+    if (mode !== "create" || !models || !credentials) return;
+    // Wrapper indirection satisfies react-hooks/set-state-in-effect (same
+    // pattern as the loaders below).
+    const apply = async () => {
+      const def = pickDefaultModel(models, credentials.hasKey);
+      if (def)
+        setForm((prev) =>
+          prev.model ? prev : { ...prev, model: { provider: def.provider, id: def.id } },
+        );
+    };
+    void apply();
+  }, [mode, models, credentials]);
+
   useEffect(() => {
     if (isPending) return;
     // Wrapper indirection satisfies react-hooks/set-state-in-effect (the
     // loaders set state after their fetches resolve — same pattern as
-    // users-admin).
+    // users-admin). The two platform catalogs are the PARENT's problem
+    // now (lifted — fetched once per page visit); these three are
+    // user-scoped and change mid-session, so they stay form-owned.
     const load = async () => {
       loadCredentials();
       loadConnectors();
-      await Promise.all([loadModels(), loadTools()]);
       if (mode === "edit") loadAgent();
     };
     load();
-  }, [isPending, mode, loadModels, loadTools, loadCredentials, loadConnectors, loadAgent]);
+  }, [isPending, mode, loadCredentials, loadConnectors, loadAgent]);
 
   /* -------------------------------------------------------------------- */
   /* Derived                                                               */
@@ -562,14 +558,12 @@ export function BuilderForm({
             <button
               type="button"
               onClick={() => {
-                // Errors stay up until the retry resolves (loadModels/
-                // loadTools re-set them on failure; success lifts the
-                // banner by setting the catalogs). Clearing them here
+                // Errors stay up until the retry resolves — the page's
+                // loaders re-set them on failure; success lifts the
+                // banner by setting the catalogs. Clearing them here
                 // would flash the form enabled with empty dropdowns.
                 setRetryingCatalog(true);
-                void Promise.all([loadModels(), loadTools()]).finally(() =>
-                  setRetryingCatalog(false),
-                );
+                void retryCatalogs().finally(() => setRetryingCatalog(false));
               }}
               disabled={retryingCatalog}
               className="shrink-0 rounded-md border border-zinc-300 px-3 py-1 text-xs font-medium text-zinc-700 transition-colors hover:bg-zinc-50 disabled:opacity-50 dark:border-zinc-700 dark:text-zinc-200 dark:hover:bg-zinc-900"

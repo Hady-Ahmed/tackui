@@ -4,6 +4,18 @@ All notable changes to this project will be documented in this file. The format 
 
 ## [Unreleased]
 
+- **agent-builder: the model/tool catalogs load once per page visit, and
+  the create-mode model default is key-aware.** The add/edit panel
+  re-ran all four catalog fetches on every interaction — dialog open,
+  kind toggle — flashing the provider select and popping the palette
+  empty→filled. Models and tools now load once on the /agents page;
+  credentials and connectors keep their form-owned loads. The
+  create-mode default no longer picks "the first model" blindly: it
+  picks the first model whose provider credential is already connected,
+  and with no keys connected there is no default — the old dead-end
+  default would 402 at run time for zero-key users. An admin enabling a
+  toolkit sees it on the next /agents load.
+
 - **agent-builder: the tool palette shows the tool's description, not the
   full docstring.** Agno toolkits carry no explicit function description,
   so the discovery scan fell back to `inspect.getdoc` and served the raw

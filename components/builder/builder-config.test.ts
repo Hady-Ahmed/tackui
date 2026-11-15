@@ -130,13 +130,41 @@ describe("groupModelsByProvider", () => {
   });
 });
 
-describe("pickDefaultModel", () => {
-  it("picks the first model (TIER DORMANCY — no platform-key preference)", () => {
-    expect(pickDefaultModel(MODELS)).toEqual(MODELS[0]);
+describe("pickDefaultModel — key-aware default", () => {
+  it("returns null when no keys are connected — the select keeps its placeholder", () => {
+    expect(pickDefaultModel(MODELS, {})).toBeNull();
+  });
+
+  it("defaults to the connected provider's first model in catalog order", () => {
+    expect(pickDefaultModel(MODELS, { openai: true })).toEqual(MODELS[0]);
+    expect(pickDefaultModel(MODELS, { anthropic: true })).toEqual(MODELS[1]);
+  });
+
+  it("picks the first connected provider in catalog order when several have keys", () => {
+    expect(pickDefaultModel(MODELS, { openai: true, anthropic: true })).toEqual(MODELS[0]);
+  });
+
+  it("resolves the provider through the model's dep key, not the door slug", () => {
+    const door: PlatformModel[] = [
+      { provider: "openai-responses", id: "gpt-4o", platformTier: false, requiresKey: true, depKey: "openai_api_key" },
+    ];
+    expect(pickDefaultModel(door, { openai: true })).toEqual(door[0]);
+  });
+
+  it("skips keyed models with no declared dep key (broken catalog rows never default)", () => {
+    const broken: PlatformModel[] = [
+      { provider: "openai", id: "gpt-4o", platformTier: false, requiresKey: true, depKey: null },
+    ];
+    expect(pickDefaultModel(broken, { openai: true })).toBeNull();
+  });
+
+  it("applies the default only once the key state exists (models first, keys later)", () => {
+    expect(pickDefaultModel(MODELS, {})).toBeNull();
+    expect(pickDefaultModel(MODELS, { openai: true })).toEqual(MODELS[0]);
   });
 
   it("returns null for an empty catalog", () => {
-    expect(pickDefaultModel([])).toBeNull();
+    expect(pickDefaultModel([], { openai: true })).toBeNull();
   });
 });
 

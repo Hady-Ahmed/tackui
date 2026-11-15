@@ -5,6 +5,12 @@ import { useRouter, useSearchParams } from "next/navigation";
 import type { PublicAgent, AgentAuthMode } from "@/lib/agents/agents.config";
 import { BackToChat } from "@/components/back-to-chat";
 import { BuilderForm } from "@/components/builder/builder-form";
+import {
+  extractErrorMessage,
+  sortTools,
+  type BuilderToolOption,
+  type PlatformModel,
+} from "@/components/builder/builder-config";
 import { ConnectorsAdmin } from "@/components/connectors-admin";
 import { UpgradeDialog } from "@/components/upgrade-dialog";
 import { authClient } from "@/lib/auth/auth-client";
@@ -166,6 +172,68 @@ function AgentsPageInner() {
   useEffect(() => {
     fetchRef.current();
   }, []);
+
+  // The two platform catalogs — fetched ONCE per page visit and passed
+  // down into the builder form. The form used to re-fetch both on every
+  // panel open and every tab flip (the kind toggle swaps the form
+  // component, remounting it); the lift pays the catalog cost once per
+  // visit instead, which also kills the collapsed-value flash while the
+  // model default landed. Staleness is accepted: an admin who enables a
+  // model or toolkit sees it on the next /agents load. Credentials and
+  // connectors stay form-owned — user-scoped, they change mid-session
+  // (the connect flow reloads them on success).
+  const [models, setModels] = useState<PlatformModel[] | null>(null);
+  const [modelsError, setModelsError] = useState<string | null>(null);
+  const [tools, setTools] = useState<BuilderToolOption[] | null>(null);
+  const [toolsError, setToolsError] = useState<string | null>(null);
+
+  const loadModels = useCallback(async () => {
+    try {
+      const res = await fetch("/api/models");
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) {
+        setModelsError(extractErrorMessage(data, `Failed to load models (${res.status})`));
+        return;
+      }
+      setModels(Array.isArray(data.models) ? data.models : []);
+    } catch {
+      // Own-proxy failure — without this the dropdowns sit empty forever.
+      setModelsError("Couldn't reach the server — try again shortly.");
+    }
+  }, []);
+
+  const loadTools = useCallback(async () => {
+    try {
+      const res = await fetch("/api/tools");
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) {
+        setToolsError(extractErrorMessage(data, `Failed to load tools (${res.status})`));
+        return;
+      }
+      // Sorted at load (not per render): the palette renders in the
+      // deterministic (toolkit, label) order for the whole visit.
+      setTools(Array.isArray(data.tools) ? sortTools(data.tools) : []);
+    } catch {
+      // Own-proxy failure — without this the toolkit list sits empty forever.
+      setToolsError("Couldn't reach the server — try again shortly.");
+    }
+  }, []);
+
+  const loadCatalog = useCallback(async () => {
+    await Promise.all([loadModels(), loadTools()]);
+  }, [loadModels, loadTools]);
+
+  useEffect(() => {
+    if (isPending) return;
+    // Wrapper indirection satisfies react-hooks/set-state-in-effect (the
+    // loaders set state after their fetches resolve — same pattern as
+    // users-admin). Gated on isPending: the catalog routes 401 an
+    // anonymous visitor, and the session must resolve first.
+    const load = async () => {
+      await loadCatalog();
+    };
+    load();
+  }, [isPending, loadCatalog]);
 
   // Bring the panel into view when it opens, when the edit target
   // changes, or when the kind toggle swaps the form.
@@ -433,6 +501,11 @@ function AgentsPageInner() {
                   key={editing?.id ?? "create"}
                   mode={editing?.kind === "builder" ? "edit" : "create"}
                   agentId={editing?.kind === "builder" ? editing.id : undefined}
+                  models={models}
+                  modelsError={modelsError}
+                  tools={tools}
+                  toolsError={toolsError}
+                  retryCatalogs={loadCatalog}
                   onSaved={handleBuilderSaved}
                   onDeleted={handleBuilderDeleted}
                   onCancel={closePanel}
