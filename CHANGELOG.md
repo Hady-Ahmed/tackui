@@ -57,6 +57,17 @@ All notable changes to this project will be documented in this file. The format 
   suspension, so the probe (not the shrinker) is what absorbs the wake-up.
   The agno db's own pool is untouched (separate engine, out of scope).
 
+- **agent-builder: the agno db engine survives Neon compute suspension
+  (#157).** The other half of #129: agno's `PostgresDb` runs on its own
+  SQLAlchemy engine, so after a ~5-minute quiet stretch its first request
+  could still fail with `SSL connection has been closed unexpectedly` —
+  pre-ping was already in effect, but only via agno's PRIVATE
+  engine-options default, which a dependency bump could silently drop with
+  every test green. The engine is now built explicitly at the one
+  `PostgresDb` site through agno's public `create_postgres_engine` factory
+  (`pool_pre_ping=True`, `pool_recycle=3600`) and passed as `db_engine`,
+  pinned by `agent-builder/tests/test_agno_engine_pool.py`.
+
 - **The e2e harness fails safely when a port is held or a battery is
   already running (#138).** Two startup hazards, both hit live: (1) a
   leftover process on a fixed harness port (3990 app, 3998 email catcher,

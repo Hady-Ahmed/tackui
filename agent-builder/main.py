@@ -46,6 +46,7 @@ from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 
 from agno.db.postgres import PostgresDb
+from agno.db.postgres.engine import create_postgres_engine
 from agno.os import AgentOS
 from agno.os.middleware.jwt import AuthMiddleware
 
@@ -159,7 +160,14 @@ def build_app(db_url: Optional[str] = None) -> FastAPI:
     catalog.refresh()
 
     # Agno creates its `ai` schema and component/session tables on demand.
-    db = PostgresDb(id="platform-os-db", db_url=db_url)
+    # The engine is built HERE, not handed over as a db_url: the db_url
+    # path's pool_pre_ping rests on agno's PRIVATE _engine_options()
+    # default, so a minor agno bump could silently drop it and re-expose
+    # the Neon suspend/wake failure #129 fixed for the catalog pool
+    # (#157). The public factory's defaults (pool_pre_ping=True,
+    # pool_recycle=3600) are the contract — pinned by
+    # tests/test_agno_engine_pool.py.
+    db = PostgresDb(id="platform-os-db", db_engine=create_postgres_engine(db_url))
 
     agent_os = AgentOS(
         id="platform-os",
