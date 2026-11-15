@@ -797,8 +797,9 @@ The admin UI is the Connectors section on `/agents`
   carries an explicit `aria-label` so its accessible name is the tool
   name rather than the whole description read aloud.
 - **Palette search + honest cap:** a search input filters the rendered
-  rows (case-insensitive on label + description — descriptions carry
-  the arg/return docs, so arg-name searches hit) with its own "No tools
+  rows (case-insensitive on label + description — descriptions are
+  summary-only, so search matches the label and the summary text) with
+  its own "No tools
   match" state, distinct from the empty-catalog copy. Filtering is
   display-only: selections live in the form state, so a row hidden by
   the search keeps its slot in the payload. The cap hint counts live
