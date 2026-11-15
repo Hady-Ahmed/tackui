@@ -46,7 +46,6 @@ import { useCanManageAgents } from "@/lib/auth/use-can-manage-agents";
 import { useBilling } from "@/lib/billing/use-billing";
 import {
   BUILDER_CONNECTORS_MAX,
-  BUILDER_TOOLS_MAX,
   buildCreatePayload,
   catalogEmptyCopy,
   catalogErrorCopy,
@@ -56,6 +55,7 @@ import {
   filterTools,
   findModel,
   groupModelsByProvider,
+  groupToolsByToolkit,
   modelKeyState,
   pickDefaultModel,
   prettySlug,
@@ -68,6 +68,7 @@ import {
   type CredentialCatalog,
   type PlatformModel,
   type ToolKeyState,
+  type ToolkitGroup,
 } from "./builder-config";
 
 export function BuilderForm({
@@ -120,6 +121,18 @@ export function BuilderForm({
   // Palette search — filters the rendered rows only. Selections live in
   // form.tools, so hiding a row never drops it from the agent's payload.
   const [toolQuery, setToolQuery] = useState("");
+  // Which toolkit groups are drilled in — default collapsed; the row's
+  // checkbox covers the common "take the whole toolkit" case.
+  const [expandedToolkits, setExpandedToolkits] = useState<
+    Record<string, boolean>
+  >({});
+  // Toolkits expanded at least once this form session. A newly-
+  // encountered toolkit's tools all start checked on first expand; this
+  // keeps a collapse → re-expand from re-checking tools the user just
+  // unchecked.
+  const [seenToolkits, setSeenToolkits] = useState<Set<string>>(
+    () => new Set(),
+  );
   // The catalog-failure Retry button's in-flight flag — without it the
   // click gives no feedback and a double-click fires duplicate fetches.
   const [retryingCatalog, setRetryingCatalog] = useState(false);
@@ -322,12 +335,11 @@ export function BuilderForm({
   const createDisabled = createBlockedByEmptyModels(mode, models, modelsError);
   const modelsEmptyCopy = catalogEmptyCopy("models", models, modelsError);
   const toolsEmptyCopy = catalogEmptyCopy("tools", tools, toolsError);
-  // The palette's rendered rows — the loaded catalog under the search
+  // The palette's rendered groups — the loaded catalog under the search
   // query. Empty list ≠ empty catalog: the no-match state is its own copy.
-  const visibleTools = tools ? filterTools(tools, toolQuery) : [];
-  // Cap reached — unchecked rows disable (the click would otherwise
-  // silently no-op in toggleTool).
-  const atToolCap = form.tools.length >= BUILDER_TOOLS_MAX;
+  const visibleGroups = tools
+    ? groupToolsByToolkit(filterTools(tools, toolQuery))
+    : [];
 
   // The edit-mode baseline: the agent's stored definition (instructions
   // prefill means the diff is computed against the real current value).
@@ -367,13 +379,41 @@ export function BuilderForm({
   const toggleTool = (name: string) => {
     setForm((prev) => {
       if (prev.tools.includes(name)) return { ...prev, tools: prev.tools.filter((t) => t !== name) };
-      // Hard cap mirroring toggleConnector — without it the palette lets
-      // a user check past BUILDER_TOOLS_MAX and validateBuilderForm then
-      // rejects the submit with errors.tools, which nothing used to
-      // render (silent no-op trap).
-      if (prev.tools.length >= BUILDER_TOOLS_MAX) return prev;
       return { ...prev, tools: [...prev.tools, name] };
     });
+  };
+
+  /** Toolkit-level selection: checked = every tool of the toolkit,
+   *  unchecked = none (the easy path); the drill-in panel curates
+   *  individuals. Computed inside the updater so rapid clicks never
+   *  act on a stale form.tools. */
+  const toggleToolkit = (group: ToolkitGroup) => {
+    const names = group.tools.map((t) => t.name);
+    setForm((prev) => {
+      if (names.every((n) => prev.tools.includes(n)))
+        return { ...prev, tools: prev.tools.filter((n) => !names.includes(n)) };
+      const set = new Set(prev.tools);
+      for (const n of names) set.add(n);
+      return { ...prev, tools: [...set] };
+    });
+  };
+
+  /** Drill in/out of a toolkit. First expand of a toolkit with nothing
+   *  selected from it checks all its tools (the "curate down from all"
+   *  entry point the easy checkbox mirrors); seenToolkits makes that a
+   *  once-per-toolkit effect, never a loop. */
+  const toggleToolkitExpand = (group: ToolkitGroup) => {
+    const slug = group.toolkit;
+    const opening = !expandedToolkits[slug];
+    setExpandedToolkits((prev) => ({ ...prev, [slug]: opening }));
+    if (!opening || seenToolkits.has(slug)) return;
+    setSeenToolkits((prev) => new Set(prev).add(slug));
+    const names = group.tools.map((t) => t.name);
+    setForm((prev) =>
+      names.some((n) => prev.tools.includes(n))
+        ? prev
+        : { ...prev, tools: [...prev.tools, ...names] },
+    );
   };
 
   const toggleConnector = (name: string) => {
@@ -799,17 +839,20 @@ export function BuilderForm({
         </div>
 
         {/* Tool palette — the platform's tool catalog (GET /api/tools,
-            proxied from the AgentOS /platform/tools). Adding a tool to
-            the platform's allowlist shows up here with zero code.
-            Search filters the rendered rows; the selection (form.tools)
-            is unaffected — a hidden tool keeps its payload slot. */}
+            proxied from the AgentOS /platform/tools), grouped by toolkit —
+            the display-layer view of what /admin/platform already shapes.
+            Adding a tool to the platform's allowlist shows up here with
+            zero code. Search filters both levels (a toolkit matches on its
+            slug/label, a function on label/description); the selection
+            (form.tools) is unaffected — a hidden tool keeps its slot. */}
         <Field
           label="Tools"
           asGroup
+          info="Many tools increase the context sent with every run — slower responses, higher cost."
           hint={
             form.tools.length > 0
-              ? `${form.tools.length} of ${BUILDER_TOOLS_MAX} selected — the agent can use them at run time.`
-              : `Up to ${BUILDER_TOOLS_MAX} — the agent can use them at run time.`
+              ? `${form.tools.length} tools selected — the agent can use them at run time.`
+              : "Select tools — the agent can use them at run time."
           }
           error={errors.tools}
         >
@@ -824,24 +867,65 @@ export function BuilderForm({
                 className={inputClass()}
               />
             )}
-            {visibleTools.map((tool) => {
-              const checked = form.tools.includes(tool.name);
-              const keyState = toolKeyState(tool, credentials);
+            {visibleGroups.map((group) => {
+              // Partial selections (edit-mode snapshots) show the
+              // checkbox's mixed state; full = all, none = unchecked.
+              const checked = group.tools.filter((t) =>
+                form.tools.includes(t.name),
+              ).length;
+              // Real toolkits share one credential contract, so the badge
+              // derives once per toolkit — from any member. The degenerate
+              // "Other tools" group can mix contracts, so it gets no badge
+              // on the header; the badge is per-tool inside the drill-in.
+              const degenerate = group.toolkit === "";
+              const keyState = degenerate
+                ? null
+                : toolKeyState(group.tools[0], credentials);
+              const open = expandedToolkits[group.toolkit] ?? false;
               return (
-                <BuilderToolRow
-                  key={tool.name}
-                  tool={tool}
+                <ToolkitRow
+                  key={group.toolkit || "other-tools"}
+                  group={group}
                   checked={checked}
-                  disabled={!checked && atToolCap}
+                  expanded={open}
                   keyState={keyState}
-                  onToggle={() => toggleTool(tool.name)}
+                  onToggle={() => toggleToolkit(group)}
+                  onExpand={() => toggleToolkitExpand(group)}
                   onConnect={() => {
                     // Same guard KeyBadge renders by — only a catalog-known
                     // provider gets a Connect flow (a drifted slug would
                     // open an empty KeyForm).
-                    if (keyState.status === "missing" && keyState.provider) {
+                    if (keyState?.status === "missing" && keyState.provider) {
                       openKeyForm(keyState.provider);
                     }
+                  }}
+                  renderTool={(tool) => {
+                    // Real toolkits keep their rows badge-free (the
+                    // toolkit-level badge carries the shared contract);
+                    // the degenerate "Other tools" group mixes contracts,
+                    // so each row derives — and owns — its own badge.
+                    const toolKey = degenerate
+                      ? toolKeyState(tool, credentials)
+                      : null;
+                    return (
+                      <BuilderToolRow
+                        key={tool.name}
+                        tool={tool}
+                        checked={form.tools.includes(tool.name)}
+                        onToggle={() => toggleTool(tool.name)}
+                        keyState={toolKey}
+                        onConnect={() => {
+                          // Same guard KeyBadge renders by — only a
+                          // catalog-known provider gets a Connect flow.
+                          if (
+                            toolKey?.status === "missing" &&
+                            toolKey.provider
+                          ) {
+                            openKeyForm(toolKey.provider);
+                          }
+                        }}
+                      />
+                    );
                   }}
                 />
               );
@@ -849,7 +933,7 @@ export function BuilderForm({
             {toolsEmptyCopy && (
               <p className="text-xs text-zinc-500 dark:text-zinc-400">{toolsEmptyCopy}</p>
             )}
-            {tools !== null && tools.length > 0 && visibleTools.length === 0 && (
+            {tools !== null && tools.length > 0 && visibleGroups.length === 0 && (
               <p className="text-xs text-zinc-500 dark:text-zinc-400">
                 No tools match &ldquo;{toolQuery.trim()}&rdquo;.
               </p>
@@ -1047,76 +1131,164 @@ function ModelKeyBadge({
 }
 
 /**
- * One palette row — two lines: checkbox + full name + key badge on the
- * first, the description clamped at two lines (ExpandableText — "Show
- * more / Show less" renders only when the text actually overflows)
- * indented beneath. The old single-line row squeezed name + description
- * against the key badge and truncated both into unreadable slivers;
- * stacking gives each its own room, and the checked-row border (the
- * platform-admin ToolRow's visual language) makes selections scan.
+ * One palette row — a whole toolkit: checkbox + toolkit label + "N tools"
+ * count + key badge + expand chevron. All tools in a real toolkit share
+ * one credential contract (single-key toolkits have one field; multi-
+ * credential ones like X have several), so the key badge derives once per
+ * toolkit — from any member — and the Connect flow lives at the toolkit
+ * level. The degenerate "Other tools" group can mix contracts, so its
+ * header carries no badge — each row inside derives and owns its own.
  *
- * Still one <label>: click anywhere toggles. The Show more/less and
- * Connect buttons are interactive content, which label activation
- * skips — they can't toggle the checkbox. The checkbox carries an
- * explicit aria-label so its accessible name is just the tool (the
- * label-derived name would read the whole description and the
- * expander's text aloud).
- *
- * `disabled` is the cap state — unchecked rows at BUILDER_TOOLS_MAX.
- * The checkbox disables with an explanatory title (the click would
- * otherwise silently no-op) and the row drops its pointer/hover
- * affordances since clicking it does nothing.
+ * The checkbox is the easy toggle: check = all tools selected, uncheck =
+ * none, partial = indeterminate (edit-mode snapshots carry partial
+ * selections; the native checkbox needs a ref to set `indeterminate`).
+ * The chevron is the drill-in: expand shows the toolkit's individual
+ * tools as simple checked rows (BuilderToolRow — badge-free in real
+ * toolkits, no cap state; the tool-level toggle is just a normal toggle).
+ */
+function ToolkitRow({
+  group,
+  checked,
+  expanded,
+  keyState,
+  onToggle,
+  onExpand,
+  onConnect,
+  renderTool,
+}: {
+  group: ToolkitGroup;
+  /** Number of the group's tools currently selected — drives the
+   *  checkbox's three states (all / partial / none). */
+  checked: number;
+  expanded: boolean;
+  /** Null for the degenerate "Other tools" group — mixed credential
+   *  contracts, so the header carries no badge (each row does). */
+  keyState: ToolKeyState | null;
+  onToggle: () => void;
+  onExpand: () => void;
+  onConnect: () => void;
+  renderTool: (tool: BuilderToolOption) => React.ReactNode;
+}) {
+  const total = group.tools.length;
+  const all = checked === total;
+  const partial = checked > 0 && !all;
+  const degenerate = group.toolkit === "";
+  const inputRef = (el: HTMLInputElement | null) => {
+    if (el) el.indeterminate = partial;
+  };
+  return (
+    <div className="rounded-lg border border-zinc-200 dark:border-zinc-700">
+      <div className="flex items-center gap-2 px-3 py-2 text-sm">
+        <input
+          ref={inputRef}
+          type="checkbox"
+          checked={all}
+          onChange={onToggle}
+          // The degenerate group's label already says "tools" — appending
+          // another would read "Select all Other tools tools".
+          aria-label={
+            degenerate
+              ? `Select all ${group.label}`
+              : `Select all ${group.label} tools`
+          }
+          className="h-4 w-4 shrink-0 rounded border-zinc-300 text-blue-600 dark:border-zinc-600"
+        />
+        <button
+          type="button"
+          onClick={onExpand}
+          aria-expanded={expanded}
+          className="flex min-w-0 flex-1 cursor-pointer items-center gap-2 text-left"
+        >
+          <span className="min-w-0 break-words font-medium text-zinc-900 dark:text-zinc-50">
+            {group.label}
+          </span>
+          <span className="shrink-0 text-xs text-zinc-500 dark:text-zinc-400">
+            {total} tools
+          </span>
+        </button>
+        {/* The degenerate group has no header badge — null keyState
+            renders nothing; each row inside owns its own. */}
+        {keyState && <KeyBadge state={keyState} onConnect={onConnect} />}
+        <button
+          type="button"
+          onClick={onExpand}
+          aria-expanded={expanded}
+          aria-label={expanded ? `Collapse ${group.label}` : `Expand ${group.label}`}
+          className="shrink-0 cursor-pointer rounded p-1 text-zinc-400 hover:bg-zinc-50 hover:text-zinc-600 dark:hover:bg-zinc-900 dark:hover:text-zinc-300"
+        >
+          <svg
+            width="12"
+            height="12"
+            viewBox="0 0 24 24"
+            fill="none"
+            className={`transition-transform ${expanded ? "rotate-180" : ""}`}
+            aria-hidden
+          >
+            <path
+              d="M6 9l6 6 6-6"
+              stroke="currentColor"
+              strokeWidth="2"
+              strokeLinecap="round"
+              strokeLinejoin="round"
+            />
+          </svg>
+        </button>
+      </div>
+      {expanded && (
+        <div className="space-y-2 border-t border-zinc-200 px-3 py-2 dark:border-zinc-700">
+          {group.tools.map(renderTool)}
+        </div>
+      )}
+    </div>
+  );
+}
+
+/**
+ * One expanded tool row inside a toolkit — checkbox + label on the
+ * first line, the description clamped at two lines (ExpandableText —
+ * "Show more / Show less" renders only when the text actually overflows)
+ * indented beneath. Single-line by design: no cap state (the tools cap
+ * is gone — many tools are a cost tradeoff, noted on the Tools header,
+ * not a limit) and no key badge in real toolkits (the toolkit-level
+ * badge carries the shared credential contract). Exception: the
+ * degenerate "Other tools" group mixes credential contracts, so the
+ * caller passes each row's own key state there and its Connect flow
+ * opens the same KeyForm.
  */
 function BuilderToolRow({
   tool,
   checked,
-  disabled,
-  keyState,
   onToggle,
+  keyState,
   onConnect,
 }: {
   tool: BuilderToolOption;
   checked: boolean;
-  disabled: boolean;
-  keyState: ToolKeyState;
   onToggle: () => void;
-  onConnect: () => void;
+  /** Set only inside the degenerate "Other tools" group — real toolkits
+   *  keep the shared toolkit-level badge and badge-free rows. */
+  keyState?: ToolKeyState | null;
+  onConnect?: () => void;
 }) {
   return (
     <label
-      className={`flex items-start gap-2 rounded-lg border px-3 py-2 text-sm transition-colors ${
-        disabled
-          ? "cursor-not-allowed border-zinc-200 dark:border-zinc-700"
-          : `cursor-pointer hover:bg-zinc-50 dark:hover:bg-zinc-900 ${
-              checked
-                ? "border-blue-200 dark:border-blue-900"
-                : "border-zinc-200 dark:border-zinc-700"
-            }`
+      className={`flex cursor-pointer items-start gap-2 rounded-lg border px-3 py-2 text-sm transition-colors hover:bg-zinc-50 dark:hover:bg-zinc-900 ${
+        checked
+          ? "border-blue-200 dark:border-blue-900"
+          : "border-zinc-200 dark:border-zinc-700"
       }`}
     >
       <input
         type="checkbox"
         checked={checked}
-        disabled={disabled}
-        title={
-          disabled
-            ? `Tool cap reached (${BUILDER_TOOLS_MAX}) — uncheck one to add another`
-            : undefined
-        }
         aria-label={tool.label}
         onChange={onToggle}
         className="mt-0.5 h-4 w-4 shrink-0 rounded border-zinc-300 text-blue-600 dark:border-zinc-600"
       />
       <div className="min-w-0 flex-1">
-        {/* Name + key badge share the first line — the badge pins right
-            and wraps below on a narrow row instead of squeezing the
-            name, which never truncates. */}
-        <div className="flex min-w-0 flex-wrap items-center gap-x-2 gap-y-1">
-          <span className="min-w-0 break-words font-medium text-zinc-900 dark:text-zinc-50">
-            {tool.label}
-          </span>
-          <KeyBadge state={keyState} onConnect={onConnect} />
-        </div>
+        <span className="break-words font-medium text-zinc-900 dark:text-zinc-50">
+          {tool.label}
+        </span>
         {tool.description ? (
           <ExpandableText
             text={tool.description}
@@ -1125,6 +1297,9 @@ function BuilderToolRow({
           />
         ) : null}
       </div>
+      {keyState ? (
+        <KeyBadge state={keyState} onConnect={onConnect ?? (() => {})} />
+      ) : null}
     </label>
   );
 }
@@ -1268,6 +1443,7 @@ function Field({
   hint,
   required,
   error,
+  info,
   children,
   asGroup,
 }: {
@@ -1275,6 +1451,10 @@ function Field({
   hint?: string;
   required?: boolean;
   error?: string;
+  /** Optional hover tooltip on the header — a small ⓘ icon (the
+   *  codebase's title-attribute pattern) next to the label. Used for the
+   *  technical context/cost note on the Tools section (no cap). */
+  info?: string;
   children: React.ReactNode;
   /** Checkbox-group variant: renders fieldset/legend instead of a label.
    *  REQUIRED for groups of checkboxes — a <label> wrapping them would
@@ -1287,6 +1467,14 @@ function Field({
     <>
       {label}
       {required && <span className="text-red-500"> *</span>}
+      {info && (
+        <span
+          className="ml-1.5 cursor-help align-middle text-zinc-400"
+          title={info}
+        >
+          ⓘ
+        </span>
+      )}
     </>
   );
   if (asGroup) {

@@ -4,6 +4,20 @@ All notable changes to this project will be documented in this file. The format 
 
 ## [Unreleased]
 
+- **agent-builder: toolkit-grouped tool palette; the 10-tool cap is
+  gone (#176).** The palette renders one row per toolkit — checkbox +
+  label + "N tools" count + key badge + expand chevron — collapsed by
+  default: checking a toolkit selects all its tools, unchecking none,
+  and expanding drills in to the individual tools. The
+  `BUILDER_TOOLS_MAX = 10` cap is removed entirely — it made large
+  toolkits like GitHub impossible to add — and an info icon on the
+  Tools header explains the cost of many tools. Search spans both
+  levels (a toolkit on its slug/label, a tool on its label/summary).
+  The wire is unchanged: `tools: [{name}]` still stores the expanded
+  names at save time, so new tools added later do not appear in an
+  already-saved agent without re-saving; the connectors cap stays at
+  10.
+
 - **agent-builder: the model/tool catalogs load once per page visit, and
   the create-mode model default is key-aware.** The add/edit panel
   re-ran all four catalog fetches on every interaction — dialog open,

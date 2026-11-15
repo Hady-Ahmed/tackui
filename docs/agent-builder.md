@@ -311,9 +311,13 @@ per request; when the fetch fails the form disables rather than
 validating against a stale palette.
 
 `components/builder/builder-config.ts` mirrors the wire shape client-side
-(`BuilderToolOption`, caps: max 10 tools, max 10 connectors); the server
+(`BuilderToolOption`; the only cap is the connectors' 10). The server
 re-validates with zod. There is no hardcoded tool list — `BUILDER_TOOLS`
-was removed; the only constant left is `BUILDER_TOOLS_MAX`.
+was removed. **Tools are uncapped** (a single toolkit carries 30+ tools;
+a 10-tool cap made large toolkits unusable — the user's agent, their
+keys, their budget, and the palette now groups by toolkit with an info
+note on the Tools header explaining the context/cost tradeoff), while
+`BUILDER_CONNECTORS_MAX` keeps the tools cap's 10 for MCP servers.
 
 ## Create flow — `POST /api/agents/builder`
 
@@ -784,29 +788,50 @@ The admin UI is the Connectors section on `/agents`
   — the server-side proxy to the AgentOS `/platform/tools` catalog —
   with key-state badges) + connector palette. `GET /api/credentials`
   and `GET /api/connectors` feed the badges.
-- **Tool palette rows** (`BuilderToolRow` in the form component) are
-  two-line: the first line carries the checkbox, the full untruncated
-  tool name, and the key badge (pinned right, wrapping to its own line
-  on narrow rows); the second carries the description clamped at two
-  lines with a "Show more / Show less" toggle that renders only when
-  the text actually overflows (the shared `ExpandableText`). Checked
-  rows get a blue border — the same visual language as the
-  platform-admin `ToolRow`. Each row is still one `<label>` (click
-  anywhere toggles; the Show more/less and Connect buttons are
-  interactive content, which label activation skips), and the checkbox
+- **Tool palette is toolkit-grouped** (`ToolkitRow` + `BuilderToolRow`
+  in the form component). The palette renders one row per toolkit —
+  checkbox + toolkit label + "N tools" count + key badge + expand
+  chevron — collapsed by default, because a single toolkit (GitHub)
+  carries 30+ tools and a flat list floods the palette. Checking a
+  toolkit selects all its tools; unchecking selects none; a partial
+  selection (edit-mode snapshots carry partials) shows the checkbox's
+  indeterminate state. Expanding (the chevron) drills in to the
+  toolkit's individual tools as simple checked rows — full name +
+  description clamped at two lines with a "Show more / Show less"
+  toggle that renders only when the text overflows (the shared
+  `ExpandableText`), and a blue border on checked rows (the same
+  visual language as the platform-admin `ToolRow`). Each tool row is
+  still one `<label>` (click anywhere toggles), and the checkbox
   carries an explicit `aria-label` so its accessible name is the tool
-  name rather than the whole description read aloud.
-- **Palette search + honest cap:** a search input filters the rendered
-  rows (case-insensitive on label + description — descriptions are
-  summary-only, so search matches the label and the summary text) with
-  its own "No tools
+  name rather than the whole description read aloud. Expanding a
+  toolkit with nothing selected from it checks all its tools — the
+  drill-in mirrors the checkbox's select-all as a once-per-toolkit
+  effect (the first expand seeds the full toolkit; later expands never
+  re-check, and a partial selection at expand time is left as-is).
+- **The key badge lives at the toolkit level.** All tools in a toolkit
+  share one credential contract (single-key toolkits have one field;
+  multi-credential ones like X have several), so the badge derives
+  once per toolkit — from any member — and the toolkit row's Connect
+  button opens the same `KeyForm` as before. Exception: the degenerate
+  "Other tools" group (orphan tools with no toolkit slug) can mix
+  credential contracts, so its header carries no badge — each tool row
+  inside derives and owns its own badge and Connect flow.
+- **Palette search:** a search input filters both levels — a toolkit
+  matches on its slug/label (searching "github" surfaces the toolkit
+  even though the individual tool labels are like "Create an issue"),
+  a tool matches on its label/description — with its own "No tools
   match" state, distinct from the empty-catalog copy. Filtering is
   display-only: selections live in the form state, so a row hidden by
-  the search keeps its slot in the payload. The cap hint counts live
-  ("3 of 10 selected"), and at the cap the unchecked checkboxes disable
-  with an explanatory `title` instead of the click silently no-op'ing.
-  Rows render in a deterministic `(toolkit, label)` order (`sortTools`)
-  regardless of the upstream allowlist's append order.
+  the search keeps its slot in the payload. Toolkits render in
+  alphabetical order and each toolkit's tools alphabetically within it
+  (`groupToolsByToolkit`), regardless of the upstream allowlist's
+  append order.
+- **No tools cap, with an info note:** tools are uncapped (a 10-tool
+  cap made large toolkits impossible to add — the user's agent, their
+  keys, their budget). A small ⓘ icon on the Tools header carries a
+  hover tooltip explaining that many tools increase the context sent
+  with every run (slower responses, higher cost). The connectors cap
+  stays at 10.
 - **Disabled state:** when `GET /api/models` or `GET /api/tools` fails
   because the platform is unreachable, the form renders a notice banner
   and disables submit — the definition would be validated against a

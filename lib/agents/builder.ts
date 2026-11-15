@@ -338,10 +338,10 @@ const builderCreateFields = {
   }),
   /** Tool names only — parameters come from the registry server-side.
    *  Shape shared by create and update; the DEFAULT belongs to create
-   *  only (a fresh config starts with none). */
-  tools: z
-    .array(z.object({ name: z.string().trim().min(1).max(200) }))
-    .max(10),
+   *  only (a fresh config starts with none). No max: a single toolkit
+   *  carries 30+ tools, and the cap made large toolkits unusable (the
+   *  run-time dispatcher still strips unknown/disabled references). */
+  tools: z.array(z.object({ name: z.string().trim().min(1).max(200) })),
   /** Org connector names (lib/connectors store). Same default split. */
   connectors: z.array(z.string().trim().min(1).max(120)).max(10),
 };

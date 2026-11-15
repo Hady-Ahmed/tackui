@@ -1,7 +1,6 @@
 import { describe, expect, it } from "vitest";
 import {
   BUILDER_CONNECTORS_MAX,
-  BUILDER_TOOLS_MAX,
   buildCreatePayload,
   buildEditPayload,
   buildUpdatePayload,
@@ -12,6 +11,7 @@ import {
   filterTools,
   findModel,
   groupModelsByProvider,
+  groupToolsByToolkit,
   modelKeyState,
   pickDefaultModel,
   providerForDepKeyInCatalog,
@@ -453,6 +453,61 @@ describe("sortTools", () => {
   });
 });
 
+describe("groupToolsByToolkit", () => {
+  it("groups toolkit-mates and orders toolkits alphabetically", () => {
+    // Deliberately upstream-shaped: toolkits out of order, labels
+    // unalphabetized within a toolkit — the AgentOS allowlist's append
+    // order, not the display order.
+    const shuffled: BuilderToolOption[] = [
+      { ...TOOLS[2] }, // tavily — "Web search (Tavily)"
+      { ...TOOLS[1], label: "News search (DuckDuckGo)" }, // duckduckgo, later label
+      { ...TOOLS[3] }, // x — "Search X posts"
+      { ...TOOLS[0], label: "Web search (DuckDuckGo)" }, // duckduckgo, earlier label
+    ];
+    const groups = groupToolsByToolkit(shuffled);
+    expect(groups.map((g) => g.toolkit)).toEqual(["duckduckgo", "tavily", "x"]);
+    expect(groups[0].tools.map((t) => t.name)).toEqual([
+      "search_news",
+      "web_search",
+    ]);
+    expect(groups[0].label).toBe("Duckduckgo");
+    expect(groups[1].tools.map((t) => t.name)).toEqual(["tavily_search"]);
+    expect(groups[2].tools.map((t) => t.name)).toEqual(["search_x"]);
+  });
+
+  it("sorts by label within a toolkit regardless of input order", () => {
+    const a: BuilderToolOption = {
+      name: "z_tool", label: "Zebra tool", requiresKey: null, platformFallback: false, toolkit: "kit", credentials: [],
+    };
+    const b: BuilderToolOption = {
+      name: "a_tool", label: "Alpha tool", requiresKey: null, platformFallback: false, toolkit: "kit", credentials: [],
+    };
+    const groups = groupToolsByToolkit([a, b]);
+    expect(groups).toHaveLength(1);
+    expect(groups[0].tools.map((t) => t.label)).toEqual(["Alpha tool", "Zebra tool"]);
+  });
+
+  it("returns an empty array for an empty catalog", () => {
+    expect(groupToolsByToolkit([])).toEqual([]);
+  });
+
+  it("falls back to a degenerate group for a missing/empty toolkit slug", () => {
+    // A platform shape drift — toolKeyState treats the same state as
+    // degraded. The tool still renders (grouped last), it just can't
+    // share a toolkit's identity.
+    const orphans: BuilderToolOption[] = [
+      { ...TOOLS[2], toolkit: "" }, // tavily
+      { ...TOOLS[0], toolkit: "duckduckgo" },
+    ];
+    const groups = groupToolsByToolkit(orphans);
+    expect(groups.map((g) => `${g.toolkit}:${g.label}`)).toEqual([
+      "duckduckgo:Duckduckgo",
+      ":Other tools",
+    ]);
+    expect(groups[1].tools.map((t) => t.name)).toEqual(["tavily_search"]);
+  });
+});
+
 describe("filterTools", () => {
   const catalog: BuilderToolOption[] = [
     {
@@ -485,6 +540,23 @@ describe("filterTools", () => {
   it("matches the description (so arg-name searches hit too)", () => {
     expect(filterTools(catalog, "convert text to speech")).toHaveLength(1);
     expect(filterTools(catalog, "prompt (str)").map((t) => t.name)).toEqual([
+      "generate_sound_effect",
+      "text_to_speech",
+    ]);
+  });
+
+  it("matches the toolkit slug — a toolkit search surfaces all its tools", () => {
+    // Searching "github" should surface the toolkit even though the
+    // individual tool labels are like "Create an issue" (the grouped
+    // palette's search spans both levels).
+    expect(filterTools(catalog, "elevenlabs").map((t) => t.name)).toEqual([
+      "generate_sound_effect",
+      "text_to_speech",
+    ]);
+  });
+
+  it("matches the toolkit's pretty label", () => {
+    expect(filterTools(catalog, "Elevenlabs").map((t) => t.name)).toEqual([
       "generate_sound_effect",
       "text_to_speech",
     ]);
@@ -545,17 +617,6 @@ describe("validateBuilderForm", () => {
     expect(errors.instructions).toBeUndefined();
   });
 
-  it("rejects more tools than BUILDER_TOOLS_MAX", () => {
-    const errors = validateBuilderForm(
-      {
-        ...validForm,
-        tools: Array.from({ length: BUILDER_TOOLS_MAX + 1 }, (_, i) => `tool_${i}`),
-      },
-      "create",
-    );
-    expect(errors.tools).toBeDefined();
-  });
-
   it("rejects more connectors than BUILDER_CONNECTORS_MAX", () => {
     const errors = validateBuilderForm(
       {
@@ -565,14 +626,6 @@ describe("validateBuilderForm", () => {
       "create",
     );
     expect(errors.connectors).toBeDefined();
-  });
-
-  it("accepts exactly BUILDER_TOOLS_MAX tools", () => {
-    const errors = validateBuilderForm(
-      { ...validForm, tools: Array.from({ length: BUILDER_TOOLS_MAX }, (_, i) => `tool_${i}`) },
-      "create",
-    );
-    expect(errors.tools).toBeUndefined();
   });
 });
 

@@ -19,7 +19,17 @@ vi.mock("@/lib/config/agentos", () => ({
   AGENTOS_MISCONFIGURED: false,
 }));
 
-import { AgentosError, agentosRequest, buildRequirements, BuilderValidationError, fetchAgentosModels, testPlatformModel, type AgentosModel, type AgentosTool } from "@/lib/agents/builder";
+import {
+  AgentosError,
+  agentosRequest,
+  buildRequirements,
+  builderCreateBodySchema,
+  BuilderValidationError,
+  fetchAgentosModels,
+  testPlatformModel,
+  type AgentosModel,
+  type AgentosTool,
+} from "@/lib/agents/builder";
 import { requirementsSchema } from "@/lib/agents/agent-store";
 
 function jsonResponse(body: unknown, status = 200) {
@@ -184,6 +194,24 @@ describe("buildRequirements write-boundary validation", () => {
 
   it("output parses with the same schema every read applies", () => {
     const req = buildRequirements(spec, model, [tool()]);
+    expect(requirementsSchema.safeParse(req).success).toBe(true);
+  });
+
+  it("accepts a >10-tool spec — tools are uncapped (regression pin)", () => {
+    // The removed 10-tool cap lived in the schema as a .max(10) on the
+    // tools array; a single toolkit (GitHub) carries 30+ tools, so the
+    // cap made large toolkits impossible to attach. This pins the
+    // uncapped behavior end-to-end: schema + requirements snapshot.
+    const catalog = Array.from({ length: 12 }, (_, i) =>
+      tool({ name: `tool_${i}`, toolkit: "bulk", label: `Bulk tool ${i}` }),
+    );
+    const big = {
+      tools: catalog.map((t) => ({ name: t.name })),
+      connectors: [],
+    };
+    expect(builderCreateBodySchema.shape.tools.safeParse(big.tools).success).toBe(true);
+    const req = buildRequirements(big, model, catalog);
+    expect(req.tools).toHaveLength(12);
     expect(requirementsSchema.safeParse(req).success).toBe(true);
   });
 

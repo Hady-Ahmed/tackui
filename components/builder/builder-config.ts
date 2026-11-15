@@ -54,8 +54,12 @@ export interface BuilderToolOption {
   credentials: { depKey: string; label: string }[];
 }
 
-/** Wire caps from the builder create/update schemas. */
-export const BUILDER_TOOLS_MAX = 10;
+/**
+ * Wire caps from the builder create/update schemas. Only connectors are
+ * capped now — the tools cap was removed because a single toolkit carries
+ * 30+ tools (the palette groups by toolkit instead; an info note on the
+ * Tools header explains the context/cost tradeoff).
+ */
 export const BUILDER_CONNECTORS_MAX = 10;
 
 /** One entry of the credentials catalog (GET /api/credentials). */
@@ -379,12 +383,68 @@ export function sortTools(tools: BuilderToolOption[]): BuilderToolOption[] {
 }
 
 /**
+ * One toolkit group of the palette — the toolkit's slug, its display
+ * label (prettySlug — the same prettifier the key badges use), and the
+ * toolkit's functions. All tools in a group share one credential
+ * contract, so the toolkit-level key badge derives from any member.
+ */
+export interface ToolkitGroup {
+  /** The toolkit slug — "" for the degenerate unslugged group (last). */
+  toolkit: string;
+  label: string;
+  tools: BuilderToolOption[];
+}
+
+/**
+ * The palette's toolkit structure — the display-layer view of what the
+ * admin side already shapes (/admin/platform toggles whole toolkits).
+ * Groups the catalog by `toolkit` slug, orders toolkits alphabetically
+ * and functions alphabetically within each — the same deterministic
+ * (toolkit, label) intent as the page-level sortTools, applied here so
+ * the output is correct on its own (the form receives pre-sorted input,
+ * but the grouping must not depend on that). Returns a new array; the
+ * input is untouched. A tool with a missing/empty toolkit slug (a
+ * platform shape drift — toolKeyState treats the same state as
+ * degraded) lands in a degenerate group ordered LAST, so it can never
+ * shadow a real toolkit; its label is honest about the grouping gap.
+ */
+export function groupToolsByToolkit(
+  tools: BuilderToolOption[],
+): ToolkitGroup[] {
+  const groups = new Map<string, BuilderToolOption[]>();
+  for (const tool of tools) {
+    const slug = tool.toolkit || "";
+    const list = groups.get(slug) ?? [];
+    list.push(tool);
+    groups.set(slug, list);
+  }
+  const byLabel = (g: BuilderToolOption[]) =>
+    [...g].sort((a, b) => a.label.localeCompare(b.label));
+  const named = Array.from(groups.entries())
+    .filter(([slug]) => slug !== "")
+    .map(([toolkit, g]): ToolkitGroup => ({
+      toolkit,
+      label: prettySlug(toolkit),
+      tools: byLabel(g),
+    }))
+    .sort((a, b) => a.toolkit.localeCompare(b.toolkit));
+  const orphan = groups.get("");
+  if (!orphan) return named;
+  return [
+    ...named,
+    { toolkit: "", label: "Other tools", tools: byLabel(orphan) },
+  ];
+}
+
+/**
  * Palette search — case-insensitive substring match on the label (the
- * human-facing name) and the description (which carries the arg/return
- * docs, so searching an argument name hits too). An empty/whitespace
- * query matches everything and returns the input as-is (no array copy).
- * Filtering is display-only: selections live in form.tools, so a hidden
- * tool keeps its slot in the payload.
+ * human-facing name), the description (the summary text — arg/return
+ * docs no longer reach the palette), and the toolkit (the
+ * raw slug and its prettified label — searching "github" must surface
+ * the GitHub toolkit even though its function labels read "Create an
+ * issue"). An empty/whitespace query matches everything and returns the
+ * input as-is (no array copy). Filtering is display-only: selections
+ * live in form.tools, so a hidden tool keeps its slot in the payload.
  */
 export function filterTools(
   tools: BuilderToolOption[],
@@ -395,7 +455,9 @@ export function filterTools(
   return tools.filter(
     (tool) =>
       tool.label.toLowerCase().includes(needle) ||
-      (tool.description ?? "").toLowerCase().includes(needle),
+      (tool.description ?? "").toLowerCase().includes(needle) ||
+      tool.toolkit.toLowerCase().includes(needle) ||
+      prettySlug(tool.toolkit).toLowerCase().includes(needle),
   );
 }
 
@@ -422,7 +484,6 @@ export function validateBuilderForm(
     errors.instructions = "Instructions must be 8000 characters or fewer";
   if (!form.model || !form.model.provider || !form.model.id)
     errors.model = "Pick a provider and model";
-  if (form.tools.length > BUILDER_TOOLS_MAX) errors.tools = "Too many tools";
   if (form.connectors.length > BUILDER_CONNECTORS_MAX)
     errors.connectors = "Too many connectors";
   return errors;
