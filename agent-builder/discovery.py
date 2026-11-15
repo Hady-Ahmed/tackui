@@ -68,6 +68,16 @@ _MODEL_ENV_RE = re.compile(
 )
 _CRED_ENV_RE = re.compile(r"(?:^|_)(?:API_?KEY|TOKEN|SECRET|PASSWORD)(?:_|$)")
 
+# Google-style docstring section markers (``Args:``, ``Returns:`` …) — the
+# palette description stops at the first one. Line-anchored so prose that
+# merely MENTIONS e.g. "Returns" cannot cut a description short; the colon
+# excludes "Returns the result" style prose. Case-insensitive: agno ships
+# lowercase markers too.
+_DOCSTRING_SECTION_RE = re.compile(
+    r"^[ \t]*(?:Args|Returns|Raises|Yields|Examples)[ \t]*:",
+    re.IGNORECASE | re.MULTILINE,
+)
+
 _DUMMY_STR = "platform-scan-placeholder"
 
 
@@ -209,6 +219,32 @@ def _dummy_for(annotation: Any) -> Any:
     return _DUMMY_STR
 
 
+def _display_description(fn: Function) -> Optional[str]:
+    """The description the palette shows for one function.
+
+    Explicit metadata wins when the toolkit sets it; otherwise the
+    entrypoint docstring, trimmed at the first Google-style section marker
+    (``Args:`` and friends). The sections document parameters for an LLM —
+    noise for a human scanning a palette, and the palette is this payload's
+    only audience (the runtime LLM-facing schemas keep the full docstring).
+    A docstring that is nothing but sections keeps its full text: half a
+    description is worse than the whole thing.
+    """
+    description = fn.description
+    if description is None and fn.entrypoint:
+        try:
+            description = inspect.getdoc(fn.entrypoint)
+        except Exception:
+            description = None
+    if description is None:
+        return None
+    marker = _DOCSTRING_SECTION_RE.search(description)
+    if not marker:
+        return description
+    head = description[: marker.start()].strip()
+    return head if head else description
+
+
 def _function_schema(fn: Function) -> Dict[str, Any]:
     """Name + description + lazily-processed json-schema parameters.
 
@@ -224,13 +260,11 @@ def _function_schema(fn: Function) -> Dict[str, Any]:
             params = fn_copy.parameters
         except Exception:
             pass
-    description = fn.description
-    if description is None and fn.entrypoint:
-        try:
-            description = inspect.getdoc(fn.entrypoint)
-        except Exception:
-            description = None
-    return {"name": fn.name, "description": description, "parameters": params}
+    return {
+        "name": fn.name,
+        "description": _display_description(fn),
+        "parameters": params,
+    }
 
 
 def _dedupe_tools(candidates: List[Tuple[str, ToolEntry]], skipped: List[str]) -> Dict[str, ToolEntry]:

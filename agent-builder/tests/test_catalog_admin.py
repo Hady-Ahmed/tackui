@@ -192,6 +192,88 @@ def test_discovery_tools_shape_and_contracts():
     assert {"web_search", "search_news"} <= {f["name"] for f in ddg.functions}
 
 
+def test_display_description_trims_docstring_sections():
+    """The palette shows the description, not the docstring's parameter
+    documentation: explicit fn.description wins, otherwise the entrypoint
+    docstring is cut at the first Google-style section marker. The palette
+    is this payload's only audience — the runtime schemas keep the full
+    docstring (they are built from the real toolkit instances, not here)."""
+    import inspect
+
+    from agno.tools.function import Function
+
+    from discovery import _display_description
+
+    def with_sections(query: str) -> str:
+        """Search the web for a query.
+
+        Args:
+            query: The query to search for.
+
+        Returns:
+            The search results.
+        """
+
+        return query
+
+    def without_sections() -> str:
+        """No section markers here at all."""
+
+        return ""
+
+    def opens_with_marker() -> str:
+        """Args:
+        query: The docstring is nothing but sections.
+        """
+
+        return ""
+
+    # Marker present → everything before the FIRST marker survives.
+    fn = Function(name="search", entrypoint=with_sections)
+    assert _display_description(fn) == "Search the web for a query."
+
+    # No marker → the full docstring, unchanged.
+    fn = Function(name="plain", entrypoint=without_sections)
+    assert _display_description(fn) == "No section markers here at all."
+
+    # Docstring that opens with a marker → the head would be empty; the
+    # full text falls back rather than serving half a description.
+    fn = Function(name="only", entrypoint=opens_with_marker)
+    assert _display_description(fn) == inspect.getdoc(opens_with_marker)
+
+    # Explicit description still wins over the docstring — and the trim
+    # applies to whatever resolves, metadata included.
+    fn = Function(name="explicit", description="Hand-written.", entrypoint=with_sections)
+    assert _display_description(fn) == "Hand-written."
+    fn = Function(name="meta_sections", description="Summary.\n\nArgs:\n    x: y")
+    assert _display_description(fn) == "Summary."
+
+    # Case-insensitive markers: lowercase sections trim the same way.
+    fn = Function(name="lower", description="Summary.\n\nargs:\n    x: y")
+    assert _display_description(fn) == "Summary."
+
+    # Every alternation branch is live: a docstring whose first marker is
+    # `Examples:` trims the same way (a typo in one branch would otherwise
+    # pass the suite).
+    fn = Function(name="examples", description="Summary.\n\nExamples:\n    >>> x")
+    assert _display_description(fn) == "Summary."
+
+    # Neither explicit description nor entrypoint → None stays None.
+    fn = Function(name="bare")
+    assert _display_description(fn) is None
+
+
+def test_display_description_on_discovered_tavily_function():
+    """Pinned against the real scan: Tavily's stock docstring carries
+    Args/Returns sections — the palette payload now serves only its
+    summary head, non-empty."""
+    disc = discover()
+    schema = next(f for f in disc.tool("tavily").functions if f["name"] == "web_search_using_tavily")
+    assert schema["description"]
+    assert "\nArgs:" not in schema["description"]
+    assert "\nReturns:" not in schema["description"]
+
+
 def test_discovery_dedupes_identical_function_sets():
     # duckduckgo.DuckDuckGoTools and websearch.WebSearchTools expose the same
     # function set under the same toolkit name — only one is offered.
