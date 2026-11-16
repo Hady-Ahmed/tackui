@@ -1,0 +1,246 @@
+name: Issue Agent
+
+# Picks up issues labeled `agent` and dispatches opencode (headless) at them.
+# The harness commits to a branch and opens a PR as tackui-agent[bot]; the
+# bot has no merge permission — a human must approve the PR to merge.
+#
+# Re-runs: remove + re-apply the `agent` label. Each run gets the full
+# issue + comment thread as context, so answers left by a human become
+# part of the next attempt's input.
+#
+# Required repo secrets:
+#   APP_ID / APP_PRIVATE_KEY     — tackui-agent GitHub App (no merge perms)
+#   AGENT_OPENCODE_CONFIG        — opencode config JSON: model + provider
+#                                  credentials (e.g. opencode Zen API key)
+#   AGENT_MODEL (optional var)   — override model, "provider/model" format
+
+on:
+  issues:
+    types: [labeled]
+
+concurrency:
+  # Two runs for the same issue can never race on the same branch.
+  group: agent-issue-${{ github.event.issue.number }}
+  cancel-in-progress: false
+
+# The auto-injected GITHUB_TOKEN gets NOTHING — every GitHub call below
+# goes through the app token, whose powers are exactly the app's three
+# permissions (contents, issues, pull requests).
+permissions: {}
+
+jobs:
+  agent:
+    if: github.event.label.name == 'agent'
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - name: Auth as tackui-agent
+        id: app-token
+        uses: actions/create-github-app-token@v2
+        with:
+          app-id: ${{ secrets.APP_ID }}
+          private-key: ${{ secrets.APP_PRIVATE_KEY }}
+          owner: Hady-Ahmed
+          repositories: tackui
+
+      # Defense-in-depth: applying the `agent` label already requires
+      # triage permission, but verify the sender has write access before
+      # spending runner minutes — the permission model could change.
+      - name: Guard — label sender must have write access
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+        run: |
+          set -euo pipefail
+          sender="${{ github.event.sender.login }}"
+          perm="$(gh api "repos/${GITHUB_REPOSITORY}/collaborators/${sender}/permission" --jq '.permission')"
+          echo "sender ${sender} has permission: ${perm}"
+          case "$perm" in
+            admin|write) ;;
+            *)
+              echo "::error::Label sender ${sender} lacks write access (${perm}) — refusing to run."
+              exit 1
+              ;;
+          esac
+
+      - name: Fetch issue context
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+        run: |
+          set -euo pipefail
+          gh api "repos/${GITHUB_REPOSITORY}/issues/${{ github.event.issue.number }}" \
+            --jq '{number, title, body, author: .user.login}' > /tmp/issue.json
+          gh api "repos/${GITHUB_REPOSITORY}/issues/${{ github.event.issue.number }}/comments" \
+            --jq '.[] | "### Comment by \(.user.login)\n\(.body)"' > /tmp/comments.md || true
+
+      - uses: actions/checkout@v7
+        with:
+          token: ${{ steps.app-token.outputs.token }}
+          fetch-depth: 0
+
+      - name: Create agent branch
+        env:
+          ISSUE_NUMBER: ${{ github.event.issue.number }}
+          ISSUE_TITLE: ${{ github.event.issue.title }}
+        run: |
+          set -euo pipefail
+          slug="$(printf '%s' "$ISSUE_TITLE" | tr '[:upper:]' '[:lower:]' | sed -E 's/[^a-z0-9]+/-/g; s/^-+//; s/-+$//' | cut -c1-40)"
+          branch="agent/issue-${ISSUE_NUMBER}-${slug:-no-slug}"
+          echo "BRANCH=${branch}" >> "$GITHUB_ENV"
+          git config user.name "tackui-agent[bot]"
+          git config user.email "tackui-agent[bot]@users.noreply.github.com"
+          git checkout -b "$branch"
+
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 24
+
+      - name: Install opencode
+        run: npm i -g opencode-ai@latest
+
+      - name: Configure opencode (model + credentials + unattended permissions)
+        run: |
+          set -euo pipefail
+          if [ -z "${{ secrets.AGENT_OPENCODE_CONFIG }}" ]; then
+            echo "::error::AGENT_OPENCODE_CONFIG secret is not set — add the opencode config JSON (model + provider key)."
+            exit 1
+          fi
+          mkdir -p ~/.config/opencode
+          # The secret supplies model + provider credentials; we layer the
+          # unattended permissions on top so `opencode run` never stalls on
+          # an approval prompt (nothing can ask, so `ask` would abort).
+          jq '. + {
+            permission: {
+              edit: "allow",
+              bash: "allow",
+              webfetch: "allow",
+              question: "deny"
+            }
+          }' <<< '${{ secrets.AGENT_OPENCODE_CONFIG }}' > ~/.config/opencode/opencode.json
+          chmod 600 ~/.config/opencode/opencode.json
+
+      - name: Build prompt
+        env:
+          ISSUE_NUMBER: ${{ github.event.issue.number }}
+        run: |
+          set -euo pipefail
+          cat > /tmp/prompt.md <<EOF
+          You are working in the tackui repository to resolve issue #${ISSUE_NUMBER}.
+
+          First, read AGENTS.md at the repository root and follow it — especially
+          the testing conventions, ground rules, and gotchas.
+
+          ## Issue
+
+          $(cat /tmp/issue.json | jq -r '"Title: \(.title)\nAuthor: \(.author)\n\n\(.body)"')
+
+          ## Issue comments (read all of them — a human may have answered
+          ## questions from a previous agent run here)
+
+          $(cat /tmp/comments.md)
+
+          ## Rules of engagement
+
+          - Implement the issue. Run the test suite (npm run test) and lint
+            (npm run lint) before considering the work done; fix what fails.
+          - Commit every change with a conventional-commit message
+            referencing the issue (e.g. "feat: ... (closes #${ISSUE_NUMBER})").
+          - Do NOT push, do NOT open pull requests, do NOT merge, and do NOT
+            touch anything under .github/ — the workflow owns those.
+          - If the requirements are ambiguous or you need more information,
+            do NOT guess: make NO code changes, and instead write your
+            questions to AGENT_QUESTIONS.md in the repository root, one
+            question per line, prefixed "- ". They will be posted to the
+            issue for a human to answer.
+          EOF
+          echo "prompt written to /tmp/prompt.md"
+
+      - name: Run opencode
+        run: |
+          set -euo pipefail
+          args=(run --agent build)
+          if [ -n "${AGENT_MODEL:-}" ]; then args+=(--model "$AGENT_MODEL"); fi
+          # 45m of opencode budget inside the 60m job timeout.
+          timeout 45m opencode "${args[@]}" "$(cat /tmp/prompt.md)" 2>&1 | tee /tmp/opencode.log
+        env:
+          AGENT_MODEL: ${{ vars.AGENT_MODEL }}
+
+      - name: Decide outcome
+        id: decide
+        run: |
+          set -euo pipefail
+          rm -f /tmp/outcome
+          tracked="$(git status --porcelain --untracked-files=no | wc -l)"
+          if [ "$tracked" -gt 0 ]; then
+            echo "outcome=pr" >> /tmp/outcome
+          elif [ -f AGENT_QUESTIONS.md ]; then
+            echo "outcome=questions" >> /tmp/outcome
+          else
+            echo "outcome=nothing" >> /tmp/outcome
+          fi
+          echo "OUTCOME=$(cat /tmp/outcome | cut -d= -f2)" >> "$GITHUB_OUTPUT"
+
+      - name: Push branch and open PR
+        if: steps.decide.outputs.OUTCOME == 'pr'
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+          ISSUE_NUMBER: ${{ github.event.issue.number }}
+          ISSUE_TITLE: ${{ github.event.issue.title }}
+        run: |
+          set -euo pipefail
+          git add -A
+          git commit -m "feat: resolve #${ISSUE_NUMBER}"
+          git push -u origin "$BRANCH"
+          summary="$(tail -c 2000 /tmp/opencode.log)"
+          body="$(cat <<MD
+          Resolves #${ISSUE_NUMBER}
+
+          ## What the agent did
+
+          \`\`\`
+          ${summary}
+          \`\`\`
+
+          ---
+          Authored by tackui-agent[bot] — requires human review before merge.
+          MD
+          )"
+          gh pr create \
+            --repo "${GITHUB_REPOSITORY}" \
+            --base main \
+            --head "$BRANCH" \
+            --title "agent: resolve #${ISSUE_NUMBER} — ${ISSUE_TITLE}" \
+            --body "$body"
+
+      - name: Comment PR link on the issue
+        if: steps.decide.outputs.OUTCOME == 'pr'
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+          ISSUE_NUMBER: ${{ github.event.issue.number }}
+        run: |
+          set -euo pipefail
+          pr_url="$(gh pr view "$BRANCH" --repo "${GITHUB_REPOSITORY}" --json url --jq .url)"
+          gh issue comment "$ISSUE_NUMBER" --repo "${GITHUB_REPOSITORY}" \
+            --body "Agent run complete — opened PR: ${pr_url}"
+
+      - name: Comment questions on the issue
+        if: steps.decide.outputs.OUTCOME == 'questions'
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+          ISSUE_NUMBER: ${{ github.event.issue.number }}
+          ISSUE_AUTHOR: ${{ github.event.issue.user.login }}
+          LABEL_SENDER: ${{ github.event.sender.login }}
+        run: |
+          set -euo pipefail
+          gh issue comment "$ISSUE_NUMBER" --repo "${GITHUB_REPOSITORY}" \
+            --body "$(printf 'The agent needs input before it can work on this issue (cc @%s, @%s):\n\n%s\n\n<sub>Re-apply the `agent` label once the questions are answered — answers will be picked up on the next run.</sub>' \
+              "$ISSUE_AUTHOR" "$LABEL_SENDER" "$(cat AGENT_QUESTIONS.md)")"
+
+      - name: Comment nothing-to-do on the issue
+        if: steps.decide.outputs.OUTCOME == 'nothing'
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+          ISSUE_NUMBER: ${{ github.event.issue.number }}
+        run: |
+          set -euo pipefail
+          gh issue comment "$ISSUE_NUMBER" --repo "${GITHUB_REPOSITORY}" \
+            --body "Agent run finished: reviewed the issue and made no code changes. See the run log for reasoning. Remove and re-apply the \`agent\` label to re-run with updated context."
