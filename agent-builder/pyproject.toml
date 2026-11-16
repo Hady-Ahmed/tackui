@@ -59,7 +59,7 @@ dependencies = [
     # everything else is reached through OpenRouter, which needs no extra
     # dependency. Versions pinned to the resolution uv add produced.
     "anthropic==2.6.0",
-    "google-genai==2.34.0",
+    "google-genai==3.3.0",
     "groq==1.7.0",
     # Tier 2 toolkits: analysis/visualization, productivity, research,
     # search, comms. One dependency per discovered toolkit.
