@@ -37,7 +37,7 @@ jobs:
   agent:
     if: github.event.label.name == 'agent'
     runs-on: ubuntu-latest
-    timeout-minutes: 110
+    timeout-minutes: 60
     steps:
       - name: Auth as tackui-agent
         id: app-token
@@ -196,7 +196,7 @@ jobs:
           set -euo pipefail
           args=(run --agent build)
           if [ -n "${AGENT_MODEL:-}" ]; then args+=(--model "$AGENT_MODEL"); fi
-          timeout 50m opencode "${args[@]}" "$(cat /tmp/prompt.md)" 2>&1 | tee /tmp/opencode.log
+          timeout 45m opencode "${args[@]}" "$(cat /tmp/prompt.md)" 2>&1 | tee /tmp/opencode.log
         env:
           AGENT_MODEL: ${{ vars.AGENT_MODEL }}
 
@@ -277,8 +277,18 @@ jobs:
           set -euo pipefail
           # A reviewer failure must not kill the run — proceed without a
           # review (gates still run unconditionally) rather than failing.
-          if ! timeout 20m opencode run --agent explore "$(cat /tmp/review-prompt.md)" 2>&1 | tee /tmp/reviewer.log; then
+          if ! timeout 10m opencode run --agent explore "$(cat /tmp/review-prompt.md)" 2>&1 | tee /tmp/reviewer.log; then
             echo "::warning::Reviewer run failed — continuing without review findings."
+          fi
+
+      # Snapshot the first review before the fix pass overwrites it — the
+      # fix brief reads from the snapshot, and it is what scoped the fixes.
+      - name: Snapshot first review
+        if: steps.changes.outputs.TRACKED_CHANGES != '0'
+        run: |
+          set -euo pipefail
+          if [ -f AGENT_REVIEW.md ]; then
+            cp AGENT_REVIEW.md /tmp/review-1.md
           fi
 
       - name: Fix pass (if the reviewer found blocking issues)
@@ -296,7 +306,7 @@ jobs:
 
           ## Reviewer findings
 
-          $(cat AGENT_REVIEW.md)
+          $(cat /tmp/review-1.md)
 
           ## Rules
 
@@ -308,7 +318,7 @@ jobs:
             one logical unit, otherwise a fixup commit is fine).
           - Do NOT push, do NOT open PRs, do NOT touch .github/.
           EOF
-          timeout 30m opencode run --agent build "$(cat /tmp/fix-prompt.md)" 2>&1 | tee -a /tmp/opencode.log
+          timeout 15m opencode run --agent build "$(cat /tmp/fix-prompt.md)" 2>&1 | tee -a /tmp/opencode.log
 
       # The fix pass may have surfaced out-of-scope findings — re-snapshot.
       - name: Re-snapshot follow-ups
@@ -317,6 +327,46 @@ jobs:
           set -euo pipefail
           if [ -f AGENT_FOLLOWUP.md ]; then
             cat AGENT_FOLLOWUP.md > /tmp/followup.md
+          fi
+
+      # Second and final review pass — scoped strictly to the fix: verify
+      # each blocking finding from pass 1 is actually resolved. If it still
+      # finds blocking issues we do NOT loop again — the PR opens with the
+      # disagreement surfaced for the human reviewer.
+      - name: Re-review the fix (opencode, read-only)
+        if: steps.changes.outputs.TRACKED_CHANGES != '0'
+        run: |
+          set -euo pipefail
+          if [ ! -f /tmp/review-1.md ] || ! grep -q "^- blocking" /tmp/review-1.md; then
+            echo "No first review or no blocking findings — skipping re-review."
+            exit 0
+          fi
+          cat > /tmp/rereview-prompt.md <<EOF
+          You are a READ-ONLY code reviewer for the tackui repository.
+          This is a RE-REVIEW after a fix pass. Scope: strictly verify whether
+          each blocking finding below is resolved by the current code —
+          inspect the fix with read-only shell (git diff/log/show, reading
+          files). Do NOT re-review the whole PR, do NOT raise new findings
+          about unrelated code, never commit, edit, or run tests/builds;
+          list anything you could not verify as 'unverified'.
+
+          ## Blocking findings to verify
+
+          $(cat /tmp/review-1.md)
+
+          ## Report format (mandatory)
+          Write AGENT_REVIEW.md in the repository root with:
+            ## Findings
+            - blocking|resolved <finding from pass 1> — one-paragraph verdict
+            ## Verdict
+            One paragraph: resolved or still blocking, and why.
+          EOF
+          if ! timeout 10m opencode run --agent explore "$(cat /tmp/rereview-prompt.md)" 2>&1 | tee -a /tmp/reviewer.log; then
+            echo "::warning::Re-review failed — continuing with pass-1 state."
+          fi
+          if [ -f AGENT_REVIEW.md ] && grep -q "^- blocking" AGENT_REVIEW.md; then
+            touch /tmp/unresolved-findings
+            cp AGENT_REVIEW.md /tmp/unresolved-findings.md
           fi
 
       # ------------------------------------------------------------------
@@ -396,6 +446,16 @@ jobs:
               echo "## Open questions"
               echo
               echo "The agent had unresolved questions while building this — see the review comment below. Scrutinize these areas."
+            fi
+            if [ -f /tmp/unresolved-findings.md ]; then
+              echo
+              echo "## Unresolved review findings (agent self-review)"
+              echo
+              echo "Two review passes ran; these blocking findings were still flagged after the fix pass — judge them yourself:"
+              echo
+              echo '```'
+              cat /tmp/unresolved-findings.md
+              echo '```'
             fi
           } > /tmp/pr-body.md
           gh pr create \
