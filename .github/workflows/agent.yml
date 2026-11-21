@@ -74,8 +74,14 @@ jobs:
           set -euo pipefail
           gh api "repos/${GITHUB_REPOSITORY}/issues/${{ github.event.issue.number }}" \
             --jq '{number, title, body, author: .user.login}' > /tmp/issue.json
-          gh api "repos/${GITHUB_REPOSITORY}/issues/${{ github.event.issue.number }}/comments" \
-            --jq '.[] | "### Comment by \(.user.login)\n\(.body)"' > /tmp/comments.md || true
+          # Comments are part of the brief — they may hold answers to a
+          # previous run's questions. Failing loudly beats implementing
+          # against stale context.
+          if ! gh api "repos/${GITHUB_REPOSITORY}/issues/${{ github.event.issue.number }}/comments" \
+            --jq '.[] | "### Comment by \(.user.login)\n\(.body)"' > /tmp/comments.md; then
+            echo "::error::Could not fetch issue comments — the brief would be incomplete. (Answered questions from prior runs may live there.) Re-apply the label to retry."
+            exit 1
+          fi
 
       - uses: actions/checkout@v7
         with:
@@ -93,7 +99,9 @@ jobs:
           echo "BRANCH=${branch}" >> "$GITHUB_ENV"
           git config user.name "tackui-agent[bot]"
           git config user.email "tackui-agent[bot]@users.noreply.github.com"
-          git checkout -b "$branch"
+          # -B (not -b): a previous failed run may have pushed this branch —
+          # force-reset locally so the re-run starts clean from main.
+          git checkout -B "$branch"
 
       - uses: actions/setup-node@v7
         with:
@@ -113,12 +121,20 @@ jobs:
           # The secret supplies model + provider credentials; we layer the
           # unattended permissions on top so `opencode run` never stalls on
           # an approval prompt (nothing can ask, so `ask` would abort).
-          jq '. + {
+          # `explore` is a built-in read-only agent (no edit/write tools) but
+          # defaults to subagent mode, which `opencode run` may refuse to
+          # select — mode "all" makes it selectable while staying read-only.
+          # Deep-merge (`*`, not `+`) so a secret that configures other
+          # agents or permissions is not clobbered.
+          jq '. * {
             permission: {
               edit: "allow",
               bash: "allow",
               webfetch: "allow",
               question: "deny"
+            },
+            agent: {
+              explore: { mode: "all" }
             }
           }' <<< '${{ secrets.AGENT_OPENCODE_CONFIG }}' > ~/.config/opencode/opencode.json
           chmod 600 ~/.config/opencode/opencode.json
@@ -279,6 +295,7 @@ jobs:
           # review (gates still run unconditionally) rather than failing.
           if ! timeout 10m opencode run --agent explore "$(cat /tmp/review-prompt.md)" 2>&1 | tee /tmp/reviewer.log; then
             echo "::warning::Reviewer run failed — continuing without review findings."
+            touch /tmp/review-unavailable
           fi
 
       # Snapshot the first review before the fix pass overwrites it — the
@@ -423,7 +440,14 @@ jobs:
           set -euo pipefail
           git add -A
           git commit -m "feat: resolve #${ISSUE_NUMBER}"
-          git push -u origin "$BRANCH"
+          # --force: a prior failed run may have pushed this branch name;
+          # the local branch was reset from main (checkout -B), so forcing
+          # is safe — concurrency serializes same-issue runs.
+          git push -u origin "$BRANCH" --force
+          # Marker for the failure-preservation step: the branch is on
+          # origin now, so no draft-PR rescue is needed even if a later
+          # step fails.
+          touch /tmp/pr-created
           summary="$(tail -c 2000 /tmp/opencode.log)"
           gates_run="npm run lint, npx tsc --noEmit, npm run test (re-run by the workflow on the final code, not the agent's word)"
           if git diff --name-only "$(git merge-base main HEAD) HEAD" | grep -q '^agent-builder/'; then
@@ -441,6 +465,12 @@ jobs:
             echo "## Gates that ran on the final code"
             echo
             echo "${gates_run}"
+            if [ -f /tmp/review-unavailable ]; then
+              echo
+              echo "## Agent review unavailable"
+              echo
+              echo "The reviewer pass failed this run — the gates (lint, typecheck, full tests) ran, but no agent review findings exist. Treat this PR as unreviewed-by-agent."
+            fi
             if [ -f /tmp/has-questions ]; then
               echo
               echo "## Open questions"
@@ -458,6 +488,17 @@ jobs:
               echo '```'
             fi
           } > /tmp/pr-body.md
+          # Re-run on the same issue with an unchanged title reuses the same
+          # branch name — and an open PR may already point at it. Update that
+          # PR instead of failing to create a duplicate.
+          existing="$(gh pr list --repo "${GITHUB_REPOSITORY}" --head "$BRANCH" --state open --json number --jq 'length')"
+          if [ "$existing" -gt 0 ]; then
+            pr_url="$(gh pr view "$BRANCH" --repo "${GITHUB_REPOSITORY}" --json url --jq .url)"
+            gh pr comment "$BRANCH" --repo "${GITHUB_REPOSITORY}" \
+              --body "Agent re-run: this PR was updated with a fresh attempt at #${ISSUE_NUMBER}."
+            echo "re-used existing PR: ${pr_url}"
+            exit 0
+          fi
           gh pr create \
             --repo "${GITHUB_REPOSITORY}" \
             --base main \
@@ -524,3 +565,57 @@ jobs:
           set -euo pipefail
           gh issue comment "$ISSUE_NUMBER" --repo "${GITHUB_REPOSITORY}" \
             --body "Agent run finished: reviewed the issue and made no code changes. See the run log for reasoning. Remove and re-apply the \`agent\` label to re-run with updated context."
+
+      # ------------------------------------------------------------------
+      # Failure path — the runner's disk dies with the job, so if anything
+      # went red AFTER the implementer produced work, rescue it: push the
+      # branch and open a draft PR so the work survives for inspection.
+      # Re-labeling still re-runs clean (checkout -B resets the branch).
+      # ------------------------------------------------------------------
+      - name: Rescue work on failure
+        if: failure()
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+          ISSUE_NUMBER: ${{ github.event.issue.number }}
+          ISSUE_TITLE: ${{ github.event.issue.title }}
+        run: |
+          set -euo pipefail
+          # Nothing to rescue if no branch/changes yet (early failures) or
+          # the work is already on origin (push step ran).
+          if [ -z "${BRANCH:-}" ] || [ -f /tmp/pr-created ]; then
+            echo "Nothing to rescue."
+            exit 0
+          fi
+          committed="$(git diff --name-only "$(git merge-base main HEAD) HEAD" | wc -l)"
+          uncommitted="$(git status --porcelain --untracked-files=no | wc -l)"
+          if [ "$((committed + uncommitted))" -eq 0 ]; then
+            echo "No code changes — nothing to rescue."
+            exit 0
+          fi
+          git add -A
+          git commit -m "wip: agent work for #${ISSUE_NUMBER} (run failed — preserved for inspection)" || true
+          git push -u origin "$BRANCH" --force
+          summary="$(tail -c 2000 /tmp/opencode.log 2>/dev/null || echo '(no agent log captured)')"
+          {
+            echo "⚠️ The agent run failed after implementation — this draft PR exists only to preserve the work; it is NOT ready for review."
+            echo
+            echo "Inspect the failed Actions run for what broke (likely a gate). Re-applying the \`agent\` label re-runs the issue from scratch on a reset branch."
+            echo
+            echo "## Agent output tail"
+            echo
+            echo '```'
+            echo "${summary}"
+            echo '```'
+          } > /tmp/rescue-body.md
+          existing="$(gh pr list --repo "${GITHUB_REPOSITORY}" --head "$BRANCH" --state open --json number --jq 'length')"
+          if [ "$existing" -eq 0 ]; then
+            gh pr create \
+              --repo "${GITHUB_REPOSITORY}" \
+              --base main \
+              --head "$BRANCH" \
+              --draft \
+              --title "agent [run failed]: resolve #${ISSUE_NUMBER} — ${ISSUE_TITLE}" \
+              --body-file /tmp/rescue-body.md
+          fi
+          gh issue comment "$ISSUE_NUMBER" --repo "${GITHUB_REPOSITORY}" \
+            --body "⚠️ The agent run failed after implementation. The work-in-progress branch was preserved${existing:+ and the existing PR updated} — see the [Actions run](https://github.com/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}) for what broke. Re-apply the \`agent\` label to retry from scratch."
