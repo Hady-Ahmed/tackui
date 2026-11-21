@@ -1,0 +1,633 @@
+name: Issue Agent
+
+# Picks up issues labeled `agent` and dispatches opencode (headless) at them.
+# The harness commits to a branch and opens a PR authored by tackui-agent[bot];
+# the bot has no merge permission — a human must approve the PR to merge.
+#
+# Pipeline: implementer run -> reviewer run (read-only) -> fix pass (if the
+# reviewer found blocking issues) -> gates re-run by this workflow (never on
+# the agents' word alone) -> PR. Follow-up findings the reviewer grades as
+# out-of-scope become a filed GitHub issue, not a PR-body comment.
+#
+# Re-runs: remove + re-apply the `agent` label. Each run gets the full
+# issue + comment thread as context, so answers left by a human become
+# part of the next attempt's input.
+#
+# Required repo secrets:
+#   APP_ID / APP_PRIVATE_KEY     — tackui-agent GitHub App (no merge perms)
+#   AGENT_OPENCODE_CONFIG        — opencode config JSON: model + provider
+#                                  credentials (e.g. OpenRouter API key)
+#   AGENT_MODEL (optional var)   — override model, "provider/model" format
+
+on:
+  issues:
+    types: [labeled]
+
+concurrency:
+  # Two runs for the same issue can never race on the same branch.
+  group: agent-issue-${{ github.event.issue.number }}
+  cancel-in-progress: false
+
+# The auto-injected GITHUB_TOKEN gets NOTHING — every GitHub call below
+# goes through the app token, whose powers are exactly the app's three
+# permissions (contents, issues, pull requests).
+permissions: {}
+
+jobs:
+  agent:
+    if: github.event.label.name == 'agent'
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - name: Auth as tackui-agent
+        id: app-token
+        uses: actions/create-github-app-token@v2
+        with:
+          app-id: ${{ secrets.APP_ID }}
+          private-key: ${{ secrets.APP_PRIVATE_KEY }}
+          owner: Hady-Ahmed
+          repositories: tackui
+
+      # Defense-in-depth: applying the `agent` label already requires
+      # triage permission, but verify the sender has write access before
+      # spending runner minutes — the permission model could change.
+      - name: Guard — label sender must have write access
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+        run: |
+          set -euo pipefail
+          sender="${{ github.event.sender.login }}"
+          perm="$(gh api "repos/${GITHUB_REPOSITORY}/collaborators/${sender}/permission" --jq '.permission')"
+          echo "sender ${sender} has permission: ${perm}"
+          case "$perm" in
+            admin|write) ;;
+            *)
+              echo "::error::Label sender ${sender} lacks write access (${perm}) — refusing to run."
+              exit 1
+              ;;
+          esac
+
+      - name: Fetch issue context
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+        run: |
+          set -euo pipefail
+          gh api "repos/${GITHUB_REPOSITORY}/issues/${{ github.event.issue.number }}" \
+            --jq '{number, title, body, author: .user.login}' > /tmp/issue.json
+          # Comments are part of the brief — they may hold answers to a
+          # previous run's questions. Failing loudly beats implementing
+          # against stale context.
+          if ! gh api "repos/${GITHUB_REPOSITORY}/issues/${{ github.event.issue.number }}/comments" \
+            --jq '.[] | "### Comment by \(.user.login)\n\(.body)"' > /tmp/comments.md; then
+            echo "::error::Could not fetch issue comments — the brief would be incomplete. (Answered questions from prior runs may live there.) Re-apply the label to retry."
+            exit 1
+          fi
+
+      - uses: actions/checkout@v7
+        with:
+          token: ${{ steps.app-token.outputs.token }}
+          fetch-depth: 0
+          # Default true would persist the app token into .git/config —
+          # meaning the opencode processes could push with the repo's own
+          # stored credential. false keeps the token in step envs only;
+          # our push steps authenticate via the URL at push time.
+          persist-credentials: false
+
+      - name: Create agent branch
+        env:
+          ISSUE_NUMBER: ${{ github.event.issue.number }}
+          ISSUE_TITLE: ${{ github.event.issue.title }}
+        run: |
+          set -euo pipefail
+          slug="$(printf '%s' "$ISSUE_TITLE" | tr '[:upper:]' '[:lower:]' | sed -E 's/[^a-z0-9]+/-/g; s/^-+//; s/-+$//' | cut -c1-40)"
+          branch="agent/issue-${ISSUE_NUMBER}-${slug:-no-slug}"
+          echo "BRANCH=${branch}" >> "$GITHUB_ENV"
+          git config user.name "tackui-agent[bot]"
+          git config user.email "tackui-agent[bot]@users.noreply.github.com"
+          # -B (not -b): a previous failed run may have pushed this branch —
+          # force-reset locally so the re-run starts clean from main.
+          git checkout -B "$branch"
+
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 24
+
+      - name: Install opencode
+        run: npm i -g opencode-ai@latest
+
+      - name: Configure opencode (model + credentials + unattended permissions)
+        run: |
+          set -euo pipefail
+          if [ -z "${{ secrets.AGENT_OPENCODE_CONFIG }}" ]; then
+            echo "::error::AGENT_OPENCODE_CONFIG secret is not set — add the opencode config JSON (model + provider key)."
+            exit 1
+          fi
+          mkdir -p ~/.config/opencode
+          # The secret supplies model + provider credentials; we layer the
+          # unattended permissions on top so `opencode run` never stalls on
+          # an approval prompt (nothing can ask, so `ask` would abort).
+          # `explore` is a built-in read-only agent (no edit/write tools) but
+          # defaults to subagent mode, which `opencode run` may refuse to
+          # select — mode "all" makes it selectable while staying read-only.
+          # Deep-merge (`*`, not `+`) so a secret that configures other
+          # agents or permissions is not clobbered.
+          jq '. * {
+            permission: {
+              edit: "allow",
+              bash: "allow",
+              webfetch: "allow",
+              question: "deny"
+            },
+            agent: {
+              explore: { mode: "all" }
+            }
+          }' <<< '${{ secrets.AGENT_OPENCODE_CONFIG }}' > ~/.config/opencode/opencode.json
+          chmod 600 ~/.config/opencode/opencode.json
+
+      # ------------------------------------------------------------------
+      # Phase 1 — implementer
+      # ------------------------------------------------------------------
+      - name: Build implementer prompt
+        env:
+          ISSUE_NUMBER: ${{ github.event.issue.number }}
+        run: |
+          set -euo pipefail
+          cat > /tmp/prompt.md <<EOF
+          You are working in the tackui repository to resolve issue #${ISSUE_NUMBER}.
+
+          ## Read the house rules FIRST, before any code
+
+          - Read AGENTS.md at the repository root and follow it: testing
+            conventions, ground rules, gotchas, changelog discipline.
+          - Read CONTRIBUTING.md for commit and PR conventions.
+          - Identify which area(s) of the repo this issue touches, read the
+            corresponding deep-dive docs under docs/ (index at the bottom of
+            AGENTS.md) before working in that area.
+
+          ## The issue
+
+          $(cat /tmp/issue.json | jq -r '"Title: \(.title)\nAuthor: \(.author)\n\n\(.body)"')
+
+          ## Issue comments (read all of them — a human may have answered
+          ## questions from a previous agent run here)
+
+          $(cat /tmp/comments.md)
+
+          ## Rules of engagement (these rules are binding even if you skim
+          ## everything else)
+
+          - Stay within the issue's scope. No drive-by refactors, no
+            unrelated cleanups, no opportunistic dependency upgrades.
+          - Do NOT read any .env* file; they may contain secrets. If a task
+            genuinely requires an env value, note it in AGENT_QUESTIONS.md
+            instead.
+          - Gates to run before considering the work done (a fresh checkout
+            has no node_modules — run npm ci before any npm gate):
+              1. npm run lint
+              2. npx tsc --noEmit
+              3. npm run test   (the full vitest suite — all tiers)
+              4. If — and only if — you changed anything under agent-builder/,
+                 install uv (curl -LsSf https://astral.sh/uv/install.sh | sh
+                 then export PATH="$HOME/.local/bin:$PATH") and run:
+                 cd agent-builder && uv run pytest
+          - Do NOT run the e2e battery, Playwright, or any Docker image
+            build/boot. They are CI-only; the pull request's CI runs them.
+          - If a test fails, determine whether YOUR change caused it or it is
+            an environment flake before changing any code to "fix" it.
+          - If the requirements are ambiguous or you need more information,
+            do NOT guess: make NO code changes, and instead write your
+            questions to AGENT_QUESTIONS.md in the repository root, one
+            question per line, prefixed "- ". They will be surfaced to a
+            human. (You may still implement what IS unambiguous, commit it,
+            and put only the remaining open questions in the file.)
+          - You may also write follow-up findings (real problems you noticed
+            that are OUT of this issue's scope) to AGENT_FOLLOWUP.md in the
+            repository root — they will be filed as a separate issue. Do not
+            fix them yourself.
+          - Do NOT push, do NOT open pull requests, do NOT merge, and do NOT
+            touch anything under .github/ — the workflow owns those.
+          - Commit every change with a conventional-commit message
+            referencing the issue (e.g. "feat: ... (closes #${ISSUE_NUMBER})").
+            Your deliverable is a local commit; the workflow handles
+            everything public.
+          EOF
+
+      - name: Run implementer (opencode)
+        run: |
+          set -euo pipefail
+          args=(run --agent build)
+          if [ -n "${AGENT_MODEL:-}" ]; then args+=(--model "$AGENT_MODEL"); fi
+          timeout 45m opencode "${args[@]}" "$(cat /tmp/prompt.md)" 2>&1 | tee /tmp/opencode.log
+        env:
+          AGENT_MODEL: ${{ vars.AGENT_MODEL }}
+
+      # The decide step later deletes the repo-root AGENT_* files before
+      # checking outcomes — preserve what we need into /tmp first. The fix
+      # pass may add follow-ups, so re-snapshot it there; questions are
+      # snapshot only from the implementer (the fix brief forbids them).
+      - name: Preserve agent artifacts
+        run: |
+          set -euo pipefail
+          if [ -f AGENT_QUESTIONS.md ]; then
+            touch /tmp/has-questions
+            cp AGENT_QUESTIONS.md /tmp/questions-comment.md
+          fi
+          if [ -f AGENT_FOLLOWUP.md ]; then
+            cat AGENT_FOLLOWUP.md > /tmp/followup.md
+          fi
+
+      - name: Check for code changes
+        id: changes
+        run: |
+          set -euo pipefail
+          # The implementer commits its work, so `git status` alone shows
+          # nothing — count the diff against the merge base with main too.
+          committed="$(git diff --name-only "$(git merge-base main HEAD) HEAD" | wc -l)"
+          uncommitted="$(git status --porcelain --untracked-files=no | wc -l)"
+          echo "TRACKED_CHANGES=$((committed + uncommitted))" >> "$GITHUB_OUTPUT"
+
+      # ------------------------------------------------------------------
+      # Phase 2 — reviewer (fresh context, no investment in the code)
+      # ------------------------------------------------------------------
+      - name: Build reviewer prompt
+        if: steps.changes.outputs.TRACKED_CHANGES != '0'
+        run: |
+          set -euo pipefail
+          {
+            echo "You are a READ-ONLY code reviewer for the tackui repository."
+            echo "An implementer just worked on issue ${{ github.event.issue.number }}."
+            echo "Inspect the diff with: git diff \$(git merge-base main HEAD) HEAD"
+            echo "and read the surrounding code as needed. Shell is allowed for"
+            echo "read-only inspection (git diff/log/show, reading files) ONLY —"
+            echo "never commit, never edit files, never run tests or builds: any"
+            echo "gate result you report would be fabricated; list any claim you"
+            echo "could not verify as 'unverified' instead."
+            echo
+            echo "Read AGENTS.md first — house rules apply to the diff too."
+            echo "Then identify the areas the diff touches and read their"
+            echo "docs/ deep-dives (index at the bottom of AGENTS.md): a"
+            echo "regression can be a violation of a documented contract the"
+            echo "tests don't cover."
+            echo
+            echo "Look for: regressions to existing behavior, missing tests for"
+            echo "new paths, scope creep beyond the issue, violations of house"
+            echo "rules, and security issues."
+            echo
+            if [ -f AGENT_QUESTIONS.md ]; then
+              echo "The implementer left open questions — scrutinize the parts of"
+              echo "the diff related to these questions especially hard:"
+              echo
+              cat AGENT_QUESTIONS.md
+              echo
+            fi
+            echo "## Report format (mandatory)"
+            echo "Write your report to AGENT_REVIEW.md in the repository root with"
+            echo "this exact structure:"
+            echo
+            echo "  ## Findings"
+            echo "  One line per finding, in this format:"
+            echo "  - <blocking|inline|out-of-scope> file:line — one-paragraph diagnosis"
+            echo "  ('blocking' = must fix before this PR can merge; 'inline' ="
+            echo "  non-blocking, cheap, within the issue's scope; 'out-of-scope' ="
+            echo "  real problem beyond the issue's scope)"
+            echo "  ## Unverified"
+            echo "  - <claim you could not verify and why>"
+            echo "  ## Verdict"
+            echo "  One paragraph: is the diff fit to open a PR?"
+          } > /tmp/review-prompt.md
+
+      - name: Run reviewer (opencode, read-only)
+        if: steps.changes.outputs.TRACKED_CHANGES != '0'
+        run: |
+          set -euo pipefail
+          # A reviewer failure must not kill the run — proceed without a
+          # review (gates still run unconditionally) rather than failing.
+          if ! timeout 10m opencode run --agent explore "$(cat /tmp/review-prompt.md)" 2>&1 | tee /tmp/reviewer.log; then
+            echo "::warning::Reviewer run failed — continuing without review findings."
+            touch /tmp/review-unavailable
+          fi
+
+      # Snapshot the first review before the fix pass overwrites it — the
+      # fix brief reads from the snapshot, and it is what scoped the fixes.
+      - name: Snapshot first review
+        if: steps.changes.outputs.TRACKED_CHANGES != '0'
+        run: |
+          set -euo pipefail
+          if [ -f AGENT_REVIEW.md ]; then
+            cp AGENT_REVIEW.md /tmp/review-1.md
+          fi
+
+      - name: Fix pass (if the reviewer found blocking issues)
+        if: steps.changes.outputs.TRACKED_CHANGES != '0'
+        run: |
+          set -euo pipefail
+          if ! grep -q "^- blocking" AGENT_REVIEW.md 2>/dev/null; then
+            echo "No blocking findings — skipping fix pass."
+            exit 0
+          fi
+          cat > /tmp/fix-prompt.md <<EOF
+          A reviewer inspected the commit for issue #${{ github.event.issue.number }} and
+          returned blocking findings. Fix ONLY the blocking findings below —
+          nothing else, no scope expansion. Read AGENTS.md first and follow it.
+
+          ## Reviewer findings
+
+          $(cat /tmp/review-1.md)
+
+          ## Rules
+
+          - Same gates as before when done: npm run lint, npx tsc --noEmit,
+            npm run test (plus uv run pytest if agent-builder/ changed).
+          - A fix that would expand the change beyond the issue's territory
+            is NOT a fix — revert it, note it in AGENT_FOLLOWUP.md instead.
+          - Commit the fixes (amend into the existing commit if the work is
+            one logical unit, otherwise a fixup commit is fine).
+          - Do NOT push, do NOT open PRs, do NOT touch .github/.
+          EOF
+          timeout 15m opencode run --agent build "$(cat /tmp/fix-prompt.md)" 2>&1 | tee -a /tmp/opencode.log
+
+      # The fix pass may have surfaced out-of-scope findings — re-snapshot.
+      - name: Re-snapshot follow-ups
+        if: steps.changes.outputs.TRACKED_CHANGES != '0'
+        run: |
+          set -euo pipefail
+          if [ -f AGENT_FOLLOWUP.md ]; then
+            cat AGENT_FOLLOWUP.md > /tmp/followup.md
+          fi
+
+      # Second and final review pass — scoped strictly to the fix: verify
+      # each blocking finding from pass 1 is actually resolved. If it still
+      # finds blocking issues we do NOT loop again — the PR opens with the
+      # disagreement surfaced for the human reviewer.
+      - name: Re-review the fix (opencode, read-only)
+        if: steps.changes.outputs.TRACKED_CHANGES != '0'
+        run: |
+          set -euo pipefail
+          if [ ! -f /tmp/review-1.md ] || ! grep -q "^- blocking" /tmp/review-1.md; then
+            echo "No first review or no blocking findings — skipping re-review."
+            exit 0
+          fi
+          cat > /tmp/rereview-prompt.md <<EOF
+          You are a READ-ONLY code reviewer for the tackui repository.
+          This is a RE-REVIEW after a fix pass. Scope: strictly verify whether
+          each blocking finding below is resolved by the current code —
+          inspect the fix with read-only shell (git diff/log/show, reading
+          files). Do NOT re-review the whole PR, do NOT raise new findings
+          about unrelated code, never commit, edit, or run tests/builds;
+          list anything you could not verify as 'unverified'.
+
+          ## Blocking findings to verify
+
+          $(cat /tmp/review-1.md)
+
+          ## Report format (mandatory)
+          Write AGENT_REVIEW.md in the repository root with:
+            ## Findings
+            - blocking|resolved <finding from pass 1> — one-paragraph verdict
+            ## Verdict
+            One paragraph: resolved or still blocking, and why.
+          EOF
+          if ! timeout 10m opencode run --agent explore "$(cat /tmp/rereview-prompt.md)" 2>&1 | tee -a /tmp/reviewer.log; then
+            echo "::warning::Re-review failed — continuing with pass-1 state."
+          fi
+          if [ -f AGENT_REVIEW.md ] && grep -q "^- blocking" AGENT_REVIEW.md; then
+            touch /tmp/unresolved-findings
+            cp AGENT_REVIEW.md /tmp/unresolved-findings.md
+          fi
+
+      # ------------------------------------------------------------------
+      # Phase 3 — unconditional gate re-run (never on the agents' word)
+      # ------------------------------------------------------------------
+      - name: Re-run gates (lint, typecheck, tests)
+        if: steps.changes.outputs.TRACKED_CHANGES != '0'
+        run: |
+          set -euo pipefail
+          npm ci
+          npm run lint
+          npx tsc --noEmit
+          npm run test
+          if git diff --name-only "$(git merge-base main HEAD) HEAD" | grep -q '^agent-builder/'; then
+            echo "agent-builder/ changed — running Python tests"
+            if ! command -v uv >/dev/null; then
+              curl -LsSf https://astral.sh/uv/install.sh | sh
+              echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+            fi
+            (cd agent-builder && uv run pytest)
+          fi
+
+      # ------------------------------------------------------------------
+      # Phase 4 — outcome
+      # ------------------------------------------------------------------
+      - name: Decide outcome
+        id: decide
+        run: |
+          set -euo pipefail
+          # Same detection as the earlier check: committed + uncommitted.
+          committed="$(git diff --name-only "$(git merge-base main HEAD) HEAD" | wc -l)"
+          uncommitted="$(git status --porcelain --untracked-files=no | wc -l)"
+          has_changes=$((committed + uncommitted))
+          rm -f AGENT_QUESTIONS.md AGENT_REVIEW.md AGENT_FOLLOWUP.md
+          if [ "$has_changes" -gt 0 ]; then
+            echo "OUTCOME=pr" >> "$GITHUB_OUTPUT"
+            if [ -f /tmp/has-questions ]; then
+              echo "HAS_QUESTIONS=1" >> "$GITHUB_OUTPUT"
+              echo "CHANGES_AND_QUESTIONS: PR will note the open questions for the reviewer."
+            fi
+          elif [ -f /tmp/has-questions ]; then
+            echo "OUTCOME=questions" >> "$GITHUB_OUTPUT"
+          else
+            echo "OUTCOME=nothing" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Push branch and open PR
+        if: steps.decide.outputs.OUTCOME == 'pr'
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+          ISSUE_NUMBER: ${{ github.event.issue.number }}
+          ISSUE_TITLE: ${{ github.event.issue.title }}
+        run: |
+          set -euo pipefail
+          git add -A
+          git commit -m "feat: resolve #${ISSUE_NUMBER}"
+          # --force: a prior failed run may have pushed this branch name;
+          # the local branch was reset from main (checkout -B), so forcing
+          # is safe — concurrency serializes same-issue runs.
+          # Credentials are not persisted (persist-credentials: false), so
+          # the push embeds the app token from this step's env into the
+          # URL — masked in logs; nothing lands on disk.
+          git push --force "https://x-access-token:${GH_TOKEN}@github.com/${GITHUB_REPOSITORY}.git" "$BRANCH:refs/heads/$BRANCH"
+          # Marker for the failure-preservation step: the branch is on
+          # origin now, so no draft-PR rescue is needed even if a later
+          # step fails.
+          touch /tmp/pr-created
+          summary="$(tail -c 2000 /tmp/opencode.log)"
+          gates_run="npm run lint, npx tsc --noEmit, npm run test (re-run by the workflow on the final code, not the agent's word)"
+          if git diff --name-only "$(git merge-base main HEAD) HEAD" | grep -q '^agent-builder/'; then
+            gates_run="${gates_run}; uv run pytest (agent-builder/ changed)"
+          fi
+          {
+            echo "Resolves #${ISSUE_NUMBER}"
+            echo
+            echo "## What the agent did"
+            echo
+            echo '```'
+            echo "${summary}"
+            echo '```'
+            echo
+            echo "## Gates that ran on the final code"
+            echo
+            echo "${gates_run}"
+            if [ -f /tmp/review-unavailable ]; then
+              echo
+              echo "## Agent review unavailable"
+              echo
+              echo "The reviewer pass failed this run — the gates (lint, typecheck, full tests) ran, but no agent review findings exist. Treat this PR as unreviewed-by-agent."
+            fi
+            if [ -f /tmp/has-questions ]; then
+              echo
+              echo "## Open questions"
+              echo
+              echo "The agent had unresolved questions while building this — see the review comment below. Scrutinize these areas."
+            fi
+            if [ -f /tmp/unresolved-findings.md ]; then
+              echo
+              echo "## Unresolved review findings (agent self-review)"
+              echo
+              echo "Two review passes ran; these blocking findings were still flagged after the fix pass — judge them yourself:"
+              echo
+              echo '```'
+              cat /tmp/unresolved-findings.md
+              echo '```'
+            fi
+          } > /tmp/pr-body.md
+          # Re-run on the same issue with an unchanged title reuses the same
+          # branch name — and an open PR may already point at it. Update that
+          # PR instead of failing to create a duplicate.
+          existing="$(gh pr list --repo "${GITHUB_REPOSITORY}" --head "$BRANCH" --state open --json number --jq 'length')"
+          if [ "$existing" -gt 0 ]; then
+            pr_url="$(gh pr view "$BRANCH" --repo "${GITHUB_REPOSITORY}" --json url --jq .url)"
+            gh pr comment "$BRANCH" --repo "${GITHUB_REPOSITORY}" \
+              --body "Agent re-run: this PR was updated with a fresh attempt at #${ISSUE_NUMBER}."
+            echo "re-used existing PR: ${pr_url}"
+            exit 0
+          fi
+          gh pr create \
+            --repo "${GITHUB_REPOSITORY}" \
+            --base main \
+            --head "$BRANCH" \
+            --title "agent: resolve #${ISSUE_NUMBER} — ${ISSUE_TITLE}" \
+            --body-file /tmp/pr-body.md
+
+      - name: Comment questions on the PR
+        if: steps.decide.outputs.OUTCOME == 'pr' && steps.decide.outputs.HAS_QUESTIONS == '1'
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+        run: |
+          set -euo pipefail
+          gh pr comment "$BRANCH" --repo "${GITHUB_REPOSITORY}" \
+            --body "$(printf 'The agent opened this PR with open questions — verify these during review:\n\n%s' "$(cat /tmp/questions-comment.md)")"
+
+      - name: Comment PR link on the issue
+        if: steps.decide.outputs.OUTCOME == 'pr'
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+          ISSUE_NUMBER: ${{ github.event.issue.number }}
+        run: |
+          set -euo pipefail
+          pr_url="$(gh pr view "$BRANCH" --repo "${GITHUB_REPOSITORY}" --json url --jq .url)"
+          gh issue comment "$ISSUE_NUMBER" --repo "${GITHUB_REPOSITORY}" \
+            --body "Agent run complete — opened PR: ${pr_url}"
+
+      - name: File follow-up issue
+        if: steps.decide.outputs.OUTCOME == 'pr'
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+          ISSUE_NUMBER: ${{ github.event.issue.number }}
+        run: |
+          set -euo pipefail
+          if [ ! -f /tmp/followup.md ]; then
+            echo "No follow-up findings."
+            exit 0
+          fi
+          followup_url="$(gh issue create \
+            --repo "${GITHUB_REPOSITORY}" \
+            --title "agent: follow-up findings from #${ISSUE_NUMBER}" \
+            --body-file /tmp/followup.md | tail -n1)"
+          echo "filed follow-up issue: ${followup_url}"
+
+      - name: Comment questions on the issue (no changes)
+        if: steps.decide.outputs.OUTCOME == 'questions'
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+          ISSUE_NUMBER: ${{ github.event.issue.number }}
+          ISSUE_AUTHOR: ${{ github.event.issue.user.login }}
+          LABEL_SENDER: ${{ github.event.sender.login }}
+        run: |
+          set -euo pipefail
+          gh issue comment "$ISSUE_NUMBER" --repo "${GITHUB_REPOSITORY}" \
+            --body "$(printf 'The agent needs input before it can work on this issue (cc @%s, @%s):\n\n%s\n\n<sub>Re-apply the \`agent\` label once the questions are answered — answers will be picked up on the next run.</sub>' \
+              "$ISSUE_AUTHOR" "$LABEL_SENDER" "$(cat /tmp/questions-comment.md)")"
+
+      - name: Comment nothing-to-do on the issue
+        if: steps.decide.outputs.OUTCOME == 'nothing'
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+          ISSUE_NUMBER: ${{ github.event.issue.number }}
+        run: |
+          set -euo pipefail
+          gh issue comment "$ISSUE_NUMBER" --repo "${GITHUB_REPOSITORY}" \
+            --body "Agent run finished: reviewed the issue and made no code changes. See the run log for reasoning. Remove and re-apply the \`agent\` label to re-run with updated context."
+
+      # ------------------------------------------------------------------
+      # Failure path — the runner's disk dies with the job, so if anything
+      # went red AFTER the implementer produced work, rescue it: push the
+      # branch and open a draft PR so the work survives for inspection.
+      # Re-labeling still re-runs clean (checkout -B resets the branch).
+      # ------------------------------------------------------------------
+      - name: Rescue work on failure
+        if: failure()
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+          ISSUE_NUMBER: ${{ github.event.issue.number }}
+          ISSUE_TITLE: ${{ github.event.issue.title }}
+        run: |
+          set -euo pipefail
+          # Nothing to rescue if no branch/changes yet (early failures) or
+          # the work is already on origin (push step ran).
+          if [ -z "${BRANCH:-}" ] || [ -f /tmp/pr-created ]; then
+            echo "Nothing to rescue."
+            exit 0
+          fi
+          committed="$(git diff --name-only "$(git merge-base main HEAD) HEAD" | wc -l)"
+          uncommitted="$(git status --porcelain --untracked-files=no | wc -l)"
+          if [ "$((committed + uncommitted))" -eq 0 ]; then
+            echo "No code changes — nothing to rescue."
+            exit 0
+          fi
+          git add -A
+          git commit -m "wip: agent work for #${ISSUE_NUMBER} (run failed — preserved for inspection)" || true
+          git push --force "https://x-access-token:${GH_TOKEN}@github.com/${GITHUB_REPOSITORY}.git" "$BRANCH:refs/heads/$BRANCH"
+          summary="$(tail -c 2000 /tmp/opencode.log 2>/dev/null || echo '(no agent log captured)')"
+          {
+            echo "⚠️ The agent run failed after implementation — this draft PR exists only to preserve the work; it is NOT ready for review."
+            echo
+            echo "Inspect the failed Actions run for what broke (likely a gate). Re-applying the \`agent\` label re-runs the issue from scratch on a reset branch."
+            echo
+            echo "## Agent output tail"
+            echo
+            echo '```'
+            echo "${summary}"
+            echo '```'
+          } > /tmp/rescue-body.md
+          existing="$(gh pr list --repo "${GITHUB_REPOSITORY}" --head "$BRANCH" --state open --json number --jq 'length')"
+          if [ "$existing" -eq 0 ]; then
+            gh pr create \
+              --repo "${GITHUB_REPOSITORY}" \
+              --base main \
+              --head "$BRANCH" \
+              --draft \
+              --title "agent [run failed]: resolve #${ISSUE_NUMBER} — ${ISSUE_TITLE}" \
+              --body-file /tmp/rescue-body.md
+          fi
+          gh issue comment "$ISSUE_NUMBER" --repo "${GITHUB_REPOSITORY}" \
+            --body "⚠️ The agent run failed after implementation. The work-in-progress branch was preserved${existing:+ and the existing PR updated} — see the [Actions run](https://github.com/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}) for what broke. Re-apply the \`agent\` label to retry from scratch."
