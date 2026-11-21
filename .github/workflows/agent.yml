@@ -87,6 +87,11 @@ jobs:
         with:
           token: ${{ steps.app-token.outputs.token }}
           fetch-depth: 0
+          # Default true would persist the app token into .git/config —
+          # meaning the opencode processes could push with the repo's own
+          # stored credential. false keeps the token in step envs only;
+          # our push steps authenticate via the URL at push time.
+          persist-credentials: false
 
       - name: Create agent branch
         env:
@@ -259,6 +264,10 @@ jobs:
             echo "could not verify as 'unverified' instead."
             echo
             echo "Read AGENTS.md first — house rules apply to the diff too."
+            echo "Then identify the areas the diff touches and read their"
+            echo "docs/ deep-dives (index at the bottom of AGENTS.md): a"
+            echo "regression can be a violation of a documented contract the"
+            echo "tests don't cover."
             echo
             echo "Look for: regressions to existing behavior, missing tests for"
             echo "new paths, scope creep beyond the issue, violations of house"
@@ -443,7 +452,10 @@ jobs:
           # --force: a prior failed run may have pushed this branch name;
           # the local branch was reset from main (checkout -B), so forcing
           # is safe — concurrency serializes same-issue runs.
-          git push -u origin "$BRANCH" --force
+          # Credentials are not persisted (persist-credentials: false), so
+          # the push embeds the app token from this step's env into the
+          # URL — masked in logs; nothing lands on disk.
+          git push --force "https://x-access-token:${GH_TOKEN}@github.com/${GITHUB_REPOSITORY}.git" "$BRANCH:refs/heads/$BRANCH"
           # Marker for the failure-preservation step: the branch is on
           # origin now, so no draft-PR rescue is needed even if a later
           # step fails.
@@ -594,7 +606,7 @@ jobs:
           fi
           git add -A
           git commit -m "wip: agent work for #${ISSUE_NUMBER} (run failed — preserved for inspection)" || true
-          git push -u origin "$BRANCH" --force
+          git push --force "https://x-access-token:${GH_TOKEN}@github.com/${GITHUB_REPOSITORY}.git" "$BRANCH:refs/heads/$BRANCH"
           summary="$(tail -c 2000 /tmp/opencode.log 2>/dev/null || echo '(no agent log captured)')"
           {
             echo "⚠️ The agent run failed after implementation — this draft PR exists only to preserve the work; it is NOT ready for review."
