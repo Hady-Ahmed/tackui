@@ -248,7 +248,7 @@ jobs:
           set -euo pipefail
           # The implementer commits its work, so `git status` alone shows
           # nothing — count the diff against the merge base with main too.
-          committed="$(git diff --name-only "$(git merge-base main HEAD) HEAD" | wc -l)"
+          committed="$(git diff --name-only "$(git merge-base main HEAD)" HEAD | wc -l)"
           uncommitted="$(git status --porcelain --untracked-files=no | wc -l)"
           echo "TRACKED_CHANGES=$((committed + uncommitted))" >> "$GITHUB_OUTPUT"
 
@@ -412,7 +412,7 @@ jobs:
           npm run lint
           npx tsc --noEmit
           npm run test
-          if git diff --name-only "$(git merge-base main HEAD) HEAD" | grep -q '^agent-builder/'; then
+          if git diff --name-only "$(git merge-base main HEAD)" HEAD | grep -q '^agent-builder/'; then
             echo "agent-builder/ changed — running Python tests"
             if ! command -v uv >/dev/null; then
               curl -LsSf https://astral.sh/uv/install.sh | sh
@@ -429,7 +429,7 @@ jobs:
         run: |
           set -euo pipefail
           # Same detection as the earlier check: committed + uncommitted.
-          committed="$(git diff --name-only "$(git merge-base main HEAD) HEAD" | wc -l)"
+          committed="$(git diff --name-only "$(git merge-base main HEAD)" HEAD | wc -l)"
           uncommitted="$(git status --porcelain --untracked-files=no | wc -l)"
           has_changes=$((committed + uncommitted))
           rm -f AGENT_QUESTIONS.md AGENT_REVIEW.md AGENT_FOLLOWUP.md
@@ -468,7 +468,7 @@ jobs:
           touch /tmp/pr-created
           summary="$(tail -c 2000 /tmp/opencode.log)"
           gates_run="npm run lint, npx tsc --noEmit, npm run test (re-run by the workflow on the final code, not the agent's word)"
-          if git diff --name-only "$(git merge-base main HEAD) HEAD" | grep -q '^agent-builder/'; then
+          if git diff --name-only "$(git merge-base main HEAD)" HEAD | grep -q '^agent-builder/'; then
             gates_run="${gates_run}; uv run pytest (agent-builder/ changed)"
           fi
           {
@@ -604,7 +604,7 @@ jobs:
             echo "Nothing to rescue."
             exit 0
           fi
-          committed="$(git diff --name-only "$(git merge-base main HEAD) HEAD" | wc -l)"
+          committed="$(git diff --name-only "$(git merge-base main HEAD)" HEAD | wc -l)"
           uncommitted="$(git status --porcelain --untracked-files=no | wc -l)"
           if [ "$((committed + uncommitted))" -eq 0 ]; then
             echo "No code changes — nothing to rescue."
