@@ -11,6 +11,7 @@ import { getCurrentUser } from "@/lib/auth/context";
 import { assertSafeUrl, UnsafeUrlError } from "@/lib/net/safe-fetch";
 import { checkUserLimit } from "@/lib/ratelimit/middleware";
 import { SSRF_REJECTION_MESSAGE } from "@/lib/config/saas";
+import { validationFailedResponse } from "@/lib/api/validation";
 
 function isPlatformAdmin(role: string): boolean {
   return role === "admin";
@@ -69,10 +70,7 @@ export async function PATCH(
 
   const parsed = updateTemplateBodySchema.safeParse(body);
   if (!parsed.success) {
-    return NextResponse.json(
-      { error: "Validation failed", details: parsed.error.flatten() },
-      { status: 400 },
-    );
+    return validationFailedResponse(parsed.error);
   }
 
   // SSRF guard: only when the endpoint is being changed (same rule as

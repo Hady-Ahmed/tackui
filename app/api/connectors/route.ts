@@ -32,6 +32,7 @@ import {
   urlSchema,
 } from "@/lib/connectors/connector-store";
 import { upsertPlatformConnector } from "@/lib/connectors/platform-sync";
+import { validationFailedResponse } from "@/lib/api/validation";
 
 const upsertConnectorBodySchema = z.object({
   // The same slug pattern the store enforces — validated HERE so the
@@ -73,10 +74,7 @@ export async function PUT(request: NextRequest) {
   const body = await request.json().catch(() => null);
   const parsed = upsertConnectorBodySchema.safeParse(body);
   if (!parsed.success) {
-    return NextResponse.json(
-      { error: "Validation failed", details: parsed.error.flatten() },
-      { status: 400 },
-    );
+    return validationFailedResponse(parsed.error);
   }
 
   // The URL is user-supplied and the AgentOS fetches it at run time with the
@@ -142,10 +140,7 @@ export async function PUT(request: NextRequest) {
     // The store's zod schemas (name pattern, http(s)-only url) reject
     // invalid input — surface those as 400s, anything else as a 500.
     if (err instanceof z.ZodError) {
-      return NextResponse.json(
-        { error: "Validation failed", details: err.flatten() },
-        { status: 400 },
-      );
+      return validationFailedResponse(err);
     }
     console.error("[connectors] failed to store connector", {
       orgId: user.orgId,

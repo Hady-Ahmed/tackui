@@ -42,6 +42,7 @@ import { ensurePlatformConnectors } from "@/lib/connectors/platform-sync";
 import { getCurrentUser } from "@/lib/auth/context";
 import { checkUserLimit } from "@/lib/ratelimit/middleware";
 import { checkAgentCountLimit } from "@/lib/plans/enforcement";
+import { validationFailedResponse } from "@/lib/api/validation";
 
 export async function POST(request: Request) {
   const user = await getCurrentUser();
@@ -60,10 +61,7 @@ export async function POST(request: Request) {
   }
   const parsed = builderCreateBodySchema.safeParse(body);
   if (!parsed.success) {
-    return NextResponse.json(
-      { error: "Validation failed", details: parsed.error.flatten() },
-      { status: 400 },
-    );
+    return validationFailedResponse(parsed.error);
   }
   const spec = parsed.data;
 
