@@ -196,6 +196,7 @@ function AgentsPageInner() {
         return;
       }
       setModels(Array.isArray(data.models) ? data.models : []);
+      setModelsError(null);
     } catch {
       // Own-proxy failure — without this the dropdowns sit empty forever.
       setModelsError("Couldn't reach the server — try again shortly.");
@@ -213,6 +214,7 @@ function AgentsPageInner() {
       // Sorted at load (not per render): the palette renders in the
       // deterministic (toolkit, label) order for the whole visit.
       setTools(Array.isArray(data.tools) ? sortTools(data.tools) : []);
+      setToolsError(null);
     } catch {
       // Own-proxy failure — without this the toolkit list sits empty forever.
       setToolsError("Couldn't reach the server — try again shortly.");
