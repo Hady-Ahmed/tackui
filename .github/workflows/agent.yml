@@ -158,6 +158,13 @@ jobs:
           ISSUE_NUMBER: ${{ github.event.issue.number }}
         run: |
           set -euo pipefail
+          # The summary format has exactly one source of truth: the repo's
+          # PR template. No fallback copy exists on purpose — if the file is
+          # gone, fail loudly rather than write PRs from a stale snapshot.
+          if [ ! -f .github/PULL_REQUEST_TEMPLATE.md ]; then
+            echo "::error::.github/PULL_REQUEST_TEMPLATE.md not found — the agent summary format has no source of truth. Restore the template or update the agent brief."
+            exit 1
+          fi
           cat > /tmp/prompt.md <<EOF
           You are working in the tackui repository to resolve issue #${ISSUE_NUMBER}.
 
@@ -165,7 +172,10 @@ jobs:
 
           - Read AGENTS.md at the repository root and follow it: testing
             conventions, ground rules, gotchas, changelog discipline.
-          - Read CONTRIBUTING.md for commit and PR conventions.
+          - Read CONTRIBUTING.md for commit and PR conventions — including
+            which checks to run before pushing; run those gates yourself.
+            (The workflow re-runs them on the final code regardless — never
+            rely on that.)
           - Identify which area(s) of the repo this issue touches, read the
             corresponding deep-dive docs under docs/ (index at the bottom of
             AGENTS.md) before working in that area.
@@ -216,6 +226,34 @@ jobs:
             referencing the issue (e.g. "feat: ... (closes #${ISSUE_NUMBER})").
             Your deliverable is a local commit; the workflow handles
             everything public.
+          - FINAL STEP, always: write your summary to AGENT_SUMMARY.md in the
+            repository root — it becomes the pull request description and
+            renders as markdown, so write real markdown, no code fences
+            around it. The structure comes from the repo, not from this
+            prompt: read .github/PULL_REQUEST_TEMPLATE.md and CONTRIBUTING.md's
+            "Pull requests" section FIRST, then write AGENT_SUMMARY.md in that
+            structure (Summary / Related issue / Changes / Checklist /
+            Security / Test plan — whatever the template specifies). The PR
+            description must follow the template the same way a human PR
+            would. Then append ONE additional section the template does not
+            have, because it is specific to agent runs:
+
+                ## Convention attestations
+                - Tests: <added where/what — or "none added" + the justification
+                  per CONTRIBUTING.md testing conventions>
+                - eslint-disable / @ts-ignore / @ts-expect-error / any: <none added, or the justification>
+                - TODO/FIXME/HACK comments: <none added, or the issue link>
+                - Docs: <which docs/*.md updated, or "not architecture-touching">
+                - CHANGELOG.md: <entry added under [Unreleased], or "skipped — docs-only/chore">
+                - Security-sensitive files (lib/auth | lib/billing | lib/net | lib/ratelimit):
+                  <not touched, or the threat-model note>
+                - Env vars: <none added, or "added to .env.example + README">
+
+            (The workflow ticked the three gate boxes on the Checklist itself —
+            it re-ran them; leave the other checklist items unticked and let
+            the attestations state your case for the human to confirm.)
+            Every claim in the file is verified against the actual diff by the
+            reviewer pass — do not write anything you did not do.
           EOF
 
       - name: Run implementer (opencode)
@@ -240,6 +278,9 @@ jobs:
           fi
           if [ -f AGENT_FOLLOWUP.md ]; then
             cat AGENT_FOLLOWUP.md > /tmp/followup.md
+          fi
+          if [ -f AGENT_SUMMARY.md ]; then
+            cp AGENT_SUMMARY.md /tmp/summary.md
           fi
 
       - name: Check for code changes
@@ -278,6 +319,18 @@ jobs:
             echo "Look for: regressions to existing behavior, missing tests for"
             echo "new paths, scope creep beyond the issue, violations of house"
             echo "rules, and security issues."
+            echo
+            if [ -f AGENT_SUMMARY.md ]; then
+              echo "The implementer wrote AGENT_SUMMARY.md — its claims become the"
+              echo "pull request description, so verify it on two axes: (1) every"
+              echo "claim against the actual diff — files touched, tests added or"
+              echo "justified, docs, changelog entry, convention attestations — a"
+              echo "claim the diff does not support is a blocking finding; and"
+              echo "(2) structure — it must follow .github/PULL_REQUEST_TEMPLATE.md"
+              echo "plus the Convention attestations section, since the description"
+              echo "must read like a human PR following the repo template."
+              echo
+            fi
             echo
             if [ -f AGENT_QUESTIONS.md ]; then
               echo "The implementer left open questions — scrutinize the parts of"
@@ -352,13 +405,17 @@ jobs:
           EOF
           timeout 15m opencode run --agent build "$(cat /tmp/fix-prompt.md)" 2>&1 | tee -a /tmp/opencode.log
 
-      # The fix pass may have surfaced out-of-scope findings — re-snapshot.
+      # The fix pass may have surfaced out-of-scope findings or updated the
+      # summary — re-snapshot both.
       - name: Re-snapshot follow-ups
         if: steps.changes.outputs.TRACKED_CHANGES != '0'
         run: |
           set -euo pipefail
           if [ -f AGENT_FOLLOWUP.md ]; then
             cat AGENT_FOLLOWUP.md > /tmp/followup.md
+          fi
+          if [ -f AGENT_SUMMARY.md ]; then
+            cp AGENT_SUMMARY.md /tmp/summary.md
           fi
 
       # Second and final review pass — scoped strictly to the fix: verify
@@ -432,7 +489,7 @@ jobs:
           committed="$(git diff --name-only "$(git merge-base main HEAD)" HEAD | wc -l)"
           uncommitted="$(git status --porcelain --untracked-files=no | wc -l)"
           has_changes=$((committed + uncommitted))
-          rm -f AGENT_QUESTIONS.md AGENT_REVIEW.md AGENT_FOLLOWUP.md
+          rm -f AGENT_QUESTIONS.md AGENT_REVIEW.md AGENT_FOLLOWUP.md AGENT_SUMMARY.md
           if [ "$has_changes" -gt 0 ]; then
             echo "OUTCOME=pr" >> "$GITHUB_OUTPUT"
             if [ -f /tmp/has-questions ]; then
@@ -469,19 +526,33 @@ jobs:
           # origin now, so no draft-PR rescue is needed even if a later
           # step fails.
           touch /tmp/pr-created
-          summary="$(tail -c 2000 /tmp/opencode.log)"
           gates_run="npm run lint, npx tsc --noEmit, npm run test (re-run by the workflow on the final code, not the agent's word)"
           if git diff --name-only "$(git merge-base main HEAD)" HEAD | grep -q '^agent-builder/'; then
             gates_run="${gates_run}; uv run pytest (agent-builder/ changed)"
           fi
           {
-            echo "Resolves #${ISSUE_NUMBER}"
+            echo "Closes #${ISSUE_NUMBER}"
             echo
-            echo "## What the agent did"
-            echo
-            echo '```'
-            echo "${summary}"
-            echo '```'
+            if [ -f /tmp/summary.md ]; then
+              # Agent-authored summary (AGENT_SUMMARY.md) — real markdown
+              # following the repo's PR template; the reviewer verified its
+              # claims against the diff. Embed verbatim so it renders.
+              cat /tmp/summary.md
+              echo
+            else
+              # Fallback: tail of the run log, ANSI-stripped, fenced.
+              echo "## What the agent did"
+              echo
+              echo '```'
+              tail -c 2000 /tmp/opencode.log | sed -e 's/\x1b\[[0-9;]*[a-zA-Z]//g' -e 's/\r//g'
+              echo '```'
+              echo
+            fi
+            echo "## Checklist"
+            echo "- [x] \`npm run lint\` passes (verified by this run's gate re-run)"
+            echo "- [x] \`npx tsc --noEmit\` passes (verified by this run's gate re-run)"
+            echo "- [x] \`npm run test\` passes (verified by this run's gate re-run)"
+            echo "- [ ] No eslint-disable / @ts-ignore / @ts-expect-error / any, no unlinked TODO comments, docs/changelog/env updated as needed — attested in the Convention attestations above; confirm on review"
             echo
             echo "## Gates that ran on the final code"
             echo
@@ -616,7 +687,7 @@ jobs:
           git add -A
           git commit -m "wip: agent work for #${ISSUE_NUMBER} (run failed — preserved for inspection)" || true
           git push --force "https://x-access-token:${GH_TOKEN}@github.com/${GITHUB_REPOSITORY}.git" "$BRANCH:refs/heads/$BRANCH"
-          summary="$(tail -c 2000 /tmp/opencode.log 2>/dev/null || echo '(no agent log captured)')"
+          summary="$(tail -c 2000 /tmp/opencode.log 2>/dev/null | sed -e 's/\x1b\[[0-9;]*[a-zA-Z]//g' -e 's/\r//g' || echo '(no agent log captured)')"
           {
             echo "⚠️ The agent run failed after implementation — this draft PR exists only to preserve the work; it is NOT ready for review."
             echo
