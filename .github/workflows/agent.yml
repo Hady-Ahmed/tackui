@@ -206,8 +206,41 @@ jobs:
                  install uv (curl -LsSf https://astral.sh/uv/install.sh | sh
                  then export PATH="$HOME/.local/bin:$PATH") and run:
                  cd agent-builder && uv run pytest
-          - Do NOT run the e2e battery, Playwright, or any Docker image
-            build/boot. They are CI-only; the pull request's CI runs them.
+          - Do NOT run the repo's formal E2E suite (npm run test:e2e and the
+            specs under e2e/), do NOT modify anything under e2e/ or
+            playwright.config.*, and do NOT build or boot any Docker image.
+            Those are CI-only; the pull request's CI runs them. This does NOT
+            ban a throwaway Playwright script of your own — see the UI
+            verification rule below.
+          - If your change affects anything a user sees or clicks in a browser
+            (components/, app pages, the builder interface), VERIFY IT IN A
+            REAL BROWSER before considering the work done:
+              1. npm ci if you have not already, then start the dev server in
+                 the background:
+                 (npm run dev -- --hostname 127.0.0.1 --port 3123 &> /tmp/dev.log &)
+                 If it needs env vars, write minimal throwaway values into
+                 .env.local (git-ignored; NEVER commit it) and restart it.
+              2. npx playwright install --with-deps chromium — browsers are
+                 not preinstalled on the runner.
+              3. Write a THROWAWAY script (e.g. /tmp/verify.mjs) that imports
+                 playwright (it is in the repo's devDependencies), opens the
+                 page(s) you changed, performs the interaction described in
+                 the issue, and asserts the expected behavior.
+              4. Run it headless. Record exactly what you ran and what
+                 rendered.
+              5. Kill the dev server and delete the script — it is scratch,
+                 not a deliverable. NEVER commit it and never add it to e2e/.
+            In AGENT_SUMMARY.md's Test plan, keep three verification tiers
+            strictly separate and never blur them:
+              - "Verified by unit tests: <what>" — what the test suite proves.
+              - "Verified in a headless browser: <what, plus the exact steps
+                the script performed>" — ONLY if a browser script actually
+                ran in this session.
+              - "To confirm by hand: <what>" — what a human should click and
+                expect to see.
+            NEVER write a first-person line describing a manual check you did
+            not perform. If no browser script ran in this session, the phrase
+            "verified in a browser" must not appear in the summary.
           - If a test fails, determine whether YOUR change caused it or it is
             an environment flake before changing any code to "fix" it.
           - If the requirements are ambiguous or you need more information,
@@ -322,13 +355,19 @@ jobs:
             echo
             if [ -f AGENT_SUMMARY.md ]; then
               echo "The implementer wrote AGENT_SUMMARY.md — its claims become the"
-              echo "pull request description, so verify it on two axes: (1) every"
-              echo "claim against the actual diff — files touched, tests added or"
-              echo "justified, docs, changelog entry, convention attestations — a"
-              echo "claim the diff does not support is a blocking finding; and"
-              echo "(2) structure — it must follow .github/PULL_REQUEST_TEMPLATE.md"
-              echo "plus the Convention attestations section, since the description"
-              echo "must read like a human PR following the repo template."
+              echo "pull request description, so verify it on three axes:"
+              echo "(1) every claim against the actual diff — files touched,"
+              echo "tests added or justified, docs, changelog entry, convention"
+              echo "attestations — a claim the diff does not support is a"
+              echo "blocking finding; (2) structure — it must follow"
+              echo ".github/PULL_REQUEST_TEMPLATE.md plus the Convention"
+              echo "attestations section, since the description must read like a"
+              echo "human PR following the repo template; (3) verification tiers"
+              echo "— the Test plan's 'Verified in a headless browser' claims"
+              echo "need evidence that a browser script actually ran (the"
+              echo "implementer's log is at /tmp/opencode.log), and any"
+              echo "first-person manual-UI line with no script behind it is a"
+              echo "blocking finding."
               echo
             fi
             echo
@@ -530,30 +569,52 @@ jobs:
           if git diff --name-only "$(git merge-base main HEAD)" HEAD | grep -q '^agent-builder/'; then
             gates_run="${gates_run}; uv run pytest (agent-builder/ changed)"
           fi
+          # The agent's summary is template-shaped, so the workflow's only
+          # edits to it are machine facts, not content: tick the three gate
+          # boxes it could not tick itself (the gates re-ran here on the
+          # final code) and prepend "Closes #N" only if the summary does not
+          # close the issue itself. No duplicate checklist, no duplicate
+          # Closes line — the template's own sections are the single source.
+          python3 - <<'PY'
+          import pathlib, re
+          src = pathlib.Path("/tmp/summary.md")
+          if not src.exists():
+              raise SystemExit(0)
+          s = src.read_text()
+          note = " — verified by this run's gate re-run"
+          for gate in ("`npm run lint`", "`npx tsc --noEmit`", "`npm run test`"):
+              pat = re.compile(r"^(\s*-\s+)\[ \]([^\n]*" + re.escape(gate) + r"[^\n]*)$", re.M)
+              s = pat.sub(lambda m: m.group(1) + "[x]" + m.group(2) + note, s, count=1)
+          pathlib.Path("/tmp/summary-ticked.md").write_text(s)
+          PY
           {
-            echo "Closes #${ISSUE_NUMBER}"
-            echo
-            if [ -f /tmp/summary.md ]; then
-              # Agent-authored summary (AGENT_SUMMARY.md) — real markdown
-              # following the repo's PR template; the reviewer verified its
-              # claims against the diff. Embed verbatim so it renders.
-              cat /tmp/summary.md
+            if [ -f /tmp/summary-ticked.md ]; then
+              # Agent-authored summary (AGENT_SUMMARY.md), template-shaped,
+              # with the three gate boxes ticked by the machine above.
+              if ! grep -Eiq "closes #${ISSUE_NUMBER}|fixes #${ISSUE_NUMBER}|resolves #${ISSUE_NUMBER}" /tmp/summary-ticked.md; then
+                echo "Closes #${ISSUE_NUMBER}"
+                echo
+              fi
+              cat /tmp/summary-ticked.md
               echo
             else
-              # Fallback: tail of the run log, ANSI-stripped, fenced.
+              # No summary — old shape: bare Closes, ANSI-stripped log tail,
+              # and a machine checklist standing in for the missing one.
+              echo "Closes #${ISSUE_NUMBER}"
+              echo
               echo "## What the agent did"
               echo
               echo '```'
               tail -c 2000 /tmp/opencode.log | sed -e 's/\x1b\[[0-9;]*[a-zA-Z]//g' -e 's/\r//g'
               echo '```'
               echo
+              echo "## Checklist"
+              echo "- [x] \`npm run lint\` passes (verified by this run's gate re-run)"
+              echo "- [x] \`npx tsc --noEmit\` passes (verified by this run's gate re-run)"
+              echo "- [x] \`npm run test\` passes (verified by this run's gate re-run)"
+              echo "- [ ] No eslint-disable / @ts-ignore / @ts-expect-error / any, no unlinked TODO comments, docs/changelog/env updated as needed — confirm on review"
+              echo
             fi
-            echo "## Checklist"
-            echo "- [x] \`npm run lint\` passes (verified by this run's gate re-run)"
-            echo "- [x] \`npx tsc --noEmit\` passes (verified by this run's gate re-run)"
-            echo "- [x] \`npm run test\` passes (verified by this run's gate re-run)"
-            echo "- [ ] No eslint-disable / @ts-ignore / @ts-expect-error / any, no unlinked TODO comments, docs/changelog/env updated as needed — attested in the Convention attestations above; confirm on review"
-            echo
             echo "## Gates that ran on the final code"
             echo
             echo "${gates_run}"
