@@ -4,6 +4,14 @@ All notable changes to this project will be documented in this file. The format 
 
 ## [Unreleased]
 
+- **agent-builder: a stale catalog-load error no longer suppresses the
+  builder form's notices after a successful retry.** When the models or
+  tools catalog fetch failed once and a retry via the banner succeeded,
+  the leftover error state kept hiding the empty-catalog notices and the
+  removed-model notice for the whole /agents visit, and left Create
+  enabled on an empty model catalog. The loaders clear the error on
+  success, so the notices re-evaluate against the loaded catalogs.
+
 - **agent-builder: toolkit-grouped tool palette; the 10-tool cap is
   gone (#176).** The palette renders one row per toolkit — checkbox +
   label + "N tools" count + key badge + expand chevron — collapsed by
