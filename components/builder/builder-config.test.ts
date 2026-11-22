@@ -581,6 +581,64 @@ describe("filterTools", () => {
   });
 });
 
+/**
+ * The composed pipeline the builder form renders —
+ * `groupToolsByToolkit(filterTools(tools, query))`. Regression pin for
+ * #187: a group's tools are the FILTERED subset, so the toolkit
+ * checkbox's select-all (which maps `group.tools`) can only ever touch
+ * the tools the filter shows — checking a toolkit under an active
+ * filter cannot select tools the search hides. A refactor that made
+ * groups hold the full toolkit while filtering only the rendered rows
+ * would silently reintroduce that hidden-selection surprise.
+ */
+describe("toolkit select-all under an active filter", () => {
+  const gh = (name: string, label: string): BuilderToolOption => ({
+    name,
+    label,
+    requiresKey: null,
+    platformFallback: false,
+    toolkit: "github",
+    credentials: [],
+  });
+  const catalog: BuilderToolOption[] = [
+    gh("gh_create_issue", "Create an issue"),
+    gh("gh_list_issues", "List issues"),
+    gh("gh_get_issue", "Get an issue"),
+    gh("gh_create_repository", "Create a repository"),
+    gh("gh_get_repository", "Get a repository"),
+    gh("gh_list_repositories", "List repositories"),
+    gh("gh_create_pull", "Create a pull request"),
+    gh("gh_merge_pull", "Merge a pull request"),
+    gh("gh_star_repository", "Star a repository"),
+    gh("gh_fork_repository", "Fork a repository"),
+  ];
+
+  it("checking a toolkit under a filter selects only the visible tools", () => {
+    const groups = groupToolsByToolkit(filterTools(catalog, "issue"));
+    const github = groups.find((g) => g.toolkit === "github");
+    // The names toggleToolkit maps over — exactly the matching subset,
+    // never the toolkit's hidden members.
+    expect(github?.tools.map((t) => t.name)).toEqual([
+      "gh_create_issue",
+      "gh_get_issue",
+      "gh_list_issues",
+    ]);
+  });
+
+  it("the header count reads the filtered subset, not the full toolkit", () => {
+    const groups = groupToolsByToolkit(filterTools(catalog, "issue"));
+    const github = groups.find((g) => g.toolkit === "github");
+    expect(github?.tools).toHaveLength(3);
+    expect(catalog).toHaveLength(10);
+  });
+
+  it("a toolkit-slug filter shows the whole toolkit, so select-all still attaches all of it", () => {
+    const groups = groupToolsByToolkit(filterTools(catalog, "github"));
+    const github = groups.find((g) => g.toolkit === "github");
+    expect(github?.tools).toHaveLength(10);
+  });
+});
+
 describe("validateBuilderForm", () => {
   it("accepts a valid create form", () => {
     expect(validateBuilderForm(validForm, "create")).toEqual({});

@@ -820,8 +820,14 @@ The admin UI is the Connectors section on `/agents`
   matches on its slug/label (searching "github" surfaces the toolkit
   even though the individual tool labels are like "Create an issue"),
   a tool matches on its label/description — with its own "No tools
-  match" state, distinct from the empty-catalog copy. Filtering is
-  display-only: selections live in the form state, so a row hidden by
+  match" state, distinct from the empty-catalog copy. The rendered
+  groups are built from the filtered tools
+  (`groupToolsByToolkit(filterTools(...))`), so a toolkit row's
+  select-all — and the first-expand seed — only ever touch the tools
+  the filter shows: checking a toolkit under an active filter selects
+  exactly the visible subset (the "N tools" count reads that subset
+  too), never the rows the search hides. Filtering is display-only
+  beyond that: selections live in the form state, so a row hidden by
   the search keeps its slot in the payload. Toolkits render in
   alphabetical order and each toolkit's tools alphabetically within it
   (`groupToolsByToolkit`), regardless of the upstream allowlist's
