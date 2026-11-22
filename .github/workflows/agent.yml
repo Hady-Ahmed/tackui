@@ -453,8 +453,11 @@ jobs:
           ISSUE_TITLE: ${{ github.event.issue.title }}
         run: |
           set -euo pipefail
+          # The implementer usually commits everything itself — tolerate a
+          # clean tree (a plain `git commit` would exit 1 and kill the step).
           git add -A
-          git commit -m "feat: resolve #${ISSUE_NUMBER}"
+          git commit -m "feat: resolve #${ISSUE_NUMBER}" \
+            || echo "::notice::Nothing to commit — the implementer already committed all changes."
           # --force: a prior failed run may have pushed this branch name;
           # the local branch was reset from main (checkout -B), so forcing
           # is safe — concurrency serializes same-issue runs.
@@ -635,5 +638,9 @@ jobs:
               --title "agent [run failed]: resolve #${ISSUE_NUMBER} — ${ISSUE_TITLE}" \
               --body-file /tmp/rescue-body.md
           fi
+          # ${existing:+} would wrongly fire on "0" (it tests non-empty,
+          # not numeric truth), so gate on the count explicitly.
+          note=""
+          if [ "$existing" -gt 0 ]; then note=" and the existing PR was updated"; fi
           gh issue comment "$ISSUE_NUMBER" --repo "${GITHUB_REPOSITORY}" \
-            --body "⚠️ The agent run failed after implementation. The work-in-progress branch was preserved${existing:+ and the existing PR updated} — see the [Actions run](https://github.com/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}) for what broke. Re-apply the \`agent\` label to retry from scratch."
+            --body "⚠️ The agent run failed after implementation. The work-in-progress branch was preserved${note} — see the [Actions run](https://github.com/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}) for what broke. Re-apply the \`agent\` label to retry from scratch."
