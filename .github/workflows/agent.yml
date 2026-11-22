@@ -158,6 +158,13 @@ jobs:
           ISSUE_NUMBER: ${{ github.event.issue.number }}
         run: |
           set -euo pipefail
+          # The summary format has exactly one source of truth: the repo's
+          # PR template. No fallback copy exists on purpose — if the file is
+          # gone, fail loudly rather than write PRs from a stale snapshot.
+          if [ ! -f .github/PULL_REQUEST_TEMPLATE.md ]; then
+            echo "::error::.github/PULL_REQUEST_TEMPLATE.md not found — the agent summary format has no source of truth. Restore the template or update the agent brief."
+            exit 1
+          fi
           cat > /tmp/prompt.md <<EOF
           You are working in the tackui repository to resolve issue #${ISSUE_NUMBER}.
 
@@ -165,7 +172,10 @@ jobs:
 
           - Read AGENTS.md at the repository root and follow it: testing
             conventions, ground rules, gotchas, changelog discipline.
-          - Read CONTRIBUTING.md for commit and PR conventions.
+          - Read CONTRIBUTING.md for commit and PR conventions — including
+            which checks to run before pushing; run those gates yourself.
+            (The workflow re-runs them on the final code regardless — never
+            rely on that.)
           - Identify which area(s) of the repo this issue touches, read the
             corresponding deep-dive docs under docs/ (index at the bottom of
             AGENTS.md) before working in that area.
@@ -217,19 +227,16 @@ jobs:
             Your deliverable is a local commit; the workflow handles
             everything public.
           - FINAL STEP, always: write your summary to AGENT_SUMMARY.md in the
-            repository root, using EXACTLY this markdown structure (it becomes
-            the pull request description and renders as markdown — write real
-            markdown, no code fences around it):
-
-                ## Summary
-                <!-- one or two sentences: what changed and why -->
-
-                ## Changes
-                <!-- concrete bullets; group by area if large (API / UI / DB / tests) -->
-
-                ## Test plan
-                <!-- how you verified it: for API changes the request shapes,
-                     for UI the behavior path; include which gates you ran -->
+            repository root — it becomes the pull request description and
+            renders as markdown, so write real markdown, no code fences
+            around it. The structure comes from the repo, not from this
+            prompt: read .github/PULL_REQUEST_TEMPLATE.md and CONTRIBUTING.md's
+            "Pull requests" section FIRST, then write AGENT_SUMMARY.md in that
+            structure (Summary / Related issue / Changes / Checklist /
+            Security / Test plan — whatever the template specifies). The PR
+            description must follow the template the same way a human PR
+            would. Then append ONE additional section the template does not
+            have, because it is specific to agent runs:
 
                 ## Convention attestations
                 - Tests: <added where/what — or "none added" + the justification
@@ -242,6 +249,9 @@ jobs:
                   <not touched, or the threat-model note>
                 - Env vars: <none added, or "added to .env.example + README">
 
+            (The workflow ticked the three gate boxes on the Checklist itself —
+            it re-ran them; leave the other checklist items unticked and let
+            the attestations state your case for the human to confirm.)
             Every claim in the file is verified against the actual diff by the
             reviewer pass — do not write anything you did not do.
           EOF
@@ -312,10 +322,13 @@ jobs:
             echo
             if [ -f AGENT_SUMMARY.md ]; then
               echo "The implementer wrote AGENT_SUMMARY.md — its claims become the"
-              echo "pull request description, so verify each claim against the"
-              echo "actual diff (files touched, tests added or justified, docs,"
-              echo "changelog entry, convention attestations). A claim the diff"
-              echo "does not support is a blocking finding."
+              echo "pull request description, so verify it on two axes: (1) every"
+              echo "claim against the actual diff — files touched, tests added or"
+              echo "justified, docs, changelog entry, convention attestations — a"
+              echo "claim the diff does not support is a blocking finding; and"
+              echo "(2) structure — it must follow .github/PULL_REQUEST_TEMPLATE.md"
+              echo "plus the Convention attestations section, since the description"
+              echo "must read like a human PR following the repo template."
               echo
             fi
             echo
