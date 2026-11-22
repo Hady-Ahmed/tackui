@@ -12,6 +12,7 @@ import { assertSafeUrl, UnsafeUrlError } from "@/lib/net/safe-fetch";
 import { checkUserLimit } from "@/lib/ratelimit/middleware";
 import { SSRF_REJECTION_MESSAGE } from "@/lib/config/saas";
 import { deleteAgentosComponent, getAgentosCurrentConfig, AgentosError } from "@/lib/agents/builder";
+import { validationFailedResponse } from "@/lib/api/validation";
 
 export async function GET(
   _request: Request,
@@ -109,10 +110,7 @@ export async function PATCH(
 
   const parsed = updateAgentBodySchema.safeParse(body);
   if (!parsed.success) {
-    return NextResponse.json(
-      { error: "Validation failed", details: parsed.error.flatten() },
-      { status: 400 },
-    );
+    return validationFailedResponse(parsed.error);
   }
 
   // SSRF guard: when the endpoint is being changed, validate the new URL

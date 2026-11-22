@@ -63,7 +63,7 @@ const fieldShapes = {
   // key preserves it (partial-update semantics).
   category: z.string().max(50).nullable().optional(),
   icon: iconSchema.nullable().optional(),
-  endpoint: z.string().url(),
+  endpoint: z.url(),
   authMode: templateAuthModeSchema.default("none"),
   // HS256 needs ≥256 bits = 32 chars. Only validated when present
   // (blank submit on PATCH preserves the existing value).
@@ -99,7 +99,7 @@ function refineQuotaConsistency(
 ): void {
   if (data.requiredPlan && data.freeDailyQuota != null) {
     ctx.addIssue({
-      code: z.ZodIssueCode.custom,
+      code: "custom",
       path: ["freeDailyQuota"],
       message:
         "freeDailyQuota cannot be set when requiredPlan is set — a plan-gated agent has no free tier.",
@@ -111,7 +111,7 @@ function refineQuotaConsistency(
     data.freeDailyQuota == null
   ) {
     ctx.addIssue({
-      code: z.ZodIssueCode.custom,
+      code: "custom",
       path: ["paidDailyQuota"],
       message:
         "paidDailyQuota on an ungated agent requires freeDailyQuota — without a free cap, paid users would be strictly worse off than free users.",
@@ -123,7 +123,7 @@ function refineQuotaConsistency(
     data.paidDailyQuota <= data.freeDailyQuota
   ) {
     ctx.addIssue({
-      code: z.ZodIssueCode.custom,
+      code: "custom",
       path: ["paidDailyQuota"],
       message:
         "paidDailyQuota must be greater than freeDailyQuota — Pro is the higher tier.",
@@ -148,7 +148,7 @@ function refineQuotaConsistencyPartial(
 ): void {
   if (data.requiredPlan && data.freeDailyQuota != null) {
     ctx.addIssue({
-      code: z.ZodIssueCode.custom,
+      code: "custom",
       path: ["freeDailyQuota"],
       message:
         "freeDailyQuota cannot be set when requiredPlan is set — a plan-gated agent has no free tier.",
@@ -161,7 +161,7 @@ function refineQuotaConsistencyPartial(
     data.freeDailyQuota == null
   ) {
     ctx.addIssue({
-      code: z.ZodIssueCode.custom,
+      code: "custom",
       path: ["paidDailyQuota"],
       message:
         "paidDailyQuota on an ungated agent requires freeDailyQuota — without a free cap, paid users would be strictly worse off than free users.",
@@ -173,7 +173,7 @@ function refineQuotaConsistencyPartial(
     data.paidDailyQuota <= data.freeDailyQuota
   ) {
     ctx.addIssue({
-      code: z.ZodIssueCode.custom,
+      code: "custom",
       path: ["paidDailyQuota"],
       message:
         "paidDailyQuota must be greater than freeDailyQuota — Pro is the higher tier.",

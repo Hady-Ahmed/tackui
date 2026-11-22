@@ -50,6 +50,7 @@ import {
   setCredential,
   getCredentialDecrypted,
 } from "@/lib/credentials/credential-store";
+import { validationFailedResponse } from "@/lib/api/validation";
 
 /**
  * Field values may be blank — a blank (or absent) field means "keep the
@@ -62,7 +63,7 @@ const setCredentialBodySchema = z.object({
   fields: z
     .record(z.string(), z.string().max(500))
     .refine((fields) => Object.values(fields).some((v) => v.trim().length > 0), {
-      message: "At least one field is required",
+      error: "At least one field is required",
     }),
 });
 
@@ -121,10 +122,7 @@ export async function PUT(request: NextRequest) {
   const body = await request.json().catch(() => null);
   const parsed = setCredentialBodySchema.safeParse(body);
   if (!parsed.success) {
-    return NextResponse.json(
-      { error: "Validation failed", details: parsed.error.flatten() },
-      { status: 400 },
-    );
+    return validationFailedResponse(parsed.error);
   }
 
   // The platform is the single source of truth: a provider it doesn't know

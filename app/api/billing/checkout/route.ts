@@ -1,9 +1,10 @@
 import { NextResponse } from "next/server";
+import { z } from "zod";
 import { getCurrentUser, canManageAgents } from "@/lib/auth/context";
 import { BILLING_ENABLED } from "@/lib/config/saas";
 import { createCheckoutSession } from "@/lib/billing/checkout";
 import { checkUserLimit } from "@/lib/ratelimit/middleware";
-import { z } from "zod";
+import { validationFailedResponse } from "@/lib/api/validation";
 
 /**
  * POST /api/billing/checkout — start a Stripe Checkout session for a paid
@@ -22,7 +23,7 @@ const bodySchema = z
   // invitee). Pro is the solo tier; seats is irrelevant for it (ignored
   // by createCheckoutSession, which always sends quantity: 1 for pro).
   .refine((data) => data.plan !== "team" || (data.seats ?? 1) >= 2, {
-    message: "Team plan requires at least 2 seats.",
+    error: "Team plan requires at least 2 seats.",
     path: ["seats"],
   });
 
@@ -57,10 +58,7 @@ export async function POST(request: Request) {
   }
   const parsed = bodySchema.safeParse(body);
   if (!parsed.success) {
-    return NextResponse.json(
-      { error: "Validation failed", details: parsed.error.flatten() },
-      { status: 400 },
-    );
+    return validationFailedResponse(parsed.error);
   }
 
   const result = await createCheckoutSession(user.orgId, parsed.data.plan, {

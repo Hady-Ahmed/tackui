@@ -46,6 +46,7 @@ import {
 import { ensurePlatformConnectors } from "@/lib/connectors/platform-sync";
 import type { UpdateBuilderAgentInput } from "@/lib/agents/agent-store";
 import { agentosErrorResponse } from "@/lib/agents/builder";
+import { validationFailedResponse } from "@/lib/api/validation";
 
 export async function PATCH(
   request: Request,
@@ -80,10 +81,7 @@ export async function PATCH(
   }
   const parsed = builderUpdateBodySchema.safeParse(body);
   if (!parsed.success) {
-    return NextResponse.json(
-      { error: "Validation failed", details: parsed.error.flatten() },
-      { status: 400 },
-    );
+    return validationFailedResponse(parsed.error);
   }
   const patch = parsed.data;
 
