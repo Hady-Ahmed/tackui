@@ -216,6 +216,34 @@ jobs:
             referencing the issue (e.g. "feat: ... (closes #${ISSUE_NUMBER})").
             Your deliverable is a local commit; the workflow handles
             everything public.
+          - FINAL STEP, always: write your summary to AGENT_SUMMARY.md in the
+            repository root, using EXACTLY this markdown structure (it becomes
+            the pull request description and renders as markdown — write real
+            markdown, no code fences around it):
+
+                ## Summary
+                <!-- one or two sentences: what changed and why -->
+
+                ## Changes
+                <!-- concrete bullets; group by area if large (API / UI / DB / tests) -->
+
+                ## Test plan
+                <!-- how you verified it: for API changes the request shapes,
+                     for UI the behavior path; include which gates you ran -->
+
+                ## Convention attestations
+                - Tests: <added where/what — or "none added" + the justification
+                  per CONTRIBUTING.md testing conventions>
+                - eslint-disable / @ts-ignore / @ts-expect-error / any: <none added, or the justification>
+                - TODO/FIXME/HACK comments: <none added, or the issue link>
+                - Docs: <which docs/*.md updated, or "not architecture-touching">
+                - CHANGELOG.md: <entry added under [Unreleased], or "skipped — docs-only/chore">
+                - Security-sensitive files (lib/auth | lib/billing | lib/net | lib/ratelimit):
+                  <not touched, or the threat-model note>
+                - Env vars: <none added, or "added to .env.example + README">
+
+            Every claim in the file is verified against the actual diff by the
+            reviewer pass — do not write anything you did not do.
           EOF
 
       - name: Run implementer (opencode)
@@ -240,6 +268,9 @@ jobs:
           fi
           if [ -f AGENT_FOLLOWUP.md ]; then
             cat AGENT_FOLLOWUP.md > /tmp/followup.md
+          fi
+          if [ -f AGENT_SUMMARY.md ]; then
+            cp AGENT_SUMMARY.md /tmp/summary.md
           fi
 
       - name: Check for code changes
@@ -278,6 +309,15 @@ jobs:
             echo "Look for: regressions to existing behavior, missing tests for"
             echo "new paths, scope creep beyond the issue, violations of house"
             echo "rules, and security issues."
+            echo
+            if [ -f AGENT_SUMMARY.md ]; then
+              echo "The implementer wrote AGENT_SUMMARY.md — its claims become the"
+              echo "pull request description, so verify each claim against the"
+              echo "actual diff (files touched, tests added or justified, docs,"
+              echo "changelog entry, convention attestations). A claim the diff"
+              echo "does not support is a blocking finding."
+              echo
+            fi
             echo
             if [ -f AGENT_QUESTIONS.md ]; then
               echo "The implementer left open questions — scrutinize the parts of"
@@ -352,13 +392,17 @@ jobs:
           EOF
           timeout 15m opencode run --agent build "$(cat /tmp/fix-prompt.md)" 2>&1 | tee -a /tmp/opencode.log
 
-      # The fix pass may have surfaced out-of-scope findings — re-snapshot.
+      # The fix pass may have surfaced out-of-scope findings or updated the
+      # summary — re-snapshot both.
       - name: Re-snapshot follow-ups
         if: steps.changes.outputs.TRACKED_CHANGES != '0'
         run: |
           set -euo pipefail
           if [ -f AGENT_FOLLOWUP.md ]; then
             cat AGENT_FOLLOWUP.md > /tmp/followup.md
+          fi
+          if [ -f AGENT_SUMMARY.md ]; then
+            cp AGENT_SUMMARY.md /tmp/summary.md
           fi
 
       # Second and final review pass — scoped strictly to the fix: verify
@@ -432,7 +476,7 @@ jobs:
           committed="$(git diff --name-only "$(git merge-base main HEAD)" HEAD | wc -l)"
           uncommitted="$(git status --porcelain --untracked-files=no | wc -l)"
           has_changes=$((committed + uncommitted))
-          rm -f AGENT_QUESTIONS.md AGENT_REVIEW.md AGENT_FOLLOWUP.md
+          rm -f AGENT_QUESTIONS.md AGENT_REVIEW.md AGENT_FOLLOWUP.md AGENT_SUMMARY.md
           if [ "$has_changes" -gt 0 ]; then
             echo "OUTCOME=pr" >> "$GITHUB_OUTPUT"
             if [ -f /tmp/has-questions ]; then
