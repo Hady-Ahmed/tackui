@@ -513,19 +513,33 @@ jobs:
           # origin now, so no draft-PR rescue is needed even if a later
           # step fails.
           touch /tmp/pr-created
-          summary="$(tail -c 2000 /tmp/opencode.log)"
           gates_run="npm run lint, npx tsc --noEmit, npm run test (re-run by the workflow on the final code, not the agent's word)"
           if git diff --name-only "$(git merge-base main HEAD)" HEAD | grep -q '^agent-builder/'; then
             gates_run="${gates_run}; uv run pytest (agent-builder/ changed)"
           fi
           {
-            echo "Resolves #${ISSUE_NUMBER}"
+            echo "Closes #${ISSUE_NUMBER}"
             echo
-            echo "## What the agent did"
-            echo
-            echo '```'
-            echo "${summary}"
-            echo '```'
+            if [ -f /tmp/summary.md ]; then
+              # Agent-authored summary (AGENT_SUMMARY.md) — real markdown
+              # following the repo's PR template; the reviewer verified its
+              # claims against the diff. Embed verbatim so it renders.
+              cat /tmp/summary.md
+              echo
+            else
+              # Fallback: tail of the run log, ANSI-stripped, fenced.
+              echo "## What the agent did"
+              echo
+              echo '```'
+              tail -c 2000 /tmp/opencode.log | sed -e 's/\x1b\[[0-9;]*[a-zA-Z]//g' -e 's/\r//g'
+              echo '```'
+              echo
+            fi
+            echo "## Checklist"
+            echo "- [x] \`npm run lint\` passes (verified by this run's gate re-run)"
+            echo "- [x] \`npx tsc --noEmit\` passes (verified by this run's gate re-run)"
+            echo "- [x] \`npm run test\` passes (verified by this run's gate re-run)"
+            echo "- [ ] No eslint-disable / @ts-ignore / @ts-expect-error / any, no unlinked TODO comments, docs/changelog/env updated as needed — attested in the Convention attestations above; confirm on review"
             echo
             echo "## Gates that ran on the final code"
             echo
@@ -660,7 +674,7 @@ jobs:
           git add -A
           git commit -m "wip: agent work for #${ISSUE_NUMBER} (run failed — preserved for inspection)" || true
           git push --force "https://x-access-token:${GH_TOKEN}@github.com/${GITHUB_REPOSITORY}.git" "$BRANCH:refs/heads/$BRANCH"
-          summary="$(tail -c 2000 /tmp/opencode.log 2>/dev/null || echo '(no agent log captured)')"
+          summary="$(tail -c 2000 /tmp/opencode.log 2>/dev/null | sed -e 's/\x1b\[[0-9;]*[a-zA-Z]//g' -e 's/\r//g' || echo '(no agent log captured)')"
           {
             echo "⚠️ The agent run failed after implementation — this draft PR exists only to preserve the work; it is NOT ready for review."
             echo
