@@ -678,7 +678,13 @@ export async function installTemplate(
     if (!winnerId) throw new TemplateInstallConflictError(template.id);
     return resyncInstalledAgent(winnerId, template, orgId, syncedAt);
   }
-  const agent = (await getAgent(id, orgId))!;
+  // The just-created row is unprotected after commit — its org can delete
+  // it between the INSERT and this final read (same vanish window as the
+  // re-sync path's final read). Surface it as the same typed error the
+  // route maps to 409 (retryable — a retry's lookup returns null, so it
+  // takes the fresh-install path) instead of a bare 500.
+  const agent = await getAgent(id, orgId);
+  if (!agent) throw new TemplateInstallVanishedError(template.id);
   return { agent, installed: true, updated: false };
 }
 
