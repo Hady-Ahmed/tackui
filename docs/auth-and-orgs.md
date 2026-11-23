@@ -55,13 +55,27 @@ providers are exposed to the login UI via `GET /api/auth/config`
   automatic bootstrap would make the first person to sign up on the
   hosted product an instance admin.
   Personal org + owner membership creation happens in the
-  `databaseHooks.session.create.before` hook — it checks if the user already
-  has an owner membership; if not (first signup — `user.create.after` is
-  deferred to post-transaction by Better Auth so it hasn't run yet), it
-  creates the org + member rows in-transaction, then sets
+  `databaseHooks.session.create.before` hook (`lib/auth/personal-org.ts`) —
+  it checks if the user already has an owner membership; if not (first
+  signup — `user.create.after` is deferred to post-transaction by Better
+  Auth so it hasn't run yet), it creates the org + member rows, then sets
   `activeOrganizationId` on the session. This ensures every auth path (email
   signup, login, social, OIDC) gets a correct `activeOrganizationId`. The
   `npm run create-admin` script can also create/promote an admin explicitly.
+  **Connection-affinity invariant:** the hook's reads and writes MUST go
+  through Better Auth's transaction-scoped adapter (resolved via
+  `getCurrentAdapter(ctx.context.adapter)` — the base adapter outside a
+  transaction), never through the app's shared `query()` pool. Email
+  signup wraps user + account + session in one transaction on a dedicated
+  connection; a pool write inside that hook cannot see the uncommitted
+  user row, so the `member.userId` FK check fails and rolls back the whole
+  signup — while the autocommitted `organization` row stays behind as an
+  orphan (#208). Deployments with SMTP configured never noticed: there
+  signup creates no session, so the hook's create branch doesn't run.
+  The regression tests in `lib/auth/personal-org.test.ts` run against a
+  real Postgres for exactly this reason — pg-mem cannot emulate
+  cross-connection transaction visibility, so it cannot reproduce the
+  failure.
 - Solo mode creates a real org row on boot (`lib/auth/solo-org.ts` —
   `ensureSoloOrg`) so `org_id` is always populated.
 
