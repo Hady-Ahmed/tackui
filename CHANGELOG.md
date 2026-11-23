@@ -4,6 +4,20 @@ All notable changes to this project will be documented in this file. The format 
 
 ## [Unreleased]
 
+- **Changed: agent JWT secrets are decrypted on demand, and a secret
+  that can't be decrypted now reports itself instead of masquerading as
+  "no secret" (#82).** Reading agents no longer decrypts every stored
+  secret — the plaintext is resolved only where it is consumed (run-token
+  minting, the admin edit form). After a `DB_ENCRYPTION_KEY` rotation,
+  affected agents surface an explicit "undecryptable — re-save the
+  secret" state in the admin edit form (and `jwtSecretStatus` on the
+  API), instead of the misleading secret-less badge; self-managed JWT
+  agents in that state fail their runs with an actionable message
+  instead of calling the backend without credentials and getting a
+  confusing 401. Catalog-installed agents are unaffected (their auth
+  comes from the live template). Broken secrets log once per process
+  instead of on every agents-list load.
+
 - **Fixed: first sign-up on a fresh database without SMTP failed with a
   500 and left an orphan organization row behind (#208).** The session
   hook that creates the personal workspace wrote through the shared

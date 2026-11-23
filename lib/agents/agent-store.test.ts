@@ -10,6 +10,7 @@ import {
   updateAgentBodySchema,
   generateAgentId,
   toPublicAgent,
+  resolveAgentSecret,
 } from "./agent-store";
 import type { CreateAgentInput } from "./agent-store";
 import { runMigrations } from "@/lib/db/migrate";
@@ -260,23 +261,30 @@ describe("createAgent", () => {
     expect(loaded?.requirements).toBeUndefined();
   });
 
-  it("stores authMode and jwtSecret", async () => {
+  it("stores authMode and jwtSecret (plaintext available on demand, not on the row mapping)", async () => {
     const created = await createAgent({
       ...validInput,
       authMode: "jwt",
       jwtSecret: "s".repeat(32),
     }, TEST_ORG);
     expect(created.authMode).toBe("jwt");
-    expect(created.jwtSecret).toBe("s".repeat(32));
+    // Presence-only mapping: the raw ciphertext rides along, the
+    // plaintext resolves on demand.
+    expect(created.jwtSecret).toBeUndefined();
+    expect(created.jwtSecretStored).toMatch(/^enc:v1:/);
+    expect(resolveAgentSecret(created)).toMatchObject({
+      status: "set",
+      secret: "s".repeat(32),
+    });
   });
 
   it("defaults authMode to 'none' when not specified", async () => {
     const created = await createAgent(validInput, TEST_ORG);
     expect(created.authMode).toBe("none");
-    expect(created.jwtSecret).toBeUndefined();
+    expect(resolveAgentSecret(created).status).toBe("none");
   });
 
-  it("toPublicAgent strips jwtSecret, exposes boolean", async () => {
+  it("toPublicAgent strips raw secrets, exposes the tri-state", async () => {
     const created = await createAgent({
       ...validInput,
       authMode: "jwt",
@@ -285,7 +293,9 @@ describe("createAgent", () => {
     const pub = toPublicAgent(created);
     expect(pub.authMode).toBe("jwt");
     expect(pub.hasJwtSecret).toBe(true);
+    expect(pub.jwtSecretStatus).toBe("set");
     expect("jwtSecret" in pub).toBe(false);
+    expect("jwtSecretStored" in pub).toBe(false);
   });
 
   it("stores and retrieves jwtScopes as a comma-separated string", async () => {
@@ -442,7 +452,7 @@ describe("updateAgent", () => {
     // Patch name only — jwtSecret not in patch → existing value kept
     const updated = await updateAgent(created.id, { name: "Renamed" }, TEST_ORG);
     expect(updated!.authMode).toBe("jwt");
-    expect(updated!.jwtSecret).toBe(secret);
+    expect(resolveAgentSecret(updated!)).toMatchObject({ status: "set", secret });
   });
 
   it("overwrites jwtSecret when patch provides a new value", async () => {
@@ -453,7 +463,7 @@ describe("updateAgent", () => {
     }, TEST_ORG);
     const newSecret = "t".repeat(40);
     const updated = await updateAgent(created.id, { jwtSecret: newSecret }, TEST_ORG);
-    expect(updated!.jwtSecret).toBe(newSecret);
+    expect(resolveAgentSecret(updated!)).toMatchObject({ status: "set", secret: newSecret });
   });
 
   it("updates authMode from none to jwt", async () => {
@@ -464,7 +474,10 @@ describe("updateAgent", () => {
       jwtSecret: "x".repeat(32),
     }, TEST_ORG);
     expect(updated!.authMode).toBe("jwt");
-    expect(updated!.jwtSecret).toBe("x".repeat(32));
+    expect(resolveAgentSecret(updated!)).toMatchObject({
+      status: "set",
+      secret: "x".repeat(32),
+    });
   });
 
   it("updates jwtScopes", async () => {
@@ -538,7 +551,7 @@ describe("countAgents (live agents — tombstones excluded)", () => {
 });
 
 describe("jwt secret encryption at rest", () => {
-  it("stores jwt_secret as ciphertext and reads back plaintext", async () => {
+  it("stores jwt_secret as ciphertext and resolves plaintext on demand", async () => {
     const secret = "s".repeat(32);
     const created = await createAgent(
       { ...validInput, authMode: "jwt", jwtSecret: secret },
@@ -550,7 +563,10 @@ describe("jwt secret encryption at rest", () => {
     );
     expect(raw.rows[0].jwt_secret).toMatch(/^enc:v1:/);
     expect(raw.rows[0].jwt_secret).not.toContain(secret);
-    expect((await getAgent(created.id, TEST_ORG))!.jwtSecret).toBe(secret);
+    expect(resolveAgentSecret((await getAgent(created.id, TEST_ORG))!)).toMatchObject({
+      status: "set",
+      secret,
+    });
   });
 
   it("re-encrypts a new secret on update (old ciphertext replaced)", async () => {
@@ -566,7 +582,10 @@ describe("jwt secret encryption at rest", () => {
     );
     expect(raw.rows[0].jwt_secret).toMatch(/^enc:v1:/);
     expect(raw.rows[0].jwt_secret).not.toContain(newSecret);
-    expect((await getAgent(created.id, TEST_ORG))!.jwtSecret).toBe(newSecret);
+    expect(resolveAgentSecret((await getAgent(created.id, TEST_ORG))!)).toMatchObject({
+      status: "set",
+      secret: newSecret,
+    });
   });
 
   it("legacy plaintext rows are still readable (passthrough)", async () => {
@@ -576,19 +595,155 @@ describe("jwt secret encryption at rest", () => {
       ["legacyagent01", "Legacy", "raw plaintext row", "http://localhost:8001/agent", TEST_ORG, "jwt", "p".repeat(32)],
     );
     const fetched = await getAgent("legacyagent01", TEST_ORG);
-    expect(fetched!.jwtSecret).toBe("p".repeat(32));
+    expect(resolveAgentSecret(fetched!)).toMatchObject({
+      status: "set",
+      secret: "p".repeat(32),
+    });
     expect(toPublicAgent(fetched!).hasJwtSecret).toBe(true);
+    expect(toPublicAgent(fetched!).jwtSecretStatus).toBe("set");
   });
 
-  it("returns decrypted plaintext (never ciphertext) through the store API", async () => {
+  it("resolves plaintext (never raw stored bytes) through the store API", async () => {
     const secret = "leak-check-" + "x".repeat(21);
     const created = await createAgent(
       { ...validInput, authMode: "jwt", jwtSecret: secret },
       TEST_ORG,
     );
     const fetched = (await getAgent(created.id, TEST_ORG))!;
-    expect(fetched.jwtSecret).toBe(secret);
+    expect(resolveAgentSecret(fetched).secret).toBe(secret);
     expect(toPublicAgent(fetched)).not.toHaveProperty("jwtSecret");
+    expect(toPublicAgent(fetched)).not.toHaveProperty("jwtSecretStored");
+  });
+});
+
+describe("row mapping is presence-only (no eager decryption)", () => {
+  // Decrypt failures used to log from rowToEntry on EVERY list/read —
+  // both the noise this file's spies had to mute and wasted work for
+  // rows whose secret no consumer of that read ever uses. The mapping
+  // must carry the raw stored value untouched and never attempt a
+  // decrypt (a decrypt attempt on this garbage ciphertext logs loudly —
+  // the spy proves it doesn't happen).
+  const GARBAGE = "enc:v1:AAAAAAAAAAAAAAAA:AAAA:AAAAAAAAAAAAAAAAAAAAAA==";
+
+  async function garbageRow() {
+    const created = await createAgent(
+      { ...validInput, authMode: "jwt", jwtSecret: "s".repeat(32) },
+      TEST_ORG,
+    );
+    await query(
+      `UPDATE agents SET jwt_secret = $1 WHERE id = $2 AND org_id = $3`,
+      [GARBAGE, created.id, TEST_ORG],
+    );
+    return created.id;
+  }
+
+  it("listAgents/getAgent carry the raw stored value without decrypting", async () => {
+    const errSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    const id = await garbageRow();
+    const listed = (await listAgents(TEST_ORG)).find((a) => a.id === id)!;
+    expect(listed.jwtSecret).toBeUndefined();
+    expect(listed.jwtSecretStored).toBe(GARBAGE);
+    const single = await getAgent(id, TEST_ORG);
+    expect(single!.jwtSecret).toBeUndefined();
+    expect(single!.jwtSecretStored).toBe(GARBAGE);
+    expect(errSpy).not.toHaveBeenCalled();
+  });
+
+  it("resolution happens only on demand — and honestly (undecryptable, not secret-less)", async () => {
+    const errSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    const id = await garbageRow();
+    const entry = (await getAgent(id, TEST_ORG))!;
+    const resolved = resolveAgentSecret(entry);
+    expect(resolved.status).toBe("undecryptable");
+    expect(resolved.secret).toBeUndefined();
+    // The honest public tri-state: presence is TRUE (a secret IS stored)
+    // — it is the status that tells the admin it can't be decrypted.
+    const pub = toPublicAgent(entry);
+    expect(pub.jwtSecretStatus).toBe("undecryptable");
+    expect(pub.hasJwtSecret).toBe(true);
+    expect(errSpy).toHaveBeenCalledTimes(1);
+  });
+
+  it("logs an undecryptable secret once per process, not per list load", async () => {
+    const errSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    const id = await garbageRow();
+    // Three independent reads (fresh entry objects each time — the shape
+    // of repeated list loads) must produce exactly ONE log line.
+    for (let i = 0; i < 3; i++) {
+      const entry = (await getAgent(id, TEST_ORG))!;
+      expect(resolveAgentSecret(entry).status).toBe("undecryptable");
+    }
+    const calls = errSpy.mock.calls.filter((c) =>
+      c.some(
+        (a) =>
+          typeof a === "object" &&
+          a !== null &&
+          "agentId" in a &&
+          a.agentId === id,
+      ),
+    );
+    expect(calls).toHaveLength(1);
+  });
+});
+
+describe("resolveAgentSecret tri-state", () => {
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  it("none — nothing stored", async () => {
+    const created = await createAgent(validInput, TEST_ORG);
+    expect(resolveAgentSecret(created)).toEqual({ status: "none" });
+  });
+
+  it("set — healthy ciphertext decrypts on demand and memoizes onto the entry", async () => {
+    const created = await createAgent(
+      { ...validInput, authMode: "jwt", jwtSecret: "s".repeat(32) },
+      TEST_ORG,
+    );
+    expect(created.jwtSecret).toBeUndefined();
+    const first = resolveAgentSecret(created);
+    expect(first.status).toBe("set");
+    expect(first.secret).toBe("s".repeat(32));
+    // The memoization lands on the entry, so a second resolution of the
+    // SAME object reports the same plaintext.
+    expect(resolveAgentSecret(created)).toMatchObject({
+      status: "set",
+      secret: "s".repeat(32),
+    });
+  });
+
+  it("set — legacy plaintext (no enc:v1: prefix) passes through without a key", async () => {
+    await query(
+      `INSERT INTO agents (id, name, description, endpoint, org_id, auth_mode, jwt_secret)
+       VALUES ($1, $2, $3, $4, $5, $6, $7)`,
+      ["legacytri01", "Legacy", "raw plaintext row", "http://localhost:8001/agent", TEST_ORG, "jwt", "p".repeat(32)],
+    );
+    const fetched = await getAgent("legacytri01", TEST_ORG);
+    expect(resolveAgentSecret(fetched!)).toMatchObject({
+      status: "set",
+      secret: "p".repeat(32),
+    });
+  });
+
+  it("undecryptable — an already-resolved plaintext wins over the stored copy", async () => {
+    // The registry's template/builder overrides ride `jwtSecret`; the
+    // resolver must honor that material instead of decrypting (or
+    // failing on) the row copy beneath it.
+    const created = await createAgent(
+      { ...validInput, authMode: "jwt", jwtSecret: "s".repeat(32) },
+      TEST_ORG,
+    );
+    await query(
+      `UPDATE agents SET jwt_secret = 'enc:v1:AAAAAAAAAAAAAAAA:AAAA:AAAAAAAAAAAAAAAAAAAAAA==' WHERE id = $1 AND org_id = $2`,
+      [created.id, TEST_ORG],
+    );
+    const entry = (await getAgent(created.id, TEST_ORG))!;
+    const errSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    expect(
+      resolveAgentSecret({ ...entry, jwtSecret: "override-secret-material" }),
+    ).toMatchObject({ status: "set", secret: "override-secret-material" });
+    expect(errSpy).not.toHaveBeenCalled();
   });
 });
 
@@ -629,9 +784,15 @@ describe("jwt secret preservation on update (undecryptable ciphertext)", () => {
       [created.id, TEST_ORG],
     );
     expect(raw.rows[0].jwt_secret).toBe(GARBAGE);
-    // And the read-path contract is unchanged: the row still DEGRADES to
-    // secret-less rather than surfacing garbage as a secret.
-    expect((await getAgent(created.id, TEST_ORG))?.jwtSecret).toBeUndefined();
+    // The read-path contract is now HONEST: the row does not degrade to
+    // secret-less — it surfaces "undecryptable" (a secret exists but
+    // can't be recovered), never mistaking a broken secret for a
+    // deliberate absence.
+    const fetched = (await getAgent(created.id, TEST_ORG))!;
+    expect(resolveAgentSecret(fetched)).toMatchObject({ status: "undecryptable" });
+    const pub = toPublicAgent(fetched);
+    expect(pub.jwtSecretStatus).toBe("undecryptable");
+    expect(pub.hasJwtSecret).toBe(true);
   });
 
   it("preserves undecryptable ciphertext under bypassOrgScope too", async () => {
@@ -675,8 +836,11 @@ describe("jwt secret preservation on update (undecryptable ciphertext)", () => {
     );
     const newSecret = "t".repeat(32);
     const updated = await updateAgent(created.id, { jwtSecret: newSecret }, TEST_ORG);
-    expect(updated?.jwtSecret).toBe(newSecret);
-    expect((await getAgent(created.id, TEST_ORG))?.jwtSecret).toBe(newSecret);
+    expect(resolveAgentSecret(updated!)).toMatchObject({ status: "set", secret: newSecret });
+    expect(resolveAgentSecret((await getAgent(created.id, TEST_ORG))!)).toMatchObject({
+      status: "set",
+      secret: newSecret,
+    });
   });
 });
 
@@ -735,7 +899,10 @@ describe("updateAgent concurrency (real Postgres)", () => {
       expect(after?.name === "Rename One" || after?.name === "Rename Two").toBe(true);
       // THE assertion: the renames' write-backs didn't clobber the stored
       // secret with stale pre-read bytes.
-      expect(after?.jwtSecret).toBe("s".repeat(32));
+      expect(resolveAgentSecret(after!)).toMatchObject({
+        status: "set",
+        secret: "s".repeat(32),
+      });
     } finally {
       restore();
     }
@@ -781,7 +948,10 @@ describe("updateAgent concurrency (real Postgres)", () => {
       // new secret decrypt (the rename didn't carry back the old secret).
       const after = await getAgent(created.id, TEST_ORG);
       expect(after?.name).toBe("Renamed");
-      expect(after?.jwtSecret).toBe("t".repeat(32));
+      expect(resolveAgentSecret(after!)).toMatchObject({
+        status: "set",
+        secret: "t".repeat(32),
+      });
     } finally {
       restore();
     }

@@ -132,8 +132,11 @@ no Docker required, no cleanup between runs (see `vitest.config.ts`).
   client-supplied, immutable after creation. The PK is composite `(id,
   org_id)`: the same id can exist in different orgs.
 - **Agent `jwtSecret` is write-only** — accepted on POST/PATCH, never
-  returned in GET responses (`PublicAgent.hasJwtSecret: boolean` replaces
-  it). A blank submit on the edit form preserves the existing value. The
+  returned in GET responses (`PublicAgent.hasJwtSecret: boolean` for
+  presence, `jwtSecretStatus` for the none/set/undecryptable tri-state).
+  A blank submit on the edit form preserves the existing value. Row
+  mapping is presence-only (`AgentEntry.jwtSecretStored`) — decrypt via
+  `resolveAgentSecret()` only where the plaintext is consumed; the
   encryption-at-rest boundary lives entirely inside
   `lib/agents/agent-store.ts`.
 - **SSRF guard on any endpoint-accepting route:** any route that takes a
