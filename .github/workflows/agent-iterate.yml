@@ -166,12 +166,21 @@ jobs:
             exit 1
           fi
           mkdir -p ~/.config/opencode
-          jq '. * {
-            permission: {
-              edit: "allow",
-              bash: "allow",
-              webfetch: "allow",
-              question: "deny"
+          # Same unattended-permission shape as agent.yml: an "ask" in
+          # headless mode aborts the session (the CLI still exits 0), so
+          # the rule list has zero ask rules — allow-all with the question
+          # deny tailing it — and both legacy shapes the secret might
+          # carry are stripped first. Agent-level denies re-state the
+          # ban where agent rules (last match wins) would override the
+          # global one.
+          jq 'del(.permission, .permissions) * {
+            permissions: [
+              { action: "*", resource: "*", effect: "allow" },
+              { action: "question", resource: "*", effect: "deny" }
+            ],
+            agents: {
+              build: { permissions: [{ action: "question", resource: "*", effect: "deny" }] },
+              explore: { mode: "all", permissions: [{ action: "question", resource: "*", effect: "deny" }] }
             },
             agent: {
               explore: { mode: "all" }
@@ -317,6 +326,13 @@ jobs:
           args=(run --agent build)
           if [ -n "${AGENT_MODEL:-}" ]; then args+=(--model "$AGENT_MODEL"); fi
           timeout 20m opencode "${args[@]}" "$(cat /tmp/prompt.md)" 2>&1 | tee /tmp/opencode.log
+          # Same aborted-session tripwire as agent.yml: a permission
+          # rejection kills the session while the CLI exits 0 — without
+          # this the run would report a benign "no changes".
+          if grep -q "The user rejected permission" /tmp/opencode.log; then
+            echo "::error::Implementer session aborted on a permission rejection — no work was completed. The opencode permission config must contain zero 'ask' rules in unattended runs."
+            exit 1
+          fi
         env:
           AGENT_MODEL: ${{ vars.AGENT_MODEL }}
 
@@ -430,6 +446,11 @@ jobs:
           args=(run --agent build)
           if [ -n "${AGENT_MODEL:-}" ]; then args+=(--model "$AGENT_MODEL"); fi
           timeout 15m opencode "${args[@]}" "$(cat /tmp/fix-prompt.md)" 2>&1 | tee /tmp/opencode-fix.log
+          # Same aborted-session tripwire as the implementer step.
+          if grep -q "The user rejected permission" /tmp/opencode-fix.log; then
+            echo "::error::Fix-pass session aborted on a permission rejection — the fix was not applied. Re-issue /agent fix after checking the permission config."
+            exit 1
+          fi
 
       - name: Re-snapshot follow-ups
         if: steps.changes.outputs.CHANGES != '0'

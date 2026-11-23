@@ -136,18 +136,33 @@ jobs:
           mkdir -p ~/.config/opencode
           # The secret supplies model + provider credentials; we layer the
           # unattended permissions on top so `opencode run` never stalls on
-          # an approval prompt (nothing can ask, so `ask` would abort).
-          # `explore` is a built-in read-only agent (no edit/write tools) but
-          # defaults to subagent mode, which `opencode run` may refuse to
-          # select — mode "all" makes it selectable while staying read-only.
+          # an approval prompt. In unattended mode NOTHING can answer an
+          # "ask" — and a rejection aborts the whole session while the CLI
+          # still exits 0, so a dead session would surface as a benign
+          # "no changes" (run #151's first attempt died exactly this way:
+          # an external_directory read of its own /tmp scratch file, and
+          # the shipped default base policy also makes `*.env` reads an
+          # ask). The V2 rule list below therefore contains zero `ask`
+          # rules and explicitly allows everything — last match wins, so
+          # the question deny tails the allow-all. `del` strips both
+          # legacy shapes the secret might carry (V1 `permission` object
+          # or a hand-written V2 `permissions` array) so only our list
+          # applies. `explore` is a built-in read-only agent (no
+          # edit/write tools) but defaults to subagent mode, which
+          # `opencode run` may refuse to select — mode "all" makes it
+          # selectable while staying read-only. Agent-level question
+          # denies re-state the ban where agent rules (appended after
+          # global, last match wins) would override the global deny.
           # Deep-merge (`*`, not `+`) so a secret that configures other
-          # agents or permissions is not clobbered.
-          jq '. * {
-            permission: {
-              edit: "allow",
-              bash: "allow",
-              webfetch: "allow",
-              question: "deny"
+          # agents or providers is not clobbered.
+          jq 'del(.permission, .permissions) * {
+            permissions: [
+              { action: "*", resource: "*", effect: "allow" },
+              { action: "question", resource: "*", effect: "deny" }
+            ],
+            agents: {
+              build: { permissions: [{ action: "question", resource: "*", effect: "deny" }] },
+              explore: { mode: "all", permissions: [{ action: "question", resource: "*", effect: "deny" }] }
             },
             agent: {
               explore: { mode: "all" }
@@ -303,6 +318,15 @@ jobs:
           args=(run --agent build)
           if [ -n "${AGENT_MODEL:-}" ]; then args+=(--model "$AGENT_MODEL"); fi
           timeout 45m opencode "${args[@]}" "$(cat /tmp/prompt.md)" 2>&1 | tee /tmp/opencode.log
+          # A permission rejection aborts the whole unattended session —
+          # and opencode still exits 0, so a dead session would surface
+          # as a benign "no changes" instead of a failure (run #151's
+          # first attempt died exactly this way). Trip on the rejection
+          # signature and fail loudly; the failure path reports honestly.
+          if grep -q "The user rejected permission" /tmp/opencode.log; then
+            echo "::error::Implementer session aborted on a permission rejection — no work was completed. The opencode permission config must contain zero 'ask' rules in unattended runs."
+            exit 1
+          fi
         env:
           AGENT_MODEL: ${{ vars.AGENT_MODEL }}
 
@@ -451,6 +475,11 @@ jobs:
           - Do NOT push, do NOT open PRs, do NOT touch .github/.
           EOF
           timeout 15m opencode run --agent build "$(cat /tmp/fix-prompt.md)" 2>&1 | tee -a /tmp/opencode.log
+          # Same aborted-session tripwire as the implementer step.
+          if grep -q "The user rejected permission" /tmp/opencode.log; then
+            echo "::error::Fix-pass session aborted on a permission rejection — the fix was not applied. Re-run after checking the permission config."
+            exit 1
+          fi
 
       # The fix pass may have surfaced out-of-scope findings or updated the
       # summary — re-snapshot both.
