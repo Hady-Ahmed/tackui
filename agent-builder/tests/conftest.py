@@ -114,8 +114,8 @@ def clean_database(postgres_dsn):
 @pytest.fixture(scope="session")
 def platform_main(postgres_dsn):
     """The service module, imported once DATABASE_URL points at the container
-    (main.py builds the real app at import time, so the env must be set
-    before the first import)."""
+    (the env must be set before the first import — build_app reads env at
+    build time; the module deliberately builds nothing at import)."""
     os.environ["DATABASE_URL"] = postgres_dsn
     # Re-assert our agent dir at the front of sys.path and evict a foreign
     # cached `main`: other suites' test modules prepend their own agent dir

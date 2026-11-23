@@ -71,12 +71,14 @@ All notable changes to this project will be documented in this file. The format 
 - **agent-builder: the tool palette shows the tool's description, not the
   full docstring.** Agno toolkits carry no explicit function description,
   so the discovery scan fell back to `inspect.getdoc` and served the raw
-  Google-style docstring — `Args:` / `Returns:` sections and all — to the
-  palette rows. The scan now cuts the resolved description at the first
-  section marker (`Args` / `Returns` / `Raises` / `Yields` / `Examples`,
-  case-insensitive); explicit `fn.description` still wins. Runtime
-  schemas keep the full docstring. Palette search no longer matches
-  argument names (an accident of the old behavior, never designed).
+  docstring — `Args:` / `Returns:` sections and all — to the palette
+  rows. The scan now cuts the resolved description at the first section
+  marker of either docstring dialect: Google-style markers (`Args` /
+  `Returns` / `Raises` / `Yields` / `Examples`) and reST/Sphinx field
+  lines (`:param x:`, `:returns:`, `:rtype:`, …), case-insensitive;
+  explicit `fn.description` still wins. Runtime schemas keep the full
+  docstring. Palette search no longer matches argument names (an
+  accident of the old behavior, never designed).
 
 - **auth: silence better-auth's misleading boot-time schema-mismatch ERROR.**
   better-auth 1.7's runtime schema check logs "Database schema mismatch …
