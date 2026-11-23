@@ -1059,6 +1059,31 @@ describe("installTemplate (idempotent upsert)", () => {
     }
   });
 
+  it("fresh install: the just-created row vanishing before the final read surfaces as the same typed error", async () => {
+    const template = await createTemplate(validInput);
+    // The row the fresh-INSERT path creates is unprotected after commit:
+    // its org can delete it between the INSERT's commit and the path's
+    // final read (nothing holds the row). Script: the lookup misses for
+    // real (fresh path) and the INSERT lands for real, but the final
+    // read sees the row gone. This used to blow up on a non-null
+    // assertion — getAgent returned null, the route's catch-all turned
+    // the missing agent into a bare 500.
+    pgScript.queryScript = (text) => {
+      if (text.includes("id = $1 AND org_id = $2")) return { rows: [] };
+      return undefined;
+    };
+    try {
+      await expect(installTemplate(template, TEST_ORG)).rejects.toBeInstanceOf(
+        TemplateInstallVanishedError,
+      );
+    } finally {
+      pgScript.queryScript = null;
+    }
+    // The INSERT itself landed — the vanish is post-commit, so a retry
+    // finds the row and takes the plain re-sync path.
+    expect(await listAgents(TEST_ORG)).toHaveLength(1);
+  });
+
   it("loses-race fallback: the winner's row vanishing mid-call surfaces as the same typed error", async () => {
     const template = await createTemplate(validInput);
     const winner = await installTemplate(template, TEST_ORG);

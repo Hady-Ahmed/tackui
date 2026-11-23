@@ -215,6 +215,13 @@ All notable changes to this project will be documented in this file. The format 
   as a bare 500. It now answers 409 with a retryable message — a retry
   takes the fresh-install path and recreates the copy.
 
+- **A fresh template install whose just-created agent row vanished before
+  the final read no longer 500s (#147).** Nothing holds the new row after
+  the INSERT commits, so its org could delete it before
+  `installTemplate`'s closing read, surfacing the missing row as a bare
+  500. It now answers 409 with a retryable message — a retry takes the
+  fresh-install path and recreates the copy.
+
 - **Connector names are slug-validated at the route before any side
   effect (#136).** `PUT /api/connectors` reused the store's http(s)-only
   URL schema but kept a looser name check, so a non-slug name passed the
