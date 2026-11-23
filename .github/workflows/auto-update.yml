@@ -225,21 +225,19 @@ jobs:
             exit 1
           fi
           mkdir -p ~/.config/opencode
-          # Same unattended-permission shape as agent.yml (see its comment
-          # for the full rationale): an "ask" in headless mode aborts the
-          # session while the CLI still exits 0, so the rule list has zero
-          # ask rules — allow-all with the question deny tailing it — and
-          # both legacy shapes the secret might carry are stripped first.
-          # Agent-level denies re-state the ban where agent rules (last
-          # match wins) would override the global one.
+          # Same V1-shaped unattended permission override as agent.yml
+          # (see its comment): the installed opencode-ai 1.x binary
+          # hard-rejects V2 `permissions` arrays and asks by default for
+          # out-of-project reads — `external_directory: "allow"` kills
+          # that ask. `del` strips both shapes the secret might carry so
+          # nothing inherited can re-introduce an ask or a fatal V2 array.
           jq 'del(.permission, .permissions) * {
-            permissions: [
-              { action: "*", resource: "*", effect: "allow" },
-              { action: "question", resource: "*", effect: "deny" }
-            ],
-            agents: {
-              build: { permissions: [{ action: "question", resource: "*", effect: "deny" }] },
-              explore: { mode: "all", permissions: [{ action: "question", resource: "*", effect: "deny" }] }
+            permission: {
+              edit: "allow",
+              bash: "allow",
+              webfetch: "allow",
+              question: "deny",
+              external_directory: "allow"
             },
             agent: {
               explore: { mode: "all" }
