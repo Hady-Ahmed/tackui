@@ -282,9 +282,12 @@ jobs:
                   <not touched, or the threat-model note>
                 - Env vars: <none added, or "added to .env.example + README">
 
-            (The workflow ticked the three gate boxes on the Checklist itself —
-            it re-ran them; leave the other checklist items unticked and let
-            the attestations state your case for the human to confirm.)
+            (Leave EVERY Checklist box unticked — including the three gate
+            boxes for lint/typecheck/tests. The workflow re-runs the gates on
+            the final code and ticks those three boxes itself, adding its own
+            "verified by this run's gate re-run" note, so the human can see
+            at a glance which claims are machine-vouched and which are yours
+            to confirm. If you tick a box, that distinction disappears.)
             Every claim in the file is verified against the actual diff by the
             reviewer pass — do not write anything you did not do.
           EOF
