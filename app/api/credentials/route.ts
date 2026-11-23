@@ -40,7 +40,7 @@ import { z } from "zod";
 import { getCurrentUser } from "@/lib/auth/context";
 import { checkUserLimit } from "@/lib/ratelimit/middleware";
 import { withTransaction } from "@/lib/db/pg";
-import { withKeyedLock } from "@/lib/db/keyed-lock";
+import { withKeyedLock, KeyedLockUnavailableError } from "@/lib/db/keyed-lock";
 import {
   fetchCredentialsCatalog,
   type CredentialCatalogEntry,
@@ -235,6 +235,15 @@ export async function PUT(request: NextRequest) {
       updatedAt: storedRecord.updatedAt,
     });
   } catch (err) {
+    // The lock's bounded-wait failure (waiter timeout / queue cap, #153)
+    // is retryable contention, not a server fault — 503 with the same
+    // "please try again" copy, never the generic 500.
+    if (err instanceof KeyedLockUnavailableError) {
+      return NextResponse.json(
+        { error: "Couldn't save the credential — please try again." },
+        { status: 503 },
+      );
+    }
     console.error("[credentials] failed to store credential", {
       userId: user.id,
       error: err instanceof Error ? err.message : String(err),

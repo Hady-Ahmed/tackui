@@ -142,6 +142,14 @@ no Docker required, no cleanup between runs (see `vitest.config.ts`).
   response bodies must be wrapped with `wrapStreamWithRelease` so the
   concurrent counter decrements on close/error/cancel. Solo-mode bypass is
   centralized in the middleware — don't add per-route `AUTH_DISABLED` checks.
+- **`withKeyedLock` waits are bounded** (`lib/db/keyed-lock.ts`): a
+  same-key waiter times out after 30s (default) and the queue caps at
+  32 waiters — contended calls reject with `KeyedLockUnavailableError`
+  (`code` `KEYED_LOCK_UNAVAILABLE`), and callers holding the lock must
+  surface it as retryable (routes map it to a 503 "please try again",
+  never the generic 500). An operation that can legitimately exceed 30s
+  under contention needs a larger per-call `waitTimeoutMs` (or
+  `Infinity`).
 - **AG-UI protocol spec:** https://docs.ag-ui.com — see
   [Events](https://docs.ag-ui.com/concepts/events),
   [Messages](https://docs.ag-ui.com/concepts/messages), and

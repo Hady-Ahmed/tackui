@@ -39,7 +39,11 @@ there is no path from a builder agent to a template.
   acquired BEFORE the transaction opens: writers blocked on the row
   queue in-process holding no pool connection, so a pile-up on one
   template can't exhaust `PG_POOL_MAX` — writers to different templates
-  never block each other.
+  never block each other. The wait is bounded (#153): a waiter gives up
+  after 30s (default) or when the same-key queue reaches 32 waiters,
+  rejecting with `KeyedLockUnavailableError`, which the PATCH route maps
+  to a 503 "please try again" instead of the generic 500 — a wedged
+  holder can stall editors briefly, but never parks them forever.
 - Installing creates an org-scoped `agents` row via `installTemplate()`
   — but the row is an **entitlement/reference, not a config copy**.
   The runtime resolves endpoint/auth **live from the template** on every

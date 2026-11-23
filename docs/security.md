@@ -101,7 +101,11 @@ secret stores whose boundaries are worth stating explicitly:
   is acquired BEFORE the transaction, so writers blocked on the row
   queue in-process without pinning a pool connection (same mechanism as
   `updateTemplate` — see [catalog.md](./catalog.md) "Concurrent template
-  edits serialize"). The
+  edits serialize"). The wait is also bounded (#153) so a wedged lock
+  holder can't accumulate waiters forever: a waiter times out after 30s
+  and the same-key queue caps at 32, failing fast with
+  `KeyedLockUnavailableError`, which the routes surface as a 503
+  "please try again" instead of the generic 500. The
   decrypted key is consumed exclusively by the run path and delivered
   per-run as an AG-UI context item — never persisted AgentOS-side, never
   cached agent-side. Rows are scoped `UNIQUE (user_id, provider)`; no FK
