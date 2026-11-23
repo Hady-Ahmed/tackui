@@ -68,13 +68,32 @@ _MODEL_ENV_RE = re.compile(
 )
 _CRED_ENV_RE = re.compile(r"(?:^|_)(?:API_?KEY|TOKEN|SECRET|PASSWORD)(?:_|$)")
 
-# Google-style docstring section markers (``Args:``, ``Returns:`` …) — the
-# palette description stops at the first one. Line-anchored so prose that
-# merely MENTIONS e.g. "Returns" cannot cut a description short; the colon
-# excludes "Returns the result" style prose. Case-insensitive: agno ships
-# lowercase markers too.
+# Docstring section markers — the palette description stops at the FIRST
+# line matching either dialect, wherever it appears.
+#
+# Google style (``Args:`` …): line-anchored so prose that merely MENTIONS
+# e.g. "Returns" cannot cut a description short; the colon excludes
+# "Returns the result" style prose.
+#
+# reST style (``:param x:``, ``:returns:`` …): an ADDITIVE branch — a
+# leading colon can never match the Google names, so affected toolkits
+# still served their full docstring to the palette. Covered fields are the
+# display-informational ones (param/parameter/arg/argument,
+# returns/return/rtype, raises/raise/except/exception, yields/yield), not
+# type/keyword minutiae.
+#
+# Both branches are case-insensitive (shared flag): agno vendors
+# third-party toolkits and ships lowercase markers of both dialects.
+#
+# No head-scan special case: reST fields may legally PRECEDE the prose,
+# but the split is simply the first marker line — a docstring whose
+# fields precede its prose truncates there, which is acceptable for a
+# two-line-clamped palette row.
 _DOCSTRING_SECTION_RE = re.compile(
-    r"^[ \t]*(?:Args|Returns|Raises|Yields|Examples)[ \t]*:",
+    r"^[ \t]*(?:"
+    r"(?:Args|Returns|Raises|Yields|Examples)[ \t]*:"
+    r"|:[ \t]*(?:Param|Parameter|Arg|Argument|Returns|Return|Rtype|Raises|Raise|Except|Exception|Yields|Yield)\b[^:\n]*:"
+    r")",
     re.IGNORECASE | re.MULTILINE,
 )
 
@@ -223,8 +242,9 @@ def _display_description(fn: Function) -> Optional[str]:
     """The description the palette shows for one function.
 
     Explicit metadata wins when the toolkit sets it; otherwise the
-    entrypoint docstring, trimmed at the first Google-style section marker
-    (``Args:`` and friends). The sections document parameters for an LLM —
+    entrypoint docstring, trimmed at the first section marker of either
+    dialect (Google-style ``Args:`` or reST ``:param x:`` fields — see
+    the regex comment). The sections document parameters for an LLM —
     noise for a human scanning a palette, and the palette is this payload's
     only audience (the runtime LLM-facing schemas keep the full docstring).
     A docstring that is nothing but sections keeps its full text: half a
