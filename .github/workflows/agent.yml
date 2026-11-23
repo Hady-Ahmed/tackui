@@ -1,5 +1,10 @@
 name: Issue Agent
 
+# Dynamic run name so sibling workflows can identify runs by issue number
+# when deciding whether an agent branch is safe to touch (auto-update.yml
+# parses "#N" out of in-progress run titles before acting on that branch).
+run-name: "Issue Agent — #${{ github.event.issue.number }}"
+
 # Picks up issues labeled `agent` and dispatches opencode (headless) at them.
 # The harness commits to a branch and opens a PR authored by tackui-agent[bot];
 # the bot has no merge permission — a human must approve the PR to merge.
