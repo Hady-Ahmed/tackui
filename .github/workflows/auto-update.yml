@@ -1,0 +1,397 @@
+name: Auto-update agent PRs
+
+# Keeps open agent PRs current with main so the human merge queue is always
+# green, up-to-date, and conflict-free. Runs on every push to main.
+#
+# Per open agent PR (branch matching agent/issue-N-*), GitHub's merge state
+# decides the action — staleness is the only thing this workflow fixes:
+#   BEHIND  (stale, no conflicts)  -> free: merge main into the branch via
+#                                     the update-branch API ("Update branch"
+#                                     button, as an API call). The push
+#                                     re-runs the PR's CI automatically.
+#   DIRTY   (real conflicts)       -> bounded agent resolve pass: git merge
+#                                     main, opencode resolves the conflicted
+#                                     hunks (preserving the PR's intent,
+#                                     adapted to main's new code), gates
+#                                     re-run by THIS workflow, push. One
+#                                     attempt — failure comments on the PR
+#                                     and stops; no self-repair spiral.
+#   anything else                  -> skip: BLOCKED/UNSTABLE mean CI or
+#                                     reviews are in motion (merging main
+#                                     would cancel and restart them for no
+#                                     fix); CLEAN is already current; DRAFT
+#                                     is deliberately not ready.
+# PRs whose issue has an in-flight "Issue Agent" run are skipped entirely —
+# the run force-pushes that branch at the end and would discard the update.
+# Runs identify themselves by issue number via agent.yml's dynamic run-name
+# ("Issue Agent — #N"), which this workflow parses.
+#
+# True conflicts are a judgment call, not a text operation, so nothing here
+# resolves them with --ours/--theirs-style picks; the resolve pass always
+# runs through the agent with both sides' intent in scope.
+#
+# Required repo secrets (same as agent.yml):
+#   APP_ID / APP_PRIVATE_KEY     — tackui-agent GitHub App
+#   AGENT_OPENCODE_CONFIG        — opencode config JSON (model + provider)
+#   AGENT_MODEL (optional var)   — override model, "provider/model" format
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch: {}
+
+concurrency:
+  # Serialize updater runs: two main-pushes in quick succession queue
+  # instead of racing on the same agent branches.
+  group: auto-update-prs
+  cancel-in-progress: false
+
+# GITHUB_TOKEN: read-only queries only (list PRs, list in-flight runs).
+# Every mutation (update-branch, pushes, comments) goes through the app
+# token. App-token pushes also re-trigger the PRs' CI — GITHUB_TOKEN
+# pushes would not.
+permissions:
+  contents: read
+  pull-requests: read
+  actions: read
+
+jobs:
+  update:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - name: Auth as tackui-agent
+        id: app-token
+        uses: actions/create-github-app-token@v2
+        with:
+          app-id: ${{ secrets.APP_ID }}
+          private-key: ${{ secrets.APP_PRIVATE_KEY }}
+          owner: Hady-Ahmed
+          repositories: tackui
+
+      - uses: actions/checkout@v7
+        with:
+          token: ${{ steps.app-token.outputs.token }}
+          fetch-depth: 0
+          # Same credential-isolation rule as agent.yml: no token lands in
+          # .git/config; mutations authenticate via explicit URLs.
+          persist-credentials: false
+
+      - name: Plan — classify every open agent PR
+        env:
+          # Read-only queries use GITHUB_TOKEN; the app token is spent on
+          # mutations only.
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          printf '| PR | Branch | State | Action |\n|---|---|---|---|\n' > /tmp/report.md
+          : > /tmp/update-prs
+          : > /tmp/resolve-prs
+
+          # Issue numbers with an in-flight implement/fix run — their
+          # branches belong to that run until it finishes.
+          inflight="$(gh run list --repo "$GITHUB_REPOSITORY" \
+            --workflow "Issue Agent" --status in_progress --json displayTitle \
+            --jq '[.[].displayTitle | capture("#(?<n>[0-9]+)$").n] | join(" ")' 2>/dev/null || echo "")"
+          echo "In-flight agent issues: ${inflight:-none}"
+
+          gh pr list --repo "$GITHUB_REPOSITORY" --state open --limit 100 \
+            --json number,headRefName,mergeStateStatus,isDraft \
+            --jq '.[] | [.number, .headRefName, (.mergeStateStatus // "UNKNOWN"), .isDraft] | @tsv' \
+          | while IFS=$'\t' read -r n branch state draft; do
+              case "$branch" in
+                agent/issue-*)
+                  n_issue="$(printf '%s' "$branch" | sed -n 's|^agent/issue-\([0-9]*\)-.*|\1|p')"
+                  if [ -z "$n_issue" ]; then
+                    printf '| #%s | %s | %s | skip — branch has no issue number |\n' "$n" "$branch" "$state" >> /tmp/report.md
+                    continue
+                  fi
+                  if [ "$draft" = "True" ]; then
+                    printf '| #%s | %s | %s | skip — draft |\n' "$n" "$branch" "$state" >> /tmp/report.md
+                    continue
+                  fi
+                  case " ${inflight} " in
+                    *" $n_issue "*)
+                      printf '| #%s | %s | %s | skip — agent run in flight |\n' "$n" "$branch" "$state" >> /tmp/report.md
+                      continue
+                      ;;
+                  esac
+                  case "$state" in
+                    BEHIND)
+                      printf '%s\t%s\n' "$n" "$branch" >> /tmp/update-prs
+                      printf '| #%s | %s | %s | **update branch** |\n' "$n" "$branch" "$state" >> /tmp/report.md
+                      ;;
+                    DIRTY)
+                      printf '%s\t%s\n' "$n" "$branch" >> /tmp/resolve-prs
+                      printf '| #%s | %s | %s | **agent conflict-resolve** |\n' "$n" "$branch" "$state" >> /tmp/report.md
+                      ;;
+                    *)
+                      printf '| #%s | %s | %s | skip — nothing staleness-shaped to fix |\n' "$n" "$branch" "$state" >> /tmp/report.md
+                      ;;
+                  esac
+                  ;;
+                *)
+                  printf '| #%s | %s | %s | skip — not an agent branch |\n' "$n" "$branch" "$state" >> /tmp/report.md
+                  ;;
+              esac
+            done
+
+          update_count="$(wc -l < /tmp/update-prs)"
+          resolve_count="$(wc -l < /tmp/resolve-prs)"
+          echo "Plan: ${update_count} to update, ${resolve_count} to resolve"
+          {
+            echo "UPDATE_COUNT=${update_count}"
+            echo "RESOLVE_COUNT=${resolve_count}"
+          } >> "$GITHUB_OUTPUT"
+
+      # ------------------------------------------------------------------
+      # BEHIND — free updates. Re-check in-flight and state immediately
+      # before acting (the plan snapshot is already minutes old).
+      # ------------------------------------------------------------------
+      - name: Update stale PRs (merge main in, no conflicts)
+        if: steps.plan.outputs.UPDATE_COUNT != '0'
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+        run: |
+          set -euo pipefail
+
+          inflight_now() {
+            gh run list --repo "$GITHUB_REPOSITORY" \
+              --workflow "Issue Agent" --status in_progress --json displayTitle \
+              --jq '[.[].displayTitle | capture("#(?<n>[0-9]+)$").n] | join(" ")' 2>/dev/null || echo ""
+          }
+
+          while IFS=$'\t' read -r n branch; do
+            [ -n "$n" ] || continue
+            n_issue="$(printf '%s' "$branch" | sed -n 's|^agent/issue-\([0-9]*\)-.*|\1|p')"
+            case " $(inflight_now) " in
+              *" $n_issue "*)
+                printf '::notice::PR #%s skipped — its agent run started mid-pass.\n' "$n"
+                printf '| #%s | %s | update skipped — agent run started mid-pass |\n' "$n" "$branch" >> /tmp/report.md
+                continue
+                ;;
+            esac
+            state_now="$(gh pr view "$n" --repo "$GITHUB_REPOSITORY" --json mergeStateStatus -q .mergeStateStatus)"
+            if [ "$state_now" != "BEHIND" ]; then
+              printf '::notice::PR #%s no longer BEHIND (%s) — skipping.\n' "$n" "$state_now"
+              printf '| #%s | %s | update skipped — now %s |\n' "$n" "$branch" "$state_now" >> /tmp/report.md
+              continue
+            fi
+            head_oid="$(gh pr view "$n" --repo "$GITHUB_REPOSITORY" --json headRefOid -q .headRefOid)"
+            # expected_head_sha: refuse the update if the branch moved since
+            # our read — nobody's work gets silently merged atop the wrong base.
+            if gh api -X PUT "repos/${GITHUB_REPOSITORY}/pulls/${n}/update-branch" \
+                 -f expected_head_sha="$head_oid" > /dev/null; then
+              printf '::notice::PR #%s — main merged in; CI re-runs on the new merge ref.\n' "$n"
+              printf '| #%s | %s | updated — main merged in, CI re-runs |\n' "$n" "$branch" >> /tmp/report.md
+            else
+              # 422 = conflicts appeared between plan and now. Leave it: the
+              # next push to main (or a manual re-run) will route it through
+              # the resolve pass with a fresh DIRTY classification.
+              printf '::warning::PR #%s update-branch failed (now conflicted?) — left for the resolve pass on the next trigger.\n' "$n"
+              printf '| #%s | %s | update failed — now conflicted; routed to resolve next pass |\n' "$n" "$branch" >> /tmp/report.md
+            fi
+          done < /tmp/update-prs
+
+      # ------------------------------------------------------------------
+      # DIRTY — bounded agent resolve pass. The workflow owns git mechanics
+      # and tokens; opencode only edits files. One attempt, gates re-run
+      # here, push as the app. Any failure: loud comment on the PR, then
+      # move on — the updater never loops on one branch.
+      # ------------------------------------------------------------------
+      - name: Install opencode
+        if: steps.plan.outputs.RESOLVE_COUNT != '0'
+        run: npm i -g opencode-ai@latest
+
+      - name: Configure opencode (model + credentials + unattended permissions)
+        if: steps.plan.outputs.RESOLVE_COUNT != '0'
+        env:
+          AGENT_OPENCODE_CONFIG: ${{ secrets.AGENT_OPENCODE_CONFIG }}
+        run: |
+          set -euo pipefail
+          if [ -z "$AGENT_OPENCODE_CONFIG" ]; then
+            echo "::error::AGENT_OPENCODE_CONFIG secret is not set — cannot run the resolve pass."
+            exit 1
+          fi
+          mkdir -p ~/.config/opencode
+          jq '. * {
+            permission: {
+              edit: "allow",
+              bash: "allow",
+              webfetch: "allow",
+              question: "deny"
+            },
+            agent: {
+              explore: { mode: "all" }
+            }
+          }' <<< "$AGENT_OPENCODE_CONFIG" > ~/.config/opencode/opencode.json
+          chmod 600 ~/.config/opencode/opencode.json
+
+      - name: Resolve conflicts (DIRTY PRs)
+        if: steps.plan.outputs.RESOLVE_COUNT != '0'
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+          AGENT_MODEL: ${{ vars.AGENT_MODEL }}
+        run: |
+          set -euo pipefail
+          URL="https://x-access-token:${GH_TOKEN}@github.com/${GITHUB_REPOSITORY}.git"
+
+          inflight_now() {
+            gh run list --repo "$GITHUB_REPOSITORY" \
+              --workflow "Issue Agent" --status in_progress --json displayTitle \
+              --jq '[.[].displayTitle | capture("#(?<n>[0-9]+)$").n] | join(" ")' 2>/dev/null || echo ""
+          }
+
+          # Post a loud comment on the PR; the caller continues with the next.
+          give_up() {
+            gh pr comment "$1" --repo "$GITHUB_REPOSITORY" \
+              --body "$(printf 'Auto-update could not resolve this PR'"'"'s conflicts with main automatically (%s).\n\nOptions: resolve by hand, or remove + re-apply the `agent` label on its issue to have the agent redo the work fresh on latest main.' "$2")" \
+              > /dev/null || true
+            printf '::error::PR #%s: auto-resolve failed (%s) — commented on the PR, moving on.\n' "$1" "$2"
+            printf '| #%s | %s | resolve FAILED (%s) — commented on PR |\n' "$1" "$3" "$2" >> /tmp/report.md
+          }
+
+          # NOTE: this function's body sits at the run-block base indent on
+          # purpose — the heredoc below must land at column 0 after YAML
+          # strips the block indentation, or bash reads it as unterminated.
+          resolve_one() {
+          # $1 = PR number, $2 = branch, $3 = issue number
+          n="$1"; branch="$2"; n_issue="$3"
+
+          case " $(inflight_now) " in
+            *" $n_issue "*)
+              printf '::notice::PR #%s skipped — its agent run started mid-pass.\n' "$n"
+              printf '| #%s | %s | resolve skipped — agent run started mid-pass |\n' "$n" "$branch" >> /tmp/report.md
+              return 0
+              ;;
+          esac
+          state_now="$(gh pr view "$n" --repo "$GITHUB_REPOSITORY" --json mergeStateStatus -q .mergeStateStatus)"
+          if [ "$state_now" != "DIRTY" ]; then
+            printf '::notice::PR #%s no longer DIRTY (%s) — skipping resolve.\n' "$n" "$state_now"
+            printf '| #%s | %s | resolve skipped — now %s |\n' "$n" "$branch" "$state_now" >> /tmp/report.md
+            return 0
+          fi
+
+          echo "::group::PR #${n} — merge main into ${branch}"
+          if ! git fetch "$URL" "$branch"; then
+            give_up "$n" "could not fetch the branch" "$branch"
+            echo "::endgroup::"
+            return 0
+          fi
+          if ! base="$(git rev-parse FETCH_HEAD)"; then
+            give_up "$n" "could not read the fetched branch head" "$branch"
+            echo "::endgroup::"
+            return 0
+          fi
+          if ! git checkout -B "$branch" "$base"; then
+            give_up "$n" "could not check out the branch" "$branch"
+            echo "::endgroup::"
+            return 0
+          fi
+          git config user.name "tackui-agent[bot]"
+          git config user.email "tackui-agent[bot]@users.noreply.github.com"
+          if git merge main > /tmp/merge.log 2>&1; then
+            # State lied — the conflicts resolved themselves upstream since
+            # the plan. A clean merge commit exists; push it and move on.
+            if git push "$URL" "$branch:refs/heads/$branch"; then
+              printf '::notice::PR #%s merged main cleanly after all — pushed merge commit.\n' "$n"
+              printf '| #%s | %s | merged main cleanly — pushed, CI re-runs |\n' "$n" "$branch" >> /tmp/report.md
+            else
+              give_up "$n" "clean-merge push rejected — branch moved; next pass re-classifies" "$branch"
+            fi
+            echo "::endgroup::"
+            return 0
+          fi
+
+          # Build the resolve brief from the actual conflict state.
+          conflicted="$(git diff --name-only --diff-filter=U | tr '\n' ' ')"
+          cat > /tmp/resolve-prompt.md <<EOF
+          You are resolving merge conflicts on branch ${branch} — the branch
+          of pull request #${n}, which implements issue #${n_issue} in the
+          tackui repository. main has moved since this branch was last
+          updated; "git merge main" left conflicts in the working tree.
+
+          Rules:
+          - For each conflicted file, understand BOTH sides before choosing:
+            the branch's feature (this PR's work) and main's incoming
+            change. Read the surrounding code on both sides.
+          - Resolve so the PR's feature SURVIVES, adapted to main's new
+            code. Where main's change supersedes one of the branch's
+            assumptions, adapt the feature to the new reality. Never resolve
+            by silently dropping the feature.
+          - Touch ONLY conflicted hunks and their immediate consequences.
+            This is not a refactor pass. Do NOT touch anything under
+            .github/.
+          - Read AGENTS.md if the conflicted code falls in a documented
+            area; follow its gotchas.
+          - When done: delete ALL conflict markers (lines starting with
+            <<<<<<< or >>>>>>>), stage the resolved files, and commit with:
+            "merge: resolve conflicts with main (issue #${n_issue})".
+          - Do NOT push — the workflow pushes.
+
+          Conflicted files: ${conflicted}
+          EOF
+
+          args=(run --agent build)
+          if [ -n "${AGENT_MODEL:-}" ]; then args+=(--model "$AGENT_MODEL"); fi
+          if ! timeout 20m opencode "${args[@]}" "$(cat /tmp/resolve-prompt.md)" 2>&1 | tee /tmp/opencode-resolve.log; then
+            give_up "$n" "the resolve agent run failed" "$branch"
+            echo "::endgroup::"
+            return 0
+          fi
+
+          # Machine verification — the agent's word is not evidence.
+          unresolved="$(git diff --name-only --diff-filter=U | wc -l)"
+          markers="$( (git grep -lE '^(<{7}|>{7})' -- . 2>/dev/null || true) | wc -l )"
+          if [ "$unresolved" != "0" ] || [ "$markers" != "0" ]; then
+            give_up "$n" "conflict markers or unmerged files remain after the resolve pass (${unresolved} unmerged, ${markers} files with markers)" "$branch"
+            echo "::endgroup::"
+            return 0
+          fi
+
+          # Gates re-run by this workflow on the resolved result — never on
+          # the agent's word.
+          if ! npm ci; then give_up "$n" "npm ci failed" "$branch"; echo "::endgroup::"; return 0; fi
+          if ! npm run lint; then give_up "$n" "lint failed on the resolved code" "$branch"; echo "::endgroup::"; return 0; fi
+          if ! npx tsc --noEmit; then give_up "$n" "typecheck failed on the resolved code" "$branch"; echo "::endgroup::"; return 0; fi
+          if ! npm run test; then give_up "$n" "tests failed on the resolved code" "$branch"; echo "::endgroup::"; return 0; fi
+          if git diff --name-only "$(git merge-base main HEAD)" HEAD | grep -q '^agent-builder/'; then
+            if ! command -v uv >/dev/null; then
+              curl -LsSf https://astral.sh/uv/install.sh | sh
+              echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+            fi
+            if ! (cd agent-builder && uv run pytest); then
+              give_up "$n" "python tests failed on the resolved code" "$branch"
+              echo "::endgroup::"
+              return 0
+            fi
+          fi
+
+          # A plain push (never --force): if the branch moved under us, the
+          # push fails loudly instead of clobbering anyone's work.
+          if git push "$URL" "$branch:refs/heads/$branch"; then
+            printf '::notice::PR #%s — conflicts resolved, gates green, pushed; CI re-runs.\n' "$n"
+            printf '| #%s | %s | resolved — gates green, pushed, CI re-runs |\n' "$n" "$branch" >> /tmp/report.md
+          else
+            give_up "$n" "push rejected — the branch moved during the resolve; next pass re-classifies" "$branch"
+          fi
+          echo "::endgroup::"
+          }
+
+          while IFS=$'\t' read -r n branch; do
+            [ -n "$n" ] || continue
+            n_issue="$(printf '%s' "$branch" | sed -n 's|^agent/issue-\([0-9]*\)-.*|\1|p')"
+            # < /dev/null: opencode and npm must never eat the loop's stdin.
+            resolve_one "$n" "$branch" "$n_issue" < /dev/null \
+              || printf '::warning::unexpected error while resolving PR #%s — see the log above.\n' "$n"
+          done < /tmp/resolve-prs
+
+      - name: Report
+        if: always()
+        run: |
+          set -euo pipefail
+          {
+            echo "## Auto-update — $(date -u '+%Y-%m-%d %H:%MZ')"
+            echo
+            cat /tmp/report.md
+          } >> "$GITHUB_STEP_SUMMARY"
