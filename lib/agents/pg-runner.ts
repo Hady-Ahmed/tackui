@@ -87,7 +87,8 @@ const STALE_LOCK_GRACE_MS = 10_000;
  * ids are client-generated UUIDs, so no legitimate flow re-creates a
  * deleted one). Pruned opportunistically inside deleteThread's
  * transaction: every delete sweeps rows older than this — no background
- * timer.
+ * timer. The same transaction also clears run_state rows for tombstoned
+ * ids (orphans a delete-vs-teardown race can leave behind; see #140).
  */
 const TOMBSTONE_RETENTION_MS = 30 * 24 * 60 * 60 * 1000;
 
@@ -1260,6 +1261,21 @@ export class PostgresAgentRunner extends AgentRunner {
         `INSERT INTO deleted_threads (thread_id) VALUES ($1)
          ON CONFLICT (thread_id) DO NOTHING`,
         [threadId],
+      );
+      // Sweep orphaned run_state rows behind tombstoned ids (#140): a
+      // delete committing between teardownRun's re-release guard SELECT
+      // and setRunState's upsert leaves a bare row for the deleted id —
+      // invisible (boot reset clears it; startRun refuses the id) but
+      // garbage that would otherwise outlive the tombstone. Runs BEFORE
+      // the age prune below: the prune removes aged tombstones from the
+      // table, and a sweep ordered after it would miss their run_state
+      // rows. Sweeping every tombstoned id — not just the pruned ones —
+      // cleans the orphan on the next delete; a tombstoned id's run_state
+      // row is always orphaned (the delete tx removed it, startRun
+      // refuses the id), so nothing load-bearing is touched.
+      await client.query(
+        `DELETE FROM run_state
+         WHERE thread_id IN (SELECT thread_id FROM deleted_threads)`,
       );
       await client.query(
         `DELETE FROM deleted_threads WHERE deleted_at < $1`,
