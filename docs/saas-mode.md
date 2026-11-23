@@ -82,9 +82,11 @@ Routes:
 - Migration `0004_subscriptions.sql` — `subscriptions` table (`org_id` PK,
   `plan`/`status`/`seats`/`current_period_end`, indexes on Stripe IDs).
 - Client hooks: `lib/billing/use-billing.ts` (`useBilling()` — one fetch per
-  page load, cached in module state), `use-orgs.ts` (`useOrgs()` +
-  `resetOrgsCache()`), `use-invitations.ts` (pending-invite badge via the
-  better-auth client + `resetInvitationsCache()`).
+  page load, cached in module state), `use-orgs.ts` (`useOrgs()` — one
+  fetch per page load, cached in module state, `refresh()` for
+  post-mutation reloads — + `resetOrgsCache()`), `use-invitations.ts`
+  (pending-invite badge via the better-auth client +
+  `resetInvitationsCache()`).
 
 ## Plan enforcement (SaaS-only)
 

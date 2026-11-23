@@ -9,6 +9,7 @@ import {
   extractErrorMessage,
   sortTools,
   type BuilderToolOption,
+  type CredentialsState,
   type PlatformModel,
 } from "@/components/builder/builder-config";
 import { ConnectorsAdmin } from "@/components/connectors-admin";
@@ -17,6 +18,7 @@ import { authClient } from "@/lib/auth/auth-client";
 import { useAuthConfig } from "@/lib/auth/use-auth-config";
 import { useCanManageAgents } from "@/lib/auth/use-can-manage-agents";
 import { useBilling } from "@/lib/billing/use-billing";
+import type { PublicConnector } from "@/lib/connectors/connector-store";
 import {
   TEST_HELP,
   TestBadge,
@@ -173,19 +175,26 @@ function AgentsPageInner() {
     fetchRef.current();
   }, []);
 
-  // The two platform catalogs — fetched ONCE per page visit and passed
-  // down into the builder form. The form used to re-fetch both on every
-  // panel open and every tab flip (the kind toggle swaps the form
-  // component, remounting it); the lift pays the catalog cost once per
-  // visit instead, which also kills the collapsed-value flash while the
-  // model default landed. Staleness is accepted: an admin who enables a
-  // model or toolkit sees it on the next /agents load. Credentials and
-  // connectors stay form-owned — user-scoped, they change mid-session
-  // (the connect flow reloads them on success).
+  // The two platform catalogs + the user-scoped badge/palette data —
+  // fetched ONCE per page visit and passed down into the builder form
+  // (and, for connectors, the ConnectorsAdmin section below). The form
+  // used to re-fetch all four on every panel open and every tab flip
+  // (the kind toggle swaps the form component, remounting it); the lift
+  // pays the cost once per visit instead, which also kills the
+  // collapsed-value flash while the model default landed — the
+  // key-aware default waits on credentials (connectivity comes from
+  // hasKey), so form-owned credentials delayed it until after the
+  // flicker. In-page mutations refresh through the callbacks (the key
+  // form's save, connector create/update/delete); staleness across
+  // tabs/windows is accepted — changes made outside this page show on
+  // the next /agents load.
   const [models, setModels] = useState<PlatformModel[] | null>(null);
   const [modelsError, setModelsError] = useState<string | null>(null);
   const [tools, setTools] = useState<BuilderToolOption[] | null>(null);
   const [toolsError, setToolsError] = useState<string | null>(null);
+  const [credentials, setCredentials] = useState<CredentialsState | null>(null);
+  const [connectors, setConnectors] = useState<PublicConnector[] | null>(null);
+  const [connectorsError, setConnectorsError] = useState<string | null>(null);
 
   const loadModels = useCallback(async () => {
     try {
@@ -225,17 +234,59 @@ function AgentsPageInner() {
     await Promise.all([loadModels(), loadTools()]);
   }, [loadModels, loadTools]);
 
+  // Credentials feed the model/tool key badges AND the key-aware model
+  // default (the first model of the first connected provider). No error
+  // state — a failed fetch degrades to "not saved" badges on purpose;
+  // the runner can retry from the key form, which has its own error
+  // path (the same contract as the form-owned loader this replaced).
+  const loadCredentials = useCallback(async () => {
+    try {
+      const res = await fetch("/api/credentials");
+      if (!res.ok) return;
+      const data = await res.json().catch(() => ({}));
+      const hasKey: Record<string, boolean> = {};
+      for (const c of Array.isArray(data.credentials) ? data.credentials : []) {
+        hasKey[c.provider] = true;
+      }
+      setCredentials({ hasKey, catalog: data.catalog ?? {} });
+    } catch {
+      // Deliberate degradation — see the comment above.
+    }
+  }, []);
+
+  const loadConnectors = useCallback(async () => {
+    try {
+      const res = await fetch("/api/connectors");
+      if (!res.ok) {
+        // An outage is NOT the empty state: "No connectors yet" would be
+        // a confident false claim (the org's connectors exist — the page
+        // just can't see them). Leave connectors null; both consumers
+        // (the builder palette, the admin section) render the error.
+        const data = await res.json().catch(() => ({}));
+        setConnectorsError(
+          extractErrorMessage(data, `Failed to load connectors (${res.status})`),
+        );
+        return;
+      }
+      const data = await res.json().catch(() => ({}));
+      setConnectors(Array.isArray(data.connectors) ? data.connectors : []);
+      setConnectorsError(null);
+    } catch {
+      setConnectorsError("Couldn't reach the server — please try again.");
+    }
+  }, []);
+
   useEffect(() => {
     if (isPending) return;
     // Wrapper indirection satisfies react-hooks/set-state-in-effect (the
     // loaders set state after their fetches resolve — same pattern as
-    // users-admin). Gated on isPending: the catalog routes 401 an
-    // anonymous visitor, and the session must resolve first.
+    // users-admin). Gated on isPending: these routes 401 an anonymous
+    // visitor, and the session must resolve first.
     const load = async () => {
-      await loadCatalog();
+      await Promise.all([loadCatalog(), loadCredentials(), loadConnectors()]);
     };
     load();
-  }, [isPending, loadCatalog]);
+  }, [isPending, loadCatalog, loadCredentials, loadConnectors]);
 
   // Bring the panel into view when it opens, when the edit target
   // changes, or when the kind toggle swaps the form.
@@ -508,6 +559,11 @@ function AgentsPageInner() {
                   tools={tools}
                   toolsError={toolsError}
                   retryCatalogs={loadCatalog}
+                  credentials={credentials}
+                  refreshCredentials={loadCredentials}
+                  connectors={connectors}
+                  connectorsError={connectorsError}
+                  retryConnectors={loadConnectors}
                   onSaved={handleBuilderSaved}
                   onDeleted={handleBuilderDeleted}
                   onCancel={closePanel}
@@ -791,9 +847,15 @@ function AgentsPageInner() {
         {/* Org MCP connectors — the builder's connector palette source.
             Org-admin only: members reference connectors in the builder
             form but can't add or change them (same gate the backend
-            enforces on PUT/DELETE /api/connectors). */}
+            enforces on PUT/DELETE /api/connectors). The list is the
+            page-level state shared with the builder form's palette —
+            mutations here refresh it for both. */}
         {canManage && (
-          <ConnectorsAdmin />
+          <ConnectorsAdmin
+            connectors={connectors}
+            connectorsError={connectorsError}
+            refresh={loadConnectors}
+          />
         )}
         <UpgradeDialog open={upgradeOpen} onClose={() => setUpgradeOpen(false)} />
       </div>

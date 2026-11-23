@@ -22,10 +22,11 @@
  *             local store — the edit GET reads them back for the prefill,
  *             and a blank field preserves them)
  *  - badges  → GET /api/credentials (hasKey per provider + catalog),
- *             GET /api/connectors; the models/tools catalogs are lifted
- *             to the /agents page — fetched once per page visit, passed
- *             down as props (every panel open and tab flip used to
- *             re-run all four fetches)
+ *             GET /api/connectors — all four loads (models, tools,
+ *             credentials, connectors) are lifted to the /agents page —
+ *             fetched once per page visit, passed down as props (every
+ *             panel open and tab flip used to re-run all four fetches);
+ *             in-page mutations refresh through the refresh callbacks
  *
  * The 402s the run gate produces (missing connector, missing BYOK key,
  * daily quota) surface at run time in the chat; this form front-loads
@@ -65,7 +66,7 @@ import {
   validateBuilderForm,
   type BuilderFormState,
   type BuilderToolOption,
-  type CredentialCatalog,
+  type CredentialsState,
   type PlatformModel,
   type ToolKeyState,
   type ToolkitGroup,
@@ -79,6 +80,11 @@ export function BuilderForm({
   tools,
   toolsError,
   retryCatalogs,
+  credentials,
+  refreshCredentials,
+  connectors,
+  connectorsError,
+  retryConnectors,
   onSaved,
   onDeleted,
   onCancel,
@@ -86,11 +92,13 @@ export function BuilderForm({
   mode: "create" | "edit";
   agentId?: string;
   /**
-   * The platform model/tool catalogs — lifted to the /agents page (they
-   * are admin-controlled, slow-changing, and shared by every panel open
-   * in the visit); null while the page-level fetch is in flight. The two
-   * user-scoped loads (credentials, connectors) stay form-owned: they
-   * change mid-session and the connect flow reloads them.
+   * The platform model/tool catalogs and the user-scoped badge/palette
+   * data (credentials, connectors) — all lifted to the /agents page and
+   * fetched once per page visit; null while the page-level fetch is in
+   * flight. The page is the single source of truth for this form AND the
+   * ConnectorsAdmin section, so a connector added there shows up in the
+   * palette without a re-fetch. The connect flow and connector mutations
+   * refresh through the callbacks below.
    */
   models: PlatformModel[] | null;
   modelsError: string | null;
@@ -98,6 +106,19 @@ export function BuilderForm({
   toolsError: string | null;
   /** Re-fetch the two lifted catalogs — the catalog banner's Retry. */
   retryCatalogs: () => Promise<void>;
+  /**
+   * hasKey per provider + the credentials catalog — the key badges'
+   * source and the key-aware model default's connectivity signal.
+   */
+  credentials: CredentialsState | null;
+  /** Re-fetch credentials — the KeyForm save's success path, so a newly
+   *  connected key updates the page state (re-rendering the badges and
+   *  re-running the model-default effect). */
+  refreshCredentials: () => Promise<void>;
+  connectors: PublicConnector[] | null;
+  connectorsError: string | null;
+  /** Re-fetch connectors — the palette error banner's Retry. */
+  retryConnectors: () => Promise<void>;
   /**
    * A successful create/save. The panel closes and the parent navigates
    * to /app?agent=<id> — "save & open in chat".
@@ -136,12 +157,6 @@ export function BuilderForm({
   // The catalog-failure Retry button's in-flight flag — without it the
   // click gives no feedback and a double-click fires duplicate fetches.
   const [retryingCatalog, setRetryingCatalog] = useState(false);
-  const [credentials, setCredentials] = useState<{
-    hasKey: Record<string, boolean>;
-    catalog: CredentialCatalog;
-  } | null>(null);
-  const [connectors, setConnectors] = useState<PublicConnector[] | null>(null);
-  const [connectorsError, setConnectorsError] = useState<string | null>(null);
   const [agent, setAgent] = useState<PublicAgent | null>(null);
   const [agentError, setAgentError] = useState<string | null>(null);
   const [form, setForm] = useState<BuilderFormState>({
@@ -172,42 +187,6 @@ export function BuilderForm({
   /* -------------------------------------------------------------------- */
   /* Data loading                                                          */
   /* -------------------------------------------------------------------- */
-
-  const loadCredentials = useCallback(async () => {
-    try {
-      const res = await fetch("/api/credentials");
-      if (!res.ok) return;
-      const data = await res.json().catch(() => ({}));
-      const hasKey: Record<string, boolean> = {};
-      for (const c of Array.isArray(data.credentials) ? data.credentials : []) {
-        hasKey[c.provider] = true;
-      }
-      setCredentials({ hasKey, catalog: data.catalog ?? {} });
-    } catch {
-      // Deliberate degradation: on a network failure the key badges read
-      // "not saved" instead of stranding the form — the runner can retry
-      // from the key form, which has its own error path.
-    }
-  }, []);
-
-  const loadConnectors = useCallback(async () => {
-    try {
-      const res = await fetch("/api/connectors");
-      if (!res.ok) {
-        // An outage is NOT the empty state: "No connectors yet" would be
-        // a confident false claim (the org's connectors exist — the page
-        // just can't see them). Leave connectors null; the palette
-        // renders the error with a retry instead.
-        setConnectorsError("Couldn't reach the server — please try again.");
-        return;
-      }
-      const data = await res.json().catch(() => ({}));
-      setConnectors(Array.isArray(data.connectors) ? data.connectors : []);
-      setConnectorsError(null);
-    } catch {
-      setConnectorsError("Couldn't reach the server — please try again.");
-    }
-  }, []);
 
   const loadAgent = useCallback(async () => {
     if (!agentId) return;
@@ -248,11 +227,12 @@ export function BuilderForm({
   // The key-aware default (create mode) — once BOTH the catalog and the
   // credentials have arrived, preselect the first model of the first
   // connected provider (pickDefaultModel; no keys → no default, the
-  // select stays on its placeholder). Lives here, not in a loader: the
-  // catalog is a prop now, and the default must react to a key connected
-  // inside the dialog the same way the loader's version reacted to the
-  // catalog arriving. The setForm guard (prev.model ? prev) keeps user
-  // edits never overridden — the effect only fills an empty selection.
+  // select stays on its placeholder). Lives here, not in a loader: both
+  // are props now, and the default must react to a key connected inside
+  // the dialog (refreshCredentials updates the page state → new prop
+  // value) the same way the loader's version reacted to the catalog
+  // arriving. The setForm guard (prev.model ? prev) keeps user edits
+  // never overridden — the effect only fills an empty selection.
   useEffect(() => {
     if (mode !== "create" || !models || !credentials) return;
     // Wrapper indirection satisfies react-hooks/set-state-in-effect (same
@@ -270,17 +250,15 @@ export function BuilderForm({
   useEffect(() => {
     if (isPending) return;
     // Wrapper indirection satisfies react-hooks/set-state-in-effect (the
-    // loaders set state after their fetches resolve — same pattern as
-    // users-admin). The two platform catalogs are the PARENT's problem
-    // now (lifted — fetched once per page visit); these three are
-    // user-scoped and change mid-session, so they stay form-owned.
+    // loader sets state after its fetch resolves — same pattern as
+    // users-admin). All four data loads are the PARENT's problem now
+    // (lifted — fetched once per page visit); only the per-agent edit
+    // prefill stays form-owned — it is legitimately per-open.
     const load = async () => {
-      loadCredentials();
-      loadConnectors();
-      if (mode === "edit") loadAgent();
+      if (mode === "edit") await loadAgent();
     };
     load();
-  }, [isPending, mode, loadCredentials, loadConnectors, loadAgent]);
+  }, [isPending, mode, loadAgent]);
 
   /* -------------------------------------------------------------------- */
   /* Derived                                                               */
@@ -442,7 +420,7 @@ export function BuilderForm({
         setKeyError(extractErrorMessage(data, "Failed to save the key"));
         return false;
       }
-      await loadCredentials();
+      await refreshCredentials();
       return true;
     } catch {
       setKeyError("Couldn't reach the server — please try again.");
@@ -957,7 +935,7 @@ export function BuilderForm({
                 <span className="text-xs text-red-700 dark:text-red-300">{connectorsError}</span>
                 <button
                   type="button"
-                  onClick={loadConnectors}
+                  onClick={retryConnectors}
                   className="shrink-0 text-xs font-medium text-red-700 underline underline-offset-2 dark:text-red-300"
                 >
                   Retry

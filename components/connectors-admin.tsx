@@ -6,6 +6,11 @@
  * /agents); the builder's connector palette is member-readable but only
  * admins can add/remove them.
  *
+ * The connector list is PAGE-level state (lifted — fetched once per page
+ * visit on /agents and shared with the builder form's palette); this
+ * component consumes it via props and refreshes it after a mutation, so
+ * an admin adding a connector updates the palette without a re-fetch.
+ *
  * Token semantics surface here (PUT /api/connectors): omit the field →
  * preserve the stored token, "" → clear it, a string → replace it. The
  * form mirrors that: blank field = omit, "Clear token" checkbox = "".
@@ -18,7 +23,7 @@
  * hit after a connector they use is removed).
  */
 
-import { useCallback, useEffect, useState } from "react";
+import { useState } from "react";
 import Link from "next/link";
 import type { PublicConnector } from "@/lib/connectors/connector-store";
 import { extractErrorMessage } from "@/components/builder/builder-config";
@@ -31,42 +36,26 @@ interface FormState {
   editing: PublicConnector | null;
 }
 
-export function ConnectorsAdmin() {
-  const [connectors, setConnectors] = useState<PublicConnector[] | null>(null);
-  const [loading, setLoading] = useState(true);
+export function ConnectorsAdmin({
+  connectors,
+  connectorsError,
+  refresh,
+}: {
+  /**
+   * The org's connectors — the /agents page's lifted state, shared with
+   * the builder form's palette; null while the page-level fetch is in
+   * flight (or after it failed — the error prop says which).
+   */
+  connectors: PublicConnector[] | null;
+  connectorsError: string | null;
+  /** Re-fetch the shared list — after a create/update/delete, so the
+   *  builder form's palette sees the change too. */
+  refresh: () => Promise<void>;
+}) {
   const [error, setError] = useState<string | null>(null);
   const [form, setForm] = useState<FormState | null>(null);
   const [saving, setSaving] = useState(false);
   const [fieldErrors, setFieldErrors] = useState<Record<string, string>>({});
-
-  const load = useCallback(async () => {
-    try {
-      const res = await fetch("/api/connectors");
-      if (!res.ok) {
-        const data = await res.json().catch(() => ({}));
-        setError(extractErrorMessage(data, `Failed to load connectors (${res.status})`));
-        return;
-      }
-      const data = await res.json().catch(() => ({}));
-      setConnectors(Array.isArray(data.connectors) ? data.connectors : []);
-      setError(null);
-    } catch {
-      // A network throw must not leave "Loading…" forever — the admins
-      // see the error with the page's retry affordance instead.
-      setError("Couldn't reach the server — please try again.");
-    } finally {
-      setLoading(false);
-    }
-  }, []);
-
-  useEffect(() => {
-    // Wrapper indirection satisfies react-hooks/set-state-in-effect (load
-    // sets state after its fetch resolves — same pattern as users-admin).
-    const loadOnce = async () => {
-      await load();
-    };
-    loadOnce();
-  }, [load]);
 
   const openEdit = (connector: PublicConnector) => {
     setForm({
@@ -109,7 +98,7 @@ export function ConnectorsAdmin() {
         return;
       }
       setForm(null);
-      await load();
+      await refresh();
     } catch {
       setError("Couldn't reach the server — please try again.");
     } finally {
@@ -128,7 +117,7 @@ export function ConnectorsAdmin() {
         setError(extractErrorMessage(data, `Failed to delete the connector (${res.status})`));
         return;
       }
-      await load();
+      await refresh();
     } catch {
       setError("Couldn't reach the server — please try again.");
     }
@@ -156,6 +145,16 @@ export function ConnectorsAdmin() {
           Add connector
         </button>
       </div>
+
+      {/* List errors are the page-level state's (shared with the builder
+          palette); mutation failures stay local. Error ≠ empty: a failed
+          fetch must not render the "No connectors yet" row — the org's
+          connectors may exist, the page just can't see them. */}
+      {connectorsError && (
+        <div className="mb-4 rounded-lg border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-700 dark:border-red-900 dark:bg-red-950 dark:text-red-300">
+          {connectorsError}
+        </div>
+      )}
 
       {error && (
         <div className="mb-4 rounded-lg border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-700 dark:border-red-900 dark:bg-red-950 dark:text-red-300">
@@ -242,11 +241,12 @@ export function ConnectorsAdmin() {
         </form>
       )}
 
-      {loading ? (
+      {connectors === null && !connectorsError && (
         <p className="text-sm text-zinc-400">Loading…</p>
-      ) : (
+      )}
+      {connectors !== null && (
         <ul className="space-y-2">
-          {(connectors ?? []).map((c) => (
+          {connectors.map((c) => (
             <li
               key={c.name}
               className="flex flex-wrap items-center justify-between gap-3 rounded-xl border border-zinc-200 bg-white px-4 py-3 dark:border-zinc-800 dark:bg-zinc-950"
@@ -282,7 +282,7 @@ export function ConnectorsAdmin() {
               </div>
             </li>
           ))}
-          {(connectors ?? []).length === 0 && (
+          {connectors.length === 0 && (
             <li className="rounded-xl border border-dashed border-zinc-200 px-4 py-6 text-center text-sm text-zinc-500 dark:border-zinc-800 dark:text-zinc-400">
               No connectors yet.{" "}
               <Link
