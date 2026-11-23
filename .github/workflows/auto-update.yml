@@ -1,7 +1,9 @@
 name: Auto-update agent PRs
 
 # Keeps open agent PRs current with main so the human merge queue is always
-# green, up-to-date, and conflict-free. Runs on every push to main.
+# green, up-to-date, and conflict-free. Runs on every push to main (after a
+# short settle delay — GitHub recomputes merge state asynchronously, and an
+# immediate sweep can read the pre-merge echo) and on manual dispatch.
 #
 # Per open agent PR (branch matching agent/issue-N-*), GitHub's merge state
 # decides the action — staleness is the only thing this workflow fixes:
@@ -84,6 +86,15 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
+          # GitHub recomputes PR merge state asynchronously after a push to
+          # main — an immediate sweep can read the pre-merge echo (all
+          # CLEAN) and skip PRs that are already BEHIND (seen live: #211
+          # needed a manual "Update branch" right after #214 merged).
+          # Let the recompute settle before classifying; manual dispatches
+          # are late by definition and skip the wait.
+          if [ "${{ github.event_name }}" = "push" ]; then
+            sleep 45
+          fi
           printf '| PR | Branch | State | Action |\n|---|---|---|---|\n' > /tmp/report.md
           : > /tmp/update-prs
           : > /tmp/resolve-prs
@@ -214,12 +225,19 @@ jobs:
             exit 1
           fi
           mkdir -p ~/.config/opencode
-          jq '. * {
+          # Same V1-shaped unattended permission override as agent.yml
+          # (see its comment): the installed opencode-ai 1.x binary
+          # hard-rejects V2 `permissions` arrays and asks by default for
+          # out-of-project reads — `external_directory: "allow"` kills
+          # that ask. `del` strips both shapes the secret might carry so
+          # nothing inherited can re-introduce an ask or a fatal V2 array.
+          jq 'del(.permission, .permissions) * {
             permission: {
               edit: "allow",
               bash: "allow",
               webfetch: "allow",
-              question: "deny"
+              question: "deny",
+              external_directory: "allow"
             },
             agent: {
               explore: { mode: "all" }
@@ -336,6 +354,15 @@ jobs:
           if [ -n "${AGENT_MODEL:-}" ]; then args+=(--model "$AGENT_MODEL"); fi
           if ! timeout 20m opencode "${args[@]}" "$(cat /tmp/resolve-prompt.md)" 2>&1 | tee /tmp/opencode-resolve.log; then
             give_up "$n" "the resolve agent run failed" "$branch"
+            echo "::endgroup::"
+            return 0
+          fi
+          # Same aborted-session tripwire as agent.yml: a permission
+          # rejection kills the session while the CLI exits 0. Without
+          # this the marker check below would report the death with a
+          # misleading "conflict markers remain" message.
+          if grep -q "The user rejected permission" /tmp/opencode-resolve.log; then
+            give_up "$n" "the resolve agent session aborted on a permission rejection" "$branch"
             echo "::endgroup::"
             return 0
           fi

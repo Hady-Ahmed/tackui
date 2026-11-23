@@ -138,31 +138,32 @@ jobs:
           # unattended permissions on top so `opencode run` never stalls on
           # an approval prompt. In unattended mode NOTHING can answer an
           # "ask" — and a rejection aborts the whole session while the CLI
-          # still exits 0, so a dead session would surface as a benign
-          # "no changes" (run #151's first attempt died exactly this way:
-          # an external_directory read of its own /tmp scratch file, and
-          # the shipped default base policy also makes `*.env` reads an
-          # ask). The V2 rule list below therefore contains zero `ask`
-          # rules and explicitly allows everything — last match wins, so
-          # the question deny tails the allow-all. `del` strips both
-          # legacy shapes the secret might carry (V1 `permission` object
-          # or a hand-written V2 `permissions` array) so only our list
-          # applies. `explore` is a built-in read-only agent (no
-          # edit/write tools) but defaults to subagent mode, which
-          # `opencode run` may refuse to select — mode "all" makes it
-          # selectable while staying read-only. Agent-level question
-          # denies re-state the ban where agent rules (appended after
-          # global, last match wins) would override the global deny.
+          # still exits 0, so a dead session surfaces as a benign "no
+          # changes" (run #151's first attempt died exactly this way: V1
+          # ASKS by default before reading paths outside the project, and
+          # the implementer's own /tmp scratch files are outside).
+          # The installed binary is opencode-ai 1.x (V1): it accepts the
+          # V1 `permission` object and HARD-REJECTS V2 `permissions`
+          # arrays ("Configuration is invalid"), so the override must be
+          # V1-shaped — with `external_directory: "allow"` explicitly
+          # killing the default out-of-project ask (verified against the
+          # 1.19.6 binary: V2 arrays error, V1 object with this key
+          # parses, and the binary's own default ask rule for
+          # external_directory is replaced by the config's allow).
+          # `del` strips both shapes the secret might carry so nothing
+          # inherited can re-introduce an ask or a fatal V2 array.
+          # `explore` is a built-in read-only agent but defaults to
+          # subagent mode, which `opencode run` refuses to select — mode
+          # "all" makes it selectable while staying read-only.
           # Deep-merge (`*`, not `+`) so a secret that configures other
           # agents or providers is not clobbered.
           jq 'del(.permission, .permissions) * {
-            permissions: [
-              { action: "*", resource: "*", effect: "allow" },
-              { action: "question", resource: "*", effect: "deny" }
-            ],
-            agents: {
-              build: { permissions: [{ action: "question", resource: "*", effect: "deny" }] },
-              explore: { mode: "all", permissions: [{ action: "question", resource: "*", effect: "deny" }] }
+            permission: {
+              edit: "allow",
+              bash: "allow",
+              webfetch: "allow",
+              question: "deny",
+              external_directory: "allow"
             },
             agent: {
               explore: { mode: "all" }
