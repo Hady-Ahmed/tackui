@@ -4,6 +4,16 @@ All notable changes to this project will be documented in this file. The format 
 
 ## [Unreleased]
 
+- **Changed: keyed-lock waits are bounded — a wedged lock holder can no
+  longer park same-key writers forever (#153).** Writers serialized by
+  `withKeyedLock` (the credentials PUT and the catalog template PATCH)
+  now time out after 30 seconds waiting for the lock, and the per-key
+  queue caps at 32 waiters (both configurable per call). Giving up
+  fails with a typed `KeyedLockUnavailableError`, which both routes
+  surface as a 503 "please try again" instead of the generic 500.
+  Happy paths are unchanged — the bounds only bite when a holder is
+  wedged or the pile-up is pathological.
+
 - **Fixed: /agents fired its catalog fetches (/api/models, /api/tools,
   /api/credentials, /api/connectors) for anonymous visitors before the
   login redirect.** The fetch gate waited only for the session check to
