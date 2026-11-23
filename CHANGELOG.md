@@ -4,6 +4,19 @@ All notable changes to this project will be documented in this file. The format 
 
 ## [Unreleased]
 
+- **Fixed: first sign-up on a fresh database without SMTP failed with a
+  500 and left an orphan organization row behind (#208).** The session
+  hook that creates the personal workspace wrote through the shared
+  connection pool, so its `member` insert could not see the
+  still-uncommitted user row inside Better Auth's signup transaction and
+  the FK check rolled everything back. Only fresh installs without
+  email verification were affected (with SMTP configured, signup creates
+  no session); existing deployments are unaffected. The hook now writes
+  through Better Auth's transaction-scoped adapter, so user, org,
+  membership, and session commit atomically. Also fixes
+  `npm run create-admin` on a fresh database, which goes through the
+  same code path.
+
 - **Changed: keyed-lock waits are bounded — a wedged lock holder can no
   longer park same-key writers forever (#153).** Writers serialized by
   `withKeyedLock` (the credentials PUT and the catalog template PATCH)

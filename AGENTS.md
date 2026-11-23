@@ -121,6 +121,13 @@ no Docker required, no cleanup between runs (see `vitest.config.ts`).
   bug".
 - **`"user"` is a reserved word in Postgres** — double-quote it in all raw
   SQL (`SELECT * FROM "user"`), including in Better Auth hook queries.
+- **Better Auth `databaseHooks` run inside Better Auth's transaction** —
+  writes in a hook MUST go through Better Auth's transaction-scoped
+  adapter (`getCurrentAdapter(ctx.context.adapter)`), never the app's
+  shared `query()` pool. A pool write cannot see the rows Better Auth's
+  signup transaction created on its own connection — the first signup's
+  `member.userId` FK check fails and rolls back the whole signup (#208).
+  See `lib/auth/personal-org.ts`.
 - **Agent `id` is server-generated** (12-char random hex) — never
   client-supplied, immutable after creation. The PK is composite `(id,
   org_id)`: the same id can exist in different orgs.
