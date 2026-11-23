@@ -277,16 +277,22 @@ function AgentsPageInner() {
   }, []);
 
   useEffect(() => {
-    if (isPending) return;
+    // Same signed-in condition the page renders by (the render gate
+    // below): these routes 401 an anonymous visitor, so nothing may fire
+    // until the session resolves — or, in solo mode (AUTH_DISABLED), the
+    // auth config confirms authDisabled. Waiting for `config` too keeps
+    // the load one-shot: a signed-in visitor whose config lands after
+    // their session would otherwise re-run this effect and refetch all
+    // four catalogs.
+    if (isPending || !config || (!session && !config.authDisabled)) return;
     // Wrapper indirection satisfies react-hooks/set-state-in-effect (the
     // loaders set state after their fetches resolve — same pattern as
-    // users-admin). Gated on isPending: these routes 401 an anonymous
-    // visitor, and the session must resolve first.
+    // users-admin).
     const load = async () => {
       await Promise.all([loadCatalog(), loadCredentials(), loadConnectors()]);
     };
     load();
-  }, [isPending, loadCatalog, loadCredentials, loadConnectors]);
+  }, [isPending, session, config, loadCatalog, loadCredentials, loadConnectors]);
 
   // Bring the panel into view when it opens, when the edit target
   // changes, or when the kind toggle swaps the form.
