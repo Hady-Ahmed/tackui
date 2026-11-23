@@ -53,6 +53,7 @@ export function useOrgs(): OrgsState & { refresh: () => void } {
   );
 
   useEffect(() => {
+    if (cached) return;
     let cancelled = false;
     if (!inflight) inflight = fetchOrgs();
     inflight

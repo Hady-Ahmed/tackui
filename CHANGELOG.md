@@ -4,6 +4,15 @@ All notable changes to this project will be documented in this file. The format 
 
 ## [Unreleased]
 
+- **Fixed: /api/org loaded on every mount of a consumer instead of once
+  per page load.** The org hook's cache only seeded the initial state —
+  the mount effect ignored it — so mounting the upgrade dialog (e.g.
+  opening the /agents add panel or flipping its tabs), the members or
+  invitations page, or the invite dialog re-requested /api/org each
+  time. The mount effect now skips when the cached result exists, same
+  as the billing and can-manage hooks; `refresh()` after org switches,
+  invites, and seat changes still reloads.
+
 - **agent-builder: a stale catalog-load error no longer suppresses the
   builder form's notices after a successful retry.** When the models or
   tools catalog fetch failed once and a retry via the banner succeeded,
@@ -30,8 +39,10 @@ All notable changes to this project will be documented in this file. The format 
   the create-mode model default is key-aware.** The add/edit panel
   re-ran all four catalog fetches on every interaction — dialog open,
   kind toggle — flashing the provider select and popping the palette
-  empty→filled. Models and tools now load once on the /agents page;
-  credentials and connectors keep their form-owned loads. The
+  empty→filled. All four loads (models, tools, credentials, connectors)
+  now happen once on the /agents page and feed the builder form and the
+  connectors admin from the same state, so the model picker renders its
+  preselection on first paint. The
   create-mode default no longer picks "the first model" blindly: it
   picks the first model whose provider credential is already connected,
   and with no keys connected there is no default — the old dead-end
