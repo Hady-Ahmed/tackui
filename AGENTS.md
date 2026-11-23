@@ -52,6 +52,13 @@ no Docker required, no cleanup between runs (see `vitest.config.ts`).
 - **Store / library functions** — unit-test each exported function. Cover
   happy paths, edge cases (missing records, duplicates), and zod validation
   rejections.
+- **Components** — for effect/wiring coverage the unit layer can't reach,
+  use `@testing-library/react` in a `*.test.tsx` file next to the
+  component, with `// @vitest-environment jsdom` as its FIRST line (the
+  suite stays node by default; only component files opt in). Mock the
+  page-data hooks at the module boundary (`vi.mock`), and call
+  `cleanup()` in `afterEach` — vitest's `globals: false` disables RTL's
+  auto-cleanup. Template: `components/builder/builder-form.test.tsx`.
 - **Test files** — place `*.test.ts` next to the file under test (e.g.
   `lib/agents/agent-store.test.ts`, `app/api/agents/route.test.ts`).
 - **External calls** — mock with `vi.stubGlobal` (e.g. `fetch` in
