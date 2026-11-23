@@ -4,6 +4,16 @@ All notable changes to this project will be documented in this file. The format 
 
 ## [Unreleased]
 
+- **Fixed: a replay of a persisted history containing a duplicate active
+  `STEP_STARTED`/`TEXT_MESSAGE_START` (or a stray terminator for either)
+  was rejected outright by the AG-UI verifier, poisoning the whole
+  reconnect replay (#151).** Such records can only come from
+  non-conforming third-party agent backends or hand-seeded data — the
+  app's own runtime stream cannot produce them. The replay builder now
+  drops lifecycle events that are invalid for the state built so far
+  (the complement of synthesizing missing terminators), so reconnects
+  on affected threads render cleanly.
+
 - **Fixed: first sign-up on a fresh database without SMTP failed with a
   500 and left an orphan organization row behind (#208).** The session
   hook that creates the personal workspace wrote through the shared

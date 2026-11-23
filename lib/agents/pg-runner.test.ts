@@ -952,6 +952,175 @@ describe("PostgresAgentRunner — connect() smart replay", () => {
     expect(retryStartIdx).toBeGreaterThan(synthFinishIdx);
     expect(await verifierRejection(received)).toBeNull();
   });
+
+  // #151 — the duplicate-active / stray-terminator drop policy. The
+  // verifier rejects each raw fixture below outright, so replaying it
+  // verbatim poisons the whole reconnect; the replay must drop the
+  // invalid extras (never synthesize a START to legalize a stray
+  // FINISHED) and survive verifier-clean, in order. Each fixture first
+  // pins its own poisoning premise: the RAW record must trip the
+  // verifier.
+  it("replay drops a duplicate STEP_STARTED for an already-active step", async (ctx) => {
+    ctx.skip(!pgStarted, "Real Postgres (Docker) unavailable");
+    // #142's openSteps.add() no-ops on a duplicate, so the second
+    // STEP_STARTED used to pass through to the replay — and the verifier
+    // rejects it ("Step \"plan\" is already active"), poisoning the
+    // reconnect even after #142's closure fix.
+    const events: BaseEvent[] = [
+      { type: EventType.RUN_STARTED, threadId: "t-dup-step", runId: "run-dup-step" } as unknown as BaseEvent,
+      { type: EventType.STEP_STARTED, stepName: "plan" } as unknown as BaseEvent,
+      { type: EventType.STEP_STARTED, stepName: "plan" } as unknown as BaseEvent,
+      { type: EventType.STEP_FINISHED, stepName: "plan" } as unknown as BaseEvent,
+      { type: EventType.RUN_FINISHED, threadId: "t-dup-step", runId: "run-dup-step" } as unknown as BaseEvent,
+    ];
+    await insertRun("t-dup-step", "run-dup-step", events);
+    expect(await verifierRejection(events)).not.toBeNull();
+
+    const received = await collectReplay("t-dup-step");
+    expect(received.map((e) => e.type)).toEqual([
+      EventType.RUN_STARTED,
+      EventType.STEP_STARTED,
+      EventType.STEP_FINISHED,
+      EventType.RUN_FINISHED,
+    ]);
+    expect(await verifierRejection(received)).toBeNull();
+  });
+
+  it("replay drops a STEP_FINISHED for a step that is not currently active", async (ctx) => {
+    ctx.skip(!pgStarted, "Real Postgres (Docker) unavailable");
+    // Both stray-finish shapes in one policy branch: a finish for a step
+    // that was never started ("ghost") and a duplicate finish after the
+    // legit close. Both are verifier-rejected ("that was not started");
+    // the repair is the drop, never a synthesized START.
+    const events: BaseEvent[] = [
+      { type: EventType.RUN_STARTED, threadId: "t-stray-fin", runId: "run-stray-fin" } as unknown as BaseEvent,
+      { type: EventType.STEP_FINISHED, stepName: "ghost" } as unknown as BaseEvent,
+      { type: EventType.STEP_STARTED, stepName: "plan" } as unknown as BaseEvent,
+      { type: EventType.STEP_FINISHED, stepName: "plan" } as unknown as BaseEvent,
+      { type: EventType.STEP_FINISHED, stepName: "plan" } as unknown as BaseEvent,
+      { type: EventType.RUN_FINISHED, threadId: "t-stray-fin", runId: "run-stray-fin" } as unknown as BaseEvent,
+    ];
+    await insertRun("t-stray-fin", "run-stray-fin", events);
+    expect(await verifierRejection(events)).not.toBeNull();
+
+    const received = await collectReplay("t-stray-fin");
+    expect(received.map((e) => e.type)).toEqual([
+      EventType.RUN_STARTED,
+      EventType.STEP_STARTED,
+      EventType.STEP_FINISHED,
+      EventType.RUN_FINISHED,
+    ]);
+    // The legit pair survived untouched, in order.
+    const stepStart = received.find((e) => e.type === EventType.STEP_STARTED);
+    expect((stepStart as { stepName?: string }).stepName).toBe("plan");
+    expect(await verifierRejection(received)).toBeNull();
+  });
+
+  it("replay drops a duplicate TEXT_MESSAGE_START for an already-active message", async (ctx) => {
+    ctx.skip(!pgStarted, "Real Postgres (Docker) unavailable");
+    // The duplicate START lands BETWEEN content deltas — the surviving
+    // replay must keep every delta, in order, with one START.
+    const events: BaseEvent[] = [
+      { type: EventType.RUN_STARTED, threadId: "t-dup-msg", runId: "run-dup-msg" } as unknown as BaseEvent,
+      { type: EventType.TEXT_MESSAGE_START, messageId: "m1", role: "assistant" } as unknown as BaseEvent,
+      { type: EventType.TEXT_MESSAGE_CONTENT, messageId: "m1", delta: "a" } as unknown as BaseEvent,
+      { type: EventType.TEXT_MESSAGE_START, messageId: "m1", role: "assistant" } as unknown as BaseEvent,
+      { type: EventType.TEXT_MESSAGE_CONTENT, messageId: "m1", delta: "b" } as unknown as BaseEvent,
+      { type: EventType.TEXT_MESSAGE_END, messageId: "m1" } as unknown as BaseEvent,
+      { type: EventType.RUN_FINISHED, threadId: "t-dup-msg", runId: "run-dup-msg" } as unknown as BaseEvent,
+    ];
+    await insertRun("t-dup-msg", "run-dup-msg", events);
+    expect(await verifierRejection(events)).not.toBeNull();
+
+    const received = await collectReplay("t-dup-msg");
+    expect(received.map((e) => e.type)).toEqual([
+      EventType.RUN_STARTED,
+      EventType.TEXT_MESSAGE_START,
+      EventType.TEXT_MESSAGE_CONTENT,
+      EventType.TEXT_MESSAGE_END,
+      EventType.RUN_FINISHED,
+    ]);
+    expect(received.filter((e) => e.type === EventType.TEXT_MESSAGE_START)).toHaveLength(1);
+    // Order-preserving: both deltas survived, in stream order (compaction
+    // merges same-message deltas into one CONTENT event).
+    expect(
+      received.find((e) => e.type === EventType.TEXT_MESSAGE_CONTENT),
+    ).toMatchObject({ delta: "ab" });
+    expect(await verifierRejection(received)).toBeNull();
+  });
+
+  it("replay drops a TEXT_MESSAGE_END for a message that is not currently active", async (ctx) => {
+    ctx.skip(!pgStarted, "Real Postgres (Docker) unavailable");
+    // Both stray-terminator shapes: an END for a message that was never
+    // started ("ghost") and a duplicate END after the legit close. The
+    // dropped stray must not take the legit message's content with it.
+    const events: BaseEvent[] = [
+      { type: EventType.RUN_STARTED, threadId: "t-stray-end", runId: "run-stray-end" } as unknown as BaseEvent,
+      { type: EventType.TEXT_MESSAGE_END, messageId: "ghost" } as unknown as BaseEvent,
+      { type: EventType.TEXT_MESSAGE_START, messageId: "m1", role: "assistant" } as unknown as BaseEvent,
+      { type: EventType.TEXT_MESSAGE_CONTENT, messageId: "m1", delta: "hi" } as unknown as BaseEvent,
+      { type: EventType.TEXT_MESSAGE_END, messageId: "m1" } as unknown as BaseEvent,
+      { type: EventType.TEXT_MESSAGE_END, messageId: "m1" } as unknown as BaseEvent,
+      { type: EventType.RUN_FINISHED, threadId: "t-stray-end", runId: "run-stray-end" } as unknown as BaseEvent,
+    ];
+    await insertRun("t-stray-end", "run-stray-end", events);
+    expect(await verifierRejection(events)).not.toBeNull();
+
+    const received = await collectReplay("t-stray-end");
+    expect(received.map((e) => e.type)).toEqual([
+      EventType.RUN_STARTED,
+      EventType.TEXT_MESSAGE_START,
+      EventType.TEXT_MESSAGE_CONTENT,
+      EventType.TEXT_MESSAGE_END,
+      EventType.RUN_FINISHED,
+    ]);
+    expect(received.filter((e) => e.type === EventType.TEXT_MESSAGE_END)).toHaveLength(1);
+    expect(
+      received.find((e) => e.type === EventType.TEXT_MESSAGE_CONTENT),
+    ).toMatchObject({ delta: "hi" });
+    expect(await verifierRejection(received)).toBeNull();
+  });
+
+  it("replay keys steps per lane — the same stepName under the parent agent and a subagent survives intact", async (ctx) => {
+    ctx.skip(!pgStarted, "Real Postgres (Docker) unavailable");
+    // The verifier tracks steps per lane, keyed by (subagentRunId,
+    // stepName): the same stepName may be open concurrently under the
+    // parent agent and a subagent, and a STEP_FINISHED must come from
+    // whoever started it. This record is verifier-legal — replaying it
+    // verbatim (the pre-#151 behavior) was clean. Plain stepName keying
+    // over-dropped it into a poisoned replay: the s1 START dropped on the
+    // plain-name collision, the s1 FINISHED was kept (plain "plan" still
+    // open), and the parent FINISHED was dropped. The builder must key
+    // lanes the way the verifier does and attribute the synthesized
+    // closures to the lane that started the step.
+    const events: BaseEvent[] = [
+      { type: EventType.RUN_STARTED, threadId: "t-lane-step", runId: "run-lane-step" } as unknown as BaseEvent,
+      { type: EventType.STEP_STARTED, stepName: "plan" } as unknown as BaseEvent,
+      { type: EventType.STEP_STARTED, stepName: "plan", subagentRunId: "s1" } as unknown as BaseEvent,
+      { type: EventType.STEP_FINISHED, stepName: "plan", subagentRunId: "s1" } as unknown as BaseEvent,
+      { type: EventType.STEP_FINISHED, stepName: "plan" } as unknown as BaseEvent,
+      { type: EventType.RUN_FINISHED, threadId: "t-lane-step", runId: "run-lane-step" } as unknown as BaseEvent,
+    ];
+    await insertRun("t-lane-step", "run-lane-step", events);
+    // The poisoning premise inverted: this record is verifier-legal raw.
+    expect(await verifierRejection(events)).toBeNull();
+
+    const received = await collectReplay("t-lane-step");
+    expect(received.map((e) => e.type)).toEqual([
+      EventType.RUN_STARTED,
+      EventType.STEP_STARTED,
+      EventType.STEP_STARTED,
+      EventType.STEP_FINISHED,
+      EventType.STEP_FINISHED,
+      EventType.RUN_FINISHED,
+    ]);
+    // Both lanes' STARTs survived (the lane keying kept them distinct).
+    const laneStarts = received.filter((e) => e.type === EventType.STEP_STARTED);
+    expect(
+      laneStarts.map((e) => (e as { subagentRunId?: string }).subagentRunId),
+    ).toEqual([undefined, "s1"]);
+    expect(await verifierRejection(received)).toBeNull();
+  });
 });
 
 describe("PostgresAgentRunner — isRunning / stop", () => {
