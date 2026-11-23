@@ -4,6 +4,15 @@ All notable changes to this project will be documented in this file. The format 
 
 ## [Unreleased]
 
+- **Fixed: /agents fired its catalog fetches (/api/models, /api/tools,
+  /api/credentials, /api/connectors) for anonymous visitors before the
+  login redirect.** The fetch gate waited only for the session check to
+  finish, so an anonymous visitor (or an expired session) still
+  produced four guaranteed 401s and error states on a page about to
+  redirect. The fetches now wait for the same signed-in condition the
+  page renders by — signed in, or AUTH_DISABLED solo mode — so
+  anonymous visitors get zero catalog requests before the redirect.
+
 - **Fixed: /api/org loaded on every mount of a consumer instead of once
   per page load.** The org hook's cache only seeded the initial state —
   the mount effect ignored it — so mounting the upgrade dialog (e.g.
