@@ -257,6 +257,12 @@ always the source of truth:**
    thread stays deleted. Tombstones older than 30 days are pruned inside
    each delete's transaction (no background timer; thread ids are
    client-generated UUIDs, so no legitimate flow re-creates a deleted id).
+   The same transaction also sweeps `run_state` rows for tombstoned ids:
+   a delete committing between `teardownRun`'s re-release guard SELECT and
+   its upsert can leave a bare orphan row behind the deleted id —
+   invisible (boot reset clears it; the tombstone gate refuses starts),
+   but the sweep removes it on the next delete instead of letting it
+   outlive the tombstone.
 2. **Read-through on async paths:** `connect()` and `run()` (both async via
    fire-and-forget Observable pattern) fetch from PG INTO the cache before
    completing, and `storeRun` merges each run's persisted events into

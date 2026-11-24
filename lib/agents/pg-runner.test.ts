@@ -2569,6 +2569,68 @@ describe("PostgresAgentRunner — deleted-thread tombstones (delete vs run)", ()
     );
     expect(rows.rows.map((r) => r.thread_id)).toEqual(["t-sweep"]);
   });
+
+  it("deleteThread's sweep clears run_state rows orphaned behind tombstoned ids", async (ctx) => {
+    ctx.skip(!pgStarted, "Real Postgres (Docker) unavailable");
+    // Issue #140 item 1. teardownRun's re-release is guarded by
+    // current_run_id, but a delete committing between the guard SELECT and
+    // setRunState's upsert re-inserts a bare (is_running=false,
+    // current_run_id=NULL) row for the deleted id. The orphan is invisible
+    // today (boot reset clears it; startRun refuses the id) — the sweep
+    // pins that it never survives past the next delete, while the
+    // tombstone itself keeps gating the id until its age prunes it.
+    await query(`INSERT INTO deleted_threads (thread_id) VALUES ($1)`, ["t-orphan"]);
+    await query(
+      `INSERT INTO run_state (thread_id, is_running, current_run_id)
+       VALUES ('t-orphan', false, NULL)`,
+    );
+    // An aged tombstone with the same orphan: its tombstone is pruned AND
+    // its run_state row swept in the same transaction.
+    await query(
+      `INSERT INTO deleted_threads (thread_id, deleted_at)
+       VALUES ('t-ancient', now() - interval '40 days')`,
+    );
+    await query(
+      `INSERT INTO run_state (thread_id, is_running, current_run_id)
+       VALUES ('t-ancient', true, 'run-ancient')`,
+    );
+
+    // Positive control: a live thread's lock row is NOT the sweep's
+    // business — only tombstoned ids are.
+    await seedThread(runner, "t-live", "agent-a", "Live chat", user1.id);
+    await query(
+      `INSERT INTO run_state (thread_id, is_running, current_run_id)
+       VALUES ('t-live', false, NULL)`,
+    );
+
+    const deleted = await runWithUser(user1, () =>
+      runner.deleteThread("t-live", user1.id, user1.orgId),
+    );
+    expect(deleted).toBe(true);
+
+    // The orphan rows are gone — both the fresh tombstone's and the aged
+    // one's — while the tombstones themselves survive until age prunes
+    // them (the aged one was pruned by the same transaction).
+    const orphan = await query<{ c: number }>(
+      `SELECT count(*)::int AS c FROM run_state WHERE thread_id = 't-orphan'`,
+    );
+    const ancient = await query<{ c: number }>(
+      `SELECT count(*)::int AS c FROM run_state WHERE thread_id = 't-ancient'`,
+    );
+    expect(orphan.rows[0]?.c).toBe(0);
+    expect(ancient.rows[0]?.c).toBe(0);
+    const tombs = await query<{ thread_id: string }>(
+      `SELECT thread_id FROM deleted_threads ORDER BY thread_id`,
+    );
+    expect(tombs.rows.map((r) => r.thread_id)).toEqual(["t-live", "t-orphan"]);
+
+    // End state: nothing else in run_state — the deleted thread's own row
+    // went with the delete and nothing re-created it.
+    const state = await query<{ c: number }>(
+      `SELECT count(*)::int AS c FROM run_state`,
+    );
+    expect(state.rows[0]?.c).toBe(0);
+  });
 });
 
 describe("PostgresAgentRunner — sync cache reads (getThreadMessages / getThreadState)", () => {
