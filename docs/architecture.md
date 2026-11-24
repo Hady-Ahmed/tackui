@@ -127,7 +127,29 @@ NOT such a cut point: `compactEvents` persists an errored run's buffered
 message/tool-call traffic after the `RUN_ERROR` (unclosed sequences are
 flushed at stream end), so events following it in the record were emitted
 before it in real time, and dropping them would erase the run's real partial
-history. The same shaping applies when a run is merged into
+history. Within a run, duplicate actives and stray terminators in the
+`STEP_*` and `TEXT_MESSAGE_*` lifecycles are dropped rather than replayed: a
+`STEP_STARTED`/`TEXT_MESSAGE_START` for an id that is already active and a
+terminator for an id that is not currently active are each rejected outright
+by the AG-UI
+verifier, so replaying either poisons the whole reconnect replay (a
+terminator whose id cannot be tracked is likewise rejected; a START with a
+non-string id is not — the verifier accepts it and tracks it under the raw
+key — but schema enforcement requires the id, so such STARTs never reach a
+persisted record). Steps are keyed per lane, `(subagentRunId, stepName)`,
+matching the verifier's step tracking ("A step must be finished by whoever
+started it"): the same stepName may be open concurrently under the parent
+agent and a subagent, and the synthesized closures carry the originating
+lane's `subagentRunId`. This
+is the complement of the closure rule: missing terminators are synthesized
+for sequences the replay actually opened, invalid extras are dropped — never
+legalized by inventing a missing `START`. Closing an id frees it, so a later
+`START` for the same id is kept (the verifier accepts a reopened id and
+resets lifecycle state at each `RUN_STARTED`, as the builder does per run
+segment). Our own pipeline cannot emit these shapes (the CopilotKit runtime
+stream is conforming); the policy protects replays of records written by
+non-conforming third-party backends. The same shaping applies when a run is
+merged into
 the events cache, so sync reads (`/threads/:id/events`) get identical
 history. It exposes
 `renameThread`/`deleteThread`, used by `PATCH/DELETE /api/threads/[id]` — the
@@ -235,6 +257,12 @@ always the source of truth:**
    thread stays deleted. Tombstones older than 30 days are pruned inside
    each delete's transaction (no background timer; thread ids are
    client-generated UUIDs, so no legitimate flow re-creates a deleted id).
+   The same transaction also sweeps `run_state` rows for tombstoned ids:
+   a delete committing between `teardownRun`'s re-release guard SELECT and
+   its upsert can leave a bare orphan row behind the deleted id —
+   invisible (boot reset clears it; the tombstone gate refuses starts),
+   but the sweep removes it on the next delete instead of letting it
+   outlive the tombstone.
 2. **Read-through on async paths:** `connect()` and `run()` (both async via
    fire-and-forget Observable pattern) fetch from PG INTO the cache before
    completing, and `storeRun` merges each run's persisted events into

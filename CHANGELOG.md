@@ -17,6 +17,23 @@ All notable changes to this project will be documented in this file. The format 
   confusing 401. Catalog-installed agents are unaffected (their auth
   comes from the live template). Broken secrets log once per process
   instead of on every agents-list load.
+- **Fixed: a replay of a persisted history containing a duplicate active
+  `STEP_STARTED`/`TEXT_MESSAGE_START` (or a stray terminator for either)
+  was rejected outright by the AG-UI verifier, poisoning the whole
+  reconnect replay (#151).** Such records can only come from
+  non-conforming third-party agent backends or hand-seeded data — the
+  app's own runtime stream cannot produce them. The replay builder now
+  drops lifecycle events that are invalid for the state built so far
+  (the complement of synthesizing missing terminators), so reconnects
+  on affected threads render cleanly.
+- **Fixed: deleting a thread could leave an orphaned `run_state` row
+  behind the deleted id (#140).** When a thread's delete committed
+  between a finishing run's lock-release check and its release write,
+  the release re-inserted a bare lock row for the now-deleted id. It
+  was harmless (boot reset cleared it and the tombstone gate refuses
+  starts on deleted ids) but it survived until the next restart.
+  `deleteThread`'s retention transaction now also sweeps `run_state`
+  rows for tombstoned ids, so the orphan is cleaned on the next delete.
 
 - **Fixed: first sign-up on a fresh database without SMTP failed with a
   500 and left an orphan organization row behind (#208).** The session
