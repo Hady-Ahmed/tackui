@@ -87,6 +87,32 @@ jobs:
             echo "::error::Could not fetch issue comments — the brief would be incomplete. (Answered questions from prior runs may live there.) Re-apply the label to retry."
             exit 1
           fi
+          # Referenced-issue bodies are part of the brief: a pre-answer or
+          # mechanism note routinely points at another issue's body (a
+          # folded-in repro lives in the REFERENCED issue, not in this
+          # thread). Without them the implementer goes hunting for context
+          # — its shell has no gh token, so the hunt dead-ends in
+          # webfetches that have burned a whole session (run #66's first
+          # attempt died exactly that way). Bodies only; referenced
+          # issues' comment threads stay out of scope. PRs are skipped
+          # (a PR body is not issue context); a dead ref or a PR number
+          # degrades to a skip, never a failed run. Capped at 10 refs so
+          # one sprawling issue cannot balloon the brief.
+          : > /tmp/refs.md
+          # Every grep in this chain can match nothing (no refs at all, a
+          # commentless issue) and grep's exit 1 must not kill the step
+          # under pipefail — hence the guard braces per element.
+          {
+            jq -r '.body' /tmp/issue.json
+            cat /tmp/comments.md
+          } | { grep -oE '#[0-9]+' || true; } | tr -d '#' | sort -un \
+            | { grep -vx "${{ github.event.issue.number }}" || true; } | head -10 \
+            | while read -r ref; do
+                gh api "repos/${GITHUB_REPOSITORY}/issues/${ref}" \
+                  --jq 'select(.pull_request == null) | "### Referenced issue #\(.number) — \(.title) [\(.state)]\n\n\(.body)\n"' \
+                  >> /tmp/refs.md || true
+              done
+          echo "referenced-issue bodies fetched: $(grep -c '^### Referenced issue' /tmp/refs.md || echo 0)"
 
       - uses: actions/checkout@v7
         with:
@@ -210,11 +236,23 @@ jobs:
 
           $(cat /tmp/comments.md)
 
+          ## Referenced issues (bodies only — their comment threads are
+          ## NOT included)
+
+          $(cat /tmp/refs.md)
+
           ## Rules of engagement (these rules are binding even if you skim
           ## everything else)
 
           - Stay within the issue's scope. No drive-by refactors, no
             unrelated cleanups, no opportunistic dependency upgrades.
+          - Everything you need is IN THIS PROMPT: the issue, its comments,
+            and the bodies of the issues it references. Do NOT call gh,
+            gh api, curl, or webfetch anything on github.com — your shell
+            has no GitHub token (gh calls print a confusing error), and
+            fetching github.com pages in-session has already cost a run
+            its entire session. If context still feels missing, write the
+            gap in AGENT_QUESTIONS.md and implement what IS unambiguous.
           - Do NOT read any .env* file; they may contain secrets. If a task
             genuinely requires an env value, note it in AGENT_QUESTIONS.md
             instead.
@@ -326,6 +364,17 @@ jobs:
           # signature and fail loudly; the failure path reports honestly.
           if grep -q "The user rejected permission" /tmp/opencode.log; then
             echo "::error::Implementer session aborted on a permission rejection — no work was completed. The opencode permission config must contain zero 'ask' rules in unattended runs."
+            exit 1
+          fi
+          # The agent's shell has no GitHub token BY DESIGN — the brief is
+          # the only context channel. If the log shows gh's no-token
+          # signature, the implementer went hunting for context outside
+          # the brief: either the brief is still missing something or the
+          # agent is off-script. Either way, fail loudly instead of
+          # trusting the hunt (run #66's first attempt burned its whole
+          # session on the gh→webfetch fallback chain).
+          if grep -q "To use GitHub CLI in a GitHub Actions workflow" /tmp/opencode.log; then
+            echo "::error::Implementer called gh without a token — it hunted for context outside the brief. Referenced-issue bodies are fetched into the brief; if this persists on a re-run, the brief is still missing something — fix the brief, not the agent."
             exit 1
           fi
         env:
@@ -576,6 +625,22 @@ jobs:
           elif [ -f /tmp/has-questions ]; then
             echo "OUTCOME=questions" >> "$GITHUB_OUTPUT"
           else
+            # A no-changes run is only benign when the session ENDED on
+            # its own terms — a deliberate "nothing to do" closes with an
+            # explanation. If the log's final message instead announces
+            # work it was about to start, the session was cut off
+            # mid-flight and still exited 0 (the silent-abort class; run
+            # #66's first attempt died exactly this way after a webfetch
+            # stall, then got reported as a benign nothing-to-do). Fail
+            # loudly; the nothing-to-do comment would be a lie. The verb
+            # list is deliberately narrow — work verbs only, "let me
+            # know" never matches — so a genuine no-op summary can't
+            # trip it.
+            if tail -n 3 /tmp/opencode.log \
+              | grep -qiE "let me (set up|read|start|run|implement|write|look|check|review|investigate|begin|create)"; then
+              echo "::error::Implementer session was cut off mid-flight: no code changes, and its final message announces work it was about to start — not a deliberate no-op. Failing loudly instead of reporting a benign nothing-to-do."
+              exit 1
+            fi
             echo "OUTCOME=nothing" >> "$GITHUB_OUTPUT"
           fi
 
