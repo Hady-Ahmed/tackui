@@ -206,6 +206,7 @@ describe("BuilderForm — the key-aware defaulting effect (component wiring)", (
       orgId: "o1",
       authMode: "jwt",
       hasJwtSecret: false,
+      jwtSecretStatus: "none",
       origin: "builder",
       authorUserId: "user-1",
       instructions: "Be helpful.",
@@ -249,6 +250,7 @@ describe("BuilderForm — the key-aware defaulting effect (component wiring)", (
       orgId: "o1",
       authMode: "jwt",
       hasJwtSecret: false,
+      jwtSecretStatus: "none",
       origin: "builder",
       authorUserId: "user-1",
     };
