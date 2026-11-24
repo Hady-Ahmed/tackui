@@ -2,7 +2,11 @@
 
 import { useState, useEffect, useCallback, useRef, Suspense } from "react";
 import { useRouter, useSearchParams } from "next/navigation";
-import type { PublicAgent, AgentAuthMode } from "@/lib/agents/agents.config";
+import type {
+  PublicAgent,
+  AgentAuthMode,
+  AgentSecretStatus,
+} from "@/lib/agents/agents.config";
 import { BackToChat } from "@/components/back-to-chat";
 import { BuilderForm } from "@/components/builder/builder-form";
 import {
@@ -57,6 +61,7 @@ type Editing = {
   kind: PanelKind;
   name: string;
   hasJwtSecret: boolean;
+  jwtSecretStatus: AgentSecretStatus;
 };
 
 /**
@@ -313,6 +318,7 @@ function AgentsPageInner() {
       kind: "custom",
       name: agent.name,
       hasJwtSecret: agent.hasJwtSecret,
+      jwtSecretStatus: agent.jwtSecretStatus,
     });
     setForm({
       name: agent.name,
@@ -339,6 +345,9 @@ function AgentsPageInner() {
       kind: "builder",
       name: agent.name,
       hasJwtSecret: false,
+      // Builder rows carry no local secret (auth resolves from the
+      // platform env at run time).
+      jwtSecretStatus: "none",
     });
     setError(null);
     setFormOpen(true);
@@ -637,7 +646,14 @@ function AgentsPageInner() {
                         <Field
                           label="JWT secret"
                           hint={
-                            editing && editingHasJwtSecret()
+                            editing && editingSecretUndecryptable() ? (
+                              <span className="font-medium text-amber-600 dark:text-amber-400">
+                                Stored secret can&apos;t be decrypted — the
+                                encryption key may have changed. Runs fail
+                                until it is re-saved: type a new value below
+                                and update the agent.
+                              </span>
+                            ) : editing && editingHasJwtSecret()
                               ? "Key set ✓ — leave blank to keep existing, type a new value to replace"
                               : "Shared HS256 secret (≥32 chars). Set this to the same value as your backend's JWT verification key."
                           }
@@ -871,6 +887,10 @@ function AgentsPageInner() {
   function editingHasJwtSecret(): boolean {
     return editing?.hasJwtSecret ?? false;
   }
+
+  function editingSecretUndecryptable(): boolean {
+    return editing?.jwtSecretStatus === "undecryptable";
+  }
 }
 
 /* ---------------------------------------------------------------------- */
@@ -1076,7 +1096,7 @@ function Field({
   children,
 }: {
   label: string;
-  hint?: string;
+  hint?: React.ReactNode;
   required?: boolean;
   children: React.ReactNode;
 }) {

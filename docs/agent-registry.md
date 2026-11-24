@@ -148,11 +148,15 @@ the admin form (`/agents` page) or the REST API.
 
 **Secret handling:** `jwtSecret` is **write-only** — accepted on POST/PATCH
 but never returned in GET responses. `PublicAgent.hasJwtSecret: boolean`
-replaces the raw value. The admin edit form shows "Key set ✓" when true;
-submitting a blank field preserves the existing value. RS256 (asymmetric)
-and audience claims are future enhancements. The encryption boundary lives
-entirely inside `lib/agents/agent-store.ts` (see below); plaintext exists
-only in server memory while minting run tokens.
+reports presence, and `PublicAgent.jwtSecretStatus` carries the honest
+tri-state (`"none"` / `"set"` / `"undecryptable"`). The admin edit form
+shows "Key set ✓" when a secret is stored, and an amber "can't be
+decrypted — re-save" warning when the stored value is undecryptable;
+submitting a blank field preserves the existing value in both cases.
+RS256 (asymmetric) and audience claims are future enhancements. The
+encryption boundary lives entirely inside `lib/agents/agent-store.ts`
+(see below); plaintext exists only in server memory while minting run
+tokens.
 
 ## Encryption-at-rest for agent JWT secrets
 
@@ -167,11 +171,16 @@ expose backend JWT verification keys.
   the existing TEXT column — no schema migration. Random 12-byte IV
   per write, 16-byte auth tag (tamper detection). The versioned prefix
   makes values self-describing and format-evolution possible.
-- **Boundary:** encryption lives entirely inside `lib/agents/agent-store.ts`
-  — `createAgent`/`updateAgent` encrypt before the INSERT/UPDATE,
-  `rowToEntry` decrypts on read. Everything downstream (registry JWT
-  minting, `toPublicAgent` stripping, blank-preserve PATCH) works
-  unchanged on plaintext `AgentEntry.jwtSecret`.
+- **Boundary:** row mapping (`rowToEntry`) is **presence-only** — it
+  carries the raw stored value (`AgentEntry.jwtSecretStored`) without
+  decrypting. The single decryption point is
+  `resolveAgentSecret()` (also in `lib/agents/agent-store.ts`), called
+  only where the plaintext is genuinely consumed: JWT minting for
+  self-managed agents in `lib/agents/registry.ts`, and the public
+  read shape's tri-state (`toPublicAgent`). Catalog installs resolve
+  their auth from the live template (whose already-resolved secret
+  wins over the row copy), and builder agents use the platform env —
+  so their row copies are never decrypted at all.
 - **Plaintext fallback (solo mode only):** when `DB_ENCRYPTION_KEY` is
   unset, secrets are stored as plaintext — but since the SaaS-hardening
   pass, boot REFUSES without the key everywhere except solo mode
@@ -184,18 +193,29 @@ expose backend JWT verification keys.
   plaintext rows (`jwt_secret NOT LIKE 'enc:v1:%'`) so existing
   deployments are protected without re-editing every agent. Skipped
   (with warning) when no key is configured.
-- **Graceful decrypt failure:** a rotated/missing key or tampered value
-  logs `[agent-store] failed to decrypt jwt_secret` and treats that
-  agent as secret-less (backend returns 401) — other agents and the
-  rest of the app keep working. Degrading a READ must never degrade the
-  STORED value: updates (`updateAgent`, and `updateTemplate` for
-  templates) preserve the raw stored ciphertext byte-for-byte when a
-  patch supplies no new secret, so an unrelated edit (a rename) can't
-  turn a key-rotation mismatch into permanent secret loss — entering a
-  fresh secret remains the recovery path.
+- **Honest undecryptable state:** a rotated/missing key or tampered
+  value makes `resolveAgentSecret` report `"undecryptable"` — never a
+  silent degrade to secret-less, which read as a deliberate
+  configuration choice. The failure logs **once per process** per agent
+  (not per list load), the admin edit form shows a re-save nudge, and a
+  self-managed JWT agent in that state **fails its runs fast** with an
+  actionable message (the registry registers a run middleware that
+  throws before any request reaches the backend) instead of calling the
+  backend headerless and surfacing a confusing 401. The agent stays
+  listed — a throw/skip at listing time would crash the client's
+  "Agent not found after runtime sync". Catalog installs are unaffected
+  while their template resolves (the live template's secret is used);
+  a tombstoned install falls back to its row copy and hits the same
+  fast-fail. Degrading a READ must never degrade the STORED value:
+  updates (`updateAgent`, and `updateTemplate` for templates) preserve
+  the raw stored value byte-for-byte when a patch supplies no new
+  secret, so an unrelated edit (a rename) can't turn a key-rotation
+  mismatch into permanent secret loss — entering a fresh secret remains
+  the recovery path.
 - **Key rotation:** changing `DB_ENCRYPTION_KEY` invalidates existing
   ciphertexts (GCM auth fails). Re-save each agent's JWT secret after
-  rotation (the value itself doesn't change — only the encryption key).
+  rotation (the value itself doesn't change — only the encryption key);
+  the admin edit form's undecryptable warning is the checklist.
 
 ## Builder-origin agents
 

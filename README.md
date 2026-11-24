@@ -365,7 +365,7 @@ If your agent backends run on the same host as the frontend (common for self-hos
 ### Secret handling
 
 - **`BETTER_AUTH_SECRET`** — the app refuses to boot in auth mode without it. A missing secret would silently sign session cookies with a publicly-known value, allowing account forgery.
-- **`jwtSecret`** — never returned in API responses. The admin edit form shows whether a key is set (via `hasJwtSecret: boolean`) but never displays the value. To replace it, type a new value; to keep the existing one, leave the field blank. When `DB_ENCRYPTION_KEY` is set, the secret is **encrypted at rest** (AES-256-GCM) — a leaked database dump alone does not expose it; it is decrypted in memory only when minting run tokens. Existing plaintext rows are re-encrypted automatically at boot.
+- **`jwtSecret`** — never returned in API responses. The admin edit form shows whether a key is set (via `hasJwtSecret: boolean`) but never displays the value. To replace it, type a new value; to keep the existing one, leave the field blank. When `DB_ENCRYPTION_KEY` is set, the secret is **encrypted at rest** (AES-256-GCM) — a leaked database dump alone does not expose it; it is decrypted in memory only where it is consumed (minting run tokens, the admin edit form's status). Existing plaintext rows are re-encrypted automatically at boot. If a stored secret can't be decrypted (e.g. the key was rotated), the agent surfaces an explicit **undecryptable** state — the edit form nudges you to re-save it, and runs of self-managed JWT agents fail with an actionable message instead of a confusing backend 401.
 - **Social/OIDC client secrets** — only read from environment variables, never stored in the database or exposed via API responses.
 
 ### Security headers

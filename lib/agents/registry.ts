@@ -2,7 +2,7 @@ import { HttpAgent } from "@ag-ui/client";
 import type { AbstractAgent, RunAgentInput } from "@ag-ui/client";
 import jwt from "jsonwebtoken";
 import type { AgentEntry } from "./agents.config";
-import { listAgents } from "./agent-store";
+import { listAgents, resolveAgentSecret } from "./agent-store";
 import { AGENTOS_USER_SCOPE } from "./builder";
 import {
   AGENTOS_ENABLED,
@@ -143,30 +143,47 @@ export async function getAgents(request?: Request): Promise<AgentsMap> {
 
 function createAgent(entry: AgentEntry, user: RequestUser): AbstractAgent {
   const headers: Record<string, string> = {};
-
-  // Per-agent JWT auth (HS256). When enabled, mint a short-lived
-  // token per run with `sub` = the authenticated user's id, signed
-  // with the agent's shared secret. The backend verifies the
-  // signature (proving tackui minted it) and uses `sub` to identify
-  // the caller. Authorization (what the user can do) stays the
-  // backend's job — tackui only vouches for *who* the user is.
-  // When `jwtScopes` is configured, the `scopes` claim is included
-  // so backends with `authorization=True` (e.g. Agno's AuthMiddleware)
-  // can check RBAC permissions. Omitted entirely when no scopes are
-  // set (works fine when the backend's authorization is off).
-  if (entry.authMode === "jwt" && entry.jwtSecret) {
-    const now = Math.floor(Date.now() / 1000);
-    const payload: {
-      sub: string;
-      iat: number;
-      exp: number;
-      scopes?: string[];
-    } = { sub: user.id, iat: now, exp: now + 3600 };
-    if (entry.jwtScopes?.length) payload.scopes = entry.jwtScopes;
-    const token = jwt.sign(payload, entry.jwtSecret, {
-      algorithm: "HS256",
-    });
-    headers.Authorization = `Bearer ${token}`;
+  // The stored secret is decrypted ON DEMAND, here — the one consumer on
+  // the run path (self-managed agents; catalog installs carry the live
+  // template's already-resolved secret on `jwtSecret`, which
+  // resolveAgentSecret honors before touching the row copy, and builder
+  // agents carry the platform secret the same way). An UNDECRYPTABLE
+  // stored secret is NOT treated as secret-less: the agent stays listed
+  // (a throw/skip here would crash the client's "Agent not found after
+  // runtime sync"), but every run fails fast with an actionable message
+  // via the guard middleware below instead of silently going headerless
+  // and letting the backend 401.
+  let secretUndecryptable = false;
+  if (entry.authMode === "jwt") {
+    const auth = resolveAgentSecret(entry);
+    if (auth.status === "set" && auth.secret !== undefined) {
+      // Mint a short-lived token per registry build with `sub` = the
+      // authenticated user's id, signed with the agent's shared secret.
+      // The backend verifies the signature (proving tackui minted it)
+      // and uses `sub` to identify the caller. Authorization (what the
+      // user can do) stays the backend's job — tackui only vouches for
+      // *who* the user is. When `jwtScopes` is configured, the `scopes`
+      // claim is included so backends with `authorization=True` (e.g.
+      // Agno's AuthMiddleware) can check RBAC permissions. Omitted
+      // entirely when no scopes are set (works fine when the backend's
+      // authorization is off).
+      const now = Math.floor(Date.now() / 1000);
+      const payload: {
+        sub: string;
+        iat: number;
+        exp: number;
+        scopes?: string[];
+      } = { sub: user.id, iat: now, exp: now + 3600 };
+      if (entry.jwtScopes?.length) payload.scopes = entry.jwtScopes;
+      const token = jwt.sign(payload, auth.secret, {
+        algorithm: "HS256",
+      });
+      headers.Authorization = `Bearer ${token}`;
+    } else if (auth.status === "undecryptable") {
+      secretUndecryptable = true;
+    }
+    // status "none" (authMode jwt but no secret stored) keeps today's
+    // headerless behavior — a configuration gap, not a broken secret.
   }
 
   // Run-time fetch policy by origin — the SSRF guard defends against
@@ -196,6 +213,18 @@ function createAgent(entry: AgentEntry, user: RequestUser): AbstractAgent {
       ? {}
       : { fetch: (url, init) => fetchGuardedRedirects(url, init) }),
   });
+
+  // Fail fast for an undecryptable stored credential — at RUN time, not
+  // listing time (see the mint block above). Registered BEFORE the
+  // context middleware so the honest error fires before any per-run
+  // processing; the throw surfaces as the run's RUN_ERROR message.
+  if (secretUndecryptable) {
+    agent.use(() => {
+      throw new Error(
+        `This agent's stored credential can't be decrypted (the encryption key may have changed) — an admin needs to re-save the agent's JWT secret in the agents settings before it can run.`,
+      );
+    });
+  }
 
   // Forward the authenticated user's id via `forwardedProps.user_id`
   // (Agno's documented convention for anonymous-caller attribution).
