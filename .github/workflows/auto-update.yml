@@ -80,6 +80,7 @@ jobs:
           persist-credentials: false
 
       - name: Plan — classify every open agent PR
+        id: plan
         env:
           # Read-only queries use GITHUB_TOKEN; the app token is spent on
           # mutations only.
@@ -160,6 +161,7 @@ jobs:
       # before acting (the plan snapshot is already minutes old).
       # ------------------------------------------------------------------
       - name: Update stale PRs (merge main in, no conflicts)
+        id: update
         if: steps.plan.outputs.UPDATE_COUNT != '0'
         env:
           GH_TOKEN: ${{ steps.app-token.outputs.token }}
@@ -196,11 +198,21 @@ jobs:
               printf '::notice::PR #%s — main merged in; CI re-runs on the new merge ref.\n' "$n"
               printf '| #%s | %s | updated — main merged in, CI re-runs |\n' "$n" "$branch" >> /tmp/report.md
             else
-              # 422 = conflicts appeared between plan and now. Leave it: the
-              # next push to main (or a manual re-run) will route it through
-              # the resolve pass with a fresh DIRTY classification.
-              printf '::warning::PR #%s update-branch failed (now conflicted?) — left for the resolve pass on the next trigger.\n' "$n"
-              printf '| #%s | %s | update failed — now conflicted; routed to resolve next pass |\n' "$n" "$branch" >> /tmp/report.md
+              # 422 = conflicts appeared between plan and now (merging main
+              # into the branch hit real conflicts — e.g. two agent PRs
+              # both adding a CHANGELOG entry under [Unreleased]).
+              # Re-route it into THIS pass's resolve phase instead of
+              # waiting for the next trigger — the merge that created the
+              # conflict may be the last push to main for a while.
+              # GitHub recomputes merge state asynchronously, so give the
+              # DIRTY classification a moment to settle before the resolve
+              # phase's own re-check runs (resolve_one skips politely if
+              # the state reads stale).
+              sleep 20
+              printf '%s\t%s\n' "$n" "$branch" >> /tmp/resolve-prs
+              echo "CONFLICTED=1" >> "$GITHUB_OUTPUT"
+              printf '::warning::PR #%s update-branch failed — conflicts; routed to the resolve phase in this pass.\n' "$n"
+              printf '| #%s | %s | update failed — now conflicted; routed to resolve in this pass |\n' "$n" "$branch" >> /tmp/report.md
             fi
           done < /tmp/update-prs
 
@@ -211,11 +223,11 @@ jobs:
       # move on — the updater never loops on one branch.
       # ------------------------------------------------------------------
       - name: Install opencode
-        if: steps.plan.outputs.RESOLVE_COUNT != '0'
+        if: steps.plan.outputs.RESOLVE_COUNT != '0' || steps.update.outputs.CONFLICTED == '1'
         run: npm i -g opencode-ai@latest
 
       - name: Configure opencode (model + credentials + unattended permissions)
-        if: steps.plan.outputs.RESOLVE_COUNT != '0'
+        if: steps.plan.outputs.RESOLVE_COUNT != '0' || steps.update.outputs.CONFLICTED == '1'
         env:
           AGENT_OPENCODE_CONFIG: ${{ secrets.AGENT_OPENCODE_CONFIG }}
         run: |
@@ -246,7 +258,7 @@ jobs:
           chmod 600 ~/.config/opencode/opencode.json
 
       - name: Resolve conflicts (DIRTY PRs)
-        if: steps.plan.outputs.RESOLVE_COUNT != '0'
+        if: steps.plan.outputs.RESOLVE_COUNT != '0' || steps.update.outputs.CONFLICTED == '1'
         env:
           GH_TOKEN: ${{ steps.app-token.outputs.token }}
           AGENT_MODEL: ${{ vars.AGENT_MODEL }}
