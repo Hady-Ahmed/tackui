@@ -182,6 +182,38 @@ export function redactReservedEvent<E extends object>(
  *   and a producer must close what it opened before a new RUN_STARTED in
  *   the same stream. The bridge supplies the "later RUN_STARTED" the
  *   synthesis exists for — it just isn't in the persisted history list.
+ * - Duplicate actives and stray terminators in the STEP_* and
+ *   TEXT_MESSAGE_* lifecycles are DROPPED rather than replayed: a START
+ *   for a step/message that is already active and a terminator for one
+ *   that is not currently active (never started, or already closed) are
+ *   each rejected outright by the @ag-ui/client verifier, so replaying
+ *   either poisons the whole reconnect replay. A terminator whose id
+ *   cannot be tracked is likewise rejected — but a START with a
+ *   non-string id is NOT: the verifier accepts it and tracks it under
+ *   the raw key, so the drop for those rests on schema enforcement
+ *   instead (TextMessageStartEventSchema/StepStartedEventSchema require
+ *   the id, and the client's enforceEvents boundary parses every event
+ *   before it can be persisted — untrackable-id STARTs never reach a
+ *   persisted record). This is the complement of the closure rule
+ *   above: missing terminators are synthesized for
+ *   sequences the replay actually opened; invalid extras are dropped,
+ *   never legalized by inventing a missing START (that would fabricate
+ *   an open step/message). Closing an id frees it — a later START for the
+ *   same id is kept, matching the verifier (which accepts a reopened id
+ *   and resets all lifecycle state at each RUN_STARTED, as this builder
+ *   does per run segment). Message ids are keyed plainly; step state is
+ *   keyed the way the verifier keys steps — per lane, by
+ *   (subagentRunId, stepName) — so the same stepName may be open
+ *   concurrently under the parent agent and a subagent without
+ *   colliding, a STEP_FINISHED only closes its own lane's step ("A step
+ *   must be finished by whoever started it"), and the synthesized
+ *   closures in closeOpenSequences carry the originating lane's
+ *   subagentRunId. Events without a subagentRunId — and with null, which
+ *   the verifier's null-stripper removes — share the parent lane. Our
+ *   own pipeline cannot emit any of these
+ *   shapes (the CopilotKit runtime stream is conforming) — this protects
+ *   replays of records written by non-conforming third-party backends or
+ *   seeded by hand.
  *
  * The synthesized tool-call results carry status "error": for an errored
  * run that reads as failed, as intended. For a finished run whose record
@@ -215,11 +247,16 @@ function buildReplayEvents(
   // REASONING_END for each open block.
   const openReasoningMessages = new Set<string>();
   const openReasoningBlocks = new Set<string>();
-  // Open STEP_* sequences, keyed by stepName. A step groups a phase of a
-  // run — its messages and tool calls — so in closeOpenSequences it is
-  // closed LAST, after the inner sequences it wraps (see the closure-order
-  // note there).
-  const openSteps = new Set<string>();
+  // Open STEP_* sequences, keyed per lane the way the verifier tracks
+  // steps: (subagentRunId, stepName). A step groups a phase of a run — its
+  // messages and tool calls — so in closeOpenSequences it is closed LAST,
+  // after the inner sequences it wraps (see the closure-order note there).
+  // Lane key: the subagentRunId string, or "" for the parent lane (events
+  // without a subagentRunId, and with null — which the verifier's
+  // null-stripper removes — both belong to the parent lane).
+  const openSteps = new Map<string, Set<string>>();
+  const stepLane = (subagentRunId: unknown): string =>
+    typeof subagentRunId === "string" ? subagentRunId : "";
 
   const closeOpenSequences = (): void => {
     // Closure order: inner sequences first — reasoning messages, then
@@ -262,8 +299,18 @@ function buildReplayEvents(
         } as unknown as BaseEvent);
       }
     }
-    for (const stepName of openSteps) {
-      out.push({ type: EventType.STEP_FINISHED, stepName } as unknown as BaseEvent);
+    for (const [lane, names] of openSteps) {
+      for (const stepName of names) {
+        // The closure carries the originating lane's subagentRunId — the
+        // verifier requires a step to be finished by whoever started it,
+        // so a parent-lane STEP_FINISHED would be rejected while the
+        // subagent lane's step is the one still open.
+        out.push(
+          (lane
+            ? { type: EventType.STEP_FINISHED, stepName, subagentRunId: lane }
+            : { type: EventType.STEP_FINISHED, stepName }) as unknown as BaseEvent,
+        );
+      }
     }
     openReasoningMessages.clear();
     openReasoningBlocks.clear();
@@ -351,11 +398,24 @@ function buildReplayEvents(
       const id = (event as { messageId?: unknown }).messageId;
       if (typeof id === "string") openReasoningBlocks.delete(id);
     } else if (event.type === EventType.TEXT_MESSAGE_START) {
+      // Drop policy (duplicate actives + stray terminators — see this
+      // function's doc comment): a message START for an id that is
+      // already active is verifier-rejected, so it is dropped instead of
+      // replayed. (A START with a non-string id is NOT verifier-rejected
+      // — the verifier accepts it and tracks it under the raw key — but
+      // schema enforcement requires the id, so conforming records never
+      // carry one; see the doc comment.)
       const id = (event as { messageId?: unknown }).messageId;
-      if (typeof id === "string") openMessageIds.add(id);
+      if (typeof id !== "string" || openMessageIds.has(id)) continue;
+      openMessageIds.add(id);
     } else if (event.type === EventType.TEXT_MESSAGE_END) {
+      // A terminator for a message that is not currently open (never
+      // started, already closed, or untrackable) is verifier-rejected —
+      // dropped. A legit close frees the id, so a later START for the
+      // same id is kept (the verifier accepts a reopened id too).
       const id = (event as { messageId?: unknown }).messageId;
-      if (typeof id === "string") openMessageIds.delete(id);
+      if (typeof id !== "string" || !openMessageIds.has(id)) continue;
+      openMessageIds.delete(id);
     } else if (event.type === EventType.TOOL_CALL_START) {
       const id = (event as { toolCallId?: unknown }).toolCallId;
       if (typeof id === "string") openToolCalls.set(id, { hasEnd: false, hasResult: false });
@@ -368,11 +428,39 @@ function buildReplayEvents(
       const info = typeof id === "string" ? openToolCalls.get(id) : undefined;
       if (info) info.hasResult = true;
     } else if (event.type === EventType.STEP_STARTED) {
+      // Drop policy, step lifecycle: a START for a (subagentRunId,
+      // stepName) pair that is already active is verifier-rejected —
+      // dropped. #142's `add()` no-op kept the duplicate in the replay,
+      // so a single poisoned record still rejected the whole reconnect.
+      // (A START with a non-string name is NOT verifier-rejected — the
+      // verifier tracks it under the raw key — but schema enforcement
+      // requires the name, so conforming records never carry one; see the
+      // doc comment.)
       const name = (event as { stepName?: unknown }).stepName;
-      if (typeof name === "string") openSteps.add(name);
+      if (typeof name !== "string") continue;
+      const lane = stepLane((event as { subagentRunId?: unknown }).subagentRunId);
+      let laneSteps = openSteps.get(lane);
+      if (laneSteps?.has(name)) continue;
+      if (!laneSteps) {
+        laneSteps = new Set<string>();
+        openSteps.set(lane, laneSteps);
+      }
+      laneSteps.add(name);
     } else if (event.type === EventType.STEP_FINISHED) {
+      // Drop policy, step lifecycle: a FINISHED for a step that its lane
+      // does not currently hold (finish-without-start or a duplicate
+      // finish) is verifier-rejected — dropped, never legalized by
+      // synthesizing a missing START (that would invent an open step).
+      // The same stepName being open in ANOTHER lane does not legalize it
+      // ("A step must be finished by whoever started it"). A legit finish
+      // frees the (lane, name) pair, so a later START for it is kept.
       const name = (event as { stepName?: unknown }).stepName;
-      if (typeof name === "string") openSteps.delete(name);
+      if (typeof name !== "string") continue;
+      const lane = stepLane((event as { subagentRunId?: unknown }).subagentRunId);
+      const laneSteps = openSteps.get(lane);
+      if (!laneSteps?.has(name)) continue;
+      laneSteps.delete(name);
+      if (laneSteps.size === 0) openSteps.delete(lane);
     }
     out.push(event);
   }
