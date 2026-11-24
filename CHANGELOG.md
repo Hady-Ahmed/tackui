@@ -4,6 +4,17 @@ All notable changes to this project will be documented in this file. The format 
 
 ## [Unreleased]
 
+- **Fixed: a thread view could briefly serve history missing a
+  just-finished run (#66, #141).** A reconnect's message fetch could
+  land its stale read-through cache write after a concurrent run's
+  capture — the sync readers then regressed to pre-run history until
+  the next write on the thread. The two cache writers are now
+  serialized per thread. Related run-lifecycle hardening in the same
+  change: a cancelled (disconnected) replay stream no longer keeps
+  draining the in-flight run's event subject, a run's bridge from a
+  predecessor's subject is disposed when the run ends, and the boot
+  cache refresh no longer wipes warm message caches or drops writes
+  landing mid-refresh.
 - **Changed: agent JWT secrets are decrypted on demand, and a secret
   that can't be decrypted now reports itself instead of masquerading as
   "no secret" (#82).** Reading agents no longer decrypts every stored

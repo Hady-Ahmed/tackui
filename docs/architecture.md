@@ -224,7 +224,14 @@ teardown), the bridge is skipped entirely. Every event a run emits is
 emitted *before* `storeRun` persists it, so a covered replay means the
 subject can only add duplicates (the messageId dedup doesn't cover
 `TOOL_CALL_*`/`STATE_*`, and a duplicate `TOOL_CALL_START` trips the AG-UI
-verifier).
+verifier). Both run-subject bridges are captured and disposed on their
+real lifecycles: the prev-run bridge (a run starting while a
+predecessor's connection still sits in `ACTIVE_CONNECTIONS`) is disposed
+by `teardownRun` on every run exit path, and the in-flight-run bridge is
+disposed by `connect()`'s Observable teardown — the SSE runtime
+subscribes exactly once per connect and unsubscribes on client
+disconnect, so a cancelled stream stops draining the run's subject
+instead of holding it (and its dedup closure) alive until run end.
 
 ### In-memory cache (sync interface bridge)
 
@@ -273,7 +280,20 @@ always the source of truth:**
    holds a runId absent from its snapshot** — a run committing between the
    history read and the write merged itself into the cache, and the older
    snapshot would regress the sync readers to pre-run history until the
-   next write on the thread.
+   next write on the thread. The message half of that write has no data
+   guard (messages carry no version), so both `messageCache` writers —
+   `connect()`'s fetch+write and `captureThreadData`'s write — are
+   serialized under a per-thread in-process keyed lock: a connect whose
+   message SELECT snapshot predates a capture's commit can still resolve
+   after the capture's cache write, and the lock queues the capture's
+   write behind the stale one so the fresh value always lands last
+   (holding the run-state lock instead would make connect contend with an
+   entire run's duration — deliberately not done). `refreshCacheFromDB`
+   (boot, and the future multi-instance timer) builds its fresh
+   `threadCache` completely, carries forward any cache entry fresher than
+   its snapshot row, and swaps the reference — no clear→fill window for a
+   concurrent write to fall into — and never touches `messageCache`, whose
+   data is owned by capture/connect.
 3. **Sync methods read cache ONLY** — no DB I/O, no Promises.
 
 Single-instance deployments (OSS self-hosters, solo mode) have no staleness —

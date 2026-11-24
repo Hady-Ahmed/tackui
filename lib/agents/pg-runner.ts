@@ -7,7 +7,7 @@ import {
   type AgentRunnerStopRequest,
   type LocalThreadEndpointRecord,
 } from "@copilotkit/runtime/v2";
-import { Observable, ReplaySubject } from "rxjs";
+import { Observable, ReplaySubject, Subscription } from "rxjs";
 import {
   AbstractAgent,
   BaseEvent,
@@ -18,6 +18,7 @@ import {
 } from "@ag-ui/client";
 import type { Message } from "@ag-ui/core";
 import { query, withTransaction } from "@/lib/db/pg";
+import { withKeyedLock } from "@/lib/db/keyed-lock";
 import { getReservedDepKeys, getRunnerUser } from "@/lib/auth/request-context";
 
 interface AgentRunRecord {
@@ -57,6 +58,16 @@ interface ActiveConnectionContext {
    * startRun gate.
    */
   threadDeleted?: boolean;
+  /**
+   * The prev-run bridge subscription created in startRun when a
+   * predecessor's connection still sat in ACTIVE_CONNECTIONS (its
+   * subject is replayed into this run's stream). Lives in this run's
+   * scope: teardownRun — the always-runs cleanup every exit path goes
+   * through — disposes it, so a leaked observer can't keep receiving
+   * the predecessor's events and holding its subject alive after this
+   * run has ended.
+   */
+  prevBridge?: Subscription;
 }
 
 // Active connections for streaming events and stop support. Owned by this
@@ -64,6 +75,20 @@ interface ActiveConnectionContext {
 // in @copilotkit/sqlite-runner, which forced the old PersistentAgentRunner to
 // reach into the parent's private `db` field via a TS escape hatch).
 const ACTIVE_CONNECTIONS = new Map<string, ActiveConnectionContext>();
+
+/**
+ * Per-thread key serializing the two messageCache writers (#141): the
+ * connect()'s read-through fetch+write and captureThreadData's write. The
+ * fetch's statement snapshot can predate a run's capture commit while its
+ * resolution lands after the capture's cache write — messages carry no
+ * version, so there is no data-comparison guard; holding the lock across
+ * fetch and write makes the capture's queued write land after any stale
+ * set. Hold times are one fast SELECT — the keyed lock's 30s waiter
+ * timeout is irrelevant here, and this is deliberately NOT the run-state
+ * lock (that one is held for an entire run's duration; connect must never
+ * contend with it).
+ */
+const msgCacheKey = (threadId: string): string => `pg-runner:msg-cache:${threadId}`;
 
 const SCHEMA_VERSION = 1;
 
@@ -861,9 +886,13 @@ export class PostgresAgentRunner extends AgentRunner {
     };
 
     // Bridge previous events if a prior subject exists (e.g. reconnect
-    // during an in-flight run on the same thread).
+    // during an in-flight run on the same thread). The subscription is
+    // captured on THIS run's connection: teardownRun disposes it on every
+    // exit path, so the bridge cannot outlive the run it serves — an
+    // uncaptured one would keep receiving the predecessor's events for a
+    // dead stream and hold its subject alive.
     if (prevSubject) {
-      prevSubject.subscribe({
+      myConnection.prevBridge = prevSubject.subscribe({
         next: (e) => nextSubject.next(e),
         error: (err) => nextSubject.error(err),
         complete: () => {
@@ -893,17 +922,50 @@ export class PostgresAgentRunner extends AgentRunner {
     // async DB work inside startConnect(), fired fire-and-forget — same
     // pattern as run(). The subject receives events once the async work
     // resolves.
+    //
+    // startConnect must be INVOKED here — inside the caller's ALS scope —
+    // not deferred to subscribe-time: its cross-tenant read guard reads
+    // the request context via getRunnerUser(), and the SSE runtime
+    // subscribes outside that scope. The fire-and-forget chain created
+    // inside this call carries the scope into its async continuations;
+    // a subscribe-time invocation would lose it and fail the guard open.
+    //
+    // The returned Observable's teardown is the client-disconnect hook:
+    // the SSE runtime subscribes exactly once per connect and
+    // unsubscribes on request.signal abort (verified against
+    // @copilotkit/runtime's createSseEventResponse), so the teardown
+    // runs when this stream's consumer leaves. It disposes the
+    // in-flight-run bridge startConnect may have attached — an
+    // uncaptured bridge would keep receiving events for a dead stream
+    // and hold the run's subject (and the emittedMessageIds closure)
+    // alive until run end. A teardown that lands before startConnect
+    // resolves disposes the freshly created bridge immediately.
     const connectionSubject = new ReplaySubject<BaseEvent>(Infinity);
-    this.startConnect(request, connectionSubject).catch((err) => {
-      connectionSubject.error(err);
+    let disposed = false;
+    let disposeBridge: (() => void) | undefined;
+    this.startConnect(request, connectionSubject)
+      .then((dispose) => {
+        if (disposed) dispose();
+        else disposeBridge = dispose;
+      })
+      .catch((err) => {
+        connectionSubject.error(err);
+      });
+    const replayable = connectionSubject.asObservable();
+    return new Observable<BaseEvent>((subscriber) => {
+      const upstream = replayable.subscribe(subscriber);
+      return () => {
+        disposed = true;
+        upstream.unsubscribe();
+        disposeBridge?.();
+      };
     });
-    return connectionSubject.asObservable();
   }
 
   private async startConnect(
     request: AgentRunnerConnectRequest,
     connectionSubject: ReplaySubject<BaseEvent>,
-  ): Promise<void> {
+  ): Promise<() => void> {
     // ─── Cross-tenant read guard ─────────────────────────────────────────
     // Same visibility rule as the sync readers (getThreadEvents et al):
     // an authenticated caller is denied for a thread unknown to this
@@ -919,7 +981,7 @@ export class PostgresAgentRunner extends AgentRunner {
       const cached = this.threadCache.get(request.threadId);
       if (!cached || !this.threadVisible(cached, runnerUser)) {
         connectionSubject.complete();
-        return;
+        return () => {};
       }
     }
 
@@ -949,7 +1011,6 @@ export class PostgresAgentRunner extends AgentRunner {
     // subscription every decision is synchronous off these values.
     const activeConnection = ACTIVE_CONNECTIONS.get(request.threadId);
     const runState = await this.getRunState(request.threadId);
-    const messages = await this.fetchThreadMessages(request.threadId);
 
     // willBridge: an in-flight run exists and the snapshot does NOT
     // cover it — the bridge will append its buffered events (first: its
@@ -976,10 +1037,24 @@ export class PostgresAgentRunner extends AgentRunner {
     // STATE_SNAPSHOT) until the next write on the thread. A cache
     // holding a runId absent from the snapshot proves a newer write
     // landed: skip and let the newer value stand.
-    if (!this.cacheHoldsRunOutsideSnapshot(request.threadId, snapshotRunIds)) {
-      this.eventsCache.set(request.threadId, compactedEvents);
-    }
-    if (messages.length > 0) this.messageCache.set(request.threadId, messages);
+    //
+    // The message half needs serialization instead of a data guard
+    // (#141): the fetch's statement snapshot can predate a run's
+    // captureThreadData commit while its resolution lands after the
+    // capture's messageCache write — the stale fetch would clobber the
+    // fresh capture. Messages carry no version, so there is nothing to
+    // compare; the keyed lock (see msgCacheKey) held across fetch and
+    // write queues the capture's write behind this section, so the fresh
+    // value always lands last. Deliberately NOT the run-state lock —
+    // that one is held for an entire run; connect must never contend
+    // with it.
+    await withKeyedLock(msgCacheKey(request.threadId), async () => {
+      const messages = await this.fetchThreadMessages(request.threadId);
+      if (!this.cacheHoldsRunOutsideSnapshot(request.threadId, snapshotRunIds)) {
+        this.eventsCache.set(request.threadId, compactedEvents);
+      }
+      if (messages.length > 0) this.messageCache.set(request.threadId, messages);
+    });
 
     const emittedMessageIds = new Set<string>();
     for (const event of compactedEvents) {
@@ -1017,7 +1092,12 @@ export class PostgresAgentRunner extends AgentRunner {
       !replayCoversActiveRun &&
       (runState.isRunning || activeConnection.stopRequested)
     ) {
-      activeConnection.subject.subscribe({
+      // Captured and returned for disposal: connect()'s Observable
+      // teardown (the SSE runtime's client-disconnect hook) unsubscribes
+      // it, so a cancelled client's stream cannot keep draining the
+      // in-flight run's subject until run end. On the source's own
+      // terminal (complete/error) rxjs already disposes it.
+      const bridge = activeConnection.subject.subscribe({
         next: (event) => {
           // Skip message events we already emitted from historic replay.
           if (
@@ -1032,9 +1112,10 @@ export class PostgresAgentRunner extends AgentRunner {
         complete: () => connectionSubject.complete(),
         error: (err) => connectionSubject.error(err),
       });
-    } else {
-      connectionSubject.complete();
+      return () => bridge.unsubscribe();
     }
+    connectionSubject.complete();
+    return () => {};
   }
 
   async isRunning(
@@ -1269,10 +1350,14 @@ export class PostgresAgentRunner extends AgentRunner {
          LEFT JOIN thread_metadata tm ON ar.thread_id = tm.thread_id
          ORDER BY ar.last_created DESC`);
 
-    this.threadCache.clear();
-    this.messageCache.clear();
+    // Build-then-swap: the whole fresh map is built from the snapshot
+    // BEFORE any mutation, then swapped in by reference — no clear→fill
+    // window in which concurrent writers could be clobbered by stale
+    // rows (boot-time both maps are empty, but the documented
+    // future-timer use would make the window real).
+    const next = new Map<string, LocalThreadEndpointRecord>();
     for (const row of result.rows) {
-      this.threadCache.set(row.thread_id, {
+      next.set(row.thread_id, {
         id: row.thread_id,
         name: row.title,
         agentId: row.agent_id ?? "default",
@@ -1282,10 +1367,21 @@ export class PostgresAgentRunner extends AgentRunner {
         createdAt: new Date(row.first_created).toISOString(),
         updatedAt: new Date(row.last_created).toISOString(),
       });
-      // Messages are loaded lazily by startConnect() — only fetch them
-      // here if they're cheap. For now, leave messageCache empty until
-      // a connect() or captureThreadData() populates it.
     }
+    // Carve-out for writes that landed after the snapshot: a
+    // captureThreadData (or rename) committing while this SELECT was in
+    // flight updated the live cache with fresher data than the rows read
+    // here — keep it (it also preserves threads seeded in-memory by
+    // startRun whose first capture hasn't persisted yet). messageCache is
+    // left alone entirely: its data is owned by capture/connect, never by
+    // this refresh.
+    for (const [threadId, record] of this.threadCache) {
+      const snapshotRow = next.get(threadId);
+      if (!snapshotRow || record.updatedAt > snapshotRow.updatedAt) {
+        next.set(threadId, record);
+      }
+    }
+    this.threadCache = next;
   }
 
   private async fetchThreadMessages(threadId: string): Promise<Message[]> {
@@ -1693,6 +1789,12 @@ export class PostgresAgentRunner extends AgentRunner {
     connection: ActiveConnectionContext,
     runId: string,
   ): Promise<void> {
+    // The prev-run bridge lives in this run's scope — dispose it on every
+    // exit path, before anything else (unconditional: even when a
+    // replacement run has already replaced the map entry, the bridge is
+    // still THIS run's and must not outlive it).
+    connection.prevBridge?.unsubscribe();
+    connection.prevBridge = undefined;
     try {
       const state = await this.getRunState(threadId);
       if (state.currentRunId === runId) {
@@ -1811,7 +1913,13 @@ export class PostgresAgentRunner extends AgentRunner {
       updatedAt: nowIso,
     });
     if (messages && messages.length > 0) {
-      this.messageCache.set(request.threadId, messages);
+      // Serialized against startConnect's read-through fetch+write (see
+      // msgCacheKey): a connect whose message SELECT snapshot predates
+      // this capture's commit can still be parked mid-fetch — its stale
+      // write must land BEFORE this fresh one, never after.
+      await withKeyedLock(msgCacheKey(request.threadId), async () => {
+        this.messageCache.set(request.threadId, messages);
+      });
     }
   }
 
