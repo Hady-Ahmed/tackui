@@ -375,6 +375,40 @@ describe("getAgents", () => {
       expect(decoded.scopes).toEqual(["agents:run", "app:superadmin"]);
     });
 
+    it("builder tokens bind the target component (agent_id claim = remoteAgentId)", async () => {
+      vi.mocked(listAgents).mockResolvedValue([
+        aguiEntry({ id: "b1", origin: "builder", remoteAgentId: "r1" }),
+      ]);
+      const map = await getAgents(new Request("http://localhost"));
+      const agent = map["b1"];
+
+      const headers = (agent as unknown as { headers: Record<string, string> }).headers;
+      const token = headers.Authorization.replace("Bearer ", "");
+      // Builder tokens are signed with the platform secret (AGENTOS_JWT_SECRET
+      // from the vi.hoisted env), not a stored per-agent secret.
+      const decoded = jwt.verify(token, "test-agentos-secret", { algorithms: ["HS256"] }) as jwt.JwtPayload;
+
+      expect(decoded.sub).toBe("u-123");
+      expect(decoded.agent_id).toBe("r1");
+      expect(decoded.scopes).toEqual(["app:user"]);
+    });
+
+    it("manual/template tokens carry no agent_id claim", async () => {
+      vi.mocked(listAgents).mockResolvedValue([
+        aguiEntry({ id: "ag1", authMode: "jwt", jwtSecret: TEST_SECRET, origin: "manual" }),
+      ]);
+      const map = await getAgents(new Request("http://localhost"));
+      const agent = map["ag1"];
+
+      const headers = (agent as unknown as { headers: Record<string, string> }).headers;
+      const token = headers.Authorization.replace("Bearer ", "");
+      const decoded = jwt.verify(token, TEST_SECRET, { algorithms: ["HS256"] }) as jwt.JwtPayload;
+
+      // The claim is builder-only: it means nothing to third-party backends,
+      // and the dispatcher's verify is only defined for builder runs.
+      expect(decoded.agent_id).toBeUndefined();
+    });
+
     it("does NOT set Authorization header when authMode is none", async () => {
       vi.mocked(listAgents).mockResolvedValue([
         aguiEntry({ id: "ag1", authMode: "none" }),

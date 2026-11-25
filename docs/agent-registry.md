@@ -254,8 +254,13 @@ How they differ from manual/template agents at run time:
   of reading the stored `endpoint`. When the platform is unconfigured,
   builder agents resolve to nothing rather than half-running.
 - **Auth:** the JWT is minted with `AGENTOS_JWT_SECRET` (platform env),
-  `sub` = the running user, `scopes: ["app:user"]`. The stored row
-  carries no `jwtSecret` — a platform secret rotation is transparent.
+  `sub` = the running user, `scopes: ["app:user"]`, and `agent_id` =
+  the target component id — the dispatcher refuses (403) a
+  claim-bearing token addressed at a different component, so a minted
+  run token only works for its own agent (manual/template tokens carry
+  no `agent_id`; the claim means nothing to third-party backends). The
+  stored row carries no `jwtSecret` — a platform secret rotation is
+  transparent.
 - **Dependencies:** the definition carries requirement *declarations*
   only; the runner's BYOK keys and the org's connector tokens are
   resolved per-run and delivered as AG-UI context items (see

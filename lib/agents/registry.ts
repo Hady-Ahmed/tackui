@@ -173,8 +173,18 @@ function createAgent(entry: AgentEntry, user: RequestUser): AbstractAgent {
         iat: number;
         exp: number;
         scopes?: string[];
+        agent_id?: string;
       } = { sub: user.id, iat: now, exp: now + 3600 };
       if (entry.jwtScopes?.length) payload.scopes = entry.jwtScopes;
+      // Builder runs bind the token to its target component: the dispatcher
+      // (agent-builder/dispatcher.py) refuses a claim-bearing token
+      // addressed at a different component, so a legitimately-minted run
+      // token only works for the agent it was minted for. Manual/template
+      // agents mint WITHOUT the claim — it means nothing to their
+      // third-party backends.
+      if (entry.origin === "builder" && entry.remoteAgentId) {
+        payload.agent_id = entry.remoteAgentId;
+      }
       const token = jwt.sign(payload, auth.secret, {
         algorithm: "HS256",
       });

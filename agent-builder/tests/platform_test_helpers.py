@@ -9,17 +9,20 @@ from agents_shared.auth import ADMIN_SCOPE, USER_SCOPE
 TEST_JWT_SECRET = "test-secret-32-chars-min-please-xx"
 
 
-def mint_token(scopes: List[str], sub: str = "test-user") -> str:
-    return jwt.encode(
-        {
-            "sub": sub,
-            "scopes": scopes,
-            "exp": datetime.now(UTC) + timedelta(hours=1),
-            "iat": datetime.now(UTC),
-        },
-        TEST_JWT_SECRET,
-        algorithm="HS256",
-    )
+def mint_token(
+    scopes: List[str],
+    sub: str = "test-user",
+    claims: Optional[dict] = None,
+) -> str:
+    payload = {
+        "sub": sub,
+        "scopes": scopes,
+        "exp": datetime.now(UTC) + timedelta(hours=1),
+        "iat": datetime.now(UTC),
+    }
+    if claims:
+        payload.update(claims)
+    return jwt.encode(payload, TEST_JWT_SECRET, algorithm="HS256")
 
 
 def admin_headers(sub: str = "admin") -> dict:
@@ -27,9 +30,15 @@ def admin_headers(sub: str = "admin") -> dict:
     return {"Authorization": f"Bearer {mint_token([ADMIN_SCOPE], sub=sub)}"}
 
 
-def user_headers(sub: str = "user-1") -> dict:
-    """End-user token (app:user) — mirrors what the frontend mints for chatters."""
-    return {"Authorization": f"Bearer {mint_token([USER_SCOPE], sub=sub)}"}
+def user_headers(sub: str = "user-1", claims: Optional[dict] = None) -> dict:
+    """End-user token (app:user) — mirrors what the frontend mints for chatters.
+
+    `claims` merges extra JWT payload entries (e.g. the builder run path's
+    `agent_id` component binding) on top of the standard sub/scopes/exp set.
+    """
+    return {
+        "Authorization": f"Bearer {mint_token([USER_SCOPE], sub=sub, claims=claims)}"
+    }
 
 
 def agui_body(

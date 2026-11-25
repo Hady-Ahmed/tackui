@@ -4,6 +4,14 @@ All notable changes to this project will be documented in this file. The format 
 
 ## [Unreleased]
 
+- **Security: builder run tokens are bound to their target component
+  (#75).** The run tokens tackui mints for agent-builder runs now carry
+  an `agent_id` claim naming the component they were minted for, and the
+  dispatcher refuses (403) a token addressed at any other component
+  before anything runs. Tokens without the claim — legacy tokens minted
+  before this change, service tokens — keep working unchanged, so both
+  deploy orders are safe (deploy the dispatcher first or the app first;
+  the one-hour token TTL closes the no-claim window on its own).
 - **Fixed: a thread view could briefly serve history missing a
   just-finished run (#66, #141).** A reconnect's message fetch could
   land its stale read-through cache write after a concurrent run's
