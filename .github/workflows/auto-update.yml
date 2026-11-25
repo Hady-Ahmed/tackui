@@ -224,7 +224,7 @@ jobs:
       # ------------------------------------------------------------------
       - name: Install opencode
         if: steps.plan.outputs.RESOLVE_COUNT != '0' || steps.update.outputs.CONFLICTED == '1'
-        run: npm i -g opencode-ai@latest
+        run: npm i -g @opencode/cli
 
       - name: Configure opencode (model + credentials + unattended permissions)
         if: steps.plan.outputs.RESOLVE_COUNT != '0' || steps.update.outputs.CONFLICTED == '1'
@@ -237,25 +237,42 @@ jobs:
             exit 1
           fi
           mkdir -p ~/.config/opencode
-          # Same V1-shaped unattended permission override as agent.yml
-          # (see its comment): the installed opencode-ai 1.x binary
-          # hard-rejects V2 `permissions` arrays and asks by default for
-          # out-of-project reads — `external_directory: "allow"` kills
-          # that ask. `del` strips both shapes the secret might carry so
-          # nothing inherited can re-introduce an ask or a fatal V2 array.
+          # Same V2 unattended permission layer as agent.yml (see its
+          # comment for the battery-established layering facts): defaults
+          # are permissive except .env reads (ask) and the shipped build
+          # agent's question-allow — both session-visible rejections in
+          # unattended runs, so both are hard-denied at the agent level
+          # (global rules can be shadowed by a built-in agent's policy).
+          # The resolve pass runs `--agent build` only.
           jq 'del(.permission, .permissions) * {
-            permission: {
-              edit: "allow",
-              bash: "allow",
-              webfetch: "allow",
-              question: "deny",
-              external_directory: "allow"
-            },
-            agent: {
-              explore: { mode: "all" }
+            permissions: [
+              { action: "question",          resource: "*",         effect: "deny" },
+              { action: "read",              resource: "*.env",     effect: "deny" },
+              { action: "read",              resource: "*.env.*",   effect: "deny" },
+              { action: "read",              resource: "*.env.example", effect: "allow" },
+              { action: "external_directory", resource: "*",        effect: "allow" }
+            ],
+            agents: {
+              build: {
+                permissions: [
+                  { action: "question", resource: "*",   effect: "deny" },
+                  { action: "read",     resource: "*.env",   effect: "deny" },
+                  { action: "read",     resource: "*.env.*", effect: "deny" }
+                ]
+              },
+              explore: {
+                mode: "all",
+                permissions: [
+                  { action: "question", resource: "*",   effect: "deny" },
+                  { action: "read",     resource: "*.env",   effect: "deny" },
+                  { action: "read",     resource: "*.env.*", effect: "deny" }
+                ]
+              }
             }
           }' <<< "$AGENT_OPENCODE_CONFIG" > ~/.config/opencode/opencode.json
           chmod 600 ~/.config/opencode/opencode.json
+          grep -q '"question"' ~/.config/opencode/opencode.json \
+            || { echo "::error::Permission layer missing from the written opencode config — the jq merge produced an unexpected shape."; exit 1; }
 
       - name: Resolve conflicts (DIRTY PRs)
         if: steps.plan.outputs.RESOLVE_COUNT != '0' || steps.update.outputs.CONFLICTED == '1'

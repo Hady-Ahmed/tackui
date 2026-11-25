@@ -144,7 +144,7 @@ jobs:
           node-version: 24
 
       - name: Install opencode
-        run: npm i -g opencode-ai@latest
+        run: npm i -g @opencode/cli
 
       - name: Configure opencode (model + credentials + unattended permissions)
         env:
@@ -161,41 +161,69 @@ jobs:
           fi
           mkdir -p ~/.config/opencode
           # The secret supplies model + provider credentials; we layer the
-          # unattended permissions on top so `opencode run` never stalls on
-          # an approval prompt. In unattended mode NOTHING can answer an
-          # "ask" — and a rejection aborts the whole session while the CLI
-          # still exits 0, so a dead session surfaces as a benign "no
-          # changes" (run #151's first attempt died exactly this way: V1
-          # ASKS by default before reading paths outside the project, and
-          # the implementer's own /tmp scratch files are outside).
-          # The installed binary is opencode-ai 1.x (V1): it accepts the
-          # V1 `permission` object and HARD-REJECTS V2 `permissions`
-          # arrays ("Configuration is invalid"), so the override must be
-          # V1-shaped — with `external_directory: "allow"` explicitly
-          # killing the default out-of-project ask (verified against the
-          # 1.19.6 binary: V2 arrays error, V1 object with this key
-          # parses, and the binary's own default ask rule for
-          # external_directory is replaced by the config's allow).
-          # `del` strips both shapes the secret might carry so nothing
-          # inherited can re-introduce an ask or a fatal V2 array.
-          # `explore` is a built-in read-only agent but defaults to
-          # subagent mode, which `opencode run` refuses to select — mode
-          # "all" makes it selectable while staying read-only.
-          # Deep-merge (`*`, not `+`) so a secret that configures other
-          # agents or providers is not clobbered.
+          # unattended permission rules on top so nothing in a headless
+          # `opencode run` can prompt (V2: a rule resolving to "ask" in a
+          # non-interactive run rejects the tool call mid-session — the
+          # agent survives but the blocked action never happens, so the
+          # layer's job is to keep ALLOWED everything the agents need and
+          # hard-DENY the rest).
+          #
+          # The installed binary is @opencode/cli (V2, verified against
+          # 2.4.1). V2 layering facts established by the acceptance battery
+          # (real binary, real model round-trips):
+          #  - defaults are permissive (every agent starts with
+          #    `*: allow`) except .env reads (ask) — and the shipped
+          #    `build` agent additionally allows questions, while `explore`
+          #    asks on .env reads. In unattended mode both asks are
+          #    session-visible rejections, so both must be hard-denied.
+          #  - rule ordering is: base defaults → GLOBAL config rules →
+          #    built-in agent policy → config `agents.<id>.permissions`.
+          #    Global rules can be shadowed by the built-in agent's own
+          #    policy (battery-proven: a global shell-ask lost to build's
+          #    built-in allow), so the ENFORCEMENT copy of every rule also
+          #    lives at the agent level — that layer is reliably last.
+          #  - `external_directory` is allow-by-default in V2 (the V1
+          #    out-of-project ask is gone); the explicit allow rule is
+          #    documentation against a future default change.
+          #  - `denies` are always enforced; `del` strips both permission
+          #    shapes (V1 object + V2 array) from the secret so nothing
+          #    inherited can weaken this layer.
+          #  - `explore` defaults to subagent mode, which `opencode run`
+          #    refuses to select — mode "all" makes it selectable while
+          #    staying read-only. Deep-merge (`*`, not `+`) so a secret
+          #    that configures other agents or providers is not clobbered.
           jq 'del(.permission, .permissions) * {
-            permission: {
-              edit: "allow",
-              bash: "allow",
-              webfetch: "allow",
-              question: "deny",
-              external_directory: "allow"
-            },
-            agent: {
-              explore: { mode: "all" }
+            permissions: [
+              { action: "question",          resource: "*",         effect: "deny" },
+              { action: "read",              resource: "*.env",     effect: "deny" },
+              { action: "read",              resource: "*.env.*",   effect: "deny" },
+              { action: "read",              resource: "*.env.example", effect: "allow" },
+              { action: "external_directory", resource: "*",        effect: "allow" }
+            ],
+            agents: {
+              build: {
+                permissions: [
+                  { action: "question", resource: "*",   effect: "deny" },
+                  { action: "read",     resource: "*.env",   effect: "deny" },
+                  { action: "read",     resource: "*.env.*", effect: "deny" }
+                ]
+              },
+              explore: {
+                mode: "all",
+                permissions: [
+                  { action: "question", resource: "*",   effect: "deny" },
+                  { action: "read",     resource: "*.env",   effect: "deny" },
+                  { action: "read",     resource: "*.env.*", effect: "deny" }
+                ]
+              }
             }
           }' <<< "$AGENT_OPENCODE_CONFIG" > ~/.config/opencode/opencode.json
           chmod 600 ~/.config/opencode/opencode.json
+          # The layer is the permission model for an unattended session —
+          # verify it actually landed (a merge gone wrong must fail here,
+          # not as mystery rejections mid-run).
+          grep -q '"question"' ~/.config/opencode/opencode.json \
+            || { echo "::error::Permission layer missing from the written opencode config — the jq merge produced an unexpected shape."; exit 1; }
 
       # ------------------------------------------------------------------
       # Phase 1 — implementer
@@ -314,6 +342,11 @@ jobs:
             fix them yourself.
           - Do NOT push, do NOT open pull requests, do NOT merge, and do NOT
             touch anything under .github/ — the workflow owns those.
+          - The PR body must carry a CLOSING KEYWORD ("Fixes #N" / "Closes #N")
+            for EVERY issue this PR fully resolves — including issues folded
+            into this fix by a maintainer pre-answer in the comment thread
+            (a prose mention does not close anything; GitHub only auto-closes
+            on the keyword). List them in the Related issue section.
           - Commit every change with a conventional-commit message
             referencing the issue (e.g. "feat: ... (closes #${ISSUE_NUMBER})").
             Your deliverable is a local commit; the workflow handles
@@ -362,8 +395,18 @@ jobs:
           # as a benign "no changes" instead of a failure (run #151's
           # first attempt died exactly this way). Trip on the rejection
           # signature and fail loudly; the failure path reports honestly.
-          if grep -q "The user rejected permission" /tmp/opencode.log; then
-            echo "::error::Implementer session aborted on a permission rejection — no work was completed. The opencode permission config must contain zero 'ask' rules in unattended runs."
+          # V2 nuance (battery-proven): an ask in a non-interactive run no
+          # longer aborts the session — the tool call is rejected in-session
+          # ("...rejected in this session (permissions aren't available in
+          # this non-interactive run)") while the session continues, so an
+          # unanticipated ask surfaces as degraded work instead of a crash.
+          # Either way: the layer must produce ZERO asks — trip on both the
+          # V1 abort signature and the V2 in-session rejection signature.
+          # Deliberate denials ("Permission denied: read" for .env) use a
+          # different message and correctly do NOT trip.
+          if grep -q "The user rejected permission" /tmp/opencode.log \
+            || grep -q "rejected in this session" /tmp/opencode.log; then
+            echo "::error::Implementer hit a permission ask/rejection — no trustworthy work. The opencode permission layer must produce zero asks in unattended runs."
             exit 1
           fi
           # The agent's shell has no GitHub token BY DESIGN — the brief is
@@ -525,9 +568,11 @@ jobs:
           - Do NOT push, do NOT open PRs, do NOT touch .github/.
           EOF
           timeout 15m opencode run --agent build "$(cat /tmp/fix-prompt.md)" 2>&1 | tee -a /tmp/opencode.log
-          # Same aborted-session tripwire as the implementer step.
-          if grep -q "The user rejected permission" /tmp/opencode.log; then
-            echo "::error::Fix-pass session aborted on a permission rejection — the fix was not applied. Re-run after checking the permission config."
+          # Same aborted-session tripwire as the implementer step (both
+          # the V1 abort signature and the V2 in-session ask-rejection).
+          if grep -q "The user rejected permission" /tmp/opencode.log \
+            || grep -q "rejected in this session" /tmp/opencode.log; then
+            echo "::error::Fix-pass hit a permission ask/rejection — the fix is not trustworthy. Re-run after checking the permission layer."
             exit 1
           fi
 
