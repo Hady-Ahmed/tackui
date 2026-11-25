@@ -154,7 +154,13 @@ JWT (HS256, proven in the phase-0 spike):
   AgentOS pins admin ownership to this fixed identity.
 - **Run tokens** (minted in `lib/agents/registry.ts`) — per run,
   `sub` = the running user's id, `scopes: ["app:user"]` (the
-  dispatcher's run-only scope). Gates `POST /agui/*`.
+  dispatcher's run-only scope), and — for builder agents only —
+  `agent_id` = the target component's id (`remoteAgentId`). The
+  dispatcher refuses (403) a claim-bearing token addressed at a
+  different component, so a legitimately-minted token only works for
+  the component it was minted for; tokens without the claim (legacy
+  mints, service tokens) keep running — fail open on absence, fail
+  closed on mismatch. Gates `POST /agui/*`.
 
 Component CRUD (Agno stock `/components` router):
 
@@ -540,8 +546,11 @@ The builder branch of `getAgents()`:
   entirely when the platform is disabled or the endpoint can't be built
   — stale builder agents resolve to nothing rather than half-running.
 - Auth is the AGENTOS **user** token: minted per run, HS256 signed with
-  `AGENTOS_JWT_SECRET`, `sub` = the running user, `scopes: ["app:user"]`.
-  The stored row carries no `jwtSecret` for builder agents, so a
+  `AGENTOS_JWT_SECRET`, `sub` = the running user, `scopes: ["app:user"]`,
+  and `agent_id` = the target component id (`remoteAgentId`) — the
+  dispatcher verifies that claim against the addressed component and 403s
+  a mismatch (a minted run token only works for its own agent). The
+  stored row carries no `jwtSecret` for builder agents, so a
   platform secret rotation is transparent.
 - Template live-resolution doesn't apply (builder rows have no
   `sourceTemplateId`), so the stored row's own fields are the resolved

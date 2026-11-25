@@ -216,6 +216,15 @@ review that added the connector guard):
   unstoppable stops). The copilotkit route refuses it unconditionally —
   before auth, before rate-limit accounting — since nothing in the app
   calls it.
+- **Run tokens are component-bound (defense-in-depth)** — tackui mints
+  builder run tokens with an `agent_id` claim naming the target
+  component, and the dispatcher verifies it against the addressed
+  component after signature verification, refusing a mismatch with 403
+  before anything runs. Tokens without the claim (legacy mints, service
+  tokens, anonymous callers) keep today's behavior — fail open on
+  absence, fail closed on mismatch — so both deploy orders stay safe
+  (verify-first serves legacy tokens; mint-first makes the claim merely
+  decorative until the other side catches up).
 - **The live run stream is redacted like persistence** — the `RUN_STARTED`
   fill (emitted when the backend doesn't echo the input) copies
   `request.input`, whose context carries the gate-injected secrets; every
@@ -223,8 +232,10 @@ review that added the connector guard):
   applies, before any subscriber sees it.
 
 **Trust model:** org isolation is entirely tackui-side. The AgentOS is an
-explicitly multi-tenant execution service with no org concept — any valid
-`app:user` token can run any stored component. tackui is the policy
+explicitly multi-tenant execution service with no org concept — a valid
+`app:user` run token runs the component its `agent_id` claim names; a
+claim-less token (legacy mint or service token) can still run any stored
+component. tackui is the policy
 layer: org scoping, connector registration, run gates, and identity
 minting all happen there. The dispatcher's per-run credential ContextVar
 (set/reset per stream) and the session-write check (`assert_session_writable`)

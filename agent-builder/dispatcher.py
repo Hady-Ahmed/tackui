@@ -551,6 +551,25 @@ def attach_stored_agent_routes(app: FastAPI, agent_os: AgentOS) -> None:
         client_user_id = run_input.forwarded_props.get("user_id") if run_input.forwarded_props else None
         user_id = resolve_run_user_id(request, client_user_id)
 
+        # Defense-in-depth component binding: tackui mints builder run
+        # tokens with an `agent_id` claim naming the component the token was
+        # minted for. The claim is only readable AFTER signature
+        # verification (Agno's AuthMiddleware stores the decoded JWT on
+        # request.state.claims), so a legitimately-minted token only works
+        # for the component it names. Fail OPEN on absence — legacy mints,
+        # service tokens, and anonymous callers carry no claim and keep
+        # today's behavior (identity stays server-resolved via `sub`; an
+        # old frontend against a new dispatcher keeps running) — fail
+        # CLOSED on a present-but-mismatched claim.
+        claims = getattr(request.state, "claims", None)
+        claimed_agent_id = claims.get("agent_id") if isinstance(claims, dict) else None
+        if claimed_agent_id is not None and claimed_agent_id != agent_id:
+            log_warning(
+                f"dispatcher: run token claims component '{claimed_agent_id}' "
+                f"but was addressed to '{agent_id}' — refusing the run"
+            )
+            raise HTTPException(status_code=403, detail="Not authorized to run this agent")
+
         catalog = getattr(request.app.state, "catalog", None)
         if catalog is not None:
             # Sync DB round-trip — and under a revision bump, a FULL
