@@ -321,6 +321,10 @@ jobs:
           - Commit every change with a conventional-commit message
             (e.g. "fix: <what> (PR #${PR_NUMBER})"). Your deliverable is a
             local commit; the workflow handles everything public.
+          - Every file you write (AGENT_SUMMARY.md, AGENT_FOLLOWUP.md,
+            AGENT_QUESTIONS.md) and every PR-facing sentence is ENGLISH,
+            always — these are read by humans in an English-language
+            review flow.
           - FINAL STEP, always: update AGENT_SUMMARY.md in the repository
             root — the FULL template-shaped summary of the PR's current
             TOTAL state (not just your delta): read
@@ -416,6 +420,8 @@ jobs:
             echo "   claim of browser verification without script evidence in"
             echo "   /tmp/opencode.log."
             echo
+            echo "Write the report in English — it is read by humans in an"
+            echo "English-language flow."
             echo "Write your report to AGENT_REVIEW.md in the repository root"
             echo "with one line per finding, prefixed '- blocking: ' for things"
             echo "that MUST be fixed before this iteration can land, and"

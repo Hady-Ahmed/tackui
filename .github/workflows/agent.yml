@@ -354,7 +354,11 @@ jobs:
           - FINAL STEP, always: write your summary to AGENT_SUMMARY.md in the
             repository root — it becomes the pull request description and
             renders as markdown, so write real markdown, no code fences
-            around it. The structure comes from the repo, not from this
+            around it. Every file you write (AGENT_SUMMARY.md,
+            AGENT_FOLLOWUP.md, AGENT_QUESTIONS.md) and every PR-facing
+            sentence is ENGLISH, always — these are read by humans in an
+            English-language review flow; a report in any other language
+            is unusable regardless of how good its content is. The structure comes from the repo, not from this
             prompt: read .github/PULL_REQUEST_TEMPLATE.md and CONTRIBUTING.md's
             "Pull requests" section FIRST, then write AGENT_SUMMARY.md in that
             structure (Summary / Related issue / Changes / Checklist /
@@ -504,6 +508,8 @@ jobs:
               echo
             fi
             echo "## Report format (mandatory)"
+            echo "Write the report in English — it is read by humans in an"
+            echo "English-language flow."
             echo "Write your report to AGENT_REVIEW.md in the repository root with"
             echo "this exact structure:"
             echo
@@ -610,11 +616,24 @@ jobs:
           about unrelated code, never commit, edit, or run tests/builds;
           list anything you could not verify as 'unverified'.
 
+          RE-VERIFICATION IS MANDATORY — quoting a finding below is not
+          verifying it. The pass-1 text describes the tree AS IT WAS BEFORE
+          the fix pass; the fix pass may have already resolved some or all
+          of it, and the workspace may still contain scratch files that are
+          no longer part of any commit. Judge ONLY the current tree
+          (git diff/log/show against the merge-base with main, tracked
+          content only): a finding whose subject no longer exists there is
+          RESOLVED, full stop — re-asserting it without a live
+          contradiction in the current tree is a false positive that
+          misleads the human reviewer.
+
           ## Blocking findings to verify
 
           $(cat /tmp/review-1.md)
 
           ## Report format (mandatory)
+          Write the report in English — it is read by humans in an
+          English-language flow.
           Write AGENT_REVIEW.md in the repository root with:
             ## Findings
             - blocking|resolved <finding from pass 1> — one-paragraph verdict
@@ -661,6 +680,21 @@ jobs:
           uncommitted="$(git status --porcelain --untracked-files=no | wc -l)"
           has_changes=$((committed + uncommitted))
           rm -f AGENT_QUESTIONS.md AGENT_REVIEW.md AGENT_FOLLOWUP.md AGENT_SUMMARY.md
+          # The rm above only sweeps UNTRACKED copies off the disk. If the
+          # implementer COMMITTED its scratch files, they survive inside
+          # the commit and would ship to main on push — the exact #222
+          # merge incident, which the #75 run's reviewer then caught and
+          # its fix pass amended away. Don't depend on the reviewer
+          # happening to look: strip them from the branch's final tree
+          # right here. Removing from the index + amending the (not yet
+          # pushed) branch drops them from the pushed diff no matter
+          # which commit carried them.
+          if scratch="$(git ls-files | grep -E '^AGENT_[A-Z]+\.md$' || true)" && [ -n "$scratch" ]; then
+            echo "::warning::Implementer committed AGENT_* scratch files — stripping from the branch before push: $scratch"
+            # shellcheck disable=SC2086 — fixed, space-free filenames
+            git rm -f --cached -- $scratch
+            git commit --amend --no-edit
+          fi
           if [ "$has_changes" -gt 0 ]; then
             echo "OUTCOME=pr" >> "$GITHUB_OUTPUT"
             if [ -f /tmp/has-questions ]; then
