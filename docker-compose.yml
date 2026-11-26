@@ -60,8 +60,13 @@ services:
   # purpose: the builder owns its catalog/state schema and its backups
   # have a different lifecycle. Not exposed to the host; the compose
   # network is the only way in.
+  #
+  # The pgvector image, NOT plain postgres:16-alpine — alpine Postgres
+  # ships no pgvector extension, and the builder's knowledge feature
+  # creates a `builder_knowledge` vector table (`CREATE EXTENSION vector`
+  # must succeed at first use, #233).
   db-builder:
-    image: postgres:16-alpine
+    image: pgvector/pgvector:pg16
     environment:
       POSTGRES_USER: agentos
       POSTGRES_PASSWORD: ${AGENTOS_DB_PASSWORD:-agentos}

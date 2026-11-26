@@ -4,6 +4,26 @@ All notable changes to this project will be documented in this file. The format 
 
 ## [Unreleased]
 
+- **Added: knowledge for builder agents — the service half (#233).** Every
+  builder component can now own a document corpus (uploaded files, pasted
+  text, URLs) embedded into pgvector, managed through new
+  `/platform/knowledge/*` routes on the agent-builder service (admin /
+  service-token scope; tackui proxies them — the builder UI and run-time
+  retrieval are follow-ups). All corpora share one `builder_knowledge`
+  vector table in the builder's Postgres, isolated per corpus by agno's
+  `isolate_vector_search` mechanics (a server-side `linked_to` filter
+  callers cannot bypass), with corpus-stamped upload metadata making content
+  ids corpus-unique. Embeddings are BYOK with no platform fallback: uploads
+  carry the creator's key (`embedding_key`, used for embedding calls only —
+  never persisted, never logged) while the embedding model is
+  platform-fixed via `KNOWLEDGE_EMBEDDER` (default
+  `openai:text-embedding-3-small`); a malformed value fails at use time,
+  never boot. Upload validation: format allowlist, 10 MB cap, URL shape
+  check; processing runs off the event loop. The builder's Postgres must be
+  a pgvector image (`pgvector/pgvector:pg16` in the compose stacks and the
+  test suite's container); the capability endpoint
+  (`GET /platform/knowledge/config`) reports availability so the frontend
+  can gate the feature.
 - **Security: builder run tokens are bound to their target component
   (#75).** The run tokens tackui mints for agent-builder runs now carry
   an `agent_id` claim naming the component they were minted for, and the

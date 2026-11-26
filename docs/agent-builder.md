@@ -884,6 +884,109 @@ The admin UI is the Connectors section on `/agents`
   ("Models & tools"); platform-admin gated, linked from the builder
   (admin-only) and from `/admin`'s header. See the section below.
 
+## Knowledge — the service half (#233)
+
+Builder agents can own a knowledge corpus — uploaded files, pasted text,
+URLs — embedded into pgvector. The service half shipped here is the
+MANAGEMENT half: the `/platform/knowledge/*` routes tackui's server
+proxies with its service token. The follow-up half is run-time retrieval
+(a component's corpus feeding its own agent's runs) plus the tackui-side
+UI/proxy work — see the seam notes at the end.
+
+### Storage and isolation
+
+All corpora live in ONE shared pgvector table, `public.builder_knowledge`
+(the builder's `DATABASE_URL` Postgres, public schema — beside the catalog
+tables; the vector extension is loaded lazily by the first table creation).
+The content list rows (name/status/size/dates) live in agno's
+`ai.agno_knowledge`. Each corpus is a named agno `Knowledge` instance,
+`kb-<component_id>`, built with `isolate_vector_search=True`: agno stamps
+`linked_to=<name>` into every chunk's metadata on insert and injects that
+filter server-side into every search — callers cannot opt out, so corpus B's
+search can never return corpus A's chunks. List and delete go through the
+same instance and are scoped the same way.
+
+Two mechanics close agno's shared-table gaps (pinned by
+`tests/test_knowledge.py` — sync AND async search isolation, list scoping,
+delete scoping across corpora):
+
+- **The corpus stamp** — content ids are `generate_id(content_hash)` and the
+  hash covers name/description/metadata/bytes but NOT the Knowledge
+  instance's name. On a shared table, byte-identical uploads into two
+  corpora would collide onto one id (the contents row's `linked_to` flips to
+  the last writer), `skip_if_exists` would skip the second ingest, and
+  `delete_by_content_id` (not `linked_to`-filtered) would strip the other
+  corpus's vectors. The upload route stamps the corpus name into the
+  upload's metadata before hashing, making ids corpus-unique and all three
+  paths corpus-scoped by construction.
+- **Fresh instances per call** — the Knowledge instance (and its embedder)
+  is constructed per request, never shared or cached: the embedder carries a
+  per-call API key, and a shared instance would race keys across concurrent
+  requests. The cost is one vector-store round-trip per construction (the
+  probe that creates the table on first use); accepted deliberately.
+
+Uploads land in the shared bucket (`user_id` NULL): pgvector's user scope
+matches `user_id = X OR user_id IS NULL`, so every scoped runner's search
+retrieves the org corpus. An unscoped search (`user_id=None`) sees
+everything — agno's documented semantic; per-user overlays at run time are
+a follow-up concern.
+
+### Embeddings — BYOK, no platform fallback
+
+- The embedding KEY is the creator's own, passed per upload as the required
+  `embedding_key` form field. It is used for the embedding calls only —
+  never persisted, never logged (nothing in the knowledge API logs a request
+  body or form value). A missing key is a clean 400; there is deliberately
+  no env-key fallback (no silent platform-key spend).
+- The embedding MODEL is platform infrastructure, fixed per deployment by
+  `KNOWLEDGE_EMBEDDER` (`<provider>:<model>`, default
+  `openai:text-embedding-3-small`; v1 provider: OpenAI only). The vector
+  column's dimensions are typed at first table creation, so rotating the
+  model after content exists requires re-uploading it.
+- A malformed `KNOWLEDGE_EMBEDDER` fails AT USE TIME (clean 503,
+  operator-readable, never echoing the configured value) — knowledge is
+  optional infrastructure and must not take boot down. Unset falls back to
+  the default.
+
+### Routes (admin/service-token scope only)
+
+Anonymous 401, valid `app:user` token 403 (the scope mappings' `METHOD /*`
+catch-alls; the inventory is pinned in `tests/test_auth_lockdown.py`):
+
+| Route | Behavior |
+| --- | --- |
+| `GET /platform/knowledge/config` | `{enabled, provider, model}` — never errors; `enabled=false` (pgvector unreachable/extension unavailable, embedder not importable, malformed env with empty provider/model) is how tackui distinguishes "knowledge off" from "service unreachable" |
+| `GET /platform/knowledge/{component_id}` | `[{"id","name","status","size","createdAt","updatedAt"}]` — epoch seconds; failed/processing rows included (status chips); unknown corpus = `[]` (component existence is tackui's truth to gate) |
+| `POST /platform/knowledge/{component_id}/content` | Multipart: exactly one of `file`/`text_content`/`url` + required `embedding_key` + optional `name`/`chunk_size`/`chunk_overlap`; `202 {id, name, status: "processing"}`; processing runs as a background task OFF the event loop (agno's PDF/DOCX parsing must not stall concurrently streaming runs) |
+| `DELETE /platform/knowledge/{component_id}/content/{content_id}` | Idempotent (`{ok: true}` on unknown ids); a foreign-corpus id is 404 |
+
+Upload validation is fail-closed at the route: no/|>1 sources, missing or
+blank `embedding_key`, unsupported format (allowlist
+`.pdf .csv .xlsx .xls .docx .doc .pptx .json .md .txt` — the 400 lists the
+formats; agno's own fallback would ingest garbage chunks from unknown
+extensions), an upload over 10 MB, a non-absolute/non-`http(s)` URL (shape
+only — the SSRF decision is tackui's client-side guard), and invalid chunk
+params (`chunk_overlap < chunk_size`) are all 400s.
+
+### Deployment note
+
+The builder's Postgres must be a pgvector image (`pgvector/pgvector:pg16` in
+both compose stacks, and in the test suite's testcontainer): plain Postgres
+has no vector extension to load, and the capability probe reads
+`pg_available_extensions` — a plain-Postgres deployment answers
+`enabled: false` rather than failing uploads.
+
+### Seam for the follow-up issues
+
+- **Run-time retrieval**: the dispatcher resolves the corpus by the run's
+  agent id (the same `kb-<component_id>` naming), builds the Knowledge
+  instance with the runner's per-run embedding key, and searches with
+  `isolate_vector_search`'s server-side filter. The service half's
+  `build_knowledge_for` is the entry point both halves share.
+- **tackui half**: the builder's Knowledge section (gated on the capability
+  endpoint), the server-side proxy of these routes with the service token,
+  and `assertSafeUrl` before forwarding URL uploads.
+
 ## Not in Phase 1
 
 - **Publishing** — builder agents are org-scoped; there is no catalog
@@ -894,5 +997,7 @@ The admin UI is the Connectors section on `/agents`
   all stay wired (snapshot fields, quota route wiring, plan limits) but
   builder runs are 100% BYOK today; the run gate ignores the tier
   fields and the quota phase never fires.
-- **Knowledge** — attaching knowledge/data sources to builder agents is
-  Phase 2.
+- **Knowledge run-time retrieval** — the management half (the service's
+  `/platform/knowledge/*` routes and the corpus store) shipped (#233); what
+  remains is the tackui half (builder UI + proxying) and the run-time
+  retrieval half (a component's corpus feeding its own agent's runs).

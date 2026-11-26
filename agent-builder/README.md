@@ -158,7 +158,10 @@ and the catalog's `public`-schema tables (DDL runs at boot, idempotent).
 Model `attrs` are a native JSONB column — malformed JSON is rejected by the
 database at write time, so an unparseable-attrs row cannot exist (the old
 sqlite TEXT column needed a skip-on-read guard for that; JSONB is the
-stronger guarantee).
+stronger guarantee). The knowledge store adds two more: the
+`public.builder_knowledge` vector table (created on first use — this is
+where `CREATE EXTENSION vector` runs) and agno's `ai.agno_knowledge`
+contents rows (status/size/dates; created by agno on first use).
 
 ## Connector registry
 
@@ -246,6 +249,102 @@ curl -X DELETE -H "Authorization: Bearer $SERVICE_TOKEN" \
   http://localhost:7778/platform/connectors/4b1f6c2e-8a47-4d0e-9b21-6f0a2c9d5e71
 ```
 
+## Knowledge store
+
+Every builder component can own a document corpus — uploaded files, pasted
+text, URLs — embedded into pgvector and retrievable at run time. This is the
+management half (`/platform/knowledge/*`); the run-time retrieval half (a
+component's corpus feeding its own agent) is a follow-up issue.
+
+**All corpora live in ONE shared table, isolated by agno's mechanics.** The
+`public.builder_knowledge` pgvector table holds every corpus's chunks. Each
+corpus is a named agno `Knowledge` instance, `kb-<component_id>`, built with
+`isolate_vector_search=True`: agno stamps `linked_to=<name>` into every
+chunk's metadata on insert and injects that filter server-side into every
+search — callers cannot opt out, so corpus B's search can never return
+corpus A's chunks. Content list/delete go through the same instance and are
+`linked_to`-scoped the same way. The behavior is pinned by tests
+(`tests/test_knowledge.py`): sync and async search isolation, list scoping,
+and delete scoping across corpora — including byte-identical uploads, which
+stay separate because the service stamps the corpus name into each upload's
+metadata before hashing (content ids are hashes; without the stamp, two
+corpora uploading the same bytes would collide onto one id on the shared
+table). Knowledge instances are constructed fresh per request — never
+shared or cached — so concurrent requests can never race embedder state.
+
+**Embeddings are BYOK with no platform fallback.** The embedding KEY is the
+creator's own, passed per upload as the required `embedding_key` form field
+(runs will resolve the runner's key per run); it is used for the embedding
+calls only — never persisted, never logged (nothing in this API logs a
+request body or form value). The embedding MODEL is platform
+infrastructure, fixed per deployment by `KNOWLEDGE_EMBEDDER`
+(`<provider>:<model>`, default `openai:text-embedding-3-small`; v1 provider:
+OpenAI only). The vector column's dimensions are typed at first table
+creation, so rotating the model after content exists requires re-uploading
+it. A malformed value fails at use time (clean 503 with an
+operator-readable message that does not echo the configured value), never
+at boot — knowledge is optional infrastructure and must not take the
+service down. Unset falls back to the default.
+
+### `GET /platform/knowledge/config` — the capability signal
+
+`{"enabled": true, "provider": "openai", "model": "text-embedding-3-small"}`.
+`enabled` is false when pgvector is unreachable or its extension is
+unavailable, the embedder module is not importable, or `KNOWLEDGE_EMBEDDER`
+is malformed (provider/model come back empty then — the configured value is
+never echoed). The endpoint never errors: the frontend gates the builder's
+Knowledge section on `enabled` and must be able to tell "the service
+answered, knowledge is off" apart from "the service is unreachable".
+
+### `GET /platform/knowledge/{component_id}` — a corpus's content list
+
+`[{"id", "name", "status", "size", "createdAt", "updatedAt"}]` — epoch-second
+timestamps; `status` is agno's `processing`/`completed`/`partial`/`failed`
+(the UI renders status chips, so failed and processing rows are included).
+An unknown or empty corpus is `[]`, not a 404: these routes do not verify
+the component exists in the components catalog — the frontend owns that
+truth and gates authorship before proxying.
+
+### `POST /platform/knowledge/{component_id}/content` — ingest one document
+
+Multipart form: exactly ONE of `file` | `text_content` | `url`, plus
+`embedding_key` (required), and optionally `name`, `chunk_size`,
+`chunk_overlap`. Answers `202 {"id", "name", "status": "processing"}` —
+processing (reader → chunking → embedding → upsert) runs as a background
+task off the event loop. Validation is fail-closed: no/|>1 sources, a
+missing or blank `embedding_key`, an unsupported format (the allowlist is
+`.pdf .csv .xlsx .xls .docx .doc .pptx .json .md .txt` — the 400 lists the
+accepted formats), an upload over 10 MB, a non-absolute or non-`http(s)`
+URL (shape only — the SSRF decision is the frontend's client-side guard),
+and invalid chunk params (`chunk_overlap` must be smaller than
+`chunk_size`) are all clean 400s.
+
+`chunk_size`/`chunk_overlap` apply to **file and text uploads only** —
+a URL upload validates but ignores them, because the reader is chosen by
+agno's URL auto-detection (YouTube, sitemap, website) and those readers
+own their chunking.
+
+### `DELETE /platform/knowledge/{component_id}/content/{content_id}` — remove one
+
+Idempotent: an unknown id is still `{"ok": true}` — the delete IS the
+state. A content id that exists but belongs to another corpus is 404 (with
+corpus-unique ids this cannot arise through the list endpoint; deleting it
+anyway would strip a foreign corpus's vectors).
+
+### Authz and storage notes
+
+All four routes are admin/service-token scope only (the same posture as the
+connector registry: anonymous 401, valid `app:user` token 403, and the
+route inventory is pinned in `tests/test_auth_lockdown.py`). Uploads land
+in the shared bucket (`user_id` NULL): every scoped runner's search matches
+shared rows (`user_id = X OR user_id IS NULL`), which is what makes an org
+corpus retrievable by the component's future runs.
+
+**The `db-builder` Postgres must be a pgvector image** (`pgvector/pgvector:pg16`
+in both compose stacks): plain Postgres has no vector extension to load, and
+the capability probe reads `pg_available_extensions` — a plain-Postgres
+deployment answers `enabled: false` rather than failing uploads.
+
 ## Known limitations
 
 **MCP connector attach URLs resolve from the platform registry, not the
@@ -274,8 +373,13 @@ construct-checks every row before serving it).
 `DATABASE_URL` is required (Neon for prod, a local Postgres for dev — same
 pattern as the two sibling chat agents): it backs BOTH the agno db (components +
 sessions, `ai` schema) and the catalog (admin decisions + revision counter,
-`public` schema). The remaining environment variables are listed in
-`.env.example` (copy to `.env`; per-service on Railway). The server binds
+`public` schema), and the knowledge store (vector table, `public` schema).
+The remaining environment variables are listed in
+`.env.example` (copy to `.env`; per-service on Railway) — including
+`KNOWLEDGE_EMBEDDER`, the knowledge store's embedding model (default
+`openai:text-embedding-3-small`; unset is the default, and a malformed
+value fails at use time, not boot). The `db-builder` Postgres in the compose
+stacks must stay on the pgvector image (`pgvector/pgvector:pg16`). The server binds
 `AGENT_OS_HOST` (default `0.0.0.0`) on port **7778** by default
 (`AGENT_OS_PORT`, or Railway's injected `PORT`, override it) — note this
 differs from the chat agents' 7777 default so the agent builder and an
@@ -297,6 +401,8 @@ page (or the `/platform/catalog` API directly).
 | `catalog.py` | Postgres catalog store (psycopg, JSONB attrs): enabled rows + revision counter |
 | `catalog_state.py` | Live registry built from rows; revision-checked rebuild; entry grammar |
 | `admin_api.py` | Admin CRUD + model test endpoints |
+| `knowledge.py` | Knowledge store: embedder config parse, per-corpus construction, capability probe |
+| `knowledge_api.py` | `/platform/knowledge/*` routes (upload/list/delete/config) |
 | `models.py` | Generic per-run-key mixin + wrapper-class factory |
 | `dispatcher.py` | Stored-component runs; per-run keyed-toolkit delivery |
 | `credentials.py` | Per-run credential resolution (runner key wins, env falls back) |
