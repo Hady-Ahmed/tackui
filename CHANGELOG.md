@@ -4,13 +4,13 @@ All notable changes to this project will be documented in this file. The format 
 
 ## [Unreleased]
 
-- **Added: knowledge for builder agents — the service half (#233).** Every
-  builder component can now own a document corpus (uploaded files, pasted
-  text, URLs) embedded into pgvector, managed through new
-  `/platform/knowledge/*` routes on the agent-builder service (admin /
-  service-token scope; tackui proxies them — the builder UI and run-time
-  retrieval are follow-ups). All corpora share one `builder_knowledge`
-  vector table in the builder's Postgres, isolated per corpus by agno's
+- **Added: knowledge for builder agents — the service half (#233), now
+  running at run time (#234).** Every builder component can now own a
+  document corpus (uploaded files, pasted text, URLs) embedded into pgvector,
+  managed through new `/platform/knowledge/*` routes on the agent-builder
+  service (admin / service-token scope; tackui proxies them — the builder UI
+  is a follow-up). All corpora share one `builder_knowledge` vector table in
+  the builder's Postgres, isolated per corpus by agno's
   `isolate_vector_search` mechanics (a server-side `linked_to` filter
   callers cannot bypass), with corpus-stamped upload metadata making content
   ids corpus-unique. Embeddings are BYOK with no platform fallback: uploads
@@ -18,7 +18,15 @@ All notable changes to this project will be documented in this file. The format 
   never persisted, never logged) while the embedding model is
   platform-fixed via `KNOWLEDGE_EMBEDDER` (default
   `openai:text-embedding-3-small`); a malformed value fails at use time,
-  never boot. Upload validation: format allowlist, 10 MB cap, URL shape
+  never boot. The dispatcher attaches a component's corpus per run when its
+  stored config declares knowledge: the reference is stripped before agno's
+  rehydration (which would otherwise skip it silently, fail-open) and a
+  fresh Knowledge instance is built with the RUNNER's key — resolved from
+  that run's dependencies with deliberately no env fallback, one instance
+  per run (never shared between concurrent runs). A run without the key
+  degrades to strip + warn + no retrieval (the client's pre-run gate is the
+  real guard), as do a misconfigured embedder and an unreachable vector
+  store. Upload validation: format allowlist, 10 MB cap, URL shape
   check; processing runs off the event loop. The builder's Postgres must be
   a pgvector image (`pgvector/pgvector:pg16` in the compose stacks and the
   test suite's container); the capability endpoint

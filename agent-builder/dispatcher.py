@@ -15,8 +15,13 @@ mounts ``POST /agui/{agent_id}``, which
    contract are constructed fresh with the run's resolved keys (runner keys
    win, platform env keys fall back) and their referenced functions are
    appended after rehydration — the shared registry holds only keyless
-   toolkits, and
-6. streams AG-UI events with the run's credentials installed for the
+   toolkits,
+6. attaches the component's knowledge corpus per run when the stored config
+   declares one: the reference is stripped BEFORE rehydration (agno's
+   registry lookup would fail open and silently run without knowledge) and
+   a fresh Knowledge instance is built with the RUNNER's embedding key —
+   deliberately no platform-env fallback (BYOK-only) — and
+7. streams AG-UI events with the run's credentials installed for the
    duration of the stream (runner keys win, platform env keys fall back).
 
 Deliberate divergence from the stock AG-UI router: dependencies are NOT
@@ -38,8 +43,10 @@ from ag_ui.core import EventType, RunAgentInput, RunErrorEvent, RunStartedEvent,
 from ag_ui.encoder import EventEncoder
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import StreamingResponse
+from sqlalchemy.exc import OperationalError
 
 from agno.agent import Agent
+from agno.knowledge.knowledge import Knowledge
 from agno.os.interfaces.agui.input import (
     extract_context,
     extract_media,
@@ -58,6 +65,12 @@ from agno.utils.log import log_error, log_warning
 
 from catalog_state import CatalogState
 from credentials import resolve_from_deps, reset_run_credentials, set_run_credentials
+
+# Imported MODULE-style, deliberately: the knowledge factory is this file's
+# test seam — tests monkeypatch ``knowledge.build_knowledge_for`` and the
+# call below must resolve the attribute at call time (a ``from knowledge
+# import build_knowledge_for`` would pin the original past the patch).
+import knowledge as knowledge_store
 
 # Cap for each MCP connector handshake during run attach. A hung endpoint
 # (unreachable host, silent drop) must not hold the run start indefinitely —
@@ -180,6 +193,174 @@ def plan_per_run_tools(
     return stripped_cfg, fresh_fns
 
 
+def plan_per_run_knowledge(
+    config: Dict[str, Any],
+    agent_os: AgentOS,
+    agent_id: str,
+    deps: Optional[Dict[str, Any]],
+    db_url: Optional[str] = None,
+) -> Tuple[Dict[str, Any], Optional[Knowledge]]:
+    """Split the stored config's knowledge reference off for per-run attach.
+
+    Stored configs reference knowledge by NAME: ``{"knowledge": {"name":
+    "kb-<component_id>"}}``. Left in place, agno's rehydration resolves that
+    name through the registry — and this service registers NO knowledge
+    instances (they are per-run, key-carrying objects, for the same reason
+    keyed toolkits are), so agno would log ``Knowledge '<name>' not found in
+    registry, skipping``, drop the reference, and the run would proceed
+    SILENTLY WITHOUT KNOWLEDGE — fail-open. We refuse that posture: the
+    reference is stripped from the config BEFORE ``Agent.from_dict`` (agno's
+    registry lookup never even happens), and the fresh Knowledge instance is
+    attached to the rehydrated agent by the caller.
+
+    The instance is built FRESH PER RUN with the RUNNER's embedding key — the
+    Knowledge object carries the query-time embedder, so two concurrent runs
+    on one agent must never share one (the same rule as per-run keyed-toolkit
+    construction above). The key resolution is deliberately DEPS-ONLY (no
+    platform-env fallback): the env ``OPENAI_API_KEY`` is the PLATFORM's key,
+    and spending it on member runs is exactly what the BYOK rule forbids. A
+    run arriving without the key runs WITHOUT retrieval after a warning —
+    the client's pre-run gate is the real guard (its issue adds the 402).
+
+    The corpus name is threaded from the config verbatim: tackui writes
+    ``kb-<component_id>`` and this dispatcher derives the same name from the
+    run's ``agent_id``, so they agree by construction; on drift the STORED
+    name wins (an older naming scheme, say) — the corpus was uploaded and
+    ``linked_to``-stamped under it, and matching the derivation instead would
+    address an empty (or foreign) corpus.
+
+    Every degradation (missing key, misconfigured embedder, unreachable
+    vector store) degrades the SAME way — strip + warn + run without
+    retrieval — mirroring the keyed-toolkit and MCP-connector postures: a
+    management route 503s on these conditions because it cannot do its job
+    at all; a run can always do its job without retrieval.
+
+    Args:
+        config: The stored component's config dict (read-only — the strip is
+            applied to a shallow copy; the caller still reads the ORIGINAL
+            for the connectors allowlist).
+        agent_os: The AgentOS (its ``db`` is the corpus's contents db).
+        agent_id: The component id the run is addressed under — the corpus
+            name's derivation input, and the same id tackui's knowledge
+            proxy addresses uploads with.
+        deps: The run's dependency dict (the AG-UI context), or ``None``
+            (anonymous/unscoped callers — treated exactly as no key).
+        db_url: The vector store's Postgres DSN — the SAME source the
+            knowledge routes use (``app.state.db_url``, threaded from the
+            run route). ``None`` falls back to ``DATABASE_URL`` inside
+            :func:`knowledge.build_knowledge`.
+
+    Returns:
+        The config with any ``knowledge`` reference removed (a shallow copy
+        when stripping; the input object itself when there was nothing to
+        strip — the ``plan_per_run_tools`` passthrough shape), plus the fresh
+        Knowledge instance or ``None`` when the config declares no knowledge
+        or the attach degraded.
+    """
+    knowledge_cfg = config.get("knowledge")
+    if knowledge_cfg is None:
+        return config, None
+
+    # Strip BEFORE rehydration — and never mutate the caller's dict: the run
+    # route reads the ORIGINAL stored config for the connectors allowlist.
+    # Anything present is stripped, whatever its shape: agno's loader only
+    # understands the dict form, so a non-dict value (a corrupted write) must
+    # not reach Agent.knowledge raw — it would surface as a run-time tool
+    # failure instead of this module's strip+warn posture.
+    stripped_cfg = {**config}
+    stripped_cfg.pop("knowledge", None)
+    if not isinstance(knowledge_cfg, dict):
+        log_warning(
+            f"dispatcher: component '{agent_id}' declares knowledge as "
+            f"{type(knowledge_cfg).__name__} — running without retrieval"
+        )
+        return stripped_cfg, None
+
+    stored_name = knowledge_cfg.get("name")
+    if not isinstance(stored_name, str) or not stored_name:
+        # A reference without a usable name cannot address a corpus; the
+        # derived name is NOT silently substituted (the config is tackui's
+        # write — drifting far enough to lose the name is an anomaly worth
+        # surfacing, not papering over).
+        log_warning(
+            f"dispatcher: component '{agent_id}' declares knowledge without a usable "
+            f"name — running without retrieval"
+        )
+        return stripped_cfg, None
+
+    # The embedding MODEL is platform infrastructure; the dep key follows the
+    # credential convention ``<provider>_api_key`` (v1: openai_api_key).
+    try:
+        embedder_cfg = knowledge_store.parse_embedder_config()
+    except knowledge_store.KnowledgeConfigError as e:
+        log_warning(
+            f"dispatcher: component '{agent_id}' declares knowledge but the platform "
+            f"embedder is misconfigured — running without retrieval ({e})"
+        )
+        return stripped_cfg, None
+
+    # BYOK, deps-only: NO fallback_env argument is the posture — the funnel's
+    # env fallback would hand the embedder the PLATFORM's OPENAI_API_KEY.
+    api_key = resolve_from_deps(deps, f"{embedder_cfg.provider}_api_key")
+    if not api_key:
+        log_warning(
+            f"dispatcher: component '{agent_id}' declares knowledge but this run carries "
+            f"no '{embedder_cfg.provider}_api_key' dependency — running without retrieval "
+            f"(the client's pre-run gate is the real guard)"
+        )
+        return stripped_cfg, None
+
+    # Agree by construction; warn and use the stored name on drift.
+    derived_name = knowledge_store.corpus_name(agent_id)
+    if stored_name != derived_name:
+        log_warning(
+            f"dispatcher: component '{agent_id}' declares knowledge '{stored_name}' "
+            f"(derived '{derived_name}' does not match) — attaching the stored name "
+            f"(the corpus was created under it)"
+        )
+
+    try:
+        # Fresh per run — the instance owns this run's embedder (and its
+        # key); construction also probes/creates the shared vector table on
+        # first use (one round-trip, the accepted per-call cost).
+        knowledge = knowledge_store.build_knowledge_for(
+            agent_id,
+            agent_os.db,
+            api_key,
+            db_url=db_url,
+            name=stored_name,
+        )
+    except knowledge_store.KnowledgeConfigError as e:
+        # Belt-and-braces: the parse above already passed, so this is an env
+        # that changed mid-run. Same degraded posture as the pre-parse miss.
+        log_warning(
+            f"dispatcher: component '{agent_id}' knowledge embedder is misconfigured "
+            f"— running without retrieval ({e})"
+        )
+        return stripped_cfg, None
+    except OperationalError:
+        # Unreachable vector store: retrieval is optional infrastructure —
+        # the run answers without it, loudly warned server-side.
+        log_warning(
+            f"dispatcher: component '{agent_id}' knowledge storage is unreachable "
+            f"— running without retrieval"
+        )
+        return stripped_cfg, None
+    except Exception as e:
+        # Sibling DBAPI failures degrade the same way (the except above is
+        # not the whole surface): a reachable store whose first-use table
+        # creation fails (CREATE EXTENSION permission denied, a plain
+        # Postgres without pgvector, a cold-start DuplicateTable race) is
+        # still retrieval-optional infrastructure. Type name only — never
+        # the exception text, which can carry DSN detail.
+        log_warning(
+            f"dispatcher: component '{agent_id}' knowledge storage failed to initialize "
+            f"({type(e).__name__}) — running without retrieval"
+        )
+        return stripped_cfg, None
+    return stripped_cfg, knowledge
+
+
 class ModelBindingError(Exception):
     """The component's model config does not resolve to a live registry
     instance. Raised BEFORE anything runs — no credentials installed, no
@@ -228,6 +409,7 @@ def build_agent_for_run(
     agent_id: str,
     catalog: Optional[CatalogState] = None,
     deps: Optional[Dict[str, Any]] = None,
+    db_url: Optional[str] = None,
 ) -> Optional[Tuple[Agent, Dict[str, Any], List[Function]]]:
     """Load a stored component's published config and build a fresh Agent.
 
@@ -237,10 +419,16 @@ def build_agent_for_run(
     (current) version runs. When a catalog state is supplied, keyed-toolkit
     references are handled by :func:`plan_per_run_tools` and the returned
     fresh Function objects must be appended to the agent's tools by the
-    caller. Returns the raw config alongside the Agent so the run route can
-    enforce config-declared MCP connectors (the config dict is what the
-    client writes; agno's ``from_dict`` ignores unknown keys like
-    ``connectors``, so
+    caller. When the config declares knowledge, :func:`plan_per_run_knowledge`
+    strips the reference pre-rehydration and the fresh per-run Knowledge
+    instance is attached here (``agent.knowledge`` — agno's run path reads it
+    at ``arun`` time, so post-rehydration assignment is the lifecycle point).
+    ``db_url`` is the knowledge vector store's DSN, threaded from the run
+    route (the same ``app.state.db_url`` the knowledge routes resolve).
+
+    Returns the raw config alongside the Agent so the run route can enforce
+    config-declared MCP connectors (the config dict is what the client
+    writes; agno's ``from_dict`` ignores unknown keys like ``connectors``, so
     the Agent object alone doesn't carry it).
     """
     db = agent_os.db
@@ -257,10 +445,25 @@ def build_agent_for_run(
     fresh_fns: List[Function] = []
     if catalog is not None:
         config, fresh_fns = plan_per_run_tools(config, catalog.fn_index, deps)
+    # Knowledge planning runs regardless of the catalog: the strip must hold
+    # even when the tool planning is skipped (no catalog state), and the
+    # attach decision depends only on the config + this run's deps.
+    config, knowledge = plan_per_run_knowledge(config, agent_os, agent_id, deps, db_url)
     agent = Agent.from_dict(config, registry=agent_os.registry, strict=False)
     _refuse_unresolved_model_binding(agent, agent_os)
     if agent.db is None:
         agent.db = db
+    if knowledge is not None:
+        # Assigned AFTER rehydration and the model-binding refusal — a refused
+        # run returns nothing, so the instance must not reach the agent. (The
+        # construction itself already happened inside
+        # plan_per_run_knowledge, pre-``from_dict``: a refused run pays one
+        # wasted vector-store round-trip, the accepted per-call cost.) agno
+        # builds the knowledge search tool per run from this attribute at
+        # ``arun`` time — post-rehydration assignment is the lifecycle point;
+        # search_knowledge stays agno's default True (agentic retrieval) and
+        # add_knowledge_to_context stays untouched.
+        agent.knowledge = knowledge
     # The agent id must match the handle the component was created under.
     agent.id = agent_id
     return agent, stored.get("config"), fresh_fns
@@ -587,9 +790,19 @@ def attach_stored_agent_routes(app: FastAPI, agent_os: AgentOS) -> None:
         try:
             # Same event-loop discipline as ensure_current above: agent
             # construction instantiates models/toolkits (network clients,
-            # etc.) and reads the registry — blocking work, off-loop.
+            # etc.) and reads the registry — blocking work, off-loop. The
+            # per-run knowledge attach rides the same hop: a fresh Knowledge
+            # instance round-trips the vector store (exists-probe / first-use
+            # table create), which must never run on the loop. db_url is the
+            # SAME DSN source the knowledge routes resolve
+            # (app.state.db_url — installed by build_app).
             agent_and_config = await anyio.to_thread.run_sync(
-                build_agent_for_run, agent_os, agent_id, catalog, deps
+                build_agent_for_run,
+                agent_os,
+                agent_id,
+                catalog,
+                deps,
+                getattr(request.app.state, "db_url", None),
             )
         except ModelBindingError as e:
             # Refused BEFORE anything ran — no credentials installed, no MCP
