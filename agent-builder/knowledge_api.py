@@ -218,19 +218,24 @@ def _content_entry(content) -> Dict[str, Any]:
         content: The agno ``Content`` (from the corpus's linked_to-scoped list).
 
     Returns:
-        ``{id, name, status, statusMessage, size, createdAt, updatedAt}`` —
-        epoch-second timestamps (agno-native), ``size`` possibly null,
-        ``status`` one of agno's ``ContentStatus`` values
+        ``{id, name, description, status, statusMessage, size, createdAt,
+        updatedAt}`` — epoch-second timestamps (agno-native), ``size``
+        possibly null, ``status`` one of agno's ``ContentStatus`` values
         (``processing``/``completed``/``partial``/``failed``) or null when
-        the row predates a status write, and ``statusMessage`` agno's
-        classified failure reason (``status_message`` — e.g. "authentication
-        (HTTP 401) ... Check the embedder's API key and permissions"),
-        null unless the row failed. Shown to the author on the failed row
-        in the builder form; contains no credential material.
+        the row predates a status write, ``description`` agno's Content
+        description (null when absent — this service's own ingest never
+        sets one, but rows written through agno's other flows may carry
+        it, and the UI renders it as the doc row's second line when
+        present), and ``statusMessage`` agno's classified failure reason
+        (``status_message`` — e.g. "authentication (HTTP 401) ... Check
+        the embedder's API key and permissions"), null unless the row
+        failed. Shown to the author on the failed row in the builder
+        form; contains no credential material.
     """
     return {
         "id": content.id,
         "name": content.name,
+        "description": (content.description or "").strip() or None,
         "status": content.status.value if content.status is not None else None,
         "statusMessage": content.status_message or None,
         "size": content.size,

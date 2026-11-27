@@ -602,10 +602,13 @@ export interface KnowledgeCapability {
  *  ContentStatus or null on a row predating a status write;
  *  `statusMessage` is agno's classified failure reason — always present
  *  on the wire, null on healthy rows — shown to the author so "Failed"
- *  is never bare). */
+ *  is never bare; `description` is agno's Content description, null when
+ *  absent (the service's own ingest never sets one) — the doc row
+ *  renders it as a muted second line under the name when present). */
 export interface KnowledgeDocRow {
   id: string;
   name: string;
+  description?: string | null;
   status: string | null;
   statusMessage?: string | null;
   size: number | null;
