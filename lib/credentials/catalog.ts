@@ -21,8 +21,10 @@
 import {
   fetchAgentosModels,
   fetchBuilderTools,
+  fetchKnowledgeConfig,
   type AgentosModel,
   type AgentosTool,
+  type KnowledgeConfig,
 } from "@/lib/agents/builder";
 
 export type CredentialKind = "llm" | "tool";
@@ -87,10 +89,21 @@ export function fieldForDepKey(provider: string, depKey: string): string {
 /**
  * Derive the credentials catalog from the two platform catalogs. A provider
  * that appears in both keeps its first (LLM) entry.
+ *
+ * The knowledge capability extends the derivation: when the platform's
+ * knowledge capability is enabled but its embedding provider has no entry,
+ * one is added — otherwise a deployment whose models catalog carries no
+ * OpenAI provider can't save the key the knowledge contract demands (the
+ * uploads would 400 forever: dead knowledge). The label/keyName derive
+ * from the embedding config's provider (`<provider>_api_key` convention —
+ * never a hardcoded list); `kind` is "tool" because the key powers the
+ * agent's knowledge-search TOOL calls (the run gate matches the dep key,
+ * which the row satisfies whatever its kind).
  */
 export function deriveCredentialsCatalog(
   models: AgentosModel[],
   tools: AgentosTool[],
+  knowledge?: KnowledgeConfig,
 ): CredentialsCatalog {
   const catalog: CredentialsCatalog = {};
   for (const m of models) {
@@ -152,6 +165,15 @@ export function deriveCredentialsCatalog(
       fields,
     };
   }
+  if (knowledge?.enabled && knowledge.provider && !catalog[knowledge.provider]) {
+    catalog[knowledge.provider] = {
+      provider: knowledge.provider,
+      kind: "tool",
+      keyName: `${knowledge.provider}_api_key`,
+      label: prettifyProviderLabel(knowledge.provider),
+      fields: [{ key: "api_key", label: "API key" }],
+    };
+  }
   return catalog;
 }
 
@@ -173,11 +195,12 @@ export interface CredentialsCatalogFetch {
  */
 export async function fetchCredentialsCatalog(): Promise<CredentialsCatalogFetch> {
   try {
-    const [models, tools] = await Promise.all([
+    const [models, tools, knowledge] = await Promise.all([
       fetchAgentosModels(),
       fetchBuilderTools(),
+      fetchKnowledgeConfig(),
     ]);
-    return { catalog: deriveCredentialsCatalog(models, tools) };
+    return { catalog: deriveCredentialsCatalog(models, tools, knowledge) };
   } catch {
     return { catalog: null, catalogError: CATALOG_UNREACHABLE_MESSAGE };
   }

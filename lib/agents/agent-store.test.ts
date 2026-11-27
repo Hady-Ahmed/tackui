@@ -237,6 +237,92 @@ describe("createAgent", () => {
     expect("requiresKey" in (loaded?.requirements?.model ?? {})).toBe(false);
   });
 
+  it("round-trips the snapshot's knowledge field (zod must not strip it on write OR read)", async () => {
+    // THE #235 pin: an undeclared requirementsSchema field is silently
+    // stripped on EVERY store write AND read — the run gate's
+    // embedding-key demand would be dead code while tests stay green.
+    // Write a snapshot WITH knowledge → read it back intact.
+    const requirements = {
+      model: {
+        provider: "openai",
+        id: "gpt-4o-mini",
+        platformTier: true,
+        depKey: "openai_api_key",
+        name: "OpenAIChat",
+      },
+      tools: [],
+      connectors: [],
+      knowledge: { provider: "openai", model: "text-embedding-3-small" },
+    };
+    const created = await createAgent(
+      { ...validInput, origin: "builder", requirements },
+      TEST_ORG,
+    );
+    const loaded = await getAgent(created.id, TEST_ORG);
+    expect(loaded?.requirements).toEqual(requirements);
+    expect(loaded?.requirements?.knowledge).toEqual({
+      provider: "openai",
+      model: "text-embedding-3-small",
+    });
+  });
+
+  it("keeps knowledge absent on read when the snapshot has none (no default materializes)", async () => {
+    // The other half of the #235 pin: presence ⇔ the config references
+    // knowledge — a default in the schema would materialize the field on
+    // every knowledge-less snapshot and make the run gate 402 agents that
+    // need no key.
+    const requirements = {
+      model: {
+        provider: "openai",
+        id: "gpt-4o-mini",
+        platformTier: true,
+        depKey: "openai_api_key",
+        name: "OpenAIChat",
+      },
+      tools: [],
+      connectors: [],
+    };
+    const created = await createAgent(
+      { ...validInput, origin: "builder", requirements },
+      TEST_ORG,
+    );
+    const loaded = await getAgent(created.id, TEST_ORG);
+    expect(loaded?.requirements).toEqual(requirements);
+    expect("knowledge" in (loaded?.requirements ?? {})).toBe(false);
+  });
+
+  it("survives an update round-trip with the knowledge field intact (the attach path's write)", async () => {
+    // The knowledge routes' attach/detach updates the snapshot via
+    // updateAgent — the write-boundary parse must keep the field too.
+    const base = {
+      model: {
+        provider: "openai",
+        id: "gpt-4o-mini",
+        platformTier: true,
+        depKey: "openai_api_key",
+        name: "OpenAIChat",
+      },
+      tools: [],
+      connectors: [],
+    };
+    const created = await createAgent(
+      { ...validInput, origin: "builder", requirements: base },
+      TEST_ORG,
+    );
+    const updated = await updateAgent(created.id, {
+      requirements: { ...base, knowledge: { provider: "openai", model: "text-embedding-3-small" } },
+    }, TEST_ORG);
+    expect(updated?.requirements?.knowledge).toEqual({
+      provider: "openai",
+      model: "text-embedding-3-small",
+    });
+    // And the detach direction — a patch writing the snapshot WITHOUT
+    // knowledge keeps it absent.
+    const detached = await updateAgent(created.id, { requirements: base }, TEST_ORG);
+    expect(detached?.requirements).toEqual(base);
+    expect("knowledge" in (detached?.requirements ?? {})).toBe(false);
+  });
+
   it("fails closed on a pre-door snapshot: the blob fails the schema and reads back as undefined", async () => {
     // THE load-bearing rejection, pinned at the store level: a snapshot
     // written before depKey/name were required (exactly what an upgrade

@@ -70,6 +70,13 @@ export const LIMITS = {
   },
   /** PUT/DELETE /api/credentials — BYOK key upserts/removals. */
   credentialMutate: { max: 20, windowMs: 60_000 },
+  /** Per-user: knowledge corpus mutations (POST/DELETE
+   *  /api/agents/[id]/knowledge — uploads hit the service's ingest
+   *  pipeline and embed with the author's key; deletes cascade vector
+   *  rows). 20/min: corpus curation legitimately bursts (multi-file
+   *  drops), but a buggy loop can't hammer the ingest. GET rides
+   *  agentRead. */
+  knowledgeMutate: { max: 20, windowMs: 60_000 },
   /** PUT/DELETE /api/connectors — org connector upserts/removals. */
   connectorMutate: { max: 20, windowMs: 60_000 },
   /** POST /api/billing/checkout + /api/billing/portal — each creates an
