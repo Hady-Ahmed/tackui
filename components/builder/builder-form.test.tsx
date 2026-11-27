@@ -685,6 +685,41 @@ describe("BuilderForm — the Knowledge section", () => {
     expect(screen.getByText(/Delete this document and upload it again/)).toBeTruthy();
   });
 
+  it("a partial row shows the captured partial reason (agno's N-of-M status message)", async () => {
+    // agno writes a status_message on PARTIAL rows too ("N of M chunks
+    // were embedded; Z failed and are not retrievable…") and the wire
+    // carries it for every row — "Partial" alone left the author
+    // guessing exactly like the failed-row case above.
+    stubKnowledgeFetch({
+      list: () => [
+        kbRow({
+          status: "partial",
+          statusMessage:
+            "1 of 3 chunks were embedded; 2 failed and are not retrievable. Re-ingest this content to retry the missing chunks.",
+        }),
+      ],
+    });
+    render(<BuilderForm {...editProps()} />);
+    await screen.findByText("Partial");
+    expect(screen.getByText(/1 of 3 chunks were embedded/)).toBeTruthy();
+    expect(screen.getByText(/2 failed and are not retrievable/)).toBeTruthy();
+    // The failed remedy never rides a partial row — something was kept
+    // (agno's own copy says re-ingest, not delete + re-upload).
+    expect(screen.queryByText(/Delete this document and upload it again/)).toBeNull();
+  });
+
+  it("a partial row without a captured reason stays the bare chip only", async () => {
+    // The wire permits a null statusMessage (agno always writes one on
+    // a partial row, but the contract allows absence) — the conditional
+    // must not grow an empty block, the same no-empty-line discipline
+    // the description second line follows.
+    stubKnowledgeFetch({ list: () => [kbRow({ status: "partial" })] });
+    render(<BuilderForm {...editProps()} />);
+    await screen.findByText("Partial");
+    const card = screen.getByText("Handbook.pdf").closest("div.rounded-lg");
+    expect(card?.childElementCount).toBe(1);
+  });
+
   it("a doc row renders its description as a second line; a row without one stays single-line", async () => {
     // The #253 wire extension: agno's Content description rides the list
     // payload and renders under the name when a row carries one. The
