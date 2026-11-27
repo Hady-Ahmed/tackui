@@ -1,17 +1,20 @@
 // @vitest-environment jsdom
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
   cleanup,
   fireEvent,
   render,
   screen,
   waitFor,
+  within,
 } from "@testing-library/react";
 import type { ReactNode } from "react";
 import { BuilderForm } from "./builder-form";
 import type {
   CredentialCatalog,
   CredentialsState,
+  KnowledgeCapability,
+  KnowledgeDocRow,
   PlatformModel,
 } from "./builder-config";
 import type { PublicAgent } from "@/lib/agents/agents.config";
@@ -286,5 +289,399 @@ describe("BuilderForm — the key-aware defaulting effect (component wiring)", (
     );
     expect(providerSelect().value).toBe("");
     expect(modelSelect().value).toBe("");
+  });
+});
+
+/* ---------------------------------------------------------------------- */
+/* Knowledge section (#236) — capability gating, polling, delete, badge.   */
+/* The pure-logic cases live in builder-config.test.ts; this file covers   */
+/* what a pure function can't: the fetch wiring per capability state, the  */
+/* poll loop's start/stop, the confirm gate, and the detach-retry flow.    */
+/* ---------------------------------------------------------------------- */
+
+const KB_AGENT: PublicAgent = {
+  id: "b9",
+  name: "Knowledge agent",
+  description: "",
+  orgId: "o1",
+  authMode: "jwt",
+  hasJwtSecret: false,
+  jwtSecretStatus: "none",
+  origin: "builder",
+  authorUserId: "user-1",
+  instructions: "Use the corpus.",
+  requirements: {
+    model: {
+      provider: "anthropic",
+      id: "claude-3-5-sonnet",
+      platformTier: false,
+      requiresKey: true,
+      depKey: "anthropic_api_key",
+      name: "Anthropic",
+    },
+    tools: [],
+    connectors: [],
+  },
+};
+
+const KB_ENABLED: KnowledgeCapability = {
+  enabled: true,
+  provider: "openai",
+  model: "text-embedding-3-small",
+};
+
+const KB_POLL_MS = 5000; // mirrors KNOWLEDGE_POLL_MS (the section's poll cadence)
+
+const kbRow = (overrides: Partial<KnowledgeDocRow> = {}): KnowledgeDocRow => ({
+  id: "row-1",
+  name: "Handbook.pdf",
+  status: "completed",
+  size: 1536,
+  createdAt: 1764000000,
+  updatedAt: 1764000000,
+  ...overrides,
+});
+
+type KbFetchOptions = {
+  capability?: KnowledgeCapability | { error: string; status?: number };
+  list?: () => KnowledgeDocRow[];
+  deleteResult?: { ok: boolean; status: number; body: unknown };
+  /** The DELETE rejects after `onDelete` fired — the lost response after
+   *  the delete landed (a network blip), the list-truth catch path. */
+  deleteThrows?: boolean;
+  onDelete?: () => void;
+  /** POST /knowledge results consumed per call (a batch walks the array). */
+  postResults?: Array<{ ok: boolean; status: number; body: unknown }>;
+};
+
+/**
+ * A URL-dispatching fetch stub for the edit-mode knowledge loads: the
+ * agent GET, the capability proxy, the doc list, the content DELETE, and
+ * (via `postResults`) POST uploads. Unguarded POSTs 500 loudly — only
+ * tests that pass `postResults` upload.
+ */
+function stubKnowledgeFetch(options: KbFetchOptions) {
+  const deleteCalls: string[] = [];
+  const postCalls: number[] = [];
+  const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+    const url = String(input instanceof Request ? input.url : input);
+    const method = init?.method ?? "GET";
+    const jsonRes = (body: unknown, status = 200) => ({
+      ok: status >= 200 && status < 300,
+      status,
+      json: async () => body,
+    });
+    if (url.endsWith("/knowledge/config")) {
+      const cap = options.capability ?? KB_ENABLED;
+      return "error" in cap
+        ? jsonRes({ error: cap.error }, cap.status ?? 502)
+        : jsonRes(cap);
+    }
+    if (url.endsWith("/knowledge") && method === "GET") {
+      const rows = options.list?.() ?? [];
+      return jsonRes(rows);
+    }
+    if (url.includes("/knowledge/") && method === "DELETE") {
+      deleteCalls.push(url);
+      options.onDelete?.();
+      if (options.deleteThrows) throw new TypeError("network blip after the delete reached the server");
+      const result = options.deleteResult ?? { ok: true, status: 200, body: { ok: true } };
+      return jsonRes(result.body, result.status);
+    }
+    if (url.endsWith("/knowledge") && method === "POST") {
+      postCalls.push(postCalls.length);
+      const result = options.postResults?.[postCalls.length - 1];
+      if (result) return jsonRes(result.body, result.status);
+      return jsonRes({ error: "unexpected POST in this test" }, 500);
+    }
+    if (url.endsWith("/api/agents/b9")) {
+      return jsonRes(KB_AGENT);
+    }
+    return jsonRes({ error: `unrouted fetch: ${method} ${url}` }, 500);
+  });
+  vi.stubGlobal("fetch", fetchMock);
+  return { fetchMock, deleteCalls, postCalls };
+}
+
+function editProps(overrides: Partial<BuilderFormProps> = {}): BuilderFormProps {
+  return builderProps({
+    mode: "edit",
+    agentId: "b9",
+    credentials: credentialsWith([]),
+    ...overrides,
+  });
+}
+
+describe("BuilderForm — the Knowledge section", () => {
+  beforeEach(() => {
+    vi.stubGlobal("confirm", vi.fn(() => false));
+  });
+
+  afterEach(() => {
+    cleanup();
+    vi.unstubAllGlobals();
+    vi.useRealTimers();
+  });
+
+  it("create mode: the one-line note, no capability fetch, no section", async () => {
+    const { fetchMock } = stubKnowledgeFetch({});
+    render(
+      <BuilderForm
+        {...builderProps({ mode: "create", agentId: undefined })}
+      />,
+    );
+    await screen.findByText(/save the agent first, then add documents/);
+    expect(screen.queryByText("Knowledge")).toBeNull();
+    // No knowledge fetches in create mode (docs attach post-save).
+    const knowledgeFetches = fetchMock.mock.calls.filter((c) =>
+      String(c[0]).includes("/knowledge"),
+    );
+    expect(knowledgeFetches).toHaveLength(0);
+  });
+
+  it("capability available: the section renders with the doc list rows", async () => {
+    stubKnowledgeFetch({ list: () => [kbRow()] });
+    render(<BuilderForm {...editProps()} />);
+    await screen.findByText("Handbook.pdf");
+    expect(screen.getByText("Ready")).toBeTruthy();
+    // Key connected? Not yet — the header shows the demand (no model
+    // badge covers OpenAI — the model is Anthropic).
+    expect(screen.getByText(/Needs your OpenAI key/)).toBeTruthy();
+  });
+
+  it("capability hidden: a one-line explanation, no upload surface", async () => {
+    stubKnowledgeFetch({
+      capability: { enabled: false, provider: "openai", model: "x" },
+    });
+    render(<BuilderForm {...editProps()} />);
+    await screen.findByText(/Knowledge isn't offered on this deployment/);
+    expect(screen.queryByLabelText("Upload files")).toBeNull();
+  });
+
+  it("capability unreachable: the error banner with Retry, never an 'off' claim", async () => {
+    stubKnowledgeFetch({
+      capability: { error: "The agent builder is unavailable right now." },
+    });
+    render(<BuilderForm {...editProps()} />);
+    await screen.findByText(/The agent builder is unavailable right now/);
+    expect(screen.queryByLabelText("Upload files")).toBeNull();
+  });
+
+  it("the connect shortcut opens the KeyForm (the existing inline pattern)", async () => {
+    stubKnowledgeFetch({ list: () => [kbRow()] });
+    render(<BuilderForm {...editProps()} />);
+    // The MODEL badge also offers a connect shortcut (the Anthropic key is
+    // missing too) — scope to the knowledge badge's own demand line.
+    await screen.findByText(/Needs your OpenAI key/);
+    const badge = screen.getByText(/Needs your OpenAI key/);
+    fireEvent.click(within(badge).getByText("connect one"));
+    await screen.findByText(/Connect a OpenAI key/);
+  });
+
+  it("key connected + docs: the green chip, no demand line", async () => {
+    stubKnowledgeFetch({ list: () => [kbRow()] });
+    render(<BuilderForm {...editProps({ credentials: credentialsWith(["openai"]) })} />);
+    await screen.findByText("Handbook.pdf");
+    expect(screen.getByText(/Runs on your OpenAI key/)).toBeTruthy();
+    expect(screen.queryByText(/Needs your OpenAI key/)).toBeNull();
+  });
+
+  it("polls the list while a row is processing and stops once settled", async () => {
+    vi.useFakeTimers();
+    let listCalls = 0;
+    let current: KnowledgeDocRow[] = [kbRow({ status: "processing" })];
+    stubKnowledgeFetch({
+      list: () => {
+        listCalls += 1;
+        return current;
+      },
+    });
+    render(<BuilderForm {...editProps()} />);
+    // Flush the initial load chain (agent + capability + list + the
+    // setState → poll-effect mount → immediate tick): each hop is an
+    // await boundary, so several small flushes are needed.
+    for (let i = 0; i < 8; i++) await vi.advanceTimersByTimeAsync(1);
+    const afterLoad = listCalls;
+    expect(afterLoad).toBeGreaterThanOrEqual(2);
+    // While processing: the interval keeps polling.
+    await vi.advanceTimersByTimeAsync(KB_POLL_MS * 2.2);
+    expect(listCalls).toBeGreaterThan(afterLoad);
+    // Settled: the next poll observes it, the effect tears the interval
+    // down, and nothing polls after.
+    current = [kbRow({ status: "completed" })];
+    await vi.advanceTimersByTimeAsync(KB_POLL_MS * 1.2);
+    for (let i = 0; i < 8; i++) await vi.advanceTimersByTimeAsync(1);
+    const afterSettleSeen = listCalls;
+    await vi.advanceTimersByTimeAsync(KB_POLL_MS * 2.2);
+    expect(listCalls).toBe(afterSettleSeen);
+  });
+
+  it("delete: confirm gates the DELETE; confirming deletes and refetches", async () => {
+    const { fetchMock, deleteCalls } = stubKnowledgeFetch({ list: () => [kbRow()] });
+    const confirmFn = vi.fn(() => false);
+    vi.stubGlobal("confirm", confirmFn);
+    render(<BuilderForm {...editProps()} />);
+    await screen.findByText("Handbook.pdf");
+    // confirm = false — no DELETE fires.
+    fireEvent.click(screen.getByRole("button", { name: "Delete" }));
+    await waitFor(() => expect(confirmFn).toHaveBeenCalledTimes(1));
+    expect(deleteCalls).toHaveLength(0);
+
+    vi.stubGlobal("confirm", vi.fn(() => true));
+    fireEvent.click(screen.getByRole("button", { name: "Delete" }));
+    await waitFor(() => expect(deleteCalls).toHaveLength(1));
+    expect(deleteCalls[0]).toContain("/knowledge/row-1");
+    // The list re-fetches after the delete (the truth about "last doc").
+    await waitFor(() =>
+      expect(
+        fetchMock.mock.calls.filter(
+          (c) => String(c[0]).endsWith("/knowledge") && (c[1]?.method ?? "GET") === "GET",
+        ).length,
+      ).toBeGreaterThanOrEqual(2),
+    );
+  });
+
+  it("a landed delete with a failed detach: the notice appears and Retry re-fires the delete", async () => {
+    // The 502-after-landed-delete case (#235's review note): the delete
+    // DID land — only the detach publish failed. The list is the truth:
+    // the row vanishes, the notice appears, and Retry re-fires the
+    // idempotent delete to finish the detach.
+    let deleted = false;
+    const { deleteCalls } = stubKnowledgeFetch({
+      list: () => (deleted ? [] : [kbRow()]),
+      deleteResult: {
+        ok: false,
+        status: 502,
+        body: { error: "The agent builder is unavailable right now — please try again shortly." },
+      },
+      onDelete: () => {
+        deleted = true;
+      },
+    });
+    vi.stubGlobal("confirm", vi.fn(() => true));
+    render(<BuilderForm {...editProps()} />);
+    await screen.findByText("Handbook.pdf");
+    fireEvent.click(screen.getByRole("button", { name: "Delete" }));
+    // The row is gone AND the retry-safe notice is up — amber alone (a
+    // red error would frame a good outcome as a failure).
+    await screen.findByText(/The document was removed, but finishing/);
+    expect(screen.queryByRole("alert")).toBeNull();
+    expect(screen.queryByText("Handbook.pdf")).toBeNull();
+    // Retry re-fires the DELETE (idempotent) without a confirm.
+    fireEvent.click(screen.getByRole("button", { name: "Retry" }));
+    await waitFor(() => expect(deleteCalls).toHaveLength(2));
+  });
+
+  it("a lost delete response settles from the list truth: amber notice only, no re-confirm", async () => {
+    // The delete REACHED the server, then the response was lost (network
+    // blip): onDelete fires, then the fetch rejects. The catch path
+    // re-fetches the list as truth — the vanished row raises the amber
+    // retry notice ALONE (a red error would frame a good outcome as a
+    // failure), and the retry needs no confirm.
+    let deleted = false;
+    const { deleteCalls } = stubKnowledgeFetch({
+      list: () => (deleted ? [] : [kbRow()]),
+      deleteThrows: true,
+      onDelete: () => {
+        deleted = true;
+      },
+    });
+    vi.stubGlobal("confirm", vi.fn(() => true));
+    render(<BuilderForm {...editProps()} />);
+    await screen.findByText("Handbook.pdf");
+    fireEvent.click(screen.getByRole("button", { name: "Delete" }));
+    await screen.findByText(/The document was removed, but finishing/);
+    expect(screen.queryByText(/deleting again is safe/)).toBeNull();
+    fireEvent.click(screen.getByRole("button", { name: "Retry" }));
+    await waitFor(() => expect(deleteCalls).toHaveLength(2));
+  });
+
+  it("a landed upload schedules one delayed re-fetch (the row insert races the 202)", async () => {
+    // The service writes the contents row AFTER the 202 — the immediate
+    // list load can see no new row, and with no OTHER row processing the
+    // poll never engages. The delayed re-fetch closes that gap.
+    vi.useFakeTimers();
+    let listCalls = 0;
+    stubKnowledgeFetch({
+      list: () => {
+        listCalls += 1;
+        return [];
+      },
+      postResults: [{ ok: true, status: 202, body: { id: "c1", name: "d", status: "processing" } }],
+    });
+    render(<BuilderForm {...editProps()} />);
+    for (let i = 0; i < 8; i++) await vi.advanceTimersByTimeAsync(1);
+    const afterInitialLoad = listCalls;
+    const input = screen.getByLabelText("Upload files") as HTMLInputElement;
+    const file = new File(["x"], "a.md", { type: "text/markdown" });
+    fireEvent.change(input, { target: { files: [file] } });
+    // Upload + the immediate refresh after it.
+    for (let i = 0; i < 8; i++) await vi.advanceTimersByTimeAsync(1);
+    const afterImmediate = listCalls;
+    expect(afterImmediate).toBeGreaterThan(afterInitialLoad);
+    // …and exactly ONE delayed re-fetch (replaced-not-stacked: two would
+    // mean the rapid-fire scheduling stacked timers), which stops after.
+    await vi.advanceTimersByTimeAsync(KB_POLL_MS + 50);
+    const afterDelayed = listCalls;
+    expect(afterDelayed).toBe(afterImmediate + 1);
+    await vi.advanceTimersByTimeAsync(KB_POLL_MS * 2);
+    expect(listCalls).toBe(afterDelayed);
+  });
+
+  it("a file batch that stops at a failing file still shows the files that landed", async () => {
+    let listCalls = 0;
+    stubKnowledgeFetch({
+      list: () => {
+        listCalls += 1;
+        return [kbRow()];
+      },
+      postResults: [
+        { ok: true, status: 202, body: { id: "c1", name: "d1", status: "processing" } },
+        { ok: false, status: 400, body: { error: "Unsupported format" } },
+      ],
+    });
+    render(<BuilderForm {...editProps()} />);
+    await screen.findByText("Handbook.pdf");
+    const input = screen.getByLabelText("Upload files") as HTMLInputElement;
+    const files = [
+      new File(["a"], "a.md", { type: "text/markdown" }),
+      // Passes the client check (extension+size) — the ROUTE 400s it, the
+      // shape the batch-stop path actually covers.
+      new File(["b"], "b.pdf", { type: "application/pdf" }),
+    ];
+    fireEvent.change(input, { target: { files } });
+    // The batch stopped at file 2 — but file 1 LANDED, so the list still
+    // refreshes (unconditional) instead of leaving file 1 invisible.
+    await waitFor(() => expect(listCalls).toBeGreaterThanOrEqual(2));
+    expect(screen.getByText(/Unsupported format/)).toBeTruthy();
+  });
+
+  it("failed rows show the re-upload guidance (no resume)", async () => {
+    stubKnowledgeFetch({ list: () => [kbRow({ status: "failed" })] });
+    render(<BuilderForm {...editProps()} />);
+    await screen.findByText("Failed");
+    expect(screen.getByText(/Delete this document and upload it again/)).toBeTruthy();
+  });
+
+  it("a failed row shows the captured failure reason (e.g. an expired key)", async () => {
+    // The live-demo gap that asked for this: agno stores the classified
+    // reason on the row ("authentication (HTTP 401) ... Check the
+    // embedder's API key and permissions") and the wire carries it —
+    // "Failed" alone left the author guessing.
+    stubKnowledgeFetch({
+      list: () => [
+        kbRow({
+          status: "failed",
+          statusMessage:
+            'Embedding failed for "chine" (0 of 1 chunks embedded). Reason: authentication (HTTP 401). Check the embedder\'s API key and permissions.',
+        }),
+      ],
+    });
+    render(<BuilderForm {...editProps()} />);
+    await screen.findByText("Failed");
+    expect(screen.getByText(/authentication \(HTTP 401\)/)).toBeTruthy();
+    expect(screen.getByText(/Check the embedder's API key/)).toBeTruthy();
+    // The remedy guidance still rides below the reason.
+    expect(screen.getByText(/Delete this document and upload it again/)).toBeTruthy();
   });
 });

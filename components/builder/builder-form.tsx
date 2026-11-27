@@ -35,7 +35,7 @@
  * the agent can run").
  */
 
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import Link from "next/link";
 import type { PublicAgent } from "@/lib/agents/agents.config";
 import type { PublicConnector } from "@/lib/connectors/connector-store";
@@ -48,6 +48,7 @@ import { useBilling } from "@/lib/billing/use-billing";
 import {
   BUILDER_CONNECTORS_MAX,
   buildCreatePayload,
+  buildKnowledgeUploadForm,
   catalogEmptyCopy,
   catalogErrorCopy,
   createBlockedByEmptyModels,
@@ -57,7 +58,25 @@ import {
   findModel,
   groupModelsByProvider,
   groupToolsByToolkit,
+  hasProcessingDocs,
+  KNOWLEDGE_CREATE_NOTE,
+  KNOWLEDGE_DETACH_RETRY_COPY,
+  KNOWLEDGE_FAILED_HINT,
+  KNOWLEDGE_FILE_ACCEPT,
+  KNOWLEDGE_MAX_UPLOAD_BYTES,
+  KNOWLEDGE_POLL_MS,
+  knowledgeCapabilityState,
+  knowledgeDateLabel,
+  knowledgeFileError,
+  knowledgeHiddenCopy,
+  knowledgeKeyBadge,
+  knowledgeListEmptyCopy,
+  knowledgeSizeLabel,
+  knowledgeStatusChip,
+  knowledgeTextError,
+  knowledgeUrlError,
   modelKeyState,
+  parseKnowledgeChunkFields,
   pickDefaultModel,
   prettySlug,
   providerMeta,
@@ -67,6 +86,12 @@ import {
   type BuilderFormState,
   type BuilderToolOption,
   type CredentialsState,
+  type KnowledgeCapability,
+  type KnowledgeCapabilityState,
+  type KnowledgeChunkParse,
+  type KnowledgeDocRow,
+  type KnowledgeKeyBadge,
+  type KnowledgeUploadSource,
   type PlatformModel,
   type ToolKeyState,
   type ToolkitGroup,
@@ -175,6 +200,39 @@ export function BuilderForm({
   const [keyProvider, setKeyProvider] = useState<string | null>(null);
   const [keySaving, setKeySaving] = useState(false);
   const [keyError, setKeyError] = useState<string | null>(null);
+
+  /* -------------------------------------------------------------------- */
+  /* Knowledge section state (#236)                                        */
+  /* -------------------------------------------------------------------- */
+  // The capability + doc list are form-owned (per-open — they address
+  // THIS agent), unlike the four lifted page loads.
+  const [knowledgeCapability, setKnowledgeCapability] =
+    useState<KnowledgeCapability | null>(null);
+  const [knowledgeCapabilityError, setKnowledgeCapabilityError] =
+    useState<string | null>(null);
+  const [knowledgeDocs, setKnowledgeDocs] = useState<KnowledgeDocRow[] | null>(null);
+  const [knowledgeDocsError, setKnowledgeDocsError] = useState<string | null>(null);
+  // Upload/delete errors render INSIDE the section (the page-level banner
+  // is far from the user's cursor here — same rule as the KeyForm's
+  // inline error).
+  const [knowledgeActionError, setKnowledgeActionError] = useState<string | null>(null);
+  const [knowledgeUploading, setKnowledgeUploading] = useState(false);
+  const [knowledgeDeletingId, setKnowledgeDeletingId] = useState<string | null>(null);
+  // A delete that LANDED while its detach publish failed — the Retry
+  // re-fires the idempotent delete to finish the agent's knowledge
+  // update (null = nothing pending).
+  const [knowledgeDetachRetryId, setKnowledgeDetachRetryId] = useState<string | null>(null);
+  // The paste-text row + URL row + Advanced disclosure inputs.
+  const [pasteText, setPasteText] = useState("");
+  const [pasteName, setPasteName] = useState("");
+  const [knowledgeUrl, setKnowledgeUrl] = useState("");
+  // Blank strings = omitted (the platform's own defaults apply — the
+  // agno defaults differ per chunker, so the UI invents no number).
+  const [chunkSizeText, setChunkSizeText] = useState("");
+  const [chunkOverlapText, setChunkOverlapText] = useState("");
+  // The file picker is uncontrolled; clearing `.value` after each round
+  // lets the same file be re-picked after an error.
+  const knowledgeFileInputRef = useRef<HTMLInputElement | null>(null);
   // Opens the connect form and clears any stale inline error — the error
   // belongs to the (provider-keyed) form, not the page.
   const openKeyForm = (provider: string) => {
@@ -261,6 +319,110 @@ export function BuilderForm({
   }, [isPending, mode, loadAgent]);
 
   /* -------------------------------------------------------------------- */
+  /* Knowledge — capability + corpus loads (edit mode only)                 */
+  /* -------------------------------------------------------------------- */
+
+  const loadKnowledgeCapability = useCallback(async () => {
+    if (!agentId) return;
+    try {
+      const res = await fetch(`/api/agents/${agentId}/knowledge/config`);
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) {
+        setKnowledgeCapabilityError(
+          extractErrorMessage(data, `Failed to load the knowledge settings (${res.status})`),
+        );
+        return;
+      }
+      setKnowledgeCapability(data as KnowledgeCapability);
+      setKnowledgeCapabilityError(null);
+    } catch {
+      setKnowledgeCapabilityError("Couldn't reach the server — try again shortly.");
+    }
+  }, [agentId]);
+
+  /**
+   * (Re-)load the corpus list. Returns the rows (or null on failure) —
+   * the delete flow re-fetches to learn whether the delete LANDED (the
+   * list is the truth when a 502/409 may mean "landed + detach failed").
+   */
+  const loadKnowledgeDocs = useCallback(
+    async (): Promise<KnowledgeDocRow[] | null> => {
+      if (!agentId) return null;
+      try {
+        const res = await fetch(`/api/agents/${agentId}/knowledge`);
+        const data = await res.json().catch(() => ({}));
+        if (!res.ok) {
+          setKnowledgeDocsError(
+            extractErrorMessage(data, `Failed to load the document list (${res.status})`),
+          );
+          return null;
+        }
+        const rows = Array.isArray(data) ? (data as KnowledgeDocRow[]) : [];
+        setKnowledgeDocs(rows);
+        setKnowledgeDocsError(null);
+        return rows;
+      } catch {
+        setKnowledgeDocsError("Couldn't reach the server — try again shortly.");
+        return null;
+      }
+    },
+    [agentId],
+  );
+
+  useEffect(() => {
+    if (mode !== "edit" || !agentId) return;
+    // Wrapper indirection satisfies react-hooks/set-state-in-effect.
+    const load = async () => {
+      await Promise.all([loadKnowledgeCapability(), loadKnowledgeDocs()]);
+    };
+    load();
+  }, [mode, agentId, loadKnowledgeCapability, loadKnowledgeDocs]);
+
+  // Status polling — agno ingests async, so a just-uploaded row reads
+  // "processing" until the service finishes. While any row is
+  // processing, re-poll the list on an interval; the effect stops (and
+  // clears the timer) the moment every row is settled — and on unmount.
+  const anyDocProcessing = knowledgeDocs ? hasProcessingDocs(knowledgeDocs) : false;
+  useEffect(() => {
+    if (!anyDocProcessing) return;
+    let cancelled = false;
+    const tick = async () => {
+      await loadKnowledgeDocs();
+    };
+    void tick();
+    const timer = setInterval(() => {
+      if (!cancelled) void tick();
+    }, KNOWLEDGE_POLL_MS);
+    return () => {
+      cancelled = true;
+      clearInterval(timer);
+    };
+  }, [anyDocProcessing, loadKnowledgeDocs]);
+
+  /**
+   * One delayed re-fetch after a landed upload. The service writes the
+   * contents row in its background task after the 202 — the immediate
+   * load can lose that race and see no new row, and if no other row is
+   * processing the poll never engages, leaving the just-uploaded doc
+   * invisible. The timer is replaced (never stacked) by a rapid second
+   * upload and cleared on unmount.
+   */
+  const knowledgeRefreshTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const scheduleKnowledgeRefresh = useCallback(() => {
+    if (knowledgeRefreshTimerRef.current) clearTimeout(knowledgeRefreshTimerRef.current);
+    knowledgeRefreshTimerRef.current = setTimeout(() => {
+      knowledgeRefreshTimerRef.current = null;
+      void loadKnowledgeDocs();
+    }, KNOWLEDGE_POLL_MS);
+  }, [loadKnowledgeDocs]);
+  useEffect(
+    () => () => {
+      if (knowledgeRefreshTimerRef.current) clearTimeout(knowledgeRefreshTimerRef.current);
+    },
+    [],
+  );
+
+  /* -------------------------------------------------------------------- */
   /* Derived                                                               */
   /* -------------------------------------------------------------------- */
 
@@ -318,6 +480,25 @@ export function BuilderForm({
   const visibleGroups = tools
     ? groupToolsByToolkit(filterTools(tools, toolQuery))
     : [];
+
+  // --- Knowledge (edit mode only; create shows the one-line note) ---
+  const knowledgeCap: KnowledgeCapabilityState | null =
+    mode === "edit" && agentId
+      ? knowledgeCapabilityState(knowledgeCapability, knowledgeCapabilityError)
+      : null;
+  const knowledgeBadge =
+    knowledgeCap?.kind === "available"
+      ? knowledgeKeyBadge(
+          knowledgeDocs,
+          knowledgeCap.provider,
+          credentials,
+          modelState,
+        )
+      : null;
+  const knowledgeDocsEmptyCopy = knowledgeListEmptyCopy(
+    knowledgeDocs,
+    knowledgeDocsError,
+  );
 
   // The edit-mode baseline: the agent's stored definition (instructions
   // prefill means the diff is computed against the real current value).
@@ -428,6 +609,200 @@ export function BuilderForm({
     } finally {
       setKeySaving(false);
     }
+  };
+
+  /* -------------------------------------------------------------------- */
+  /* Knowledge actions                                                     */
+  /* -------------------------------------------------------------------- */
+
+  /**
+   * One upload (file | text | url) → POST /api/agents/[id]/knowledge.
+   * Client pre-checks mirror the route's cheap gates (instant feedback);
+   * the route re-validates everything. `withChunk` carries the parsed
+   * Advanced fields. Returns whether the upload was accepted.
+   */
+  const uploadKnowledge = async (
+    source: KnowledgeUploadSource,
+    chunk: KnowledgeChunkParse,
+  ): Promise<boolean> => {
+    if (!agentId) return false;
+    setKnowledgeUploading(true);
+    setKnowledgeActionError(null);
+    try {
+      const body = buildKnowledgeUploadForm(
+        source,
+        chunk.ok ? { chunkSize: chunk.chunkSize, chunkOverlap: chunk.chunkOverlap } : undefined,
+      );
+      const res = await fetch(`/api/agents/${agentId}/knowledge`, {
+        method: "POST",
+        body,
+      });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) {
+        setKnowledgeActionError(
+          extractErrorMessage(data, `Upload failed (${res.status})`),
+        );
+        return false;
+      }
+      return true;
+    } catch {
+      setKnowledgeActionError("Couldn't reach the server — please try again.");
+      return false;
+    } finally {
+      setKnowledgeUploading(false);
+    }
+  };
+
+  /** The file picker's change — validate every picked file, then upload
+   *  each one sequentially (the route takes exactly one file per
+   *  request). The list refresh happens once, after the last upload. */
+  const handleKnowledgeFiles = async (files: FileList | null) => {
+    if (!files || files.length === 0) return;
+    const picked = Array.from(files);
+    for (const file of picked) {
+      const problem = knowledgeFileError(file);
+      if (problem) {
+        setKnowledgeActionError(problem);
+        if (knowledgeFileInputRef.current) knowledgeFileInputRef.current.value = "";
+        return;
+      }
+    }
+    const chunk = parseKnowledgeChunkFields(chunkSizeText, chunkOverlapText);
+    if (!chunk.ok) {
+      setKnowledgeActionError(chunk.error);
+      if (knowledgeFileInputRef.current) knowledgeFileInputRef.current.value = "";
+      return;
+    }
+    let anyOk = false;
+    for (const file of picked) {
+      const ok = await uploadKnowledge({ kind: "file", file }, chunk);
+      if (!ok) {
+        break; // the error is on screen; stop the batch there
+      }
+      anyOk = true;
+    }
+    if (knowledgeFileInputRef.current) knowledgeFileInputRef.current.value = "";
+    // Unconditional: a batch that stopped at file 3 of 5 still landed
+    // files 1-2 — their rows must show even though the batch stopped.
+    await loadKnowledgeDocs();
+    // The 202'd doc's contents row is written by the service's background
+    // task AFTER the response — the immediate load above can lose that
+    // race and see no new row (and, if no other row is processing, no
+    // poll engages and nothing would ever refresh). One delayed re-fetch
+    // per landed upload closes the gap.
+    if (anyOk) scheduleKnowledgeRefresh();
+  };
+
+  /** The paste-text row's Add. */
+  const handleKnowledgeText = async () => {
+    const problem = knowledgeTextError(pasteText);
+    if (problem) {
+      setKnowledgeActionError(problem);
+      return;
+    }
+    if (!pasteName.trim()) {
+      setKnowledgeActionError("Name the document so it's findable in the list.");
+      return;
+    }
+    const chunk = parseKnowledgeChunkFields(chunkSizeText, chunkOverlapText);
+    if (!chunk.ok) {
+      setKnowledgeActionError(chunk.error);
+      return;
+    }
+    const ok = await uploadKnowledge(
+      { kind: "text", text: pasteText.trim(), name: pasteName.trim() },
+      chunk,
+    );
+    if (ok) {
+      setPasteText("");
+      setPasteName("");
+      await loadKnowledgeDocs();
+      scheduleKnowledgeRefresh();
+    }
+  };
+
+  /** The URL row's Add. */
+  const handleKnowledgeUrl = async () => {
+    const problem = knowledgeUrlError(knowledgeUrl);
+    if (problem) {
+      setKnowledgeActionError(problem);
+      return;
+    }
+    const chunk = parseKnowledgeChunkFields(chunkSizeText, chunkOverlapText);
+    if (!chunk.ok) {
+      setKnowledgeActionError(chunk.error);
+      return;
+    }
+    const ok = await uploadKnowledge(
+      { kind: "url", url: knowledgeUrl.trim() },
+      chunk,
+    );
+    if (ok) {
+      setKnowledgeUrl("");
+      await loadKnowledgeDocs();
+      scheduleKnowledgeRefresh();
+    }
+  };
+
+  /**
+   * The delete flow, confirm separated from the attempt: the detach-
+   * retry path re-fires the ATTEMPT directly (the document is already
+   * gone — the retry finishes the agent's knowledge update and must not
+   * re-ask "this cannot be undone").
+   */
+  const attemptKnowledgeDelete = async (contentId: string) => {
+    if (!agentId) return;
+    setKnowledgeDeletingId(contentId);
+    setKnowledgeActionError(null);
+    try {
+      const res = await fetch(`/api/agents/${agentId}/knowledge/${encodeURIComponent(contentId)}`, {
+        method: "DELETE",
+      });
+      if (!res.ok) {
+        const data = await res.json().catch(() => ({}));
+        const routeError = extractErrorMessage(data, `Delete failed (${res.status})`);
+        await settleKnowledgeDelete(contentId, routeError);
+        return;
+      }
+      setKnowledgeDetachRetryId(null);
+      await loadKnowledgeDocs();
+    } catch {
+      // A lost response (the delete may have reached the server before the
+      // network blip) settles the same way: the re-fetched list is the
+      // truth — a vanished row means the retry is safe and must not
+      // re-ask the confirm.
+      await settleKnowledgeDelete(contentId, "Couldn't reach the server — please try again.");
+    } finally {
+      setKnowledgeDeletingId(null);
+    }
+  };
+
+  /**
+   * The failed/lost delete's settle: the re-fetched list is the truth
+   * (the delete may have LANDED with its detach publish failing — the
+   * #235 note). A vanished row raises the amber retry notice alone —
+   * a red error would frame a good outcome as a failure — while an
+   * error whose row is still there shows the route's message.
+   */
+  const settleKnowledgeDelete = async (contentId: string, routeError: string) => {
+    const rows = await loadKnowledgeDocs();
+    const gone = rows !== null && !rows.some((r) => r.id === contentId);
+    if (gone) {
+      setKnowledgeDetachRetryId(contentId);
+      setKnowledgeActionError(null);
+    } else {
+      setKnowledgeActionError(routeError);
+    }
+  };
+
+  const deleteKnowledgeDoc = (contentId: string) => {
+    if (!confirm("Delete this document from the agent's knowledge? This cannot be undone.")) return;
+    void attemptKnowledgeDelete(contentId);
+  };
+
+  /** The detach-retry notice's Retry (no confirm — nothing left to undo). */
+  const retryKnowledgeDetach = (contentId: string) => {
+    void attemptKnowledgeDelete(contentId);
   };
 
   const handleSubmit = async (e: React.FormEvent) => {
@@ -1004,6 +1379,258 @@ export function BuilderForm({
           </div>
         </Field>
 
+        {/* Knowledge — documents the agent can search at run time. Docs
+            attach to a SAVED component, so the section exists only in
+            edit mode; create mode carries the one-line note. Edit mode
+            gates the section on the capability signal (hidden with an
+            explanation when off/unsupported, the error banner when
+            unreachable — empty-vs-unreachable, same as the palette). */}
+        {mode === "create" && (
+          <p className="text-xs text-zinc-500 dark:text-zinc-400">{KNOWLEDGE_CREATE_NOTE}</p>
+        )}
+        {mode === "edit" && knowledgeCap && knowledgeCap.kind !== "loading" && (
+          <fieldset className="min-w-0 space-y-2 border-0 p-0">
+            <div className="flex flex-wrap items-center gap-2">
+              <span className="text-xs font-medium text-zinc-700 dark:text-zinc-300">
+                Knowledge
+              </span>
+              {knowledgeBadge?.show && (
+                <KnowledgeKeyBadgeView
+                  badge={knowledgeBadge}
+                  onConnect={() => {
+                    // Same guard KeyBadge renders by — only a catalog-known
+                    // provider gets a Connect flow (a drifted slug would
+                    // open an empty KeyForm).
+                    if (knowledgeBadge.provider) openKeyForm(knowledgeBadge.provider);
+                  }}
+                />
+              )}
+            </div>
+            <p className="text-[11px] text-zinc-400">
+              Documents the agent can search at run time — every run embeds its
+              queries with your own OpenAI key.
+            </p>
+
+            {knowledgeCap.kind === "unreachable" && (
+              <div className="flex items-center justify-between gap-3 rounded-lg border border-red-200 bg-red-50 px-3 py-2 dark:border-red-900 dark:bg-red-950">
+                <span className="text-xs text-red-700 dark:text-red-300">
+                  {knowledgeCap.error}
+                </span>
+                <button
+                  type="button"
+                  onClick={() => void loadKnowledgeCapability()}
+                  className="shrink-0 text-xs font-medium text-red-700 underline underline-offset-2 dark:text-red-300"
+                >
+                  Retry
+                </button>
+              </div>
+            )}
+
+            {knowledgeCap.kind === "hidden" && (
+              <p className="text-xs text-zinc-500 dark:text-zinc-400">
+                {knowledgeHiddenCopy(knowledgeCap.reason)}
+              </p>
+            )}
+
+            {knowledgeCap.kind === "available" && (
+              <div className="space-y-3">
+                {knowledgeActionError && (
+                  <p role="alert" className="text-xs text-red-600 dark:text-red-400">
+                    {knowledgeActionError}
+                  </p>
+                )}
+                {knowledgeDetachRetryId && (
+                  <div className="flex flex-wrap items-center gap-2 rounded-lg border border-amber-200 bg-amber-50 px-3 py-2 text-xs text-amber-800 dark:border-amber-900 dark:bg-amber-950 dark:text-amber-200">
+                    <span>{KNOWLEDGE_DETACH_RETRY_COPY}</span>
+                    <button
+                      type="button"
+                      onClick={() => retryKnowledgeDetach(knowledgeDetachRetryId)}
+                      disabled={knowledgeDeletingId !== null}
+                      className="font-medium underline underline-offset-2 disabled:opacity-50"
+                    >
+                      Retry
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => setKnowledgeDetachRetryId(null)}
+                      className="underline underline-offset-2"
+                    >
+                      Dismiss
+                    </button>
+                  </div>
+                )}
+
+                {/* Upload rows — three labeled sources (files / pasted
+                    text / web page). Each is one POST (the route takes
+                    exactly one source). */}
+                <div className="space-y-4 rounded-lg border border-zinc-200 px-3 py-3 dark:border-zinc-700">
+                  <div className="space-y-1.5">
+                    <p className="text-xs font-medium text-zinc-600 dark:text-zinc-300">
+                      Files
+                    </p>
+                    {/* The native input is sr-only — the dashed row is the
+                        visible picker (a bare file input reads as a text
+                        field and was missed in the first live pass). */}
+                    <label
+                      className={`flex cursor-pointer items-center justify-center rounded-lg border border-dashed border-zinc-300 px-3 py-3 text-xs text-zinc-600 transition-colors hover:border-zinc-400 hover:bg-zinc-50 focus-within:border-blue-500 dark:border-zinc-600 dark:text-zinc-300 dark:hover:border-zinc-500 dark:hover:bg-zinc-800 ${
+                        knowledgeUploading ? "pointer-events-none opacity-50" : ""
+                      }`}
+                    >
+                      <input
+                        ref={knowledgeFileInputRef}
+                        type="file"
+                        multiple
+                        accept={KNOWLEDGE_FILE_ACCEPT}
+                        disabled={knowledgeUploading}
+                        onChange={(e) => void handleKnowledgeFiles(e.target.files)}
+                        aria-label="Upload files"
+                        className="sr-only"
+                      />
+                      <span>Choose files…</span>
+                    </label>
+                    <p className="text-[11px] text-zinc-400">
+                      PDF, CSV, Excel, Word, PowerPoint, JSON, Markdown, TXT —
+                      up to 10 MB each.
+                    </p>
+                  </div>
+
+                  <div className="space-y-1.5">
+                    <p className="text-xs font-medium text-zinc-600 dark:text-zinc-300">
+                      Paste text
+                    </p>
+                    <input
+                      value={pasteName}
+                      onChange={(e) => setPasteName(e.target.value)}
+                      maxLength={200}
+                      placeholder="Document name"
+                      aria-label="Pasted text document name"
+                      className={inputClass()}
+                    />
+                    <textarea
+                      value={pasteText}
+                      onChange={(e) => setPasteText(e.target.value)}
+                      rows={3}
+                      placeholder="Paste the document's text here…"
+                      aria-label="Paste text to add as a document"
+                      maxLength={KNOWLEDGE_MAX_UPLOAD_BYTES}
+                      className={inputClass()}
+                    />
+                    {/* Directly under the textarea it submits — "Add text"
+                        next to the name field read as a second document
+                        flow in the first live pass. */}
+                    <button
+                      type="button"
+                      onClick={() => void handleKnowledgeText()}
+                      disabled={knowledgeUploading}
+                      className="rounded-lg border border-zinc-200 px-3 py-2 text-xs font-medium text-zinc-700 transition-colors hover:bg-zinc-100 disabled:opacity-50 dark:border-zinc-700 dark:text-zinc-300 dark:hover:bg-zinc-800"
+                    >
+                      Add text
+                    </button>
+                  </div>
+
+                  <div className="space-y-1.5">
+                    <p className="text-xs font-medium text-zinc-600 dark:text-zinc-300">
+                      Web page
+                    </p>
+                    <div className="flex gap-2">
+                      <input
+                        value={knowledgeUrl}
+                        onChange={(e) => setKnowledgeUrl(e.target.value)}
+                        placeholder="https://example.com/page"
+                        aria-label="Page URL to add as a document"
+                        className={inputClass()}
+                      />
+                      <button
+                        type="button"
+                        onClick={() => void handleKnowledgeUrl()}
+                        disabled={knowledgeUploading}
+                        className="shrink-0 rounded-lg border border-zinc-200 px-3 py-2 text-xs font-medium text-zinc-700 transition-colors hover:bg-zinc-100 disabled:opacity-50 dark:border-zinc-700 dark:text-zinc-300 dark:hover:bg-zinc-800"
+                      >
+                        Add URL
+                      </button>
+                    </div>
+                    <p className="text-[11px] text-zinc-400">
+                      The page is fetched and read when it&apos;s added — not
+                      at run time.
+                    </p>
+                  </div>
+
+                  {/* Advanced — chunk fields. Blank = the platform's own
+                      defaults (agno's defaults differ per chunker, so the
+                      UI shows blanks rather than inventing a number).
+                      Applies to files and pasted text; URL ingest is
+                      agno's auto-detected reader. */}
+                  <details className="text-xs text-zinc-500 dark:text-zinc-400">
+                    <summary className="cursor-pointer select-none">
+                      Advanced — chunk size and overlap
+                    </summary>
+                    <div className="mt-2 grid grid-cols-1 gap-3 sm:grid-cols-2">
+                      <Field label="Chunk size" hint="Leave blank for the default">
+                        <input
+                          type="number"
+                          min={1}
+                          value={chunkSizeText}
+                          onChange={(e) => setChunkSizeText(e.target.value)}
+                          aria-label="Chunk size"
+                          className={inputClass()}
+                        />
+                      </Field>
+                      <Field label="Chunk overlap" hint="Leave blank for the default">
+                        <input
+                          type="number"
+                          min={0}
+                          value={chunkOverlapText}
+                          onChange={(e) => setChunkOverlapText(e.target.value)}
+                          aria-label="Chunk overlap"
+                          className={inputClass()}
+                        />
+                      </Field>
+                    </div>
+                    <p className="mt-2">
+                      Applies to files and pasted text — the platform&apos;s own
+                      defaults apply when left blank.
+                    </p>
+                  </details>
+                </div>
+
+                {/* The corpus's doc list — rows with status chips, polling
+                    while any row processes (the effect above), delete with
+                    confirm. A failed fetch renders the error banner, not
+                    an empty-list claim. */}
+                {knowledgeDocsError ? (
+                  <div className="flex items-center justify-between gap-3 rounded-lg border border-red-200 bg-red-50 px-3 py-2 dark:border-red-900 dark:bg-red-950">
+                    <span className="text-xs text-red-700 dark:text-red-300">
+                      {knowledgeDocsError}
+                    </span>
+                    <button
+                      type="button"
+                      onClick={() => void loadKnowledgeDocs()}
+                      className="shrink-0 text-xs font-medium text-red-700 underline underline-offset-2 dark:text-red-300"
+                    >
+                      Retry
+                    </button>
+                  </div>
+                ) : knowledgeDocsEmptyCopy ? (
+                  <p className="text-xs text-zinc-500 dark:text-zinc-400">
+                    {knowledgeDocsEmptyCopy}
+                  </p>
+                ) : knowledgeDocs ? (
+                  <div className="space-y-1">
+                    {knowledgeDocs.map((doc) => (
+                      <KnowledgeDocRowView
+                        key={doc.id}
+                        doc={doc}
+                        deleting={knowledgeDeletingId === doc.id}
+                        onDelete={() => deleteKnowledgeDoc(doc.id)}
+                      />
+                    ))}
+                  </div>
+                ) : null}
+              </div>
+            )}
+          </fieldset>
+        )}
+
         <div className="flex flex-wrap items-center gap-2 pt-2">
           <button
             type="submit"
@@ -1412,6 +2039,102 @@ function KeyForm({
           {saving ? "Saving…" : fields.length > 1 ? "Save credentials" : "Save key"}
         </button>
       </div>
+    </div>
+  );
+}
+
+/**
+ * The knowledge section header's key badge — the same three states as
+ * ModelKeyBadge (connected → the green "runs on" chip; missing → the
+ * amber demand + connect shortcut), minus the null case (the badge is
+ * computed only when the capability is available and only rendered when
+ * `show` — the dedupe against the model's badge lives in
+ * knowledgeKeyBadge).
+ */
+function KnowledgeKeyBadgeView({
+  badge,
+  onConnect,
+}: {
+  badge: KnowledgeKeyBadge;
+  onConnect: () => void;
+}) {
+  if (badge.connected) {
+    return (
+      <span className="rounded-full bg-green-100 px-2 py-1 text-[11px] font-medium text-green-700 dark:bg-green-950 dark:text-green-300">
+        Runs on your {badge.providerLabel} key
+      </span>
+    );
+  }
+  return (
+    <span className="text-[11px] text-amber-600 dark:text-amber-400">
+      Needs your {badge.providerLabel} key —{" "}
+      {badge.provider ? (
+        <button
+          type="button"
+          onClick={onConnect}
+          className="cursor-pointer underline underline-offset-2 hover:text-amber-800 dark:hover:text-amber-300 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-amber-500"
+        >
+          connect one
+        </button>
+      ) : null}
+    </span>
+  );
+}
+
+/**
+ * One document row of the corpus — name + status chip (processing /
+ * ready / partial / failed; no chip on a row predating a status write),
+ * size, upload date, and delete-with-confirm. A failed row carries the
+ * captured failure reason when the service stored one (agno's classified
+ * ``status_message`` — e.g. an expired key's "authentication (HTTP 401)")
+ * plus the re-upload guidance inline (the upload creates a NEW content
+ * row — there is no resume, so the copy says so plainly).
+ */
+function KnowledgeDocRowView({
+  doc,
+  deleting,
+  onDelete,
+}: {
+  doc: KnowledgeDocRow;
+  deleting: boolean;
+  onDelete: () => void;
+}) {
+  const chip = knowledgeStatusChip(doc.status);
+  const size = knowledgeSizeLabel(doc.size);
+  return (
+    <div className="rounded-lg border border-zinc-200 px-3 py-2 text-sm dark:border-zinc-700">
+      <div className="flex flex-wrap items-center gap-2">
+        <span className="min-w-0 flex-1 break-words font-medium text-zinc-900 dark:text-zinc-50">
+          {doc.name}
+        </span>
+        {chip && (
+          <span
+            className={`shrink-0 rounded-full px-1.5 py-0.5 text-[10px] font-medium ${chip.className}`}
+          >
+            {chip.label}
+          </span>
+        )}
+        {size && <span className="shrink-0 text-xs text-zinc-400">{size}</span>}
+        <span className="shrink-0 text-xs text-zinc-400">
+          {knowledgeDateLabel(doc.createdAt)}
+        </span>
+        <button
+          type="button"
+          onClick={onDelete}
+          disabled={deleting}
+          className="shrink-0 text-xs font-medium text-red-600 hover:underline disabled:opacity-50 dark:text-red-400"
+        >
+          {deleting ? "Deleting…" : "Delete"}
+        </button>
+      </div>
+      {doc.status === "failed" && (
+        <div className="mt-1 space-y-1 text-[11px] text-zinc-500 dark:text-zinc-400">
+          {doc.statusMessage ? (
+            <p className="break-words">{doc.statusMessage}</p>
+          ) : null}
+          <p>{KNOWLEDGE_FAILED_HINT}</p>
+        </div>
+      )}
     </div>
   );
 }
