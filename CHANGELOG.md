@@ -4,6 +4,37 @@ All notable changes to this project will be documented in this file. The format 
 
 ## [Unreleased]
 
+- **Added: knowledge for builder agents — the tackui half (#235).** The
+  app now proxies the builder service's knowledge management routes for
+  the agent's author: `GET/POST /api/agents/[id]/knowledge` and
+  `DELETE .../knowledge/[contentId]` (list, upload, remove), author-gated
+  with the builder PATCH/DELETE semantics (403 anyone-but-author, no
+  admin override; 404 for missing/non-builder rows). Cheap gates run
+  before anything is forwarded — exactly one of file/text/url, the
+  format allowlist, the 10 MB cap, URL shape, and the SSRF guard on URL
+  uploads — then the upload is forwarded multipart with the author's own
+  OpenAI key (`embedding_key`, resolved server-side from the credential
+  store; rides in the request body only, never in a response, a log
+  line, or an error detail; an author without the key gets a 400
+  pointing at the API-keys page). `agentosRequest` grew a FormData
+  pass-through branch (no JSON encoding, no Content-Type — fetch sets
+  the multipart boundary). First upload on a knowledge-less agent
+  attaches the corpus: the stored config publishes a new version with
+  the `knowledge` ref (`kb-<component_id>` — both sides derive it from
+  the component id) and the requirements snapshot gains
+  `knowledge: {provider, model}` (a new optional-without-default
+  requirementsSchema field, round-tripped both ways); deleting the last
+  doc detaches both. Attach/detach reuse the builder PATCH flow's
+  local-first + guarded-publish + compensating-revert machinery, with
+  the uploaded doc never deleted as compensation (the service dedupes
+  re-uploads by content hash, so retries converge). Config-publishing
+  builder PATCHes preserve the ref through unrelated edits, and the
+  credentials catalog adds the embedding provider when knowledge is
+  enabled and no model carries it (otherwise the required key could
+  never be saved). The knowledge config's 404 reads as "unsupported"
+  (the service predates knowledge), distinct from unreachable. The
+  builder UI section and the run-gate 402 for knowledge-attached agents
+  remain #236.
 - **Added: knowledge for builder agents — the service half (#233), now
   running at run time (#234).** Every builder component can now own a
   document corpus (uploaded files, pasted text, URLs) embedded into pgvector,

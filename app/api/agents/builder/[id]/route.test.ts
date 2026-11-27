@@ -425,6 +425,80 @@ describe("PATCH /api/agents/builder/[id]", () => {
     const res = await patchAgent(agent.id, { name: "Renamed" });
     expect(res.status).toBe(503);
   });
+
+  describe("knowledge ref preservation on config-publishing PATCHes (#235)", () => {
+    it("carries the ref through and keeps the snapshot's knowledge contract", async () => {
+      // The stored config references the corpus while docs exist — an
+      // unrelated config edit (a prompt change) must not silently detach
+      // it, and the snapshot's embedding contract must survive the
+      // re-derivation.
+      const attached = await createFixture({
+        name: "With knowledge",
+        requirements: {
+          model: { provider: "openai", id: "gpt-4o-mini", platformTier: true, depKey: "openai_api_key", name: "OpenAIChat" },
+          tools: [],
+          connectors: [],
+          knowledge: { provider: "openai", model: "text-embedding-3-small" },
+        },
+      });
+      const res = await patchAgent(attached.id, { instructions: "New prompt" });
+      expect(res.status).toBe(200);
+      expect(mockUpdateConfig).toHaveBeenCalledTimes(1);
+      const config = mockUpdateConfig.mock.calls[0][1] as Record<string, unknown>;
+      expect(config.knowledge).toEqual({ name: "kb-comp-1" });
+      const stored = await getAgent(attached.id, testOrg);
+      expect(stored?.requirements?.knowledge).toEqual({
+        provider: "openai",
+        model: "text-embedding-3-small",
+      });
+    });
+
+    it("publishes no knowledge key for a knowledge-less agent", async () => {
+      const res = await patchAgent(agent.id, { instructions: "New prompt" });
+      expect(res.status).toBe(200);
+      const config = mockUpdateConfig.mock.calls[0][1] as Record<string, unknown>;
+      expect("knowledge" in config).toBe(false);
+      const stored = await getAgent(agent.id, testOrg);
+      expect("knowledge" in (stored?.requirements ?? {})).toBe(false);
+    });
+
+    it("the 409 revert re-derives WITH the knowledge contract when the winning config references it", async () => {
+      const attached = await createFixture({
+        name: "With knowledge",
+        requirements: {
+          model: { provider: "openai", id: "gpt-4o-mini", platformTier: true, depKey: "openai_api_key", name: "OpenAIChat" },
+          tools: [],
+          connectors: [],
+          knowledge: { provider: "openai", model: "text-embedding-3-small" },
+        },
+      });
+      // The concurrent editor's winning config still references the corpus.
+      mockGetCurrentConfig.mockResolvedValue({
+        model: { id: "gpt-5-flash", name: "OpenAIChat" },
+        instructions: ["their prompt"],
+        tools: [],
+        connectors: [],
+        knowledge: { name: "kb-comp-1" },
+      });
+      mockFetchModels.mockResolvedValue([
+        ...MODELS,
+        { provider: "openai", id: "gpt-5-flash", platform_tier: true, requires_key: true, dep_key: "openai_api_key", name: "OpenAIChat" },
+      ]);
+      mockUpdateConfig.mockRejectedValue(new AgentosError(409, "version conflict"));
+      const res = await patchAgent(attached.id, { instructions: "my prompt" });
+      expect(res.status).toBe(409);
+      const stored = await getAgent(attached.id, testOrg);
+      // The re-derived snapshot describes the winning config — model AND
+      // the knowledge contract intact (a ref without the contract would
+      // have refused the derivation and fallen back to the pre-patch
+      // snapshot, which happens to agree here).
+      expect(stored?.requirements?.model.id).toBe("gpt-5-flash");
+      expect(stored?.requirements?.knowledge).toEqual({
+        provider: "openai",
+        model: "text-embedding-3-small",
+      });
+    });
+  });
 });
 
 describe("DELETE /api/agents/builder/[id]", () => {

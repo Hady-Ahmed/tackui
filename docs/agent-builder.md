@@ -1027,23 +1027,71 @@ Pinned by `tests/test_dispatcher_knowledge.py`: the fake
 test proving the attached instance searches the corpus the uploads landed
 in (FakeEmbedder at the provider seam, the pgvector testcontainer).
 
-### Seam for the tackui half (follow-up issues in the series)
+### The tackui half (#235 — this repo's routes and lifecycle)
 
-The tackui side (#235/#236) owns everything user-facing around this store:
+The tackui side owns everything user-facing around this store. The server
+half shipped in #235; the builder UI's Knowledge section and the run-gate
+402 are #236.
 
-- **Proxy routes** — `app/api/agents/[id]/knowledge` (list/upload/delete),
-  service-token'd server-side; author-gated (the builder PATCH/DELETE
-  semantics: 403 anyone-but-author, no admin override); `assertSafeUrl`
-  before forwarding URL uploads; format/size caps enforced client-side too.
-- **Attach/detach lifecycle** — the stored config's knowledge ref is written
-  by tackui: first upload publishes a config version WITH the ref, deleting
-  the last doc publishes WITHOUT it (guard `current_version`, re-derived
-  requirements snapshot). The name derives from the component id
-  (`kb-<remoteAgentId>`), so the dispatcher's attach and the corpus agree by
-  construction.
-- **Run gate** — knowledge-attached agents demand the embedding provider's
-  key in the aggregated pre-run 402; the dispatcher's strip+warn posture
-  assumes this gate exists (a run without the key runs without retrieval).
+- **Knowledge clients (`lib/agents/builder.ts`)** — the four service calls
+  ride the shared `agentosRequest` (fresh service token, sanitized
+  `AgentosError`): `fetchKnowledgeConfig` (the capability signal — a 404
+  degrades to `{enabled: false, unsupported: true}`, so a service that
+  predates knowledge reads as unsupported, NOT unreachable; a transport
+  failure still throws), `fetchKnowledgeList` (camelCase rows, zod-validated),
+  `uploadKnowledgeContent` (multipart), `deleteKnowledgeContent` (idempotent).
+  `agentosRequest` grew a FormData branch: a form body passes through
+  UNTOUCHED with no Content-Type header (fetch derives the multipart
+  boundary) — never base64 a file into JSON. `knowledgeCorpusName` derives
+  `kb-<component_id>` on both sides, so the config ref and the corpus agree
+  by construction.
+- **Proxy routes (`app/api/agents/[id]/knowledge/`)** — GET (list) +
+  POST (upload) + `[contentId]` DELETE, service-token'd server-side.
+  Author-gated with the builder PATCH/DELETE semantics: 403 anyone-but-author
+  (no admin override), 404 for missing/non-builder rows (no existence oracle
+  for foreign rows). GET rides the `agentRead` bucket; POST/DELETE ride the
+  dedicated `knowledgeMutate` bucket (20/min — corpus curation legitimately
+  bursts with multi-file drops). Cheap gates run FIRST, before anything is
+  forwarded: exactly-one-of (file/text/url), the format allowlist, the 10 MB
+  cap (file byte size; text UTF-8 length), URL shape, then `assertSafeUrl`
+  for URL uploads. Chunk params are integers, `overlap < size`.
+- **The embedding key is the author's saved OpenAI key, resolved server-side**
+  — `getCredentialSecrets(userId)["openai"]?.["api_key"]` (BYOK; the dep key
+  the dispatcher resolves is `openai_api_key`). An author without the key
+  cannot upload: 400 with copy pointing at the API-keys page. The key rides
+  in the multipart body ONLY — never in a response, a log line, or an error
+  detail. The credentials catalog grows an entry for the embedding provider
+  when knowledge is enabled and no model carries it (otherwise the key could
+  never be saved — dead knowledge).
+- **Attach/detach lifecycle (`app/api/agents/[id]/knowledge/lifecycle.ts`)** —
+  the stored config references the corpus while ≥1 doc exists. The FIRST
+  upload on a knowledge-less agent publishes a config version WITH the ref
+  (`"knowledge": {"name": "kb-<component_id>"}`); deleting the LAST doc
+  publishes WITHOUT it. Both directions reuse the builder PATCH flow's
+  machinery: local snapshot first, then the guarded
+  `updateAgentosConfig(current_version)` publish, then the compensating
+  local revert on failure (a 409 is the "just updated by someone else —
+  reload" copy). The snapshot's `knowledge: {provider, model}` is captured
+  from `fetchKnowledgeConfig()` at attach time and re-derived through
+  `deriveRequirementsFromConfig`; when full re-derivation declines (a config
+  shape the catalogs can't map), the fallback applies the single-key diff to
+  the existing snapshot — the config diff IS only the knowledge key. The
+  uploaded doc is NEVER deleted as compensation: the service dedupes
+  re-uploads by content hash, so a retry re-runs the attach and converges.
+  Detach truth is the post-delete corpus list, so a raced concurrent upload
+  keeps the ref.
+- **Config-publishing PATCHes preserve the ref** — the builder PATCH route
+  carries the knowledge ref (and the snapshot contract) through every
+  unrelated edit, re-deriving with the stored contract; otherwise a rename
+  would silently detach the corpus.
+- **Snapshot field** — `AgentRequirements.knowledge?: {provider, model}`,
+  optional WITHOUT a default in `requirementsSchema` (absent stays absent —
+  the run gate reads PRESENCE as "this agent embeds with the author's key");
+  the store round-trips it both directions (pinned in tests).
+- **Run gate** — NOT yet: knowledge-attached agents don't demand the
+  embedding key in the aggregated pre-run 402 until #236; until then the
+  dispatcher's strip+warn posture covers a key-less run (it runs without
+  retrieval).
 
 ## Not in Phase 1
 
@@ -1055,11 +1103,12 @@ The tackui side (#235/#236) owns everything user-facing around this store:
   all stay wired (snapshot fields, quota route wiring, plan limits) but
   builder runs are 100% BYOK today; the run gate ignores the tier
   fields and the quota phase never fires.
-- **Knowledge — the tackui half** — the service's management routes shipped
-  (#233) and the dispatcher's run-time attach shipped (#234); what remains
-  is the tackui side: the builder's Knowledge section (gated on the
-  capability endpoint), the server-side proxy of the knowledge routes with
-  the service token, `assertSafeUrl` before forwarding URL uploads, and the
-  run-gate 402 for knowledge-attached agents (the service-side strip+warn
-  posture assumes that gate exists — a run without the key runs without
-  retrieval).
+- **Knowledge — the builder UI and the run gate** — the service's
+  management routes shipped (#233), the dispatcher's run-time attach
+  shipped (#234), and the tackui server half shipped (#235): the knowledge
+  clients, the author-gated proxy routes with the attach/detach lifecycle,
+  the `requirementsSchema.knowledge` snapshot field, and the
+  credentials-catalog extension. What remains (#236) is the builder UI's
+  Knowledge section (gated on the capability endpoint) and the run-gate
+  402 for knowledge-attached agents (the service-side strip+warn posture
+  covers a key-less run until then — it runs without retrieval).
