@@ -325,6 +325,21 @@ describe("POST /api/agents/[id]/knowledge — validation", () => {
     expect((await res.json()).error).toContain("accepted formats");
   });
 
+  it("rejects an oversized content-length header before formData() buffers it", async () => {
+    // The header alone triggers the rejection — a small body with a lying
+    // oversized content-length is 400'd BEFORE formData() parses it (the
+    // cheap-header-check semantics; the post-parse File.size/text checks
+    // and the upload never run).
+    const res = await POST(new Request(`http://localhost/api/agents/${agent.id}/knowledge`, {
+      method: "POST",
+      body: textForm({ text: "hello" }),
+      headers: { "content-length": String(11 * 1024 * 1024) },
+    }), { params: Promise.resolve({ id: agent.id }) });
+    expect(res.status).toBe(400);
+    expect((await res.json()).error).toContain("10.5 MB request cap");
+    expect(mockUploadKnowledgeContent).not.toHaveBeenCalled();
+  });
+
   it("returns 400 when the file exceeds the 10 MB cap", async () => {
     const form = new FormData();
     form.set("file", new File([new Uint8Array(10 * 1024 * 1024 + 1)], "big.pdf"));

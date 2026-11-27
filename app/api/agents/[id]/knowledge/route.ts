@@ -11,7 +11,9 @@
  * tackui proxies the service's /platform/knowledge/* routes with its
  * service token, enforcing the cheap gates FIRST — clean 400s before
  * anything is forwarded (the service is the second gate, not the first):
- * format allowlist, 10 MB cap, URL shape + SSRF guard. The creator's
+ * content-length pre-parse gate, the 10 MB post-parse cap, URL shape +
+ * SSRF guard. Only the content-length gate runs before buffering; the
+ * post-parse gates read the parsed body. The creator's
  * embedding key is resolved server-side from the credential store and
  * rides in the upload body ONLY — never in a response, a log line, or an
  * error detail.
@@ -32,6 +34,12 @@ import { ensureKnowledgeAttached, resolveCuratedAgent } from "./lifecycle";
 /** Cheap request hygiene before anything is forwarded (the service
  *  enforces the same caps — this is the clean-400-first gate). */
 const MAX_UPLOAD_BYTES = 10 * 1024 * 1024; // 10 MB
+
+/** The multipart-overhead allowance above the 10 MB payload cap — a
+ *  content-length header past it is rejected BEFORE formData() buffers
+ *  the whole body into memory (chunked bodies and lying headers still
+ *  meet the post-parse File.size/byte-length checks). */
+const MAX_UPLOAD_CONTENT_LENGTH = 10.5 * 1024 * 1024; // 10.5 MB
 
 /** The extensions the service ships a real reader for (agno's fallback
  *  would ingest binary noise as garbage chunks). */
@@ -103,6 +111,18 @@ export async function POST(
 
   const limited = checkUserLimit(user.id, "knowledgeMutate");
   if (limited) return limited;
+
+  // The content-length pre-parse gate — the size bound the rate limit
+  // doesn't provide: rejected BEFORE formData() buffers the whole body
+  // into memory. A junk header parses as NaN (no false positive); chunked
+  // bodies and lying headers still meet the post-parse checks below.
+  const contentLength = Number(request.headers.get("content-length"));
+  if (contentLength > MAX_UPLOAD_CONTENT_LENGTH) {
+    return NextResponse.json(
+      { error: `Request exceeds the ${MAX_UPLOAD_CONTENT_LENGTH / (1024 * 1024)} MB request cap.` },
+      { status: 400 },
+    );
+  }
 
   const { id } = await params;
   const resolved = await resolveCuratedAgent(id, user.orgId, user.id);
