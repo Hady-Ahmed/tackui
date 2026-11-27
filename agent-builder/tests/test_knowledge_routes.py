@@ -4,8 +4,9 @@ Posture pinned here: admin/service-token scope only (tackui proxies; a user
 token is 403, anonymous is 401 — the full route inventory is additionally
 pinned in test_auth_lockdown.py), the capability signal never errors, upload
 validation is fail-closed (BYOK key required, format allowlist, size cap,
-URL shape, chunk params), and deletes are idempotent with foreign-corpus ids
-answered 404.
+URL shape, chunk params), deletes are idempotent with foreign-corpus ids
+answered 404, and the optional chunk params demonstrably reach the actual
+chunking — the stored chunk boundaries are pinned, not just the validation.
 
 The upload lifecycle test runs the REAL route → background-task → agno
 processing flow against the pgvector container, with the fake embedder
@@ -20,7 +21,7 @@ import pytest
 from agno.knowledge.content import ContentStatus
 
 import knowledge as knowledge_store
-from knowledge_test_helpers import FakeEmbedder, RejectingEmbedder
+from knowledge_test_helpers import FakeEmbedder, RejectingEmbedder, build_fake_knowledge
 
 from platform_test_helpers import admin_headers, user_headers
 
@@ -390,3 +391,107 @@ def test_completed_row_has_a_null_status_message(client, offline_embedder):
     assert len(rows) == 1
     assert rows[0]["status"] == "completed"
     assert rows[0]["statusMessage"] is None
+
+
+# -- chunk params reach the actual chunking (#239) ------------------------------
+#
+# The upload route accepts optional chunk_size/chunk_overlap and validates
+# them, but validation alone cannot see a WIRING regression: if the params
+# were dropped between the route and agno's ``process_content``, every upload
+# would silently chunk at agno's default (FixedSizeChunking(chunk_size=5000))
+# while all the 400-pinning tests stayed green. These tests upload a long,
+# deterministic text through the REAL route → background task → processing
+# flow and read the STORED chunks back (the contents row is one-per-upload —
+# the chunks live only in the shared vector table), so the observable is the
+# actual chunk boundaries, not echoed params or a stubbed strategy.
+#
+# The chunking semantics these assertions rely on (verified against agno
+# 3.1.12's FixedSizeChunker, the route's DEFAULT_CHUNKER): it is
+# CHARACTER-based; each chunk's end walks BACK to the nearest whitespace
+# before the requested size (a word-boundary snap — it never splits a word),
+# and the next chunk starts ``overlap`` characters before the previous end.
+# The pinned text is 100 fixed-width ``wNNN`` tokens joined by single spaces
+# (499 chars): every boundary lands on a space, so at chunk_size=20 the
+# chunks are 19 or 20 chars — 25 of them, tiling the text contiguously at
+# overlap=0 — and at chunk_size=60 there are 9. A dropped param yields ONE
+# 499-char chunk instead, so every assertion below fails loudly.
+CHUNK_PARAMS_TEXT = " ".join(f"w{i:03d}" for i in range(100))  # 499 chars
+
+
+def _stored_chunks(client, offline_embedder, agno_db, postgres_dsn, component_id, **form):
+    """Upload the pinned text through the real route, then read the corpus's stored chunks.
+
+    The search-side corpus (``build_fake_knowledge`` — the same ``kb-<component_id>``
+    name, so the same shared table and stamp) reads back what the route's own
+    instance wrote. Vector search ranks by similarity, not position, so the
+    hits are re-ordered by the chunker's own chunk number.
+
+    Args:
+        client: The TestClient fixture.
+        offline_embedder: The provider-seam fixture (the route embeds with the fake).
+        agno_db: The contents-db fixture for the search-side corpus.
+        postgres_dsn: The container DSN (the search-side corpus's vector store).
+        component_id: The corpus's component id.
+        **form: Extra form fields (chunk_size, chunk_overlap...).
+
+    Returns:
+        The stored chunks, ordered by chunk number.
+    """
+    res = _post_text(client, component_id=component_id, text=CHUNK_PARAMS_TEXT, **form)
+    assert res.status_code == 202
+    rows = client.get(f"/platform/knowledge/{component_id}", headers=admin_headers()).json()
+    assert rows and rows[0]["status"] == ContentStatus.COMPLETED.value, rows
+    corpus = build_fake_knowledge(component_id, agno_db, postgres_dsn)
+    hits = corpus.search("w000 w001 w002", max_results=100)
+    return sorted(hits, key=lambda doc: doc.meta_data.get("chunk", 0))
+
+
+def test_chunk_params_take_effect_on_the_stored_chunks(client, offline_embedder, agno_db, postgres_dsn):
+    """chunk_size/chunk_overlap actually shape the stored chunks (#239).
+
+    Pinned here, per requested shape: the exact chunk counts (25 at size 20,
+    9 at size 60 — and the count DIFFERENTIAL between the two uploads of the
+    same text kills a silently-ignored-params regression on its own), every
+    chunk within its requested size cap, the chunk numbers arriving intact
+    in generation order, contiguous tiling of the source at overlap=0 (the
+    19-char head chunk reflects the word-boundary snap: the 20th char would
+    split ``w004``, so the end walks back to the space at index 19), and at
+    overlap=5 consecutive chunks sharing exactly the 5-char seam.
+
+    The fake embedder is irrelevant to the boundaries — chunking happens in
+    the reader before any embedding — which is precisely why the observation
+    is a wiring check: nothing here can be satisfied by a stubbed strategy.
+    """
+    small = _stored_chunks(
+        client, offline_embedder, agno_db, postgres_dsn, "chunksize-20", chunk_size=20, chunk_overlap=0
+    )
+    large = _stored_chunks(
+        client, offline_embedder, agno_db, postgres_dsn, "chunksize-60", chunk_size=60, chunk_overlap=0
+    )
+    overlapped = _stored_chunks(
+        client, offline_embedder, agno_db, postgres_dsn, "chunksize-20-5", chunk_size=20, chunk_overlap=5
+    )
+
+    # Same text, different requested sizes → different chunk counts, each the
+    # exact boundary math (19/20-char tiles at size 20; 9 chunks at size 60).
+    assert [len(chunk.content) for chunk in small] == [19] + [20] * 24
+    assert len(large) == 9
+    assert len(small) != len(large)
+
+    # Every stored chunk respects its requested size cap (a dropped param
+    # produces ONE 499-char chunk — over both caps).
+    assert all(len(chunk.content) <= 20 for chunk in small)
+    assert all(len(chunk.content) <= 60 for chunk in large)
+    assert all(len(chunk.content) <= 20 for chunk in overlapped)
+
+    # The chunk numbers survive into the vector rows, 1..N in generation order.
+    assert [chunk.meta_data.get("chunk") for chunk in small] == list(range(1, 26))
+
+    # At overlap=0 the chunks TILE the source text: contiguous, no gaps, no
+    # overlaps — the observed boundaries are exactly the requested geometry.
+    assert "".join(chunk.content for chunk in small) == CHUNK_PARAMS_TEXT
+
+    # At overlap=5 consecutive chunks share exactly the 5-char seam (the next
+    # chunk starts ``overlap`` chars before the previous one's end).
+    for prev, nxt in zip(overlapped, overlapped[1:]):
+        assert prev.content[-5:] == nxt.content[:5]
