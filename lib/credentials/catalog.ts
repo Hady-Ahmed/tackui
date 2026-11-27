@@ -166,12 +166,16 @@ export function deriveCredentialsCatalog(
     };
   }
   if (knowledge?.enabled && knowledge.provider && !catalog[knowledge.provider]) {
-    catalog[knowledge.provider] = {
-      provider: knowledge.provider,
+    const provider = knowledge.provider;
+    const keyName = `${provider}_api_key`;
+    catalog[provider] = {
+      provider,
       kind: "tool",
-      keyName: `${knowledge.provider}_api_key`,
-      label: prettifyProviderLabel(knowledge.provider),
-      fields: [{ key: "api_key", label: "API key" }],
+      keyName,
+      label: prettifyProviderLabel(provider),
+      // The field key follows the dep-key convention — the dep key minus
+      // the provider prefix, the same derivation the tool rows apply.
+      fields: [{ key: fieldForDepKey(provider, keyName), label: "API key" }],
     };
   }
   return catalog;
@@ -189,19 +193,42 @@ export interface CredentialsCatalogFetch {
 }
 
 /**
- * Live-fetch both platform catalogs and derive the credentials catalog.
- * Any AgentOS failure degrades to `{catalog: null, catalogError}` — this
- * never throws, so routes can render saved data without the platform.
+ * Live-fetch the platform catalogs and derive the credentials catalog.
+ * A models OR tools failure degrades to `{catalog: null, catalogError}` —
+ * this never throws, so routes can render saved data without the
+ * platform. The knowledge signal is an EXTENSION fetched independently:
+ * its failure (transport or malformed payload) degrades ONLY the
+ * knowledge extension row — the models/tools catalog stays live, so the
+ * API-keys page keeps every provider and the row simply returns when the
+ * signal recovers.
  */
 export async function fetchCredentialsCatalog(): Promise<CredentialsCatalogFetch> {
-  try {
-    const [models, tools, knowledge] = await Promise.all([
-      fetchAgentosModels(),
-      fetchBuilderTools(),
-      fetchKnowledgeConfig(),
-    ]);
-    return { catalog: deriveCredentialsCatalog(models, tools, knowledge) };
-  } catch {
+  // Models and tools are all-or-nothing: the derivation needs both, and a
+  // partial catalog would silently under-offer providers. The knowledge
+  // signal rides the same round-trip concurrently but degrades alone.
+  const [modelsResult, toolsResult, knowledgeResult] = await Promise.allSettled([
+    fetchAgentosModels(),
+    fetchBuilderTools(),
+    fetchKnowledgeConfig(),
+  ]);
+  if (modelsResult.status === "rejected" || toolsResult.status === "rejected") {
     return { catalog: null, catalogError: CATALOG_UNREACHABLE_MESSAGE };
   }
+  let knowledge: KnowledgeConfig | undefined;
+  if (knowledgeResult.status === "rejected") {
+    // The degradation is observable — without this the page would silently
+    // miss the embedding provider's row with zero explanation.
+    console.warn(
+      "[credentials] the knowledge capability signal failed — the catalog renders without the knowledge extension row",
+      {
+        error:
+          knowledgeResult.reason instanceof Error
+            ? knowledgeResult.reason.message
+            : String(knowledgeResult.reason),
+      },
+    );
+  } else {
+    knowledge = knowledgeResult.value;
+  }
+  return { catalog: deriveCredentialsCatalog(modelsResult.value, toolsResult.value, knowledge) };
 }

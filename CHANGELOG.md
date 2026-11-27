@@ -34,11 +34,14 @@ All notable changes to this project will be documented in this file. The format 
   builder PATCHes preserve the ref through unrelated edits, and the
   credentials catalog adds the embedding provider when knowledge is
   enabled and no model carries it (otherwise the required key could
-  never be saved). The knowledge config's 404 reads as "unsupported"
-  (the service predates knowledge), distinct from unreachable; an
-  `enabled` answer naming no embedder is rejected at the read as a
-  malformed payload (502) instead of failing the attach later with a
-  generic 500.
+  never be saved), and the knowledge signal degrades independently: a
+  failed knowledge fetch (transport or malformed payload) drops only
+  that extension row — the rest of the catalog stays live and every
+  other provider's key-saving is unaffected. The knowledge config's 404
+  reads as "unsupported" (the service predates knowledge), distinct
+  from unreachable; an `enabled` answer naming no embedder is rejected
+  at the read as a malformed payload (502) instead of failing the
+  attach later with a generic 500.
 - **Added: the builder UI's Knowledge section + the run-gate 402 for
   knowledge-attached agents (#236).** The builder form (edit mode) now
   curates the agent's knowledge corpus directly: multi-file upload (a
@@ -46,7 +49,10 @@ All notable changes to this project will be documented in this file. The format 
   page — the site reader's link-crawl is capped at the submitted URL so
   same-page `#anchor` links don't duplicate the page as extra documents;
   Hady-Ahmed/tackui#260), and an Advanced disclosure for chunk size and
-  overlap (blank = the platform's own defaults). The doc list shows status
+  overlap (blank = the platform's own defaults; the params ride
+  file/text uploads only — a URL upload's chunking is the platform
+  reader's own, so the route validates but does not forward them). The
+  doc list shows status
   chips (Processing / Ready / Partial / Failed) with a failed row also
   showing the service's captured failure reason (e.g. an expired key's
   "authentication (HTTP 401)") and polls every 5s while

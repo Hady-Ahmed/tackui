@@ -262,6 +262,13 @@ export async function POST(
 
   let uploaded;
   try {
+    // The chunk params ride file/text uploads only — the service validates
+    // them for any source but applies them only to file_data uploads (its
+    // docstring: agno's URL auto-detection owns the reader and its
+    // chunking), so forwarding them on a URL upload would be a
+    // silently-ignored lie in the request. Validation above stays
+    // shape-agnostic: invalid params 400 regardless of the source.
+    const isFileOrText = file !== undefined || hasText;
     uploaded = await uploadKnowledgeContent({
       componentId: existing.remoteAgentId!,
       ...(file !== undefined
@@ -270,8 +277,8 @@ export async function POST(
           ? { text: text! }
           : { url: urlRaw!.trim() }),
       ...(name !== undefined && name.trim() ? { name: name.trim() } : {}),
-      ...(chunkSize !== undefined ? { chunkSize } : {}),
-      ...(chunkOverlap !== undefined ? { chunkOverlap } : {}),
+      ...(isFileOrText && chunkSize !== undefined ? { chunkSize } : {}),
+      ...(isFileOrText && chunkOverlap !== undefined ? { chunkOverlap } : {}),
       embeddingKey,
     });
   } catch (err) {

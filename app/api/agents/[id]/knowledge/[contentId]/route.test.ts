@@ -229,6 +229,28 @@ describe("DELETE /api/agents/[id]/knowledge/[contentId]", () => {
     expect(stored?.requirements?.model.id).toBe("gpt-4o-mini");
   });
 
+  it("falls back to the snapshot single-key diff on detach when re-derivation declines — every field but knowledge survives", async () => {
+    // The catalogs don't contain the fixture's model → the full derivation
+    // returns null → the existing snapshot minus knowledge must still land.
+    // The fallback keeps-with-rest: every AgentRequirements field but
+    // knowledge survives — a future field can't be silently dropped here.
+    mockFetchModels.mockResolvedValue([]);
+    mockFetchKnowledgeList.mockResolvedValue([]);
+    const res = await deleteContent(agent.id);
+    expect(res.status).toBe(200);
+    const stored = await getAgent(agent.id, testOrg);
+    expect("knowledge" in (stored?.requirements ?? {})).toBe(false);
+    expect(stored?.requirements?.model).toEqual({
+      provider: "openai",
+      id: "gpt-4o-mini",
+      platformTier: true,
+      depKey: "openai_api_key",
+      name: "OpenAIChat",
+    });
+    expect(stored?.requirements?.tools).toEqual([]);
+    expect(stored?.requirements?.connectors).toEqual([]);
+  });
+
   it("keeps the ref when a raced concurrent upload's row is already visible", async () => {
     // The corpus list is fetched AFTER the delete, so a doc whose row the
     // list can see keeps the ref. That pins the VISIBLE-row case only —

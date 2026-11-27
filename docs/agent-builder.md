@@ -625,7 +625,10 @@ requirements; runners keep their keys here.
   the platform automatically adds it here. When the platform is
   unreachable, `fetchCredentialsCatalog` degrades to
   `{catalog: null, catalogError}` — never throws, so saved rows still
-  render.
+  render. The knowledge extension degrades independently: a failed
+  knowledge-signal fetch drops only the embedding provider's row (a
+  server warn makes it observable) — the rest of the catalog, and every
+  other provider's key-saving, stays live.
 - **The store is catalog-agnostic:** it accepts any slug-shaped provider
   (`providerSchema` is a loose slug regex) and a `kind` the route passes
   from the catalog. This is what makes provider removal graceful — see
@@ -1059,11 +1062,10 @@ half shipped in #235; the builder UI's Knowledge section and the run-gate
   predates knowledge reads as unsupported, NOT unreachable; a transport
   failure still throws; an `enabled` answer naming no embedder is
   rejected as a malformed payload — 502 — instead of poisoning the
-  attach write with a snapshot that can't parse; that 502 also degrades
-  `fetchCredentialsCatalog` fail-closed — the whole catalog view nulls
-  to the unreachable-builder copy, so all key-saving blocks, not just
-  knowledge uploads — an upstream-bug-only blast radius the catalog's
-  own guard used to absorb),
+  attach write with a snapshot that can't parse; in the credentials
+  catalog BOTH failures degrade the knowledge extension independently —
+  the models/tools catalog stays live and every provider stays saveable,
+  only the knowledge row is absent until the signal recovers),
   `fetchKnowledgeList` (camelCase rows, zod-validated),
   `uploadKnowledgeContent` (multipart), `deleteKnowledgeContent` (idempotent).
   `agentosRequest` grew a FormData branch: a form body passes through
@@ -1087,7 +1089,10 @@ half shipped in #235; the builder UI's Knowledge section and the run-gate
   format allowlist, the 10 MB cap (file byte size; text UTF-8 length —
   chunked bodies and lying headers still meet it post-parse), URL shape,
   then `assertSafeUrl` for URL uploads. Chunk params are integers,
-  `overlap < size`.
+  `overlap < size`; they ride file/text uploads only — the service
+  validates any shape but applies them only to `file_data` (agno's URL
+  auto-detection owns the reader and its chunking), so the route
+  validates but does not forward them on a URL upload.
 - **The embedding key is the author's saved OpenAI key, resolved server-side**
   — `getCredentialSecrets(userId)["openai"]?.["api_key"]` (BYOK; the dep key
   the dispatcher resolves is `openai_api_key`). An author without the key
