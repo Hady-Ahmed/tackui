@@ -18,13 +18,13 @@ mechanics:
 
 The one rule, extended to embeddings: the embedding KEY is per-call BYOK
 (uploads carry the creator's key in the request; runs resolve the runner's key
-per run — the run half is a follow-up issue), and the embedding MODEL is
+per run — see ``dispatcher.plan_per_run_knowledge``), and the embedding MODEL is
 platform infrastructure fixed per deployment via ``KNOWLEDGE_EMBEDDER``. A
 missing key is a client-side error surfaced cleanly — never a silent
 platform-key spend (this module never falls back to an env key for the
 embedder).
 
-Instances are CONSTRUCTED FRESH PER CALL (upload, list, delete — later, runs):
+Instances are CONSTRUCTED FRESH PER CALL (upload, list, delete, run attach):
 the embedder carries a per-call API key and a shared instance would race keys
 across concurrent requests — the same rule that keeps keyed toolkits fresh per
 run in ``dispatcher.py``. The cost is one ``vector_db.exists()`` information-
@@ -190,8 +190,9 @@ def corpus_name(component_id: str) -> str:
     """The Knowledge instance name for a component's corpus: ``kb-<component_id>``.
 
     This name IS the isolation key: it stamps ``linked_to`` on every chunk and
-    scopes every list. The run half (follow-up issue) derives the same name
-    from the agent id, so both halves resolve one corpus by construction.
+    scopes every list. The run half (``dispatcher.plan_per_run_knowledge``)
+    derives the same name from the agent id, so both halves resolve one corpus
+    by construction.
 
     Args:
         component_id: The stored component's id (the builder agent's handle).
@@ -249,6 +250,7 @@ def build_knowledge(
     embedder: Embedder,
     *,
     db_url: Optional[str] = None,
+    name: Optional[str] = None,
 ) -> Knowledge:
     """Build a corpus's Knowledge instance — the mechanical construction both halves use.
 
@@ -258,7 +260,8 @@ def build_knowledge(
     with the pgvector extension — on first use.
 
     Args:
-        component_id: The component whose corpus this is (drives the instance name).
+        component_id: The component whose corpus this is (drives the default
+            instance name).
         db: The service's agno ``PostgresDb`` — the CONTENTS db (the
             ``ai.agno_knowledge`` rows agno keeps status/size/dates in).
         embedder: A fresh embedder carrying the caller's key (BYOK) — its
@@ -266,6 +269,12 @@ def build_knowledge(
         db_url: The vector store's Postgres DSN (defaults to ``DATABASE_URL``;
             the same Postgres the catalog and agno db live in — a separate
             store would only add an operational surface).
+        name: The Knowledge instance name. Defaults to :func:`corpus_name`
+            of ``component_id`` (``kb-<component_id>``). The run-time attach
+            passes the STORED config name explicitly instead: when it drifted
+            from the derivation, the stored name wins — the corpus was
+            uploaded (stamped ``linked_to``) under it, and matching the
+            derivation would address an empty (or foreign) corpus.
 
     Returns:
         A fresh, isolation-isolated Knowledge instance for the corpus.
@@ -303,7 +312,7 @@ def build_knowledge(
     if WebsiteReader is not None:
         readers = {"website": WebsiteReader(max_links=1)}
     return Knowledge(
-        name=corpus_name(component_id),
+        name=name or corpus_name(component_id),
         vector_db=vector_db,
         content_db=db,
         isolate_vector_search=True,
@@ -317,6 +326,7 @@ def build_knowledge_for(
     api_key: Optional[str] = None,
     *,
     db_url: Optional[str] = None,
+    name: Optional[str] = None,
 ) -> Knowledge:
     """Build a corpus's Knowledge instance with the platform's configured embedder.
 
@@ -324,15 +334,20 @@ def build_knowledge_for(
     MODEL comes from ``KNOWLEDGE_EMBEDDER`` (platform infrastructure) and the
     embedding KEY is whatever the caller passes — the upload route passes the
     creator's per-call key; the key-free management paths (list/delete) pass
-    ``None`` and never embed, so no key is ever read or sent on those paths.
-    There is deliberately NO env-key fallback for the embedder: a missing key
-    is a client-side error surfaced cleanly, never a silent platform-key spend.
+    ``None`` and never embed, so no key is ever read or sent on those paths;
+    the run-time attach (``dispatcher.plan_per_run_knowledge``) passes the
+    RUNNER's per-run key. There is deliberately NO env-key fallback for the
+    embedder: a missing key is a client-side error surfaced cleanly, never a
+    silent platform-key spend.
 
     Args:
         component_id: The component whose corpus this is.
         db: The service's agno ``PostgresDb`` (the contents db).
         api_key: The per-call embedding key, or ``None`` on key-free paths.
         db_url: The vector store's Postgres DSN (defaults to ``DATABASE_URL``).
+        name: The Knowledge instance name (defaults to :func:`corpus_name` of
+            ``component_id``; the run-time attach threads the stored config's
+            name verbatim — see :func:`build_knowledge` for the drift rule).
 
     Returns:
         A fresh Knowledge instance for the corpus.
@@ -343,7 +358,7 @@ def build_knowledge_for(
     """
     config = parse_embedder_config()
     embedder = _provider_embedder(config.provider, config.model, api_key)
-    return build_knowledge(component_id, db, embedder, db_url=db_url)
+    return build_knowledge(component_id, db, embedder, db_url=db_url, name=name)
 
 
 def pgvector_available(db_url: Optional[str] = None, connect_timeout: int = 5) -> bool:

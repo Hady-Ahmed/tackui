@@ -884,13 +884,13 @@ The admin UI is the Connectors section on `/agents`
   ("Models & tools"); platform-admin gated, linked from the builder
   (admin-only) and from `/admin`'s header. See the section below.
 
-## Knowledge — the service half (#233)
+## Knowledge — the service half (#233) + the run-time attach (#234)
 
 Builder agents can own a knowledge corpus — uploaded files, pasted text,
-URLs — embedded into pgvector. The service half shipped here is the
-MANAGEMENT half: the `/platform/knowledge/*` routes tackui's server
-proxies with its service token. The follow-up half is run-time retrieval
-(a component's corpus feeding its own agent's runs) plus the tackui-side
+URLs — embedded into pgvector. The service half shipped so far is the
+MANAGEMENT half (the `/platform/knowledge/*` routes tackui's server proxies
+with its service token) and the dispatcher's RUN-TIME attach (a component's
+corpus feeding its own agent's runs, below). What remains is the tackui-side
 UI/proxy work — see the seam notes at the end.
 
 ### Storage and isolation
@@ -976,16 +976,74 @@ has no vector extension to load, and the capability probe reads
 `pg_available_extensions` — a plain-Postgres deployment answers
 `enabled: false` rather than failing uploads.
 
-### Seam for the follow-up issues
+### Run-time attach — the dispatcher (#234)
 
-- **Run-time retrieval**: the dispatcher resolves the corpus by the run's
-  agent id (the same `kb-<component_id>` naming), builds the Knowledge
-  instance with the runner's per-run embedding key, and searches with
-  `isolate_vector_search`'s server-side filter. The service half's
-  `build_knowledge_for` is the entry point both halves share.
-- **tackui half**: the builder's Knowledge section (gated on the capability
-  endpoint), the server-side proxy of these routes with the service token,
-  and `assertSafeUrl` before forwarding URL uploads.
+A stored config references its corpus **by name**:
+`"knowledge": {"name": "kb-<component_id>"}` (written by tackui at
+attach/detach time — see the lifecycle rules in the tackui-half seam notes).
+Left in place, agno's rehydration resolves the name through the registry —
+and this service registers NO knowledge instances (they are per-run,
+key-carrying objects, the same rule as keyed toolkits) — so agno logs
+`Knowledge '<name>' not found in registry, skipping` and the run proceeds
+**silently without knowledge**. The dispatcher refuses that posture
+(`dispatcher.plan_per_run_knowledge`, mirroring `plan_per_run_tools`):
+
+- **Strip before rehydrate** — the `knowledge` key is removed from the
+  stored config before `Agent.from_dict` (agno's registry lookup never
+  happens; the fail-open skip is unreachable), and the fresh Knowledge
+  instance is attached to the rehydrated agent afterwards
+  (`agent.knowledge` — agno builds its knowledge search tool from that
+  attribute per run; `search_knowledge` stays agno's default True — agentic
+  retrieval, not prompt injection: `add_knowledge_to_context` stays
+  untouched).
+- **Per-run key, deps-only (BYOK-only)** — the attach builds a FRESH
+  Knowledge instance per run with the runner's embedding key, resolved from
+  that run's dependencies (`<provider>_api_key`, v1 `openai_api_key`)
+  through the shared `resolve_from_deps` funnel with deliberately NO env
+  fallback — the platform's `OPENAI_API_KEY` is the platform's key and must
+  never embed for a member run. Two concurrent runs on one agent each get
+  their own instance (a shared one would race embedder keys). The
+  vector-store DSN is the same `app.state.db_url` the knowledge routes
+  resolve, threaded from the run route into
+  `build_agent_for_run(..., db_url=...)`; the construction rides the same
+  off-loop `anyio.to_thread` hop as the rest of agent construction.
+- **Degradation is strip + warn, run without retrieval** — a run arriving
+  without the key, a misconfigured `KNOWLEDGE_EMBEDDER`, or an unreachable
+  vector store all degrade the same way: strip, warn naming the component,
+  run without retrieval. A management route 503s on these conditions
+  because it cannot do its job at all; a run can always do its job without
+  retrieval. tackui's pre-run gate (its issue adds the knowledge 402) is
+  the primary guard — the service-side strip is belt-and-braces for runs
+  that slip past it.
+- **The stored name wins on drift** — the dispatcher derives
+  `kb-<component_id>` from the run's agent id, so config name and
+  derivation agree by construction; on drift (an older naming scheme) the
+  stored name is attached verbatim after a warning — the corpus was
+  uploaded and `linked_to`-stamped under it.
+
+Pinned by `tests/test_dispatcher_knowledge.py`: the fake
+`build_knowledge_for` seam for the key/strip/name decisions (with an
+`Agent.from_dict` spy making the strip observable), plus a real-retrieval
+test proving the attached instance searches the corpus the uploads landed
+in (FakeEmbedder at the provider seam, the pgvector testcontainer).
+
+### Seam for the tackui half (follow-up issues in the series)
+
+The tackui side (#235/#236) owns everything user-facing around this store:
+
+- **Proxy routes** — `app/api/agents/[id]/knowledge` (list/upload/delete),
+  service-token'd server-side; author-gated (the builder PATCH/DELETE
+  semantics: 403 anyone-but-author, no admin override); `assertSafeUrl`
+  before forwarding URL uploads; format/size caps enforced client-side too.
+- **Attach/detach lifecycle** — the stored config's knowledge ref is written
+  by tackui: first upload publishes a config version WITH the ref, deleting
+  the last doc publishes WITHOUT it (guard `current_version`, re-derived
+  requirements snapshot). The name derives from the component id
+  (`kb-<remoteAgentId>`), so the dispatcher's attach and the corpus agree by
+  construction.
+- **Run gate** — knowledge-attached agents demand the embedding provider's
+  key in the aggregated pre-run 402; the dispatcher's strip+warn posture
+  assumes this gate exists (a run without the key runs without retrieval).
 
 ## Not in Phase 1
 
@@ -997,7 +1055,11 @@ has no vector extension to load, and the capability probe reads
   all stay wired (snapshot fields, quota route wiring, plan limits) but
   builder runs are 100% BYOK today; the run gate ignores the tier
   fields and the quota phase never fires.
-- **Knowledge run-time retrieval** — the management half (the service's
-  `/platform/knowledge/*` routes and the corpus store) shipped (#233); what
-  remains is the tackui half (builder UI + proxying) and the run-time
-  retrieval half (a component's corpus feeding its own agent's runs).
+- **Knowledge — the tackui half** — the service's management routes shipped
+  (#233) and the dispatcher's run-time attach shipped (#234); what remains
+  is the tackui side: the builder's Knowledge section (gated on the
+  capability endpoint), the server-side proxy of the knowledge routes with
+  the service token, `assertSafeUrl` before forwarding URL uploads, and the
+  run-gate 402 for knowledge-attached agents (the service-side strip+warn
+  posture assumes that gate exists — a run without the key runs without
+  retrieval).
