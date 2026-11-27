@@ -25,7 +25,16 @@ dependencies = [
     # mcp extra: the dispatcher imports agno.tools.mcp lazily per run (a
     # core feature) — without the extra the MCP tooling resolves only
     # transitively and `uv sync` yields a broken MCP feature.
-    "agno[mcp,tavily,website]==3.1.12",
+    #
+    # The knowledge-phase extras are per-format (each names exactly the
+    # reader engine agno declares for it — pdf: pypdf, docx: python-docx,
+    # excel: openpyxl+xlrd, pptx: python-pptx, csv/markdown/text: aiofiles)
+    # plus `pgvector` (the Python side of the pgvector column type, required
+    # by agno.vectordb.pgvector). This is the upload format allowlist's
+    # dependency set (#233): every extension the service accepts must have
+    # its real reader importable here — a missing one would surface only at
+    # upload time as a FAILED content row.
+    "agno[mcp,tavily,website,pdf,csv,docx,excel,pptx,markdown,text,pgvector]==3.1.12",
     "openai==3.46.0",
     "sqlalchemy==2.1.8",
     # SQLAlchemy 2.1 drops greenlet from its default dependencies (it

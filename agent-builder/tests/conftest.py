@@ -70,7 +70,11 @@ def postgres_dsn():
         from testcontainers.postgres import PostgresContainer
 
     try:
-        container = PostgresContainer("postgres:16-alpine")
+        # The pgvector image, NOT plain postgres (alpine Postgres has no
+        # pgvector extension to install at runtime — the knowledge tests
+        # build the shared `builder_knowledge` vector table, whose
+        # `CREATE EXTENSION vector` must succeed at first use, #233).
+        container = PostgresContainer("pgvector/pgvector:pg16")
         container.start()
     except Exception as e:
         raise RuntimeError(
@@ -93,8 +97,9 @@ def postgres_dsn():
 @pytest.fixture(autouse=True)
 def clean_database(postgres_dsn):
     """Hermetic per-test state: truncate every user table in `public` (the
-    catalog) and `ai` (agno components/sessions) before each test. Tables
-    that do not exist yet (first use) are simply absent from the list."""
+    catalog + the knowledge vector table) and `ai` (agno
+    components/sessions/knowledge contents) before each test. Tables that do
+    not exist yet (first use) are simply absent from the list."""
     with psycopg.connect(postgres_dsn) as conn:
         tables = [
             f'"{schema}"."{name}"'
@@ -141,6 +146,21 @@ def app(platform_main, clean_database):
 def bare_app(platform_main, clean_database):
     """An app with EMPTY catalog tables — no enabled models or tools."""
     return platform_main.build_app(db_url=os.environ["DATABASE_URL"])
+
+
+@pytest.fixture
+def agno_db(postgres_dsn):
+    """A fresh agno PostgresDb over the throwaway container.
+
+    The knowledge store's CONTENTS db (the `ai.agno_knowledge` rows agno keeps
+    status/size/dates in) — what the knowledge-layer tests hand to
+    ``build_knowledge``/``build_fake_knowledge`` so they exercise the same
+    construction the routes perform, without booting the whole app.
+    """
+    from agno.db.postgres import PostgresDb
+    from agno.db.postgres.engine import create_postgres_engine
+
+    return PostgresDb(id="test-agno-db", db_engine=create_postgres_engine(postgres_dsn))
 
 
 @pytest.fixture
