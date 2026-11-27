@@ -168,6 +168,25 @@ def test_upload_rejects_unknown_file_formats_with_the_allowlist(client):
         assert fmt in detail, fmt
 
 
+def test_upload_rejects_legacy_doc_files(client):
+    """Legacy binary .doc is NOT an accepted format: agno maps the extension to
+    DocxReader, which parses the modern OOXML .docx container — a genuine .doc
+    passed the allowlist and then reliably produced a FAILED row on a
+    python-docx parse error (#238). Rejected at the route instead: a clean 400
+    naming the accepted formats."""
+    res = client.post(
+        "/platform/knowledge/route-agent/content",
+        headers=admin_headers(),
+        data={"embedding_key": "k"},
+        files={"file": ("legacy.doc", b"\xd0\xcf\x11\xe0\xa1\xb1\x1a\xe1", "application/msword")},
+    )
+    assert res.status_code == 400
+    detail = res.json()["detail"]
+    assert "'.doc'" in detail
+    for fmt in (".docx", ".pdf", ".txt"):
+        assert fmt in detail, fmt
+
+
 def test_upload_rejects_files_over_10mb(client):
     """The size cap: >10 MB per file is a 400 — cheap hygiene, checked before embedding."""
     big = b"x" * (10 * 1024 * 1024 + 1)

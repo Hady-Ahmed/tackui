@@ -315,7 +315,7 @@ Multipart form: exactly ONE of `file` | `text_content` | `url`, plus
 processing (reader → chunking → embedding → upsert) runs as a background
 task off the event loop. Validation is fail-closed: no/|>1 sources, a
 missing or blank `embedding_key`, an unsupported format (the allowlist is
-`.pdf .csv .xlsx .xls .docx .doc .pptx .json .md .txt` — the 400 lists the
+`.pdf .csv .xlsx .xls .docx .pptx .json .md .txt` — the 400 lists the
 accepted formats), an upload over 10 MB, a non-absolute or non-`http(s)`
 URL (shape only — the SSRF decision is the frontend's client-side guard),
 and invalid chunk params (`chunk_overlap` must be smaller than

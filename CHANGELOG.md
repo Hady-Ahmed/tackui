@@ -85,8 +85,10 @@ All notable changes to this project will be documented in this file. The format 
   per run (never shared between concurrent runs). A run without the key
   degrades to strip + warn + no retrieval (the client's pre-run gate is the
   real guard), as do a misconfigured embedder and an unreachable vector
-  store. Upload validation: format allowlist, 10 MB cap, URL shape
-  check; processing runs off the event loop. The builder's Postgres must be
+  store. Upload validation: format allowlist (legacy `.doc` rejected —
+  its reader only parses the OOXML `.docx` container; #238), 10 MB cap,
+  URL shape check; processing runs off the event loop. The builder's
+  Postgres must be
   a pgvector image (`pgvector/pgvector:pg16` in the compose stacks and the
   test suite's container); the capability endpoint
   (`GET /platform/knowledge/config`) reports availability so the frontend
