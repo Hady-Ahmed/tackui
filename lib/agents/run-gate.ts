@@ -54,11 +54,12 @@ export interface BuilderRunResolution {
   /** true when the run will use the platform key and its daily quota
       must be consumed AFTER the concurrent slot is acquired. */
   platformKeyRun: boolean;
-  /** Every dep key the gate owns — model key, every credential-contract
-      field, mcp_connectors. The registry middleware strips any client-sent
-      context item matching one of these so the client can never forge a
-      server-resolved dependency (multi-field contracts like x_consumer_key
-      are NOT covered by the mechanical `_api_key` family regex — they must
+  /** Every dep key the gate owns — the model key, every credential-
+      contract field, mcp_connectors, the knowledge embedder's key. The
+      registry middleware strips any client-sent context item matching
+      one of these so the client can never forge a server-resolved
+      dependency (multi-field contracts like x_consumer_key are NOT
+      covered by the mechanical `_api_key` family regex — they must
       come from here, exactly as delivered). */
   reservedDepKeys: string[];
 }
@@ -169,6 +170,56 @@ export async function checkBuilderRunGate(
     blockers.push(
       `This agent runs on ${requirements.model.id} — add your own ${providerLabel} key to run it.`,
     );
+  }
+
+  // --- Knowledge: the embedding provider's key. BYOK-only (no platform ---
+  // fallback — knowledge never had one, consistent with tier dormancy) and
+  // no quota change: the embedding spend rides the runner's own key, so a
+  // knowledge-attached run is NOT a platform-key run. The dep key follows
+  // the `<provider>_api_key` convention the dispatcher resolves the
+  // embedder with (agent-builder/dispatcher.py resolves
+  // `resolve_from_deps(deps, f"{embedder_cfg.provider}_api_key")` from the
+  // run's EXISTING dependency context — no dedicated dep item), so the
+  // gate demands exactly what the dispatcher reads.
+  //
+  // Delivery and blocker DEDUPE against the model check: when the model
+  // demands the SAME dep key (an OpenAI model + OpenAI knowledge), the
+  // model block above already delivered the key or produced the blocker —
+  // pushing a second identical context item / blocker line would double
+  // both (and the dispatcher's deps dict keys on the context description,
+  // so a duplicate delivery would just overwrite itself). When the dep
+  // keys DIFFER (an OpenRouter model + OpenAI knowledge), delivery is
+  // per-need: BOTH keys ride the run, and the knowledge key gets its own
+  // blocker line with its own remedy.
+  if (requirements.knowledge?.provider) {
+    const provider = requirements.knowledge.provider;
+    const knowledgeDepKey = `${provider}_api_key`;
+    reservedDepKeys.add(knowledgeDepKey);
+    // The key is saved under the VENDOR (providerForDepKey of the dep key)
+    // with the single "api_key" field — the same lookup shape the model
+    // check uses. An empty provider can't reach here from the store (the
+    // schema requires min(1)); an in-memory caller passing one gets no
+    // demand, which degrades the same way the dispatcher does (strip +
+    // warn, run without retrieval).
+    const knowledgeProvider = providerForDepKey(knowledgeDepKey);
+    const knowledgeKey =
+      runnerFields[knowledgeProvider]?.[
+        fieldForDepKey(knowledgeProvider, knowledgeDepKey)
+      ];
+    const modelCoversIt =
+      modelKeyName === knowledgeDepKey && requirements.model.requiresKey !== false;
+    // The requiresKey guard: a model row that names the same dep key but
+    // is marked keyless (requiresKey false — a malformed platform row; the
+    // live catalog pairs keyless with depKey null) delivered nothing, so
+    // it does NOT cover the knowledge demand — the saved key must still
+    // ride the run instead of being suppressed into a no-retrieval run.
+    if (knowledgeKey && !modelCoversIt) {
+      contextItems.push({ description: knowledgeDepKey, value: knowledgeKey });
+    } else if (!knowledgeKey && !modelCoversIt) {
+      blockers.push(
+        `This agent uses knowledge — add your own ${prettifyProviderLabel(knowledgeProvider)} key to run it.`,
+      );
+    }
   }
 
   // --- Tools: every dep of the credential contract must resolve, or the ---

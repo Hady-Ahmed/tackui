@@ -887,11 +887,12 @@ The admin UI is the Connectors section on `/agents`
 ## Knowledge — the service half (#233) + the run-time attach (#234)
 
 Builder agents can own a knowledge corpus — uploaded files, pasted text,
-URLs — embedded into pgvector. The service half shipped so far is the
-MANAGEMENT half (the `/platform/knowledge/*` routes tackui's server proxies
-with its service token) and the dispatcher's RUN-TIME attach (a component's
-corpus feeding its own agent's runs, below). What remains is the tackui-side
-UI/proxy work — see the seam notes at the end.
+URLs — embedded into pgvector. The service half is the MANAGEMENT half
+(the `/platform/knowledge/*` routes tackui's server proxies with its
+service token) and the dispatcher's RUN-TIME attach (a component's corpus
+feeding its own agent's runs, below). The tackui-side proxy/server work
+shipped in #235; the builder UI's Knowledge section and the run-gate 402
+shipped in #236.
 
 ### Storage and isolation
 
@@ -1031,7 +1032,7 @@ in (FakeEmbedder at the provider seam, the pgvector testcontainer).
 
 The tackui side owns everything user-facing around this store. The server
 half shipped in #235; the builder UI's Knowledge section and the run-gate
-402 are #236.
+402 shipped in #236.
 
 - **Knowledge clients (`lib/agents/builder.ts`)** — the four service calls
   ride the shared `agentosRequest` (fresh service token, sanitized
@@ -1088,10 +1089,58 @@ half shipped in #235; the builder UI's Knowledge section and the run-gate
   optional WITHOUT a default in `requirementsSchema` (absent stays absent —
   the run gate reads PRESENCE as "this agent embeds with the author's key");
   the store round-trips it both directions (pinned in tests).
-- **Run gate** — NOT yet: knowledge-attached agents don't demand the
-  embedding key in the aggregated pre-run 402 until #236; until then the
-  dispatcher's strip+warn posture covers a key-less run (it runs without
-  retrieval).
+- **Run gate (#236)** — `checkBuilderRunGate`'s gate phase reads the
+  snapshot's `knowledge.provider` and demands the embedding key exactly the
+  way the dispatcher resolves it: the dep key is
+  `<provider>_api_key` (dispatcher.py's
+  `resolve_from_deps(deps, f"{embedder_cfg.provider}_api_key")`, deps-only —
+  no platform-env fallback), so the gate delivers
+  `{description: "openai_api_key", value: <saved key>}` as a run context
+  item and reserves the dep key against client-sent context. BYOK-only:
+  embedding spend rides the runner's own key, so `platformKeyRun` stays
+  false and the (dormant) quota phase never fires. Dedupe against the model
+  demand: when the model already demanded the SAME dep key (an OpenAI model
+  + OpenAI knowledge), one blocker line covers both — the aggregated 402
+  never shows the identical remedy twice. When the dep keys differ (an
+  OpenRouter model + OpenAI knowledge), delivery is per-need: BOTH keys
+  ride the run, and the knowledge demand gets its own
+  `This agent uses knowledge — add your own <Provider> key to run it.`
+  line. Without knowledge in the snapshot the check is a passthrough.
+- **The builder form's Knowledge section (#236)** — edit-mode only (docs
+  attach to a SAVED component; create mode shows the one-line note). The
+  section gates on the capability proxy `GET
+  /api/agents/[id]/knowledge/config` (member-accessible, `agentRead`
+  bucket, NOT author-gated — read-only capability metadata, same posture
+  as `/api/tools`' palette): `enabled` renders the section, `enabled:
+  false` hides it with a one-line explanation (`unsupported` = the
+  deployment predates knowledge vs `disabled` = a platform admin can turn
+  it on), and a fetch failure renders the error banner with Retry — a
+  transport failure must never read as "knowledge is off" (the
+  empty-vs-unreachable distinction the palette follows). The section
+  itself: multi-file upload (the picker's `accept` mirrors the route's
+  allowlist — the two lists are kept identical deliberately), paste-text
+  with a required name, a URL row; an Advanced disclosure for chunk
+  size/overlap where BLANK means "the platform's own defaults" (agno's
+  defaults differ per chunker, so the UI invents no number — fields ride
+  every upload and the service applies them to files and pasted text;
+  URL ingest is agno's auto-detected reader). The doc list shows status
+  chips over agno's ContentStatus — `processing`, `completed` (rendered
+  "Ready"), `partial` (its own amber chip: searchable but incomplete —
+  never a false "Ready"), `failed` (inline re-upload guidance: delete +
+  re-upload, there is no resume) — and polls the list every 5s WHILE any
+  row is processing, stopping the moment every row settles (the interval
+  is torn down on unmount too). Delete confirms first; a delete that
+  LANDED with a failed detach publish (the 502/409 case) re-fetches the
+  list as the truth — a vanished row surfaces a retry-safe notice whose
+  Retry re-fires the idempotent DELETE without re-confirming (nothing
+  left to undo). The header's key badge dedupes against the model's:
+  connected + docs → the green "runs on" chip; missing →
+  "Needs your <Provider> key" with a connect shortcut — hidden when the
+  MODEL badge already demands the same provider's key (one line, not
+  two). The pure logic (wire types, capability branching, payload
+  shaping, chip mapping, badge dedupe) lives in
+  `components/builder/builder-config.ts` — client-safe, no service
+  imports.
 
 ## Not in Phase 1
 
@@ -1103,12 +1152,11 @@ half shipped in #235; the builder UI's Knowledge section and the run-gate
   all stay wired (snapshot fields, quota route wiring, plan limits) but
   builder runs are 100% BYOK today; the run gate ignores the tier
   fields and the quota phase never fires.
-- **Knowledge — the builder UI and the run gate** — the service's
+- **Knowledge — the knowledge phase is complete** — the service's
   management routes shipped (#233), the dispatcher's run-time attach
-  shipped (#234), and the tackui server half shipped (#235): the knowledge
+  shipped (#234), the tackui server half shipped (#235): the knowledge
   clients, the author-gated proxy routes with the attach/detach lifecycle,
   the `requirementsSchema.knowledge` snapshot field, and the
-  credentials-catalog extension. What remains (#236) is the builder UI's
-  Knowledge section (gated on the capability endpoint) and the run-gate
-  402 for knowledge-attached agents (the service-side strip+warn posture
-  covers a key-less run until then — it runs without retrieval).
+  credentials-catalog extension. The builder UI's Knowledge section and
+  the run-gate 402 shipped (#236) — see the two #236 bullets in the
+  Knowledge section above.

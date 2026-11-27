@@ -800,3 +800,203 @@ describe("lib/agents/run-gate — contract present despite null requiresKey", ()
     ]);
   });
 });
+
+// (appended) knowledge — the embedding provider's key demand (#236)
+describe("lib/agents/run-gate — knowledge", () => {
+  // The knowledge contract's embedding key: the SAME dep-key machinery the
+  // model check uses, with delivery/blocker dedupe when the model shares
+  // the vendor's key. BYOK-only, no quota change (embedding spend is the
+  // runner's own key; the run is not a platform-key run).
+  beforeEach(() => {
+    mockGetAgent.mockReset();
+    mockGetCredentialSecrets.mockReset();
+    mockGetConnectorsByIds.mockReset();
+    mockConsumeQuota.mockReset();
+    mockGetEnforcementLimits.mockReset();
+    mockConsumeQuota.mockReturnValue({ allowed: true, resetAt: Date.now() + 1000, used: 1 });
+    mockGetEnforcementLimits.mockResolvedValue({
+      plan: "free",
+      limits: {
+        maxAgents: 3, concurrentRuns: 1, runsPerMinute: 10,
+        platformDailyQuota: 50, maxMembers: 1, canCreateOrg: false, label: "Free",
+      },
+    });
+  });
+
+  afterEach(() => {
+    delete process.env.SAAS_MODE;
+    vi.resetModules();
+  });
+
+  const openaiModelWithKnowledge = {
+    model: { provider: "openai", id: "gpt-5", platformTier: false, depKey: "openai_api_key", name: "OpenAIChat" },
+    tools: [],
+    connectors: [],
+    knowledge: { provider: "openai", model: "text-embedding-3-small" },
+  };
+  const openrouterModelWithKnowledge = {
+    model: { provider: "openrouter", id: "anthropic/claude-3", platformTier: false, depKey: "openrouter_api_key", name: "OpenRouter" },
+    tools: [],
+    connectors: [],
+    knowledge: { provider: "openai", model: "text-embedding-3-small" },
+  };
+
+  it("delivers ONE openai_api_key when an OpenAI model AND knowledge share it (no duplicate delivery)", async () => {
+    mockGetAgent.mockResolvedValue(builderAgent(openaiModelWithKnowledge));
+    mockGetCredentialSecrets.mockResolvedValue({ openai: { api_key: "sk-runner" } });
+    const { checkBuilderRunGate } = await loadGate();
+    const result = await checkBuilderRunGate(
+      { id: "user-1", role: "member", name: "u", email: null, orgId: "org-1" },
+      "agent-1",
+    );
+    expect(result.response).toBeNull();
+    expect(result.contextItems).toEqual([
+      { description: "openai_api_key", value: "sk-runner" },
+    ]);
+    // The reserved set is a set — the shared dep key appears once.
+    expect([...result.reservedDepKeys].sort()).toEqual([
+      "mcp_connectors",
+      "openai_api_key",
+    ]);
+  });
+
+  it("one blocker covers both when the model and knowledge share the key and it is missing (no duplicate line)", async () => {
+    mockGetAgent.mockResolvedValue(builderAgent(openaiModelWithKnowledge));
+    mockGetCredentialSecrets.mockResolvedValue({});
+    const { checkBuilderRunGate } = await loadGate();
+    const result = await checkBuilderRunGate(
+      { id: "user-1", role: "member", name: "u", email: null, orgId: "org-1" },
+      "agent-1",
+    );
+    expect(result.response?.status).toBe(402);
+    const body = await result.response!.json();
+    expect(body.code).toBe("AGENT_REQUIREMENTS_MISSING");
+    // The MODEL blocker's remedy ("add your own OpenAI key") is the same
+    // fix the knowledge demand needs — one line covers both.
+    expect(body.error).toContain("gpt-5");
+    expect(body.error).toContain("OpenAI key");
+    expect(body.error).not.toContain("knowledge");
+    expect(result.contextItems).toEqual([]);
+  });
+
+  it("delivers BOTH keys when the model is OpenRouter and knowledge is OpenAI (per-need delivery)", async () => {
+    mockGetAgent.mockResolvedValue(builderAgent(openrouterModelWithKnowledge));
+    mockGetCredentialSecrets.mockResolvedValue({
+      openai: { api_key: "sk-openai" },
+      openrouter: { api_key: "sk-openrouter" },
+    });
+    const { checkBuilderRunGate } = await loadGate();
+    const result = await checkBuilderRunGate(
+      { id: "user-1", role: "member", name: "u", email: null, orgId: "org-1" },
+      "agent-1",
+    );
+    expect(result.response).toBeNull();
+    // The model dep AND the knowledge dep both ride the run — the
+    // dispatcher resolves the embedder key from this same deps dict.
+    expect(result.contextItems).toEqual([
+      { description: "openrouter_api_key", value: "sk-openrouter" },
+      { description: "openai_api_key", value: "sk-openai" },
+    ]);
+    expect([...result.reservedDepKeys].sort()).toEqual([
+      "mcp_connectors",
+      "openai_api_key",
+      "openrouter_api_key",
+    ]);
+  });
+
+  it("402s with BOTH lines when the model's key and the knowledge key differ and both are missing", async () => {
+    mockGetAgent.mockResolvedValue(builderAgent(openrouterModelWithKnowledge));
+    mockGetCredentialSecrets.mockResolvedValue({});
+    const { checkBuilderRunGate } = await loadGate();
+    const result = await checkBuilderRunGate(
+      { id: "user-1", role: "member", name: "u", email: null, orgId: "org-1" },
+      "agent-1",
+    );
+    expect(result.response?.status).toBe(402);
+    const body = await result.response!.json();
+    // Two DISTINCT remedies — the model's key and the knowledge key are
+    // different credentials; neither line can cover the other.
+    expect(body.error).toContain("Openrouter key");
+    expect(body.error).toContain("This agent uses knowledge — add your own OpenAI key to run it.");
+    expect(result.contextItems).toEqual([]);
+  });
+
+  it("402s with the knowledge line alone when the model is keyless (ollama) and the key is missing", async () => {
+    mockGetAgent.mockResolvedValue(
+      builderAgent({
+        model: { provider: "ollama", id: "llama3:8b", platformTier: false, requiresKey: false, depKey: null, name: "Ollama" },
+        tools: [],
+        connectors: [],
+        knowledge: { provider: "openai", model: "text-embedding-3-small" },
+      }),
+    );
+    mockGetCredentialSecrets.mockResolvedValue({});
+    const { checkBuilderRunGate } = await loadGate();
+    const result = await checkBuilderRunGate(
+      { id: "user-1", role: "member", name: "u", email: null, orgId: "org-1" },
+      "agent-1",
+    );
+    expect(result.response?.status).toBe(402);
+    const body = await result.response!.json();
+    expect(body.error).toContain("This agent uses knowledge — add your own OpenAI key to run it.");
+    expect(body.error).not.toContain("ollama");
+    expect(result.reservedDepKeys).toContain("openai_api_key");
+  });
+
+  it("a model row that NAMES the same dep key but is marked keyless does NOT cover the knowledge demand", async () => {
+    // requiresKey false with a depKey set is a malformed platform row (the
+    // live catalog pairs keyless with depKey null) — but the schema allows
+    // it, and the old coverage check (dep-key equality alone) suppressed
+    // the runner's SAVED key from delivery: the run proceeded, the
+    // dispatcher stripped into no-retrieval. The requiresKey guard keeps
+    // the key riding the run.
+    mockGetAgent.mockResolvedValue(
+      builderAgent({
+        model: { provider: "openai", id: "custom-x", platformTier: false, requiresKey: false, depKey: "openai_api_key", name: "OpenAIChat" },
+        tools: [],
+        connectors: [],
+        knowledge: { provider: "openai", model: "text-embedding-3-small" },
+      }),
+    );
+    mockGetCredentialSecrets.mockResolvedValue({ openai: { api_key: "sk-runner" } });
+    const { checkBuilderRunGate } = await loadGate();
+    const result = await checkBuilderRunGate(
+      { id: "user-1", role: "member", name: "u", email: null, orgId: "org-1" },
+      "agent-1",
+    );
+    expect(result.response).toBeNull();
+    // Delivered BY the knowledge branch (once — the model branch, marked
+    // keyless, delivered nothing).
+    expect(result.contextItems).toEqual([
+      { description: "openai_api_key", value: "sk-runner" },
+    ]);
+  });
+
+  it("absent knowledge → passthrough: the resolution is unchanged by the check", async () => {
+    mockGetAgent.mockResolvedValue(builderAgent(miniRequirements));
+    mockGetCredentialSecrets.mockResolvedValue({ openai: { api_key: "sk-runner" } });
+    const { checkBuilderRunGate } = await loadGate();
+    const result = await checkBuilderRunGate(
+      { id: "user-1", role: "member", name: "u", email: null, orgId: "org-1" },
+      "agent-1",
+    );
+    expect(result.response).toBeNull();
+    expect(result.contextItems).toEqual([
+      { description: "openai_api_key", value: "sk-runner" },
+    ]);
+  });
+
+  it("BYOK-only: a knowledge-attached run never flips platformKeyRun (no quota consumption)", async () => {
+    mockGetAgent.mockResolvedValue(builderAgent(openaiModelWithKnowledge));
+    mockGetCredentialSecrets.mockResolvedValue({ openai: { api_key: "sk-runner" } });
+    const { checkBuilderRunGate } = await loadSaaSGate();
+    const result = await checkBuilderRunGate(
+      { id: "user-1", role: "member", name: "u", email: null, orgId: "org-1" },
+      "agent-1",
+    );
+    // Embedding spend rides the runner's own key — the run is not a
+    // platform-key run, so the (dormant) quota phase would not fire.
+    expect(result.platformKeyRun).toBe(false);
+    expect(mockConsumeQuota).not.toHaveBeenCalled();
+  });
+});

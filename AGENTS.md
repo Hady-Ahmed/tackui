@@ -167,6 +167,15 @@ no Docker required, no cleanup between runs (see `vitest.config.ts`).
   never the generic 500). An operation that can legitimately exceed 30s
   under contention needs a larger per-call `waitTimeoutMs` (or
   `Infinity`).
+- **Knowledge-attached builder agents demand the embedding provider's key
+  at run time** — the run gate 402s without it and delivers the saved key
+  as the `<provider>_api_key` context item the dispatcher resolves the
+  embedder from (deps-only; the gate's delivery and its 402 line both
+  dedupe against the model's key demand when they need the same key). The
+  demand only exists when `requirementsSchema` declares `knowledge` — the
+  zod schema strips undeclared fields on EVERY write AND read (the
+  round-trip test pins it), so removing the field silently drops the
+  contract and the run gate never fires. See docs/agent-builder.md.
 - **AG-UI protocol spec:** https://docs.ag-ui.com — see
   [Events](https://docs.ag-ui.com/concepts/events),
   [Messages](https://docs.ag-ui.com/concepts/messages), and

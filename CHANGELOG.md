@@ -32,9 +32,32 @@ All notable changes to this project will be documented in this file. The format 
   credentials catalog adds the embedding provider when knowledge is
   enabled and no model carries it (otherwise the required key could
   never be saved). The knowledge config's 404 reads as "unsupported"
-  (the service predates knowledge), distinct from unreachable. The
-  builder UI section and the run-gate 402 for knowledge-attached agents
-  remain #236.
+  (the service predates knowledge), distinct from unreachable.
+- **Added: the builder UI's Knowledge section + the run-gate 402 for
+  knowledge-attached agents (#236).** The builder form (edit mode) now
+  curates the agent's knowledge corpus directly: multi-file upload, paste
+  text with a name, a URL, and an Advanced disclosure for chunk size and
+  overlap (blank = the platform's own defaults). The doc list shows status
+  chips (Processing / Ready / Partial / Failed) and polls every 5s while
+  any row is processing; delete confirms first, and a delete that landed
+  with a failed detach publish re-fetches the list as the truth and
+  offers a retry-safe Retry (the service delete is idempotent). The
+  section gates on the capability proxy `GET
+  /api/agents/[id]/knowledge/config` (member-accessible, `agentRead`
+  bucket) — knowledge-off deployments hide it with a one-line
+  explanation, and a failed capability fetch renders an error banner,
+  never a false "knowledge is off". The header's key badge demands the
+  embedding provider's key when missing ("Needs your OpenAI key" with a
+  connect shortcut) and hides itself when the model's badge already
+  demands the same key — one line, not two. The run gate now 402s a
+  knowledge-attached agent whose author has no embedding key
+  (`This agent uses knowledge — add your own <Provider> key to run it.`
+  in the aggregated requirements response), delivering the saved key as
+  the run's `<provider>_api_key` context item exactly as the dispatcher
+  resolves it; the demand is BYOK-only (embedding spend rides the
+  runner's own key — no quota change), dedupes with the model's key
+  demand when both need the same key, and delivers per-need when they
+  differ (an OpenRouter model + OpenAI knowledge delivers both keys).
 - **Added: knowledge for builder agents — the service half (#233), now
   running at run time (#234).** Every builder component can now own a
   document corpus (uploaded files, pasted text, URLs) embedded into pgvector,
