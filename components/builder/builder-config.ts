@@ -599,11 +599,14 @@ export interface KnowledgeCapability {
 
 /** One content row of the corpus (GET /api/agents/[id]/knowledge —
  *  camelCase, the #235 list route's shape; `status` is agno's
- *  ContentStatus or null on a row predating a status write). */
+ *  ContentStatus or null on a row predating a status write;
+ *  `statusMessage` is agno's classified failure reason, present only
+ *  on failed rows — shown to the author so "Failed" is never bare). */
 export interface KnowledgeDocRow {
   id: string;
   name: string;
   status: string | null;
+  statusMessage?: string | null;
   size: number | null;
   createdAt: number;
   updatedAt: number;

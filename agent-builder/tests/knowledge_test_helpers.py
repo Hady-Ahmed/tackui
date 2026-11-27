@@ -101,6 +101,73 @@ class FakeEmbedder(Embedder):
         return self._vector(text), None
 
 
+class RejectingEmbedder(FakeEmbedder):
+    """A ``FakeEmbedder`` whose embed calls FAIL — the provider-rejection
+    shape (an expired key's 401) without network. Construction succeeds (the
+    embedder builds fine); every embed attempt raises, so ingest marks the
+    content row failed with agno's classified ``status_message``.
+    """
+
+    def _reject(self, text: str) -> List[float]:
+        """The failure itself (every path routes here).
+
+        Args:
+            text: The text the caller tried to embed.
+
+        Raises:
+            RuntimeError: Always — the simulated provider rejection.
+        """
+        raise RuntimeError("simulated provider rejection")
+
+    def get_embedding(self, text: str) -> List[float]:
+        """Fail the sync embed (see ``_reject``).
+
+        Args:
+            text: The text the caller tried to embed.
+
+        Raises:
+            RuntimeError: The simulated provider rejection.
+        """
+        self._reject(text)
+        raise AssertionError("unreachable")
+
+    def get_embedding_and_usage(self, text: str) -> Tuple[List[float], Optional[dict]]:
+        """Fail the sync embed-with-usage (see ``_reject``).
+
+        Args:
+            text: The text the caller tried to embed.
+
+        Raises:
+            RuntimeError: The simulated provider rejection.
+        """
+        self._reject(text)
+        raise AssertionError("unreachable")
+
+    async def async_get_embedding(self, text: str) -> List[float]:
+        """Fail the async embed (see ``_reject``).
+
+        Args:
+            text: The text the caller tried to embed.
+
+        Raises:
+            RuntimeError: The simulated provider rejection.
+        """
+        self._reject(text)
+        raise AssertionError("unreachable")
+
+    async def async_get_embedding_and_usage(self, text: str) -> Tuple[List[float], Optional[dict]]:
+        """Fail the async embed-with-usage (see ``_reject``).
+
+        Args:
+            text: The text the caller tried to embed.
+
+        Raises:
+            RuntimeError: The simulated provider rejection.
+        """
+        self._reject(text)
+        raise AssertionError("unreachable")
+
+
 def build_fake_knowledge(component_id: str, db, db_url: str):
     """Build one corpus's Knowledge instance with the fake embedder.
 

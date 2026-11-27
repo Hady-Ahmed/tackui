@@ -662,4 +662,26 @@ describe("BuilderForm — the Knowledge section", () => {
     await screen.findByText("Failed");
     expect(screen.getByText(/Delete this document and upload it again/)).toBeTruthy();
   });
+
+  it("a failed row shows the captured failure reason (e.g. an expired key)", async () => {
+    // The live-demo gap that asked for this: agno stores the classified
+    // reason on the row ("authentication (HTTP 401) ... Check the
+    // embedder's API key and permissions") and the wire carries it —
+    // "Failed" alone left the author guessing.
+    stubKnowledgeFetch({
+      list: () => [
+        kbRow({
+          status: "failed",
+          statusMessage:
+            'Embedding failed for "chine" (0 of 1 chunks embedded). Reason: authentication (HTTP 401). Check the embedder\'s API key and permissions.',
+        }),
+      ],
+    });
+    render(<BuilderForm {...editProps()} />);
+    await screen.findByText("Failed");
+    expect(screen.getByText(/authentication \(HTTP 401\)/)).toBeTruthy();
+    expect(screen.getByText(/Check the embedder's API key/)).toBeTruthy();
+    // The remedy guidance still rides below the reason.
+    expect(screen.getByText(/Delete this document and upload it again/)).toBeTruthy();
+  });
 });

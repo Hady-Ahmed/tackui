@@ -391,13 +391,16 @@ export async function fetchKnowledgeConfig(): Promise<KnowledgeConfig> {
  * One content row of a corpus (GET /platform/knowledge/{id} — camelCase,
  * the frontend consumes these directly). `status` mirrors agno's
  * ContentStatus (processing/completed/partial/failed) or null on a row
- * that predates a status write; `createdAt`/`updatedAt` are epoch seconds.
- * Unknown extra fields are tolerated (zod strips them).
+ * that predates a status write; `statusMessage` is agno's classified
+ * failure reason (null on healthy rows — the service normalizes agno's
+ * empty-string default to null); `createdAt`/`updatedAt` are epoch
+ * seconds. Unknown extra fields are tolerated (zod strips them).
  */
 export interface KnowledgeContentRow {
   id: string;
   name: string;
   status: string | null;
+  statusMessage?: string | null;
   size: number | null;
   createdAt: number;
   updatedAt: number;
@@ -407,6 +410,7 @@ const knowledgeContentRowSchema = z.object({
   id: z.string(),
   name: z.string(),
   status: z.string().nullable(),
+  statusMessage: z.string().nullable().optional(),
   size: z.number().nullable(),
   createdAt: z.number(),
   updatedAt: z.number(),

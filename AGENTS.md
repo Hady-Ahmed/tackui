@@ -232,3 +232,13 @@ full how-it-works detail this file deliberately omits:
 - **`docs/e2e.md`** — the Playwright E2E smoke suite: the real-app harness
   (web-server lifecycle, seeding, mock agent), the 8 Tier 1 tests, locator
   discipline, and the breakage-test contract
+
+<!-- BEGIN:nextjs-agent-rules -->
+
+## This is NOT the Next.js you know
+
+This version has breaking changes — APIs, conventions, and file structure may all differ from your training data. Read the relevant guide in `node_modules/next/dist/docs/` (resolved from this file's directory; in monorepos the `next` package may not be visible from the repo root) before writing any code. Heed deprecation notices.
+
+This block is written and re-added by `next dev` — verify at `node_modules/next/dist/server/lib/generate-agent-files.js`. Removing it from a diff only re-creates the uncommitted change; committing it with your work keeps the tree clean.
+
+<!-- END:nextjs-agent-rules -->

@@ -2085,8 +2085,10 @@ function KnowledgeKeyBadgeView({
  * One document row of the corpus — name + status chip (processing /
  * ready / partial / failed; no chip on a row predating a status write),
  * size, upload date, and delete-with-confirm. A failed row carries the
- * re-upload guidance inline (the upload creates a NEW content row —
- * there is no resume, so the copy says so plainly).
+ * captured failure reason when the service stored one (agno's classified
+ * ``status_message`` — e.g. an expired key's "authentication (HTTP 401)")
+ * plus the re-upload guidance inline (the upload creates a NEW content
+ * row — there is no resume, so the copy says so plainly).
  */
 function KnowledgeDocRowView({
   doc,
@@ -2126,9 +2128,12 @@ function KnowledgeDocRowView({
         </button>
       </div>
       {doc.status === "failed" && (
-        <p className="mt-1 text-[11px] text-zinc-500 dark:text-zinc-400">
-          {KNOWLEDGE_FAILED_HINT}
-        </p>
+        <div className="mt-1 space-y-1 text-[11px] text-zinc-500 dark:text-zinc-400">
+          {doc.statusMessage ? (
+            <p className="break-words">{doc.statusMessage}</p>
+          ) : null}
+          <p>{KNOWLEDGE_FAILED_HINT}</p>
+        </div>
       )}
     </div>
   );

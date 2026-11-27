@@ -20,7 +20,7 @@ import pytest
 from agno.knowledge.content import ContentStatus
 
 import knowledge as knowledge_store
-from knowledge_test_helpers import FakeEmbedder
+from knowledge_test_helpers import FakeEmbedder, RejectingEmbedder
 
 from platform_test_helpers import admin_headers, user_headers
 
@@ -247,7 +247,7 @@ def test_upload_list_delete_lifecycle(client, offline_embedder):
     rows = client.get("/platform/knowledge/lifecycle-a", headers=admin_headers()).json()
     assert [r["name"] for r in rows] == ["Notes"]
     row = rows[0]
-    assert set(row.keys()) == {"id", "name", "status", "size", "createdAt", "updatedAt"}
+    assert set(row.keys()) == {"id", "name", "status", "statusMessage", "size", "createdAt", "updatedAt"}
     assert row["id"] == content_id
     assert row["status"] == ContentStatus.COMPLETED.value
     assert row["size"] == len("The banana harvest ripens.".encode("utf-8"))
@@ -315,3 +315,33 @@ def test_delete_of_another_corpus_content_id_is_404(client, offline_embedder):
     # The foreign row survived.
     rows = client.get("/platform/knowledge/owner-a", headers=admin_headers()).json()
     assert [r["id"] for r in rows] == [foreign_id]
+
+
+def test_failed_row_carries_the_status_message(client, offline_embedder, monkeypatch):
+    """A failed ingest's reason reaches the wire. agno stores the classified
+    reason on the contents row (``status_message`` — the live-demo case: an
+    expired key surfaced as 'authentication (HTTP 401) ... Check the
+    embedder's API key and permissions'); the list entry serializes it so the
+    author's UI can say WHY a row failed instead of a bare failed chip.
+    The seam is swapped for an embedder that constructs but rejects at embed
+    time — the expired-key shape."""
+    monkeypatch.setattr(
+        knowledge_store, "_provider_embedder", lambda p, m, k: RejectingEmbedder()
+    )
+    res = _post_text(client, component_id="failmsg", text="The oat harvest ripens.")
+    assert res.status_code == 202
+    rows = client.get("/platform/knowledge/failmsg", headers=admin_headers()).json()
+    assert len(rows) == 1
+    assert rows[0]["status"] == "failed"
+    assert rows[0]["statusMessage"], "the classified reason must reach the wire"
+
+
+def test_completed_row_has_a_null_status_message(client, offline_embedder):
+    """The failure-reason field is null on a healthy row — the UI's failed
+    branch keys on status, but the wire shape stays uniform."""
+    res = _post_text(client, component_id="okmsg", text="The barley harvest ripens.")
+    assert res.status_code == 202
+    rows = client.get("/platform/knowledge/okmsg", headers=admin_headers()).json()
+    assert len(rows) == 1
+    assert rows[0]["status"] == "completed"
+    assert rows[0]["statusMessage"] is None
