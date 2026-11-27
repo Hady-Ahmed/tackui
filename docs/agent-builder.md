@@ -924,7 +924,20 @@ delete scoping across corpora):
   is constructed per request, never shared or cached: the embedder carries a
   per-call API key, and a shared instance would race keys across concurrent
   requests. The cost is one vector-store round-trip per construction (the
-  probe that creates the table on first use); accepted deliberately.
+  probe that creates the table on first use); accepted deliberately. The
+  first-use probe is a check-then-create, so two concurrent first-use
+  constructions on a fresh deployment can race, and the loser's DDL fails
+  in one of two flavors: the duplicate-table server error (42P07) when the
+  winner's DDL already committed, or — when the two DDLs overlap — a
+  unique violation on a catalog unique (name, namespace) index (23505; on
+  pg16 the loser's row type in pg_type collides first,
+  `pg_type_typname_nsp_index`, and the concurrent `CREATE EXTENSION`
+  dies on `pg_extension_name_index`). The build layer absorbs those
+  provably-benign name conflicts with a single retry (the winner created
+  the object) and lets every other failure — including any data-level
+  unique violation — propagate to the degrade paths. A management route
+  answers any construction failure as a clean 503, mirroring the
+  dispatcher's strip+warn posture on the run path.
 
 Uploads land in the shared bucket (`user_id` NULL): pgvector's user scope
 matches `user_id = X OR user_id IS NULL`, so every scoped runner's search

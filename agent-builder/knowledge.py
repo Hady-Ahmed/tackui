@@ -42,6 +42,7 @@ from agno.db.base import BaseDb
 from agno.knowledge.embedder.base import Embedder
 from agno.knowledge.knowledge import Knowledge
 from agno.utils.log import log_warning
+from sqlalchemy.exc import IntegrityError, ProgrammingError
 
 try:  # the website extra is in pyproject; a stripped env degrades to agno's factory
     from agno.knowledge.reader.website_reader import WebsiteReader
@@ -65,6 +66,41 @@ CORPUS_METADATA_KEY = "corpus"
 # The embedding MODEL is platform infrastructure: "<provider>:<model>", fixed
 # per deployment via env. The KEY is never configured here — it is per-call.
 EMBEDDER_ENV_VAR = "KNOWLEDGE_EMBEDDER"
+
+# The Postgres SQLSTATE for ``duplicate_table`` (42P07). The cold-start race
+# guard keys on this code, not on error text or a driver class: it is
+# dialect-stable across Postgres versions. PRECONDITION: the guard reads the
+# code off the psycopg 3 surface (``.sqlstate``); a psycopg2-backed DSN
+# carries the same code at ``.pgcode``/``.diag.sqlstate`` instead, so the
+# guard would no-op there (this service's engines are psycopg 3, and a no-op
+# only means the failure propagates loudly). See
+# :func:`_is_duplicate_table_error`.
+DUPLICATE_TABLE_SQLSTATE = "42P07"
+
+# The catalog unique indexes a concurrent first-use construction can violate —
+# the OVERLAPPING-DDL flavor of the cold-start race. When the winner's DDL is
+# still uncommitted, Postgres does NOT answer the loser's ``CREATE TABLE`` with
+# duplicate_table (42P07): it blocks the loser on a catalog unique index until
+# the winner's statement resolves, and the loser then fails with
+# unique_violation (23505). Empirically (pgvector/pgvector:pg16 — the suite's
+# and the compose stacks' image) the first insert to collide is the table's
+# ROW TYPE in pg_type, so the loser dies on ``pg_type_typname_nsp_index``;
+# ``pg_class_relname_nsp_index`` (the (relname, relnamespace) index) is the
+# same benign shape and is kept as defense across catalog paths and versions.
+# The concurrent ``CREATE EXTENSION IF NOT EXISTS vector`` every cold
+# construction runs races the same way and dies on
+# ``pg_extension_name_index`` (the flavor set is pinned by the offline
+# retry tests below; the live pg16 probe that chose the names was a
+# one-off, not reproducible from the repo). Every
+# name here is a unique (name, namespace) index over a system catalog, so
+# these names — and ONLY these — are absorbable: a data-level unique violation
+# (any other constraint name, or none reported) stays loud. See
+# :func:`_is_catalog_name_conflict`.
+CATALOG_NAME_CONFLICT_CONSTRAINTS = frozenset({
+    "pg_class_relname_nsp_index",
+    "pg_extension_name_index",
+    "pg_type_typname_nsp_index",
+})
 
 
 @dataclass(frozen=True)
@@ -244,6 +280,92 @@ def corpus_of(metadata: Optional[Dict[str, Any]]) -> Optional[str]:
     return value if isinstance(value, str) else None
 
 
+def _is_duplicate_table_error(exc: Exception) -> bool:
+    """Whether ``exc`` is the Postgres ``duplicate_table`` server error (SQLSTATE 42P07).
+
+    The COMMITTED-CONFLICT flavor of the cold-start table-creation race: two
+    concurrent first-use constructions both observe the shared table absent
+    (agno's ``PgVector.create`` probes then creates — a TOCTOU window) and the
+    loser's ``CREATE TABLE`` is answered with DuplicateTable — which happens
+    when the winner's DDL was already committed. When the two DDLs OVERLAP
+    (the winner's is still uncommitted), Postgres fails the loser with a
+    unique violation on a catalog index instead — see
+    :func:`_is_catalog_name_conflict`. The driver error arrives wrapped in
+    SQLAlchemy's ``ProgrammingError`` (this service's engines are
+    psycopg-backed via agno), so the code is read off the wrapped DBAPI error
+    (``exc.orig``), falling back to the exception itself for an unwrapped
+    driver error.
+
+    WHY SQLSTATE, not a driver class or message text: the code is the
+    dialect-stable Postgres contract for ``duplicate_table``, independent of
+    error-message wording — matching on text would be fragile and
+    locale-dependent. PRECONDITION: the read is the psycopg 3 surface
+    (``.sqlstate``); a psycopg2-backed DSN would carry the same code at
+    ``.pgcode`` and this guard would no-op — see the note at
+    ``DUPLICATE_TABLE_SQLSTATE``.
+
+    Args:
+        exc: The exception raised by the construction (a
+            ``sqlalchemy.exc.ProgrammingError`` in the raced shape).
+
+    Returns:
+        True when the error is the duplicate-table server error (the table
+        now exists — construction may retry), False otherwise (re-raise).
+    """
+    candidates = (exc, getattr(exc, "orig", None))
+    return any(
+        getattr(candidate, "sqlstate", None) == DUPLICATE_TABLE_SQLSTATE
+        for candidate in candidates
+        if candidate is not None
+    )
+
+
+def _is_catalog_name_conflict(exc: Exception) -> bool:
+    """Whether ``exc`` is the OVERLAPPING-DDL flavor of the cold-start race.
+
+    When the winner's DDL is still uncommitted, Postgres does not answer the
+    loser's ``CREATE TABLE`` with ``duplicate_table`` (42P07) — it blocks the
+    loser on a catalog unique (name, namespace) index until the winner's
+    statement resolves, and the loser then fails with unique_violation (23505).
+    Empirically (pgvector/pgvector:pg16) the first insert to collide is the
+    table's ROW TYPE in pg_type, so the loser dies on
+    ``pg_type_typname_nsp_index``; ``pg_class_relname_nsp_index`` is the same
+    benign shape (kept as defense), and the concurrent
+    ``CREATE EXTENSION IF NOT EXISTS vector`` dies on
+    ``pg_extension_name_index``. Either way the name conflict carries the same
+    good news as 42P07 — the winner created the object — so the construction
+    may retry. A DATA-level unique violation (any other constraint name, or
+    none reported) is NOT this flavor and must propagate untouched.
+
+    psycopg 3 surfaces the name at ``.diag.constraint_name`` on the driver
+    error, which SQLAlchemy wraps as ``IntegrityError.orig`` — so the name is
+    read the same way the SQLSTATE is (off ``exc`` and ``exc.orig``), and a
+    missing ``diag``/attribute degrades to False.
+
+    This predicate is calibrated to the construction path, whose guarded
+    region is DDL-only (CREATE EXTENSION/SCHEMA/TABLE) — it keys on the
+    constraint name alone, which is unforgeable there. It must NOT be
+    reused on a data path: a data-path guard would additionally require
+    ``sqlstate == "23505"``.
+
+    Args:
+        exc: The exception raised by the construction (a
+            ``sqlalchemy.exc.IntegrityError`` in this raced shape).
+
+    Returns:
+        True when the error is a unique violation on one of the pinned catalog
+        name-conflict indexes (the object now exists — construction may
+        retry), False otherwise (re-raise).
+    """
+    for candidate in (exc, getattr(exc, "orig", None)):
+        if candidate is None:
+            continue
+        constraint = getattr(getattr(candidate, "diag", None), "constraint_name", None)
+        if constraint in CATALOG_NAME_CONFLICT_CONSTRAINTS:
+            return True
+    return False
+
+
 def build_knowledge(
     component_id: str,
     db: BaseDb,
@@ -258,6 +380,29 @@ def build_knowledge(
     docstring: per-call key isolation, and the accepted one-round-trip
     construction cost). Construction probes the vector table and creates it —
     with the pgvector extension — on first use.
+
+    The first-use probe is a TOCTOU check-then-create (agno's
+    ``PgVector.create`` runs ``table_exists()`` then an unchecked
+    ``Table.create``): two concurrent first-use constructions — two
+    simultaneous runs, or a run racing the first upload on a fresh
+    deployment — can both observe the table absent, and the loser's DDL
+    fails in one of two flavors. When the winner's DDL was ALREADY
+    COMMITTED, the loser's ``CREATE TABLE`` is answered with the
+    ``duplicate_table`` server error (SQLSTATE 42P07); when the two DDLs
+    OVERLAP (the winner's is still uncommitted), Postgres blocks the loser
+    on a catalog unique (name, namespace) index and the loser fails with a
+    unique_violation — empirically on the table's row type in pg_type
+    (``pg_type_typname_nsp_index``; ``pg_class_relname_nsp_index`` kept as
+    defense), and the concurrent ``CREATE EXTENSION`` racing the same way
+    fails on ``pg_extension_name_index``. Both flavors carry the good news (the
+    winner created the object), so they are absorbed with ONE retry of the
+    construction (the retry's probe now finds the table present and skips
+    creation). Any other failure propagates untouched — a real
+    misconfiguration (an unreachable store, missing pgvector extension,
+    permission denied) AND any data-level unique violation (a constraint
+    name other than those catalog indexes) must reach the callers'
+    existing degrade paths (dispatcher: run without retrieval; management
+    routes: 503), never be masked by a retry.
 
     Args:
         component_id: The component whose corpus this is (drives the default
@@ -311,13 +456,39 @@ def build_knowledge(
     readers = None
     if WebsiteReader is not None:
         readers = {"website": WebsiteReader(max_links=1)}
-    return Knowledge(
-        name=name or corpus_name(component_id),
-        vector_db=vector_db,
-        content_db=db,
-        isolate_vector_search=True,
-        readers=readers,
-    )
+
+    def _construct() -> Knowledge:
+        """One construction attempt (the table is probed/created in ``__post_init__``)."""
+        return Knowledge(
+            name=name or corpus_name(component_id),
+            vector_db=vector_db,
+            content_db=db,
+            isolate_vector_search=True,
+            readers=readers,
+        )
+
+    try:
+        return _construct()
+    except (ProgrammingError, IntegrityError) as e:
+        # The two race flavors (see the docstring): the committed-conflict
+        # duplicate_table error, and the overlapping-DDL catalog name-conflict
+        # unique violation. Any other failure — including a data-level unique
+        # violation — propagates untouched.
+        if not (_is_duplicate_table_error(e) or _is_catalog_name_conflict(e)):
+            raise
+        # The race loser's object already exists (the winner created it) — the
+        # one retry re-probes and skips creation. Bounded: exactly one. The
+        # vector store is reused (its engine is per-instance, already built),
+        # and safely so: every agno call opens its own session/connection
+        # (``create()``'s scoped session, ``table_exists()``'s per-call
+        # inspection, ``Table.create``'s engine connection) and the pool
+        # rolls connections back on return, so the retry never reuses the
+        # aborted transaction's connection.
+        log_warning(
+            "knowledge: cold-start table-creation race lost — retrying the "
+            "construction once (the concurrent winner created the shared table)"
+        )
+        return _construct()
 
 
 def build_knowledge_for(
