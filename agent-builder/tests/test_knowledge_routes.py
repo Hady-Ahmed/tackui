@@ -323,8 +323,10 @@ def test_failed_row_carries_the_status_message(client, offline_embedder, monkeyp
     expired key surfaced as 'authentication (HTTP 401) ... Check the
     embedder's API key and permissions'); the list entry serializes it so the
     author's UI can say WHY a row failed instead of a bare failed chip.
-    The seam is swapped for an embedder that constructs but rejects at embed
-    time — the expired-key shape."""
+    The seam is swapped for an embedder that constructs but raises agno's
+    ``EmbeddingError`` at embed time (status 401 → reason ``authentication``)
+    — the exact class the real provider embedder raises, so this pins the
+    classified path, not the generic upsert-failure fallback."""
     monkeypatch.setattr(
         knowledge_store, "_provider_embedder", lambda p, m, k: RejectingEmbedder()
     )
@@ -333,7 +335,13 @@ def test_failed_row_carries_the_status_message(client, offline_embedder, monkeyp
     rows = client.get("/platform/knowledge/failmsg", headers=admin_headers()).json()
     assert len(rows) == 1
     assert rows[0]["status"] == "failed"
-    assert rows[0]["statusMessage"], "the classified reason must reach the wire"
+    message = rows[0]["statusMessage"]
+    assert message, "the classified reason must reach the wire"
+    # The classified composition (reason + recovery hint), not a generic
+    # "Could not upsert embedding" fallback — agno derives both from the
+    # EmbeddingError's status code.
+    assert "Reason: authentication (HTTP 401)." in message
+    assert "Check the embedder's API key and permissions." in message
 
 
 def test_completed_row_has_a_null_status_message(client, offline_embedder):

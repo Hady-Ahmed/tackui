@@ -35,10 +35,15 @@ All notable changes to this project will be documented in this file. The format 
   (the service predates knowledge), distinct from unreachable.
 - **Added: the builder UI's Knowledge section + the run-gate 402 for
   knowledge-attached agents (#236).** The builder form (edit mode) now
-  curates the agent's knowledge corpus directly: multi-file upload, paste
-  text with a name, a URL, and an Advanced disclosure for chunk size and
+  curates the agent's knowledge corpus directly: multi-file upload (a
+  labeled picker row), paste text with a name, a URL (ingested as ONE
+  page — the site reader's link-crawl is capped at the submitted URL so
+  same-page `#anchor` links don't duplicate the page as extra documents;
+  Hady-Ahmed/tackui#260), and an Advanced disclosure for chunk size and
   overlap (blank = the platform's own defaults). The doc list shows status
-  chips (Processing / Ready / Partial / Failed) and polls every 5s while
+  chips (Processing / Ready / Partial / Failed) with a failed row also
+  showing the service's captured failure reason (e.g. an expired key's
+  "authentication (HTTP 401)") and polls every 5s while
   any row is processing; delete confirms first, and a delete that landed
   with a failed detach publish re-fetches the list as the truth and
   offers a retry-safe Retry (the service delete is idempotent). The

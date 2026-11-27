@@ -14,6 +14,7 @@ import re
 from dataclasses import dataclass
 from typing import List, Optional, Tuple
 
+from agno.exceptions import EmbeddingError
 from agno.knowledge.embedder.base import Embedder
 
 import knowledge as knowledge_store
@@ -104,8 +105,12 @@ class FakeEmbedder(Embedder):
 class RejectingEmbedder(FakeEmbedder):
     """A ``FakeEmbedder`` whose embed calls FAIL — the provider-rejection
     shape (an expired key's 401) without network. Construction succeeds (the
-    embedder builds fine); every embed attempt raises, so ingest marks the
-    content row failed with agno's classified ``status_message``.
+    embedder builds fine); every embed attempt raises the SAME exception
+    class a real provider embedder raises (agno's ``EmbeddingError``, which
+    agno's ingest path catches to write the CLASSIFIED status message — a
+    bare ``RuntimeError`` would take the generic upsert-failure branch and
+    the test would pin a message, not the classified one). 401 classifies
+    to reason ``authentication`` — the live-demo expired-key shape.
     """
 
     def _reject(self, text: str) -> List[float]:
@@ -115,9 +120,10 @@ class RejectingEmbedder(FakeEmbedder):
             text: The text the caller tried to embed.
 
         Raises:
-            RuntimeError: Always — the simulated provider rejection.
+            EmbeddingError: Always — the simulated provider rejection (an
+                expired key's 401).
         """
-        raise RuntimeError("simulated provider rejection")
+        raise EmbeddingError("Your API key has expired.", status_code=401)
 
     def get_embedding(self, text: str) -> List[float]:
         """Fail the sync embed (see ``_reject``).
@@ -126,7 +132,7 @@ class RejectingEmbedder(FakeEmbedder):
             text: The text the caller tried to embed.
 
         Raises:
-            RuntimeError: The simulated provider rejection.
+            EmbeddingError: The simulated provider rejection.
         """
         self._reject(text)
         raise AssertionError("unreachable")
@@ -138,7 +144,7 @@ class RejectingEmbedder(FakeEmbedder):
             text: The text the caller tried to embed.
 
         Raises:
-            RuntimeError: The simulated provider rejection.
+            EmbeddingError: The simulated provider rejection.
         """
         self._reject(text)
         raise AssertionError("unreachable")
@@ -150,7 +156,7 @@ class RejectingEmbedder(FakeEmbedder):
             text: The text the caller tried to embed.
 
         Raises:
-            RuntimeError: The simulated provider rejection.
+            EmbeddingError: The simulated provider rejection.
         """
         self._reject(text)
         raise AssertionError("unreachable")
@@ -162,7 +168,7 @@ class RejectingEmbedder(FakeEmbedder):
             text: The text the caller tried to embed.
 
         Raises:
-            RuntimeError: The simulated provider rejection.
+            EmbeddingError: The simulated provider rejection.
         """
         self._reject(text)
         raise AssertionError("unreachable")

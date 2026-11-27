@@ -1472,7 +1472,7 @@ export function BuilderForm({
                         visible picker (a bare file input reads as a text
                         field and was missed in the first live pass). */}
                     <label
-                      className={`flex cursor-pointer items-center justify-center rounded-lg border border-dashed border-zinc-300 px-3 py-3 text-xs text-zinc-600 transition-colors hover:border-zinc-400 hover:bg-zinc-50 dark:border-zinc-600 dark:text-zinc-300 dark:hover:border-zinc-500 dark:hover:bg-zinc-800 ${
+                      className={`flex cursor-pointer items-center justify-center rounded-lg border border-dashed border-zinc-300 px-3 py-3 text-xs text-zinc-600 transition-colors hover:border-zinc-400 hover:bg-zinc-50 focus-within:border-blue-500 dark:border-zinc-600 dark:text-zinc-300 dark:hover:border-zinc-500 dark:hover:bg-zinc-800 ${
                         knowledgeUploading ? "pointer-events-none opacity-50" : ""
                       }`}
                     >

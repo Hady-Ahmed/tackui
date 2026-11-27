@@ -1123,12 +1123,18 @@ half shipped in #235; the builder UI's Knowledge section and the run-gate
   size/overlap where BLANK means "the platform's own defaults" (agno's
   defaults differ per chunker, so the UI invents no number — fields ride
   every upload and the service applies them to files and pasted text;
-  URL ingest is agno's auto-detected reader). The doc list shows status
+  URL ingest is agno's auto-detected reader, capped to one page — the
+  website reader is constructed with `max_links=1` so a page's own
+  `#anchor` nav links are NOT re-fetched as separate documents
+  (Hady-Ahmed/tackui#260)). The doc list shows status
   chips over agno's ContentStatus — `processing`, `completed` (rendered
   "Ready"), `partial` (its own amber chip: searchable but incomplete —
-  never a false "Ready"), `failed` (inline re-upload guidance: delete +
-  re-upload, there is no resume) — and polls the list every 5s WHILE any
-  row is processing, stopping the moment every row settles (the interval
+  never a false "Ready"), `failed` (the captured failure reason when the
+  service stored one — agno's classified `status_message`, e.g. an
+  expired key's "authentication (HTTP 401)" — above the inline re-upload
+  guidance: delete + re-upload, there is no resume) — and polls the
+  list every 5s WHILE any row is processing, stopping the moment every
+  row settles (the interval
   is torn down on unmount too). Delete confirms first; a delete that
   LANDED with a failed detach publish (the 502/409 case) re-fetches the
   list as the truth — a vanished row surfaces a retry-safe notice whose
