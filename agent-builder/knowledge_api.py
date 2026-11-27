@@ -60,6 +60,12 @@ import knowledge as knowledge_store
 # agno truncates nothing, so this is the practical request-size bound.
 MAX_UPLOAD_BYTES = 10 * 1024 * 1024  # 10 MB
 
+# The optional display name lands verbatim in the contents row and feeds the
+# content-hash input — unbounded it would let a multi-MB string reach both.
+# Bounded for symmetry with the other validated inputs, not a quota (#241):
+# 300 chars is generous for a display name.
+MAX_NAME_CHARS = 300
+
 # Format allowlist: only extensions agno ships a real reader for. agno itself
 # silently falls back to the plain-text reader on unknown extensions, which
 # turns a binary file into garbage chunks — this service rejects instead of
@@ -302,9 +308,9 @@ def attach_knowledge_routes(app: FastAPI) -> None:
         Raises:
             HTTPException: 400 for a missing/misshapen request (no source,
                 multiple sources, missing key, oversized upload, rejected
-                format, malformed URL, invalid chunk params); 503 for
-                service-side conditions (misconfigured embedder, unreachable
-                storage) via :func:`_knowledge_for`.
+                format, over-long name, malformed URL, invalid chunk
+                params); 503 for service-side conditions (misconfigured
+                embedder, unreachable storage) via :func:`_knowledge_for`.
         """
         sources = [bool(file), bool(text_content), bool(url and url.strip())]
         if sum(sources) == 0:
@@ -318,6 +324,11 @@ def attach_knowledge_routes(app: FastAPI) -> None:
             raise HTTPException(
                 status_code=400,
                 detail="embedding_key is required — uploads are embedded with the creator's own key (BYOK).",
+            )
+        if name is not None and len(name) > MAX_NAME_CHARS:
+            raise HTTPException(
+                status_code=400,
+                detail=f"name exceeds the {MAX_NAME_CHARS}-character cap.",
             )
         if chunk_size is not None and chunk_size < 1:
             raise HTTPException(status_code=400, detail="chunk_size must be at least 1.")
