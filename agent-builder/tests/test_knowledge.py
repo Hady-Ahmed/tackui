@@ -111,6 +111,18 @@ def test_corpus_stamp_round_trip():
 # -- upload → status → search round-trip -------------------------------------
 
 
+def test_url_ingest_is_capped_to_one_page(agno_db, postgres_dsn):
+    """The platform URL ingest fetches exactly the submitted page: the
+    website reader is capped at max_links=1 (decision recorded in
+    Hady-Ahmed/tackui#260 — without it, a single-page site's #anchor nav
+    produced one row per fragment and duplicated content crowding
+    retrieval). Only the ``website`` key is provided — sitemap/YouTube
+    keep agno's factory defaults (auto-detection untouched)."""
+    kb = build_fake_knowledge("urlcap-agent", agno_db, postgres_dsn)
+    assert set(kb.readers.keys()) == {"website"}
+    assert kb.readers["website"].max_links == 1
+
+
 async def test_upload_process_search_round_trip(agno_db, postgres_dsn):
     """Upload → status processing → completed → exact retrieval — the service's whole
     ingest path (agno's stock process_content) with the fake embedder, no network."""

@@ -43,6 +43,15 @@ from agno.knowledge.embedder.base import Embedder
 from agno.knowledge.knowledge import Knowledge
 from agno.utils.log import log_warning
 
+try:  # the website extra is in pyproject; a stripped env degrades to agno's factory
+    from agno.knowledge.reader.website_reader import WebsiteReader
+except ImportError:  # pragma: no cover
+    WebsiteReader = None  # type: ignore[assignment,misc]
+    log_warning(
+        "agno website reader unavailable — URL ingest falls back to agno's factory"
+        " default (max_links=10); the one-page cap (Hady-Ahmed/tackui#260) is OFF"
+    )
+
 # The shared vector table: one table, every corpus, isolation by ``linked_to``.
 # Lives in the `public` schema (our infrastructure) — NOT agno's default `ai`.
 KNOWLEDGE_TABLE = "builder_knowledge"
@@ -279,11 +288,26 @@ def build_knowledge(
         db_url=url,
         embedder=embedder,
     )
+    # URL ingest is ONE PAGE, by decision (Hady-Ahmed/tackui#260): the
+    # platform caps the website reader at max_links=1 — the crawl loop
+    # spends its only slot on the submitted URL, so every queued link
+    # (including same-page #anchor fragments, whose full-URL strings agno's
+    # visited-set treats as distinct) is skipped. Without the cap a
+    # single-page site with a 7-anchor nav produced 8 rows of duplicated
+    # content and crowded retrieval. Sitemap/YouTube auto-detection is
+    # untouched (only the "website" key is provided; the rest fall through
+    # to agno's factory). FLIP-OFF: when multi-page crawling is wanted,
+    # raise the value (or make it env-configurable) — see #260 for the
+    # trade-offs recorded at decision time.
+    readers = None
+    if WebsiteReader is not None:
+        readers = {"website": WebsiteReader(max_links=1)}
     return Knowledge(
         name=corpus_name(component_id),
         vector_db=vector_db,
         content_db=db,
         isolate_vector_search=True,
+        readers=readers,
     )
 
 
