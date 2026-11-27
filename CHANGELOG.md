@@ -16,7 +16,9 @@ All notable changes to this project will be documented in this file. The format 
   uploads — then the upload is forwarded multipart with the author's own
   OpenAI key (`embedding_key`, resolved server-side from the credential
   store; rides in the request body only, never in a response, a log
-  line, or an error detail; an author without the key gets a 400
+  line, or an error detail — the ingest's own error path skips upstream
+  detail extraction entirely, so even a service echoing form input in
+  validation errors can't leak it); an author without the key gets a 400
   pointing at the API-keys page). `agentosRequest` grew a FormData
   pass-through branch (no JSON encoding, no Content-Type — fetch sets
   the multipart boundary). First upload on a knowledge-less agent
@@ -33,7 +35,10 @@ All notable changes to this project will be documented in this file. The format 
   credentials catalog adds the embedding provider when knowledge is
   enabled and no model carries it (otherwise the required key could
   never be saved). The knowledge config's 404 reads as "unsupported"
-  (the service predates knowledge), distinct from unreachable.
+  (the service predates knowledge), distinct from unreachable; an
+  `enabled` answer naming no embedder is rejected at the read as a
+  malformed payload (502) instead of failing the attach later with a
+  generic 500.
 - **Added: the builder UI's Knowledge section + the run-gate 402 for
   knowledge-attached agents (#236).** The builder form (edit mode) now
   curates the agent's knowledge corpus directly: multi-file upload (a
