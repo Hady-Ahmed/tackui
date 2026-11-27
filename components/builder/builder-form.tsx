@@ -1460,71 +1460,101 @@ export function BuilderForm({
                   </div>
                 )}
 
-                {/* Upload rows — file picker (multi), paste-text, URL. Each
-                    is one POST (the route takes exactly one source). */}
-                <div className="space-y-2 rounded-lg border border-zinc-200 px-3 py-3 dark:border-zinc-700">
-                  <label className="flex items-center gap-2 text-xs text-zinc-500 dark:text-zinc-400">
+                {/* Upload rows — three labeled sources (files / pasted
+                    text / web page). Each is one POST (the route takes
+                    exactly one source). */}
+                <div className="space-y-4 rounded-lg border border-zinc-200 px-3 py-3 dark:border-zinc-700">
+                  <div className="space-y-1.5">
+                    <p className="text-xs font-medium text-zinc-600 dark:text-zinc-300">
+                      Files
+                    </p>
+                    {/* The native input is sr-only — the dashed row is the
+                        visible picker (a bare file input reads as a text
+                        field and was missed in the first live pass). */}
+                    <label
+                      className={`flex cursor-pointer items-center justify-center rounded-lg border border-dashed border-zinc-300 px-3 py-3 text-xs text-zinc-600 transition-colors hover:border-zinc-400 hover:bg-zinc-50 dark:border-zinc-600 dark:text-zinc-300 dark:hover:border-zinc-500 dark:hover:bg-zinc-800 ${
+                        knowledgeUploading ? "pointer-events-none opacity-50" : ""
+                      }`}
+                    >
+                      <input
+                        ref={knowledgeFileInputRef}
+                        type="file"
+                        multiple
+                        accept={KNOWLEDGE_FILE_ACCEPT}
+                        disabled={knowledgeUploading}
+                        onChange={(e) => void handleKnowledgeFiles(e.target.files)}
+                        aria-label="Upload files"
+                        className="sr-only"
+                      />
+                      <span>Choose files…</span>
+                    </label>
+                    <p className="text-[11px] text-zinc-400">
+                      PDF, CSV, Excel, Word, PowerPoint, JSON, Markdown, TXT —
+                      up to 10 MB each.
+                    </p>
+                  </div>
+
+                  <div className="space-y-1.5">
+                    <p className="text-xs font-medium text-zinc-600 dark:text-zinc-300">
+                      Paste text
+                    </p>
                     <input
-                      ref={knowledgeFileInputRef}
-                      type="file"
-                      multiple
-                      accept={KNOWLEDGE_FILE_ACCEPT}
-                      disabled={knowledgeUploading}
-                      onChange={(e) => void handleKnowledgeFiles(e.target.files)}
-                      aria-label="Upload files"
-                      className="min-w-0 flex-1 cursor-pointer text-xs"
+                      value={pasteName}
+                      onChange={(e) => setPasteName(e.target.value)}
+                      maxLength={200}
+                      placeholder="Document name"
+                      aria-label="Pasted text document name"
+                      className={inputClass()}
                     />
-                  </label>
-                  <p className="text-[11px] text-zinc-400">
-                    PDF, CSV, Excel, Word, PowerPoint, JSON, Markdown, TXT — up
-                    to 10 MB each.
-                  </p>
-                  <div className="space-y-2">
                     <textarea
                       value={pasteText}
                       onChange={(e) => setPasteText(e.target.value)}
                       rows={3}
-                      placeholder="Paste text to add as a document…"
+                      placeholder="Paste the document's text here…"
                       aria-label="Paste text to add as a document"
                       maxLength={KNOWLEDGE_MAX_UPLOAD_BYTES}
                       className={inputClass()}
                     />
+                    {/* Directly under the textarea it submits — "Add text"
+                        next to the name field read as a second document
+                        flow in the first live pass. */}
+                    <button
+                      type="button"
+                      onClick={() => void handleKnowledgeText()}
+                      disabled={knowledgeUploading}
+                      className="rounded-lg border border-zinc-200 px-3 py-2 text-xs font-medium text-zinc-700 transition-colors hover:bg-zinc-100 disabled:opacity-50 dark:border-zinc-700 dark:text-zinc-300 dark:hover:bg-zinc-800"
+                    >
+                      Add text
+                    </button>
+                  </div>
+
+                  <div className="space-y-1.5">
+                    <p className="text-xs font-medium text-zinc-600 dark:text-zinc-300">
+                      Web page
+                    </p>
                     <div className="flex gap-2">
                       <input
-                        value={pasteName}
-                        onChange={(e) => setPasteName(e.target.value)}
-                        maxLength={200}
-                        placeholder="Document name"
-                        aria-label="Pasted text document name"
+                        value={knowledgeUrl}
+                        onChange={(e) => setKnowledgeUrl(e.target.value)}
+                        placeholder="https://example.com/page"
+                        aria-label="Page URL to add as a document"
                         className={inputClass()}
                       />
                       <button
                         type="button"
-                        onClick={() => void handleKnowledgeText()}
+                        onClick={() => void handleKnowledgeUrl()}
                         disabled={knowledgeUploading}
                         className="shrink-0 rounded-lg border border-zinc-200 px-3 py-2 text-xs font-medium text-zinc-700 transition-colors hover:bg-zinc-100 disabled:opacity-50 dark:border-zinc-700 dark:text-zinc-300 dark:hover:bg-zinc-800"
                       >
-                        Add text
+                        Add URL
                       </button>
                     </div>
+                    <p className="text-[11px] text-zinc-400">
+                      The page is fetched and read when it&apos;s added — not
+                      at run time.
+                    </p>
                   </div>
-                  <div className="flex gap-2">
-                    <input
-                      value={knowledgeUrl}
-                      onChange={(e) => setKnowledgeUrl(e.target.value)}
-                      placeholder="https://example.com/page"
-                      aria-label="Page URL to add as a document"
-                      className={inputClass()}
-                    />
-                    <button
-                      type="button"
-                      onClick={() => void handleKnowledgeUrl()}
-                      disabled={knowledgeUploading}
-                      className="shrink-0 rounded-lg border border-zinc-200 px-3 py-2 text-xs font-medium text-zinc-700 transition-colors hover:bg-zinc-100 disabled:opacity-50 dark:border-zinc-700 dark:text-zinc-300 dark:hover:bg-zinc-800"
-                    >
-                      Add URL
-                    </button>
-                  </div>
+
                   {/* Advanced — chunk fields. Blank = the platform's own
                       defaults (agno's defaults differ per chunker, so the
                       UI shows blanks rather than inventing a number).
