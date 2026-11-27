@@ -423,20 +423,68 @@ describe("BuilderForm — the Knowledge section", () => {
     vi.useRealTimers();
   });
 
-  it("create mode: the one-line note, no capability fetch, no section", async () => {
+  it("create mode: the knowledge preview is visible before saving — header, the three sources, and the save-first note", async () => {
+    // The discovery gap (#259): a one-line note below the form didn't
+    // register — first-time builders were never shown that knowledge
+    // exists. Create mode now renders the section as an inert preview:
+    // the same header and upload rows the edit section carries, so the
+    // capability is visible where it will live after the save.
     const { fetchMock } = stubKnowledgeFetch({});
     render(
       <BuilderForm
         {...builderProps({ mode: "create", agentId: undefined })}
       />,
     );
-    await screen.findByText(/save the agent first, then add documents/);
-    expect(screen.queryByText("Knowledge")).toBeNull();
-    // No knowledge fetches in create mode (docs attach post-save).
+    expect(screen.getByText("Knowledge")).toBeTruthy();
+    await screen.findByText(/Save the agent first, then add documents it can search/);
+    expect(screen.getByText("Files")).toBeTruthy();
+    expect(screen.getByText("Choose files…")).toBeTruthy();
+    expect(screen.getByText("Paste text")).toBeTruthy();
+    expect(screen.getByText("Web page")).toBeTruthy();
+    // The preview is the affordance, not the live section — no Advanced
+    // disclosure (chunk tuning is an edit-mode concern), no doc rows.
+    expect(screen.queryByText("Advanced — chunk size and overlap")).toBeNull();
+    expect(screen.queryByText("Handbook.pdf")).toBeNull();
+    // The preview is static — no capability or corpus fetch in create
+    // mode (docs attach to a SAVED component's corpus).
     const knowledgeFetches = fetchMock.mock.calls.filter((c) =>
       String(c[0]).includes("/knowledge"),
     );
     expect(knowledgeFetches).toHaveLength(0);
+  });
+
+  it("create mode: every preview control is disabled and nothing is wired (clicks make no calls)", async () => {
+    // Inert-but-real, not clickable-and-broken: the same controls the
+    // edit section carries, all genuinely disabled, and no handlers —
+    // interacting with the preview fires nothing.
+    const { fetchMock } = stubKnowledgeFetch({});
+    render(
+      <BuilderForm
+        {...builderProps({ mode: "create", agentId: undefined })}
+      />,
+    );
+    await screen.findByText(/Save the agent first/);
+    expect((screen.getByLabelText("Upload files") as HTMLInputElement).disabled).toBe(true);
+    expect(
+      (screen.getByLabelText("Pasted text document name") as HTMLInputElement).disabled,
+    ).toBe(true);
+    expect(
+      (screen.getByLabelText("Paste text to add as a document") as HTMLTextAreaElement)
+        .disabled,
+    ).toBe(true);
+    expect(
+      (screen.getByLabelText("Page URL to add as a document") as HTMLInputElement).disabled,
+    ).toBe(true);
+    expect((screen.getByRole("button", { name: "Add text" }) as HTMLButtonElement).disabled).toBe(
+      true,
+    );
+    expect((screen.getByRole("button", { name: "Add URL" }) as HTMLButtonElement).disabled).toBe(
+      true,
+    );
+    fireEvent.click(screen.getByText("Choose files…"));
+    fireEvent.click(screen.getByRole("button", { name: "Add text" }));
+    fireEvent.click(screen.getByRole("button", { name: "Add URL" }));
+    expect(fetchMock.mock.calls).toHaveLength(0);
   });
 
   it("capability available: the section renders with the doc list rows", async () => {

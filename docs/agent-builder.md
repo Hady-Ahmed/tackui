@@ -1158,9 +1158,18 @@ half shipped in #235; the builder UI's Knowledge section and the run-gate
   contract — exactly one item rides the run (the first delivery
   survives, matching the model-wins convention above). Without knowledge
   in the snapshot the check is a passthrough.
-- **The builder form's Knowledge section (#236)** — edit-mode only (docs
-  attach to a SAVED component; create mode shows the one-line note). The
-  section gates on the capability proxy `GET
+- **The builder form's Knowledge section (#236)** — live curation is
+  edit-mode only (docs attach to a SAVED component; the corpus address
+  doesn't exist before the first save). Create mode instead renders the
+  section as an INERT PREVIEW (#259): the same header and the same three
+  upload rows the edit section carries, every control disabled and
+  nothing wired, with the note carrying the save-first explanation
+  ("Save the agent first, then add documents it can search — PDFs,
+  pasted text, or web pages."). No capability fetch fires in create
+  mode (there is no agent yet) — the preview assumes the deployment's
+  knowledge state is worth showing, and the live section's capability
+  gate takes over after the save. The live section gates on the
+  capability proxy `GET
   /api/agents/[id]/knowledge/config` (member-accessible, `agentRead`
   bucket, NOT author-gated — read-only capability metadata, same posture
   as `/api/tools`' palette): `enabled` renders the section, `enabled:

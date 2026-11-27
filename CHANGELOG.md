@@ -68,7 +68,14 @@ All notable changes to this project will be documented in this file. The format 
   /api/agents/[id]/knowledge/config` (member-accessible, `agentRead`
   bucket) — knowledge-off deployments hide it with a one-line
   explanation, and a failed capability fetch renders an error banner,
-  never a false "knowledge is off". The header's key badge demands the
+  never a false "knowledge is off". In create mode the section renders
+  as an inert preview (#259) — the same header and upload rows the edit
+  section carries, every control disabled and nothing wired, and the
+  note upgraded from a bare save-first reminder to a feature statement
+  ("Save the agent first, then add documents it can search — PDFs,
+  pasted text, or web pages.") — closing the live-demo discovery gap
+  where a first-time builder was never shown that knowledge exists. The
+  header's key badge demands the
   embedding provider's key when missing ("Needs your OpenAI key" with a
   connect shortcut) and hides itself when the model's badge already
   demands the same key — one line, not two. The run gate now 402s a

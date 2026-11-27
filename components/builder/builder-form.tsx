@@ -63,8 +63,10 @@ import {
   KNOWLEDGE_DETACH_RETRY_COPY,
   KNOWLEDGE_FAILED_HINT,
   KNOWLEDGE_FILE_ACCEPT,
+  KNOWLEDGE_FILE_TYPE_HINT,
   KNOWLEDGE_MAX_UPLOAD_BYTES,
   KNOWLEDGE_POLL_MS,
+  KNOWLEDGE_URL_HINT,
   knowledgeCapabilityState,
   knowledgeDateLabel,
   knowledgeFileError,
@@ -1380,14 +1382,15 @@ export function BuilderForm({
         </Field>
 
         {/* Knowledge — documents the agent can search at run time. Docs
-            attach to a SAVED component, so the section exists only in
-            edit mode; create mode carries the one-line note. Edit mode
-            gates the section on the capability signal (hidden with an
-            explanation when off/unsupported, the error banner when
+            attach to a SAVED component, so the LIVE section (upload +
+            delete, capability-gated) exists only in edit mode; create
+            mode renders the section as an inert preview (#259) so a
+            first-time builder SEES the capability exists before saving —
+            the one-line note alone didn't register (Nov 26 demo). Edit
+            mode gates the section on the capability signal (hidden with
+            an explanation when off/unsupported, the error banner when
             unreachable — empty-vs-unreachable, same as the palette). */}
-        {mode === "create" && (
-          <p className="text-xs text-zinc-500 dark:text-zinc-400">{KNOWLEDGE_CREATE_NOTE}</p>
-        )}
+        {mode === "create" && <KnowledgeCreatePreview />}
         {mode === "edit" && knowledgeCap && knowledgeCap.kind !== "loading" && (
           <fieldset className="min-w-0 space-y-2 border-0 p-0">
             <div className="flex flex-wrap items-center gap-2">
@@ -1489,8 +1492,7 @@ export function BuilderForm({
                       <span>Choose files…</span>
                     </label>
                     <p className="text-[11px] text-zinc-400">
-                      PDF, CSV, Excel, Word, PowerPoint, JSON, Markdown, TXT —
-                      up to 10 MB each.
+                      {KNOWLEDGE_FILE_TYPE_HINT}
                     </p>
                   </div>
 
@@ -1549,10 +1551,7 @@ export function BuilderForm({
                         Add URL
                       </button>
                     </div>
-                    <p className="text-[11px] text-zinc-400">
-                      The page is fetched and read when it&apos;s added — not
-                      at run time.
-                    </p>
+                    <p className="text-[11px] text-zinc-400">{KNOWLEDGE_URL_HINT}</p>
                   </div>
 
                   {/* Advanced — chunk fields. Blank = the platform's own
@@ -2078,6 +2077,108 @@ function KnowledgeKeyBadgeView({
         </button>
       ) : null}
     </span>
+  );
+}
+
+/**
+ * The Knowledge section's create-mode preview (#259). Docs attach to a
+ * SAVED component's corpus, so the live section only exists in edit
+ * mode — which hid the capability from every first-time builder (the
+ * Nov 26 demo's discovery gap: the one-line note alone didn't
+ * register). Create mode instead renders the section INERT: the same
+ * header and the same three upload rows the edit section carries, every
+ * control genuinely disabled and nothing wired — inert-but-real, not
+ * clickable-and-broken — with the note explaining the save-first gate.
+ * No capability fetch fires (there is no agent yet); the preview shows
+ * the capability where it will live, and the edit mode's capability
+ * gate takes over after the save.
+ */
+function KnowledgeCreatePreview() {
+  return (
+    <fieldset className="min-w-0 space-y-2 border-0 p-0">
+      <div className="flex flex-wrap items-center gap-2">
+        <span className="text-xs font-medium text-zinc-700 dark:text-zinc-300">
+          Knowledge
+        </span>
+      </div>
+      <p className="text-[11px] text-zinc-400">
+        Documents the agent can search at run time.
+      </p>
+      <div className="space-y-4 rounded-lg border border-zinc-200 px-3 py-3 dark:border-zinc-700">
+        <div className="space-y-1.5">
+          <p className="text-xs font-medium text-zinc-600 dark:text-zinc-300">
+            Files
+          </p>
+          {/* The same dashed picker row the edit section carries, minus
+              the interactive affordances (no cursor/hover) — the disabled
+              input cannot open a picker, so the row reads inert rather
+              than clickable-and-broken. */}
+          <label className="flex items-center justify-center rounded-lg border border-dashed border-zinc-300 px-3 py-3 text-xs text-zinc-600 opacity-60 dark:border-zinc-600 dark:text-zinc-300">
+            <input
+              type="file"
+              multiple
+              accept={KNOWLEDGE_FILE_ACCEPT}
+              disabled
+              aria-label="Upload files"
+              className="sr-only"
+            />
+            <span>Choose files…</span>
+          </label>
+          <p className="text-[11px] text-zinc-400">{KNOWLEDGE_FILE_TYPE_HINT}</p>
+        </div>
+
+        <div className="space-y-1.5">
+          <p className="text-xs font-medium text-zinc-600 dark:text-zinc-300">
+            Paste text
+          </p>
+          <input
+            disabled
+            maxLength={200}
+            placeholder="Document name"
+            aria-label="Pasted text document name"
+            className={inputClass(true)}
+          />
+          <textarea
+            disabled
+            rows={3}
+            placeholder="Paste the document's text here…"
+            aria-label="Paste text to add as a document"
+            maxLength={KNOWLEDGE_MAX_UPLOAD_BYTES}
+            className={inputClass(true)}
+          />
+          <button
+            type="button"
+            disabled
+            className="rounded-lg border border-zinc-200 px-3 py-2 text-xs font-medium text-zinc-700 disabled:opacity-50 dark:border-zinc-700 dark:text-zinc-300"
+          >
+            Add text
+          </button>
+        </div>
+
+        <div className="space-y-1.5">
+          <p className="text-xs font-medium text-zinc-600 dark:text-zinc-300">
+            Web page
+          </p>
+          <div className="flex gap-2">
+            <input
+              disabled
+              placeholder="https://example.com/page"
+              aria-label="Page URL to add as a document"
+              className={inputClass(true)}
+            />
+            <button
+              type="button"
+              disabled
+              className="shrink-0 rounded-lg border border-zinc-200 px-3 py-2 text-xs font-medium text-zinc-700 disabled:opacity-50 dark:border-zinc-700 dark:text-zinc-300"
+            >
+              Add URL
+            </button>
+          </div>
+          <p className="text-[11px] text-zinc-400">{KNOWLEDGE_URL_HINT}</p>
+        </div>
+      </div>
+      <p className="text-xs text-zinc-500 dark:text-zinc-400">{KNOWLEDGE_CREATE_NOTE}</p>
+    </fieldset>
   );
 }
 
