@@ -29,6 +29,11 @@ from platform_test_helpers import admin_headers, user_headers
 def offline_embedder(monkeypatch):
     """Swap the provider-dispatch seam for the deterministic fake embedder.
 
+    The ambient ``KNOWLEDGE_EMBEDDER`` is scrubbed suite-wide (conftest's
+    ``hermetic_embedder_env``): ``build_knowledge_for`` parses the env BEFORE
+    dispatching to this seam, so the parse must read the platform default —
+    a malformed developer-shell export must not 503 these tests (#240).
+
     Args:
         monkeypatch: pytest's patcher (restores the seam after the test).
 
