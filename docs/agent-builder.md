@@ -1181,7 +1181,10 @@ half shipped in #235; the builder UI's Knowledge section and the run-gate
   (Hady-Ahmed/tackui#260)). The doc list shows status
   chips over agno's ContentStatus — `processing`, `completed` (rendered
   "Ready"), `partial` (its own amber chip: searchable but incomplete —
-  never a false "Ready"), `failed` (the captured failure reason when the
+  never a false "Ready" — plus agno's classified partial `status_message`
+  rendered the same break-words way as the failed reason: "N of M chunks
+  were embedded; Z failed and are not retrievable…"), `failed` (the
+  captured failure reason when the
   service stored one — agno's classified `status_message`, e.g. an
   expired key's "authentication (HTTP 401)" — above the inline re-upload
   guidance: delete + re-upload, there is no resume) — and polls the

@@ -55,7 +55,9 @@ All notable changes to this project will be documented in this file. The format 
   doc list shows status
   chips (Processing / Ready / Partial / Failed) with a failed row also
   showing the service's captured failure reason (e.g. an expired key's
-  "authentication (HTTP 401)") and each row also renders the
+  "authentication (HTTP 401)") and a partial row showing agno's
+  classified partial reason (how many chunks embedded, how many failed
+  and are not retrievable), and each row also renders the
   document's description as a muted second line under the name when one
   is on the wire (pasted text carries none — the name is what the user
   typed), and polls every 5s while

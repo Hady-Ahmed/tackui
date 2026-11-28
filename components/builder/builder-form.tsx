@@ -2090,7 +2090,11 @@ function KnowledgeKeyBadgeView({
  * carries the captured failure reason when the service stored one (agno's
  * classified ``status_message`` — e.g. an expired key's "authentication
  * (HTTP 401)") plus the re-upload guidance inline (the upload creates a
- * NEW content row — there is no resume, so the copy says so plainly).
+ * NEW content row — there is no resume, so the copy says so plainly). A
+ * partial row carries agno's classified partial reason the same way ("N
+ * of M chunks were embedded; Z failed and are not retrievable…") — the
+ * bare amber chip never leaves the author guessing how incomplete the
+ * row is.
  */
 function KnowledgeDocRowView({
   doc,
@@ -2145,6 +2149,19 @@ function KnowledgeDocRowView({
           <p>{KNOWLEDGE_FAILED_HINT}</p>
         </div>
       )}
+      {doc.status === "partial" && doc.statusMessage ? (
+        // agno writes a classified reason on PARTIAL rows too ("N of M
+        // chunks were embedded; Z failed and are not retrievable…") —
+        // the same captured-reason paragraph the failed branch renders,
+        // in the same position under the header line, so the bare amber
+        // chip never leaves the author guessing how incomplete the row
+        // is. The failed remedy does NOT ride along (something was kept
+        // — agno's own copy says re-ingest), so the reason rides alone;
+        // absent (the wire allows null) the chip stays bare.
+        <p className="mt-1 break-words text-[11px] text-zinc-500 dark:text-zinc-400">
+          {doc.statusMessage}
+        </p>
+      ) : null}
     </div>
   );
 }
