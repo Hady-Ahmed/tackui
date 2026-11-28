@@ -202,8 +202,12 @@ bodies — so every route may render it verbatim. The upstream
 validation text rides in `AgentosError.detail` (parsed from the
 FastAPI `detail` field), and only admin-gated routes surface it:
 `/api/admin/platform/*` return `{error, detail}`, member routes return
-`error` alone. The full upstream body is always logged server-side for
-operators.
+`error` alone. The extracted upstream detail is always logged
+server-side for operators — with one exception: multipart (FormData)
+calls skip detail extraction entirely, because their bodies carry
+secrets (the knowledge ingest's `embedding_key`) and a service echoing
+form input in validation errors must not copy it into logs or
+`detail`; that log line keeps the method/path/status framing.
 
 ## Models & tools — the admin page (`/admin/platform`)
 
@@ -1053,11 +1057,21 @@ half shipped in #235; the builder UI's Knowledge section and the run-gate
   `AgentosError`): `fetchKnowledgeConfig` (the capability signal — a 404
   degrades to `{enabled: false, unsupported: true}`, so a service that
   predates knowledge reads as unsupported, NOT unreachable; a transport
-  failure still throws), `fetchKnowledgeList` (camelCase rows, zod-validated),
+  failure still throws; an `enabled` answer naming no embedder is
+  rejected as a malformed payload — 502 — instead of poisoning the
+  attach write with a snapshot that can't parse; that 502 also degrades
+  `fetchCredentialsCatalog` fail-closed — the whole catalog view nulls
+  to the unreachable-builder copy, so all key-saving blocks, not just
+  knowledge uploads — an upstream-bug-only blast radius the catalog's
+  own guard used to absorb),
+  `fetchKnowledgeList` (camelCase rows, zod-validated),
   `uploadKnowledgeContent` (multipart), `deleteKnowledgeContent` (idempotent).
   `agentosRequest` grew a FormData branch: a form body passes through
   UNTOUCHED with no Content-Type header (fetch derives the multipart
-  boundary) — never base64 a file into JSON. `knowledgeCorpusName` derives
+  boundary) — never base64 a file into JSON — and a form body's 4xx/5xx
+  responses skip detail extraction entirely (the ingest's body carries
+  the embedding key; an echoing error body must not reach the logs).
+  `knowledgeCorpusName` derives
   `kb-<component_id>` on both sides, so the config ref and the corpus agree
   by construction.
 - **Proxy routes (`app/api/agents/[id]/knowledge/`)** — GET (list) +
@@ -1079,7 +1093,10 @@ half shipped in #235; the builder UI's Knowledge section and the run-gate
   the dispatcher resolves is `openai_api_key`). An author without the key
   cannot upload: 400 with copy pointing at the API-keys page. The key rides
   in the multipart body ONLY — never in a response, a log line, or an error
-  detail. The credentials catalog grows an entry for the embedding provider
+  detail (the ingest's error path skips upstream-detail extraction
+  entirely, so even a service echoing form input in validation errors
+  can't leak it). The credentials catalog grows an entry for the
+  embedding provider
   when knowledge is enabled and no model carries it (otherwise the key could
   never be saved — dead knowledge).
 - **Attach/detach lifecycle (`app/api/agents/[id]/knowledge/lifecycle.ts`)** —

@@ -250,11 +250,14 @@ export async function agentosRequest<T>(
   if (!/^\/[A-Za-z0-9._~/%-]*$/.test(path)) {
     throw new AgentosError(500, "Internal error building the platform request.");
   }
+  // A FormData body is passed through as-is (fetch sets the multipart
+  // boundary); anything else is JSON-serialized. The flag also gates the
+  // error path below: a form body may carry a secret (the knowledge
+  // ingest rides the creator's embedding key), so its error detail is
+  // never extracted.
+  const isForm = body instanceof FormData;
   let res: Response;
   try {
-    // A FormData body is passed through as-is (fetch sets the multipart
-    // boundary); anything else is JSON-serialized.
-    const isForm = body instanceof FormData;
     res = await fetch(`${AGENTOS_BASE_URL}${path}`, {
       method,
       headers: {
@@ -274,10 +277,22 @@ export async function agentosRequest<T>(
     );
   }
   if (!res.ok) {
-    const detail = extractDetail(await res.text().catch(() => ""));
+    // Detail extraction is skipped for form bodies: the multipart ingest
+    // carries the creator's embedding key in its body ONLY (the module
+    // invariant), while extractDetail copies upstream error bodies into
+    // the server log and admin-facing `detail` — a foreign/future
+    // service that echoes form input in validation errors would copy
+    // the key with it. Skipping the whole extraction is airtight; a
+    // scrub would bet the invariant on matching every echo shape
+    // (FastAPI 422 entry arrays, encodings, truncation slices). The
+    // operator keeps the method/path/status framing on the same line.
+    const detail = isForm
+      ? undefined
+      : extractDetail(await res.text().catch(() => ""));
     const status = res.status === 401 || res.status === 403 ? 502 : res.status;
-    // Log the full body server-side (it keeps method/path framing — that's
-    // for operators reading logs, not for the browser).
+    // Log the error server-side (it keeps method/path framing — that's
+    // for operators reading logs, not for the browser; form bodies skip
+    // the detail, see above).
     console.error(`[agentos] ${method} ${path} failed (${res.status})${detail ? `: ${detail}` : ""}`);
     if (status < 500) {
       throw new AgentosError(
@@ -355,14 +370,27 @@ export interface KnowledgeConfig {
   unsupported?: boolean;
 }
 
-const knowledgeConfigSchema = z.object({
-  enabled: z.boolean(),
-  provider: z.string(),
-  model: z.string(),
-});
+const knowledgeConfigSchema = z
+  .object({
+    enabled: z.boolean(),
+    provider: z.string(),
+    model: z.string(),
+  })
+  // A capability answer claiming enabled WITHOUT naming the embedder
+  // would survive this read and then fail requirementsSchema's min(1)
+  // at the attach write — a generic 500 with the corpus already
+  // uploaded. The disabled answer legitimately carries empty strings
+  // (the service blanks them), so the check is conditional: enabled +
+  // empty is an upstream bug, rejected here with the same 502 posture
+  // as any malformed payload.
+  .refine(
+    (cfg) => !cfg.enabled || (cfg.provider.length > 0 && cfg.model.length > 0),
+    "enabled knowledge requires a provider and a model",
+  );
 
 /** GET /platform/knowledge/config — never throws for a 404 (unsupported);
- *  transport/5xx failures propagate as AgentosError (unreachable). */
+ *  transport/5xx failures and a payload that fails the schema (including
+ *  an enabled answer naming no embedder) propagate as AgentosError. */
 export async function fetchKnowledgeConfig(): Promise<KnowledgeConfig> {
   try {
     const body = await agentosRequest<unknown>(

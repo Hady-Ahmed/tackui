@@ -103,6 +103,64 @@ describe("agentosRequest error discipline", () => {
     expect(err.message).not.toContain("boom");
   });
 
+  it("a multipart body's 4xx never leaks its form values into detail or the log", async () => {
+    // The multipart ingest (uploadKnowledgeContent) carries the creator's
+    // embedding key in its body ONLY. A foreign/future service that echoes
+    // form input in validation errors would otherwise copy the key into
+    // the server log and admin-facing detail — so FormData bodies skip
+    // detail extraction entirely (airtight beats scrub-shaped). Called
+    // through the wrapper so the real ingest call site is exercised.
+    const errSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    // The mock echoes the REAL form the wrapper builds — the exported
+    // ingest call site is what's pinned, not a hand-built stand-in (a
+    // future refactor passing a non-FormData body would fail this loudly).
+    let sentKey = "";
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (_url: string | URL | Request, init?: RequestInit) => {
+        const body = init?.body;
+        sentKey =
+          body instanceof FormData ? String(body.get("embedding_key")) : "";
+        return jsonResponse(
+          { detail: `invalid value for embedding_key: ${sentKey}` },
+          422,
+        );
+      }),
+    );
+    const err = await rejection(
+      uploadKnowledgeContent({
+        componentId: "abc123",
+        text: "hello",
+        embeddingKey: "sk-echo-secret",
+      }),
+    );
+    expect(sentKey).toBe("sk-echo-secret");
+    expect(err.status).toBe(422);
+    expect(err.detail).toBeUndefined();
+    expect(errSpy).toHaveBeenCalledTimes(1);
+    const logLine = String(errSpy.mock.calls[0]?.[0]);
+    expect(logLine).toBe(
+      "[agentos] POST /platform/knowledge/abc123/content failed (422)",
+    );
+    errSpy.mockRestore();
+    // Contrast: the SAME echoed body on a JSON-body call still extracts
+    // the detail — the skip is form-scoped, not a blanket detail removal.
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () =>
+        jsonResponse(
+          { detail: "invalid value for embedding_key: sk-echo-secret" },
+          422,
+        ),
+      ),
+    );
+    const errSpy2 = vi.spyOn(console, "error").mockImplementation(() => {});
+    const jsonErr = await rejection(testPlatformModel("openrouter:nope"));
+    expect(jsonErr.detail).toBe("invalid value for embedding_key: sk-echo-secret");
+    expect(String(errSpy2.mock.calls[0]?.[0])).toContain("sk-echo-secret");
+    errSpy2.mockRestore();
+  });
+
   it("5xx → unavailable message; detail still parsed (admin surfaces only)", async () => {
     vi.stubGlobal(
       "fetch",
@@ -253,6 +311,28 @@ describe("knowledge clients", () => {
   it("fetchKnowledgeConfig parses the capability payload", async () => {
     vi.stubGlobal("fetch", vi.fn(async () => jsonResponse(capability)));
     expect(await fetchKnowledgeConfig()).toEqual(capability);
+  });
+
+  it("fetchKnowledgeConfig rejects an enabled answer that names no embedder (upstream bug → 502, not a late 500)", async () => {
+    // knowledgeConfigSchema's cross-field rule: enabled with EMPTY
+    // provider/model would survive this read and then fail
+    // requirementsSchema's min(1) at the attach write — a generic 500
+    // with the corpus already uploaded. Rejected here, with the same
+    // 502 posture as any malformed payload.
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () => jsonResponse({ enabled: true, provider: "", model: "" })),
+    );
+    const err = await rejection(fetchKnowledgeConfig());
+    expect(err).toBeInstanceOf(AgentosError);
+    expect(err.status).toBe(502);
+  });
+
+  it("fetchKnowledgeConfig rejects an enabled answer MISSING the embedder fields", async () => {
+    vi.stubGlobal("fetch", vi.fn(async () => jsonResponse({ enabled: true })));
+    const err = await rejection(fetchKnowledgeConfig());
+    expect(err).toBeInstanceOf(AgentosError);
+    expect(err.status).toBe(502);
   });
 
   it("fetchKnowledgeConfig degrades a 404 to the unsupported shape (service predates knowledge)", async () => {
