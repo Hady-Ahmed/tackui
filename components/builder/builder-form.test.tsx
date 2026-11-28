@@ -684,4 +684,31 @@ describe("BuilderForm — the Knowledge section", () => {
     // The remedy guidance still rides below the reason.
     expect(screen.getByText(/Delete this document and upload it again/)).toBeTruthy();
   });
+
+  it("a doc row renders its description as a second line; a row without one stays single-line", async () => {
+    // The #253 wire extension: agno's Content description rides the list
+    // payload and renders under the name when a row carries one. The
+    // paste-text flow maps name to what the user typed and carries NO
+    // description — its row must not grow an empty second line.
+    stubKnowledgeFetch({
+      list: () => [
+        kbRow({
+          id: "row-desc",
+          description: "The team handbook — policies and onboarding.",
+        }),
+        kbRow({ id: "row-bare", name: "Pasted text" }),
+      ],
+    });
+    render(<BuilderForm {...editProps()} />);
+    await screen.findByText("The team handbook — policies and onboarding.");
+    // Structural pin: the described row's card holds the name/chip/size/
+    // date line PLUS the description line; the bare row's card holds the
+    // one line alone.
+    const describedCard = screen
+      .getByText("Handbook.pdf")
+      .closest("div.rounded-lg");
+    const bareCard = screen.getByText("Pasted text").closest("div.rounded-lg");
+    expect(describedCard?.childElementCount).toBe(2);
+    expect(bareCard?.childElementCount).toBe(1);
+  });
 });

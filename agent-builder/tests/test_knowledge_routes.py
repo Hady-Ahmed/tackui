@@ -18,9 +18,10 @@ import time
 
 import pytest
 
-from agno.knowledge.content import ContentStatus
+from agno.knowledge.content import Content, ContentStatus
 
 import knowledge as knowledge_store
+from knowledge_api import _content_entry
 from knowledge_test_helpers import FakeEmbedder, RejectingEmbedder, build_fake_knowledge
 
 from platform_test_helpers import admin_headers, user_headers
@@ -309,9 +310,14 @@ def test_upload_list_delete_lifecycle(client, offline_embedder):
     rows = client.get("/platform/knowledge/lifecycle-a", headers=admin_headers()).json()
     assert [r["name"] for r in rows] == ["Notes"]
     row = rows[0]
-    assert set(row.keys()) == {"id", "name", "status", "statusMessage", "size", "createdAt", "updatedAt"}
+    assert set(row.keys()) == {"id", "name", "description", "status", "statusMessage", "size", "createdAt", "updatedAt"}
     assert row["id"] == content_id
     assert row["status"] == ContentStatus.COMPLETED.value
+    # This service's own ingest never sets a description (the paste-text
+    # flow maps name to what the user typed), so the wire carries null —
+    # the serializer's absent→null normalization keeps the row shape
+    # uniform for tackui's zod schema.
+    assert row["description"] is None
     assert row["size"] == len("The banana harvest ripens.".encode("utf-8"))
     assert isinstance(row["createdAt"], int) and row["createdAt"] <= int(time.time()) + 5
     # The completion update may land in a later epoch second than the insert.
@@ -415,6 +421,51 @@ def test_completed_row_has_a_null_status_message(client, offline_embedder):
     assert len(rows) == 1
     assert rows[0]["status"] == "completed"
     assert rows[0]["statusMessage"] is None
+
+
+# -- the row serializer: description reaches the wire (#253) --------------------
+#
+# _content_entry is the row shape tackui's zod schema mirrors — a pure
+# function over agno's Content, so the mapping is pinned directly: the
+# description rides the wire (a row written with one through agno's other
+# flows renders as the doc row's second line) and absent/empty serialize
+# as null (the same posture as statusMessage), never an omitted key.
+
+
+def test_content_entry_serializes_a_stored_description():
+    """A Content with a description emits it under the camelCase key — the
+    wire extension the UI's muted second line consumes."""
+    entry = _content_entry(
+        Content(id="c1", name="Handbook.pdf", description="The team handbook")
+    )
+    assert entry["description"] == "The team handbook"
+    # The full row contract, pinned key-by-key (tackui's schema mirrors it).
+    assert set(entry.keys()) == {
+        "id",
+        "name",
+        "description",
+        "status",
+        "statusMessage",
+        "size",
+        "createdAt",
+        "updatedAt",
+    }
+
+
+def test_content_entry_normalizes_a_blank_description_to_null():
+    """Absent (this service's ingest never sets one) and empty-string
+    descriptions both serialize as null — never an omitted key, never an
+    empty line in the UI."""
+    assert _content_entry(Content(id="c1", name="a"))["description"] is None
+    assert _content_entry(Content(id="c1", name="a", description=""))["description"] is None
+    # Whitespace-only and padded values normalize too — the UI's truncate
+    # would render trailing whitespace as an invisible difference, and a
+    # padded value reads as its stripped text.
+    assert _content_entry(Content(id="c1", name="a", description="   "))["description"] is None
+    assert (
+        _content_entry(Content(id="c1", name="a", description="  Handbook  "))["description"]
+        == "Handbook"
+    )
 
 
 # -- chunk params reach the actual chunking (#239) ------------------------------

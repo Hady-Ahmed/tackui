@@ -977,7 +977,7 @@ catch-alls; the inventory is pinned in `tests/test_auth_lockdown.py`):
 | Route | Behavior |
 | --- | --- |
 | `GET /platform/knowledge/config` | `{enabled, provider, model}` — never errors; `enabled=false` (pgvector unreachable/extension unavailable, embedder not importable, malformed env with empty provider/model) is how tackui distinguishes "knowledge off" from "service unreachable" |
-| `GET /platform/knowledge/{component_id}` | `[{"id","name","status","size","createdAt","updatedAt"}]` — epoch seconds; failed/processing rows included (status chips); unknown corpus = `[]` (component existence is tackui's truth to gate) |
+| `GET /platform/knowledge/{component_id}` | `[{"id","name","description","status","statusMessage","size","createdAt","updatedAt"}]` — epoch seconds; `description`/`statusMessage` null when absent; failed/processing rows included (status chips); unknown corpus = `[]` (component existence is tackui's truth to gate) |
 | `POST /platform/knowledge/{component_id}/content` | Multipart: exactly one of `file`/`text_content`/`url` + required `embedding_key` + optional `name`/`chunk_size`/`chunk_overlap`; `202 {id, name, status: "processing"}`; processing runs as a background task OFF the event loop (agno's PDF/DOCX parsing must not stall concurrently streaming runs) |
 | `DELETE /platform/knowledge/{component_id}/content/{content_id}` | Idempotent (`{ok: true}` on unknown ids); a foreign-corpus id is 404 |
 

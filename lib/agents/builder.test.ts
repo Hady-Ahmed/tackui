@@ -368,15 +368,26 @@ describe("knowledge clients", () => {
       "fetch",
       vi.fn(async () =>
         jsonResponse([
-          { id: "c1", name: "handbook.pdf", status: "completed", size: 12_345, createdAt: 1_700, updatedAt: 1_800, extra: "ignored" },
-          { id: "c2", name: "notes.txt", status: null, size: null, createdAt: 1.5, updatedAt: 2.5 },
+          { id: "c1", name: "handbook.pdf", description: "The team handbook", status: "completed", size: 12_345, createdAt: 1_700, updatedAt: 1_800, extra: "ignored" },
+          { id: "c2", name: "notes.txt", description: null, status: null, size: null, createdAt: 1.5, updatedAt: 2.5 },
         ]),
       ),
     );
     const rows = await fetchKnowledgeList("abc123");
     expect(rows).toHaveLength(2);
-    expect(rows[0]).toEqual({ id: "c1", name: "handbook.pdf", status: "completed", size: 12_345, createdAt: 1_700, updatedAt: 1_800 });
-    expect(rows[1].status).toBeNull();
+    expect(rows[0]).toEqual({ id: "c1", name: "handbook.pdf", description: "The team handbook", status: "completed", size: 12_345, createdAt: 1_700, updatedAt: 1_800 });
+    // The description round-trips when present and reads as null when the
+    // service stored none (the paste-text shape); an old deployment that
+    // omits the key entirely parses too (#253's wire extension is additive).
+    expect(rows[1].description).toBeNull();
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () =>
+        jsonResponse([{ id: "c3", name: "legacy.txt", status: null, size: null, createdAt: 1, updatedAt: 2 }]),
+      ),
+    );
+    const legacyRows = await fetchKnowledgeList("abc123");
+    expect(legacyRows[0].description).toBeUndefined();
   });
 
   it("fetchKnowledgeList treats an empty corpus as [] and a malformed payload as a 502", async () => {

@@ -421,12 +421,16 @@ export async function fetchKnowledgeConfig(): Promise<KnowledgeConfig> {
  * ContentStatus (processing/completed/partial/failed) or null on a row
  * that predates a status write; `statusMessage` is agno's classified
  * failure reason (null on healthy rows — the service normalizes agno's
- * empty-string default to null); `createdAt`/`updatedAt` are epoch
- * seconds. Unknown extra fields are tolerated (zod strips them).
+ * empty-string default to null); `description` is agno's Content
+ * description (null when absent — the service's own ingest never sets
+ * one; the builder form renders it as the doc row's second line when a
+ * row carries it); `createdAt`/`updatedAt` are epoch seconds. Unknown
+ * extra fields are tolerated (zod strips them).
  */
 export interface KnowledgeContentRow {
   id: string;
   name: string;
+  description?: string | null;
   status: string | null;
   statusMessage?: string | null;
   size: number | null;
@@ -437,6 +441,7 @@ export interface KnowledgeContentRow {
 const knowledgeContentRowSchema = z.object({
   id: z.string(),
   name: z.string(),
+  description: z.string().nullable().optional(),
   status: z.string().nullable(),
   statusMessage: z.string().nullable().optional(),
   size: z.number().nullable(),

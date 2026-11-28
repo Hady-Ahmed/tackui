@@ -2084,11 +2084,13 @@ function KnowledgeKeyBadgeView({
 /**
  * One document row of the corpus — name + status chip (processing /
  * ready / partial / failed; no chip on a row predating a status write),
- * size, upload date, and delete-with-confirm. A failed row carries the
- * captured failure reason when the service stored one (agno's classified
- * ``status_message`` — e.g. an expired key's "authentication (HTTP 401)")
- * plus the re-upload guidance inline (the upload creates a NEW content
- * row — there is no resume, so the copy says so plainly).
+ * the document's description as a muted truncated second line when the
+ * row carries one (absent for pasted text — its name IS what the user
+ * typed), size, upload date, and delete-with-confirm. A failed row
+ * carries the captured failure reason when the service stored one (agno's
+ * classified ``status_message`` — e.g. an expired key's "authentication
+ * (HTTP 401)") plus the re-upload guidance inline (the upload creates a
+ * NEW content row — there is no resume, so the copy says so plainly).
  */
 function KnowledgeDocRowView({
   doc,
@@ -2127,6 +2129,14 @@ function KnowledgeDocRowView({
           {deleting ? "Deleting…" : "Delete"}
         </button>
       </div>
+      {doc.description ? (
+        // Single truncated line — a description can be long and the row
+        // stays one card (the full text is metadata, not the identity the
+        // name already carries).
+        <p className="mt-1 truncate text-xs text-zinc-500 dark:text-zinc-400">
+          {doc.description}
+        </p>
+      ) : null}
       {doc.status === "failed" && (
         <div className="mt-1 space-y-1 text-[11px] text-zinc-500 dark:text-zinc-400">
           {doc.statusMessage ? (
