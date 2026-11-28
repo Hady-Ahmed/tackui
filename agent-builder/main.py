@@ -56,6 +56,7 @@ from catalog import CatalogDB
 from catalog_state import CatalogState, platform_models_payload, platform_tools_payload
 from dispatcher import attach_stored_agent_routes
 from discovery import discover
+from knowledge_api import attach_knowledge_routes
 
 
 def platform_scope_mappings() -> Dict[str, List[str]]:
@@ -181,6 +182,7 @@ def build_app(db_url: Optional[str] = None) -> FastAPI:
     attach_stored_agent_routes(base_app, agent_os)
     attach_platform_routes(base_app)
     attach_admin_routes(base_app)
+    attach_knowledge_routes(base_app)
 
     app = agent_os.get_app()
     # Agno's AgentOS unconditionally installs CORSMiddleware with its own
@@ -198,9 +200,11 @@ def build_app(db_url: Optional[str] = None) -> FastAPI:
     ]
     app.middleware_stack = None  # rebuilt lazily on first request
     # Expose the OS and the live catalog state to the tests (and any
-    # introspection) on the app itself.
+    # introspection) on the app itself. db_url is the knowledge routes'
+    # vector-store DSN (same Postgres; see knowledge.py).
     app.state.agent_os = agent_os
     app.state.catalog = catalog
+    app.state.db_url = db_url
     return app
 
 

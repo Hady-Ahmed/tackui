@@ -1179,6 +1179,62 @@ def test_identity_is_server_resolved_not_client_claimed(app):
     assert resolve_run_user_id(request, "spoofed-user") == "jwt-sub-user"
 
 
+def test_run_token_component_claim_mismatch_is_refused(client):
+    """A run token whose agent_id claim names a DIFFERENT component is
+    refused with 403: tackui binds the target component id into the token at
+    mint time, and the dispatcher verifies it before anything runs — a
+    legitimately-minted token only works for the component it was minted
+    for."""
+    res = _create_component(client, component_id="claim-target")
+    assert res.status_code in (200, 201), res.text
+    res = client.post(
+        "/agui/claim-target",
+        headers=user_headers(claims={"agent_id": "some-other-component"}),
+        json=agui_body(thread_id="t-claim-mismatch"),
+    )
+    assert res.status_code == 403, res.text
+    assert "RUN_STARTED" not in res.text
+
+
+def test_run_token_component_claim_match_runs(client, recording_registry):
+    """The positive half: a token whose agent_id claim names the requested
+    component passes the binding check and runs normally."""
+    res = _create_component(client, component_id="claim-match")
+    assert res.status_code in (200, 201), res.text
+    text = _run_component(
+        client,
+        "claim-match",
+        user_headers(claims={"agent_id": "claim-match"}),
+        agui_body(thread_id="t-claim-match"),
+    )
+    assert "RUN_STARTED" in text
+
+
+def test_run_token_without_component_claim_runs_as_before(client, recording_registry):
+    """Fail OPEN on absence: tokens with no agent_id claim behave exactly as
+    before the binding existed. Mint-side ships in the same repo with a 1h
+    TTL, so the no-claim window self-closes; a self-hoster running an old
+    frontend against a new dispatcher keeps running. Service tokens
+    (app:superadmin) carry no agent_id claim either — admin-operated runs
+    are equally unaffected."""
+    res = _create_component(client, component_id="claim-legacy")
+    assert res.status_code in (200, 201), res.text
+    text = _run_component(
+        client,
+        "claim-legacy",
+        user_headers(),
+        agui_body(thread_id="t-claim-legacy"),
+    )
+    assert "RUN_STARTED" in text
+    text = _run_component(
+        client,
+        "claim-legacy",
+        admin_headers(sub="frontend-service"),
+        agui_body(thread_id="t-claim-svc"),
+    )
+    assert "RUN_STARTED" in text
+
+
 # ---------------------------------------------------------------------------
 # Keyed-toolkit per-run delivery (fresh construction with the run's keys)
 # ---------------------------------------------------------------------------

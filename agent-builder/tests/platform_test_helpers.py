@@ -9,17 +9,20 @@ from agents_shared.auth import ADMIN_SCOPE, USER_SCOPE
 TEST_JWT_SECRET = "test-secret-32-chars-min-please-xx"
 
 
-def mint_token(scopes: List[str], sub: str = "test-user") -> str:
-    return jwt.encode(
-        {
-            "sub": sub,
-            "scopes": scopes,
-            "exp": datetime.now(UTC) + timedelta(hours=1),
-            "iat": datetime.now(UTC),
-        },
-        TEST_JWT_SECRET,
-        algorithm="HS256",
-    )
+def mint_token(
+    scopes: List[str],
+    sub: str = "test-user",
+    claims: Optional[dict] = None,
+) -> str:
+    payload = {
+        "sub": sub,
+        "scopes": scopes,
+        "exp": datetime.now(UTC) + timedelta(hours=1),
+        "iat": datetime.now(UTC),
+    }
+    if claims:
+        payload.update(claims)
+    return jwt.encode(payload, TEST_JWT_SECRET, algorithm="HS256")
 
 
 def admin_headers(sub: str = "admin") -> dict:
@@ -27,9 +30,15 @@ def admin_headers(sub: str = "admin") -> dict:
     return {"Authorization": f"Bearer {mint_token([ADMIN_SCOPE], sub=sub)}"}
 
 
-def user_headers(sub: str = "user-1") -> dict:
-    """End-user token (app:user) — mirrors what the frontend mints for chatters."""
-    return {"Authorization": f"Bearer {mint_token([USER_SCOPE], sub=sub)}"}
+def user_headers(sub: str = "user-1", claims: Optional[dict] = None) -> dict:
+    """End-user token (app:user) — mirrors what the frontend mints for chatters.
+
+    `claims` merges extra JWT payload entries (e.g. the builder run path's
+    `agent_id` component binding) on top of the standard sub/scopes/exp set.
+    """
+    return {
+        "Authorization": f"Bearer {mint_token([USER_SCOPE], sub=sub, claims=claims)}"
+    }
 
 
 def agui_body(
@@ -59,6 +68,7 @@ def component_payload(
     tools: Optional[list] = None,
     model: Optional[dict] = None,
     connectors: Optional[list] = None,
+    knowledge: Optional[dict] = None,
 ) -> dict:
     """A POST /components payload for a minimal agent component."""
     config = {
@@ -78,6 +88,11 @@ def component_payload(
         # Mirrors the frontend's builder: connector NAMES in the stored config —
         # the dispatcher's run-time allowlist for wire mcp_connectors.
         config["connectors"] = connectors
+    if knowledge:
+        # Mirrors the frontend's builder: the knowledge reference is a NAME
+        # ("kb-<component_id>") — the dispatcher strips it pre-rehydration
+        # and attaches a fresh per-run Knowledge instance (#234).
+        config["knowledge"] = knowledge
     return {
         "name": "Test Agent",
         "component_id": component_id,

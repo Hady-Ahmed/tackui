@@ -16,7 +16,7 @@ import {
   getRunUsage,
   annotateAgentTemplateState,
 } from "./template-store";
-import { toPublicAgent } from "@/lib/agents/agent-store";
+import { toPublicAgent, resolveAgentSecret } from "@/lib/agents/agent-store";
 import type { CreateTemplateInput } from "./template-store";
 import { TemplateInstallConflictError, TemplateInstallVanishedError } from "./template-store";
 import type { AgentTemplate } from "./catalog.config";
@@ -878,7 +878,10 @@ describe("installTemplate (idempotent upsert)", () => {
     expect(result.agent.name).toBe(template.name);
     expect(result.agent.endpoint).toBe(template.endpoint);
     expect(result.agent.authMode).toBe("jwt");
-    expect(result.agent.jwtSecret).toBe("s".repeat(32));
+    expect(resolveAgentSecret(result.agent)).toMatchObject({
+      status: "set",
+      secret: "s".repeat(32),
+    });
     expect(result.agent.jwtScopes).toEqual(["agents:run"]);
     expect(result.agent.sourceTemplateId).toBe(template.id);
     expect(result.agent.installedTemplateUpdatedAt).toBe(template.updatedAt);
@@ -903,7 +906,10 @@ describe("installTemplate (idempotent upsert)", () => {
     expect(second.updated).toBe(true);
     expect(second.agent.id).toBe(originalId);
     expect(second.agent.endpoint).toBe("http://localhost:9000/agent");
-    expect(second.agent.jwtSecret).toBe("rotated".padEnd(32, "x"));
+    expect(resolveAgentSecret(second.agent)).toMatchObject({
+      status: "set",
+      secret: "rotated".padEnd(32, "x"),
+    });
     expect(await listAgents(TEST_ORG)).toHaveLength(1);
   });
 
@@ -920,7 +926,10 @@ describe("installTemplate (idempotent upsert)", () => {
       jwtSecret: "s".repeat(32),
     });
     const first = await installTemplate(template, TEST_ORG);
-    expect(first.agent.jwtSecret).toBe("s".repeat(32));
+    expect(resolveAgentSecret(first.agent)).toMatchObject({
+      status: "set",
+      secret: "s".repeat(32),
+    });
 
     await query(
       `UPDATE agent_templates SET jwt_secret = 'enc:v1:AAAAAAAAAAAAAAAA:AAAA:AAAAAAAAAAAAAAAAAAAAAA==' WHERE id = $1`,
@@ -931,7 +940,10 @@ describe("installTemplate (idempotent upsert)", () => {
 
     const second = await installTemplate(reread!, TEST_ORG);
     expect(second.installed).toBe(false);
-    expect(second.agent.jwtSecret).toBe("s".repeat(32));
+    expect(resolveAgentSecret(second.agent)).toMatchObject({
+      status: "set",
+      secret: "s".repeat(32),
+    });
     expect(second.agent.authMode).toBe("jwt");
     errSpy.mockRestore();
   });

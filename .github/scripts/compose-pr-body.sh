@@ -90,6 +90,12 @@ PY
     echo
     echo "Two review passes ran; these blocking findings were still flagged after the fix pass — judge them yourself:"
     echo
+    echo "Ground truth, mechanically verified by the workflow (not the"
+    echo "reviewer's word): the pushed branch contains no AGENT_* scratch"
+    echo "files — the workflow strips any committed copies before push, so a"
+    echo "finding about them describes the pre-fix state and is already"
+    echo "resolved. For every other finding, judge against the current diff."
+    echo
     echo '```'
     cat /tmp/unresolved-findings.md
     echo '```'

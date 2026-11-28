@@ -1,12 +1,13 @@
 import { randomUUID } from "node:crypto";
 import { query, withTransaction } from "@/lib/db/pg";
-import { decryptSecret, encryptSecret } from "@/lib/crypto/encrypt";
+import { decryptSecret, encryptSecret, isEncrypted } from "@/lib/crypto/encrypt";
 import { z } from "zod";
 import type {
   AgentAuthMode,
   AgentEntry,
   AgentOrigin,
   AgentRequirements,
+  AgentSecretStatus,
   PublicAgent,
 } from "./agents.config";
 import { AGENT_ORIGINS } from "./agents.config";
@@ -77,6 +78,16 @@ export const requirementsSchema = z.object({
   connectors: z.array(
     z.object({ id: z.string().min(1), name: z.string().min(1) }),
   ),
+  // The knowledge/embedding contract — present ⇔ the stored config
+  // references a knowledge corpus. OPTIONAL WITHOUT A DEFAULT: an
+  // undeclared field is silently stripped on EVERY store write AND read
+  // (the zod round-trip gotcha), which would turn the run gate's
+  // embedding-key demand into dead code; a default would materialize the
+  // field on snapshots that never had it. Both directions are pinned in
+  // the store round-trip tests.
+  knowledge: z
+    .object({ provider: z.string().min(1), model: z.string().min(1) })
+    .optional(),
 });
 
 // Shared field definitions — used by the create + update input schemas
@@ -198,22 +209,12 @@ const AGENT_SELECT_COLUMNS =
    origin, author_user_id, remote_agent_id, requirements` as const;
 
 function rowToEntry(row: AgentRow): AgentEntry {
-  // Decrypt at the read boundary. Legacy plaintext rows (written before
-  // DB_ENCRYPTION_KEY was configured) pass through unchanged. A decrypt
-  // failure (rotated/missing key, tampered value) degrades gracefully:
-  // the agent keeps working minus JWT auth, and other agents are
-  // unaffected — the secret was unusable either way.
-  let jwtSecret: string | undefined;
-  if (row.jwt_secret) {
-    try {
-      jwtSecret = decryptSecret(row.jwt_secret);
-    } catch (err) {
-      console.error("[agent-store] failed to decrypt jwt_secret — treating agent as secret-less", {
-        agentId: row.id,
-        error: err instanceof Error ? err.message : String(err),
-      });
-    }
-  }
+  // Presence-only mapping: the raw stored value is carried as-is and
+  // decryption is deferred to the consumers that genuinely need the
+  // plaintext (resolveAgentSecret — registry JWT minting, the admin
+  // surfaces' tri-state). Most rows are never decrypted at all: catalog
+  // installs resolve their auth from the live template, and read paths
+  // only need to know WHETHER a secret exists.
   const requirements = parseRequirements(row.requirements);
   return {
     id: row.id,
@@ -222,7 +223,7 @@ function rowToEntry(row: AgentRow): AgentEntry {
     endpoint: row.endpoint,
     orgId: row.org_id,
     authMode: (row.auth_mode ?? "none") as AgentAuthMode,
-    jwtSecret,
+    ...(row.jwt_secret ? { jwtSecretStored: row.jwt_secret } : {}),
     jwtScopes: row.jwt_scopes
       ? row.jwt_scopes.split(",").map((s) => s.trim()).filter(Boolean)
       : undefined,
@@ -265,10 +266,76 @@ function rowToEntry(row: AgentRow): AgentEntry {
 }
 
 /**
- * Strip raw secrets (`jwtSecret`) from an AgentEntry and replace them
- * with a boolean. Use this for any response that leaves the server (REST
- * GET endpoints, admin UI fetches). The raw secrets are only ever read
- * by `lib/agents/registry.ts` server-side.
+ * The result of an on-demand secret resolution: the honest tri-state
+ * plus the plaintext when (and only when) the status is "set".
+ */
+export interface ResolvedAgentSecret {
+  status: AgentSecretStatus;
+  /** Decrypted plaintext — present only when status is "set". */
+  secret?: string;
+}
+
+// Agent rows whose decryption has already failed and been logged this
+// process, keyed `${orgId}/${id}` (the composite row identity — the same
+// id can exist in different orgs). Bounds the log noise to ONE line per
+// broken agent per process instead of one per list load, and lets
+// repeated resolutions skip the futile decrypt attempt's log path.
+const undecryptableLogged = new Set<string>();
+
+/**
+ * Resolve an agent's JWT secret on demand — the single decryption point
+ * for stored agent secrets.
+ *
+ * Row mapping is presence-only (`jwtSecretStored`), so the plaintext is
+ * produced here, only for callers that genuinely consume it (registry
+ * JWT minting for self-managed agents, the admin surfaces' tri-state).
+ * An already-resolved plaintext (`jwtSecret`, e.g. the registry's
+ * template/builder overrides) wins over the stored copy — a live
+ * template's healthy secret must not be shadowed by a stale row copy.
+ *
+ * On decryption failure the status is "undecryptable" — never silently
+ * degraded to secret-less — and the failure is logged once per process
+ * per agent, not once per list load.
+ *
+ * Note: a successful resolution is memoized onto the entry
+ * (`entry.jwtSecret`) so repeated resolutions of the same entry object
+ * decrypt at most once. Entries are per-request objects, so the memo
+ * never goes stale.
+ */
+export function resolveAgentSecret(entry: AgentEntry): ResolvedAgentSecret {
+  if (entry.jwtSecret) return { status: "set", secret: entry.jwtSecret };
+  const stored = entry.jwtSecretStored;
+  if (!stored) return { status: "none" };
+  // Legacy plaintext rows (written before DB_ENCRYPTION_KEY was
+  // configured) pass through unchanged — nothing to decrypt.
+  if (!isEncrypted(stored)) return { status: "set", secret: stored };
+  try {
+    const secret = decryptSecret(stored);
+    entry.jwtSecret = secret;
+    return { status: "set", secret };
+  } catch (err) {
+    const key = `${entry.orgId}/${entry.id}`;
+    if (!undecryptableLogged.has(key)) {
+      undecryptableLogged.add(key);
+      console.error(
+        "[agent-store] agent jwt_secret cannot be decrypted — the stored credential is unusable until it is re-saved (runs of self-managed JWT agents fail fast; catalog installs are unaffected while their template resolves)",
+        {
+          agentId: entry.id,
+          orgId: entry.orgId,
+          error: err instanceof Error ? err.message : String(err),
+        },
+      );
+    }
+    return { status: "undecryptable" };
+  }
+}
+
+/**
+ * Strip raw secrets (`jwtSecret` / `jwtSecretStored`) from an AgentEntry
+ * and replace them with the honest tri-state. Use this for any response
+ * that leaves the server (REST GET endpoints, admin UI fetches). The raw
+ * secrets are only ever read server-side (`lib/agents/registry.ts`,
+ * `updateAgent`'s blank-preserve).
  */
 export function toPublicAgent(entry: AgentEntry): PublicAgent {
   // Managed agents (catalog installs) are references to their template,
@@ -280,6 +347,11 @@ export function toPublicAgent(entry: AgentEntry): PublicAgent {
   // the client never needs.
   const isManaged = entry.sourceTemplateId !== undefined;
   const isBuilder = entry.origin === "builder";
+  // Resolving here IS the admin surfaces' genuine consumption: the
+  // tri-state (set vs undecryptable) is the product feature. Healthy
+  // rows decrypt in microseconds; broken rows log once per process and
+  // resolve memoize (see resolveAgentSecret).
+  const { status } = resolveAgentSecret(entry);
   return {
     id: entry.id,
     name: entry.name,
@@ -287,7 +359,8 @@ export function toPublicAgent(entry: AgentEntry): PublicAgent {
     ...((isManaged || isBuilder) ? {} : { endpoint: entry.endpoint }),
     orgId: entry.orgId,
     authMode: entry.authMode,
-    hasJwtSecret: Boolean(entry.jwtSecret),
+    hasJwtSecret: status !== "none",
+    jwtSecretStatus: status,
     ...(entry.jwtScopes !== undefined ? { jwtScopes: entry.jwtScopes } : {}),
     ...(entry.sourceTemplateId !== undefined
       ? { sourceTemplateId: entry.sourceTemplateId }
@@ -423,10 +496,11 @@ export async function createAgent(
  * Update an agent scoped to an org. Platform admins can bypass the org
  * filter to update agents in any org. The `id` comes from the URL path
  * param (never from the patch body). Omitting jwtSecret preserves the
- * existing secret (blank-preserve) — including an UNDECRYPTABLE stored
- * ciphertext, which is written back raw (byte-for-byte): a decrypt
- * failure is never silently upgraded to "no secret" (same shape as
- * updateTemplate).
+ * existing secret (blank-preserve) — byte-for-byte, whatever the stored
+ * value is (healthy ciphertext, legacy plaintext, or an UNDECRYPTABLE
+ * ciphertext): a decrypt failure is never silently upgraded to "no
+ * secret", and an unrelated edit (a rename) never re-encrypts the stored
+ * bytes (same shape as updateTemplate).
  */
 export async function updateAgent(
   id: string,
@@ -446,13 +520,16 @@ export async function updateAgent(
     const storedRow = locked.rows[0];
     if (!storedRow) return null;
     const existing = rowToEntry(storedRow);
+    // The merged row's jwtSecret comes ONLY from the patch — row mapping
+    // is presence-only, so there is no resolved plaintext to merge. A
+    // patch that omits the secret therefore lands on the raw-preserve
+    // branch below.
     const merged = {
       id,
       name: existing.name,
       description: existing.description,
       endpoint: existing.endpoint,
       authMode: existing.authMode,
-      jwtSecret: existing.jwtSecret,
       jwtScopes: existing.jwtScopes,
       origin: existing.origin,
       authorUserId: existing.authorUserId,
@@ -461,16 +538,14 @@ export async function updateAgent(
       ...patch,
     };
     const parsed = agentRowSchema.parse(merged);
-    // Re-encrypt (fresh IV) when the merged row carries a usable secret —
-    // same behavior as updateTemplate. When it doesn't, DON'T write NULL:
-    // `existing.jwtSecret` is undefined both for "no secret stored" and
-    // for "stored but undecryptable" (rowToEntry degrades a decrypt
-    // failure to secret-less), and nulling the latter would silently
-    // destroy the stored ciphertext on an unrelated edit (a rename),
-    // unrecoverable even after the encryption key is restored. An update
-    // that supplies no secret preserves the raw stored value — read from
-    // the same locked row (a second, unlocked round-trip could pair one
-    // writer's fields with a concurrent writer's secret bytes).
+    // When the patch supplies a secret, encrypt it (fresh IV). When it
+    // doesn't, DON'T write NULL: nulling a stored secret an admin didn't
+    // touch would silently destroy it on an unrelated edit — including
+    // an undecryptable ciphertext, unrecoverable even after the
+    // encryption key is restored. The raw stored value is preserved
+    // byte-for-byte, read from the same locked row (a second, unlocked
+    // round-trip could pair one writer's fields with a concurrent
+    // writer's secret bytes).
     const jwtSecretForDb = parsed.jwtSecret
       ? encryptSecret(parsed.jwtSecret)
       : (storedRow.jwt_secret ?? null);

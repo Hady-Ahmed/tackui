@@ -154,7 +154,7 @@ jobs:
           node-version: 24
 
       - name: Install opencode
-        run: npm i -g opencode-ai@latest
+        run: npm i -g @opencode/cli
 
       - name: Configure opencode (model + credentials + unattended permissions)
         env:
@@ -166,26 +166,44 @@ jobs:
             exit 1
           fi
           mkdir -p ~/.config/opencode
-          # Same V1-shaped unattended permission override as agent.yml
-          # (see its comment): the installed opencode-ai 1.x binary
-          # hard-rejects V2 `permissions` arrays and asks by default for
-          # out-of-project reads — `external_directory: "allow"` kills
-          # that ask so the agent can read its own /tmp scratch files.
-          # `del` strips both shapes the secret might carry so nothing
-          # inherited can re-introduce an ask or a fatal V2 array.
+          # Same V2 unattended permission layer as agent.yml (see its
+          # comment for the battery-established layering facts): the
+          # @opencode/cli V2 binary defaults every agent to allow-all
+          # except .env reads (ask) and the shipped build agent's
+          # question-allow — both session-visible rejections in
+          # unattended runs, so both are hard-denied at the agent level
+          # (global rules can be shadowed by a built-in agent's policy).
+          # `del` strips both permission shapes the secret might carry
+          # so nothing inherited can weaken this layer.
           jq 'del(.permission, .permissions) * {
-            permission: {
-              edit: "allow",
-              bash: "allow",
-              webfetch: "allow",
-              question: "deny",
-              external_directory: "allow"
-            },
-            agent: {
-              explore: { mode: "all" }
+            permissions: [
+              { action: "question",          resource: "*",         effect: "deny" },
+              { action: "read",              resource: "*.env",     effect: "deny" },
+              { action: "read",              resource: "*.env.*",   effect: "deny" },
+              { action: "read",              resource: "*.env.example", effect: "allow" },
+              { action: "external_directory", resource: "*",        effect: "allow" }
+            ],
+            agents: {
+              build: {
+                permissions: [
+                  { action: "question", resource: "*",   effect: "deny" },
+                  { action: "read",     resource: "*.env",   effect: "deny" },
+                  { action: "read",     resource: "*.env.*", effect: "deny" }
+                ]
+              },
+              explore: {
+                mode: "all",
+                permissions: [
+                  { action: "question", resource: "*",   effect: "deny" },
+                  { action: "read",     resource: "*.env",   effect: "deny" },
+                  { action: "read",     resource: "*.env.*", effect: "deny" }
+                ]
+              }
             }
           }' <<< "$AGENT_OPENCODE_CONFIG" > ~/.config/opencode/opencode.json
           chmod 600 ~/.config/opencode/opencode.json
+          grep -q '"question"' ~/.config/opencode/opencode.json \
+            || { echo "::error::Permission layer missing from the written opencode config — the jq merge produced an unexpected shape."; exit 1; }
 
       # ------------------------------------------------------------------
       # Phase 1 — implementer (iteration pass)
@@ -303,6 +321,10 @@ jobs:
           - Commit every change with a conventional-commit message
             (e.g. "fix: <what> (PR #${PR_NUMBER})"). Your deliverable is a
             local commit; the workflow handles everything public.
+          - Every file you write (AGENT_SUMMARY.md, AGENT_FOLLOWUP.md,
+            AGENT_QUESTIONS.md) and every PR-facing sentence is ENGLISH,
+            always — these are read by humans in an English-language
+            review flow.
           - FINAL STEP, always: update AGENT_SUMMARY.md in the repository
             root — the FULL template-shaped summary of the PR's current
             TOTAL state (not just your delta): read
@@ -327,9 +349,13 @@ jobs:
           timeout 20m opencode "${args[@]}" "$(cat /tmp/prompt.md)" 2>&1 | tee /tmp/opencode.log
           # Same aborted-session tripwire as agent.yml: a permission
           # rejection kills the session while the CLI exits 0 — without
-          # this the run would report a benign "no changes".
-          if grep -q "The user rejected permission" /tmp/opencode.log; then
-            echo "::error::Implementer session aborted on a permission rejection — no work was completed. The opencode permission config must contain zero 'ask' rules in unattended runs."
+          # this the run would report a benign "no changes". V2 adds an
+          # in-session rejection signature (asks no longer abort; the
+          # tool call is rejected and the session continues), so trip on
+          # both — either means the permission layer failed its job.
+          if grep -q "The user rejected permission" /tmp/opencode.log \
+            || grep -q "rejected in this session" /tmp/opencode.log; then
+            echo "::error::Implementer hit a permission ask/rejection — no trustworthy work. The opencode permission layer must produce zero asks in unattended runs."
             exit 1
           fi
         env:
@@ -394,6 +420,8 @@ jobs:
             echo "   claim of browser verification without script evidence in"
             echo "   /tmp/opencode.log."
             echo
+            echo "Write the report in English — it is read by humans in an"
+            echo "English-language flow."
             echo "Write your report to AGENT_REVIEW.md in the repository root"
             echo "with one line per finding, prefixed '- blocking: ' for things"
             echo "that MUST be fixed before this iteration can land, and"
@@ -445,9 +473,11 @@ jobs:
           args=(run --agent build)
           if [ -n "${AGENT_MODEL:-}" ]; then args+=(--model "$AGENT_MODEL"); fi
           timeout 15m opencode "${args[@]}" "$(cat /tmp/fix-prompt.md)" 2>&1 | tee /tmp/opencode-fix.log
-          # Same aborted-session tripwire as the implementer step.
-          if grep -q "The user rejected permission" /tmp/opencode-fix.log; then
-            echo "::error::Fix-pass session aborted on a permission rejection — the fix was not applied. Re-issue /agent fix after checking the permission config."
+          # Same aborted-session tripwire as the implementer step (V1
+          # abort signature + V2 in-session ask-rejection signature).
+          if grep -q "The user rejected permission" /tmp/opencode-fix.log \
+            || grep -q "rejected in this session" /tmp/opencode-fix.log; then
+            echo "::error::Fix-pass hit a permission ask/rejection — the fix is not trustworthy. Re-issue /agent fix after checking the permission layer."
             exit 1
           fi
 

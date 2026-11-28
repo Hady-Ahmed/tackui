@@ -132,8 +132,11 @@ no Docker required, no cleanup between runs (see `vitest.config.ts`).
   client-supplied, immutable after creation. The PK is composite `(id,
   org_id)`: the same id can exist in different orgs.
 - **Agent `jwtSecret` is write-only** — accepted on POST/PATCH, never
-  returned in GET responses (`PublicAgent.hasJwtSecret: boolean` replaces
-  it). A blank submit on the edit form preserves the existing value. The
+  returned in GET responses (`PublicAgent.hasJwtSecret: boolean` for
+  presence, `jwtSecretStatus` for the none/set/undecryptable tri-state).
+  A blank submit on the edit form preserves the existing value. Row
+  mapping is presence-only (`AgentEntry.jwtSecretStored`) — decrypt via
+  `resolveAgentSecret()` only where the plaintext is consumed; the
   encryption-at-rest boundary lives entirely inside
   `lib/agents/agent-store.ts`.
 - **SSRF guard on any endpoint-accepting route:** any route that takes a
@@ -164,6 +167,15 @@ no Docker required, no cleanup between runs (see `vitest.config.ts`).
   never the generic 500). An operation that can legitimately exceed 30s
   under contention needs a larger per-call `waitTimeoutMs` (or
   `Infinity`).
+- **Knowledge-attached builder agents demand the embedding provider's key
+  at run time** — the run gate 402s without it and delivers the saved key
+  as the `<provider>_api_key` context item the dispatcher resolves the
+  embedder from (deps-only; the gate's delivery and its 402 line both
+  dedupe against the model's key demand when they need the same key). The
+  demand only exists when `requirementsSchema` declares `knowledge` — the
+  zod schema strips undeclared fields on EVERY write AND read (the
+  round-trip test pins it), so removing the field silently drops the
+  contract and the run gate never fires. See docs/agent-builder.md.
 - **AG-UI protocol spec:** https://docs.ag-ui.com — see
   [Events](https://docs.ag-ui.com/concepts/events),
   [Messages](https://docs.ag-ui.com/concepts/messages), and
@@ -220,3 +232,13 @@ full how-it-works detail this file deliberately omits:
 - **`docs/e2e.md`** — the Playwright E2E smoke suite: the real-app harness
   (web-server lifecycle, seeding, mock agent), the 8 Tier 1 tests, locator
   discipline, and the breakage-test contract
+
+<!-- BEGIN:nextjs-agent-rules -->
+
+## This is NOT the Next.js you know
+
+This version has breaking changes — APIs, conventions, and file structure may all differ from your training data. Read the relevant guide in `node_modules/next/dist/docs/` (resolved from this file's directory; in monorepos the `next` package may not be visible from the repo root) before writing any code. Heed deprecation notices.
+
+This block is written and re-added by `next dev` — verify at `node_modules/next/dist/server/lib/generate-agent-files.js`. Removing it from a diff only re-creates the uncommitted change; committing it with your work keeps the tree clean.
+
+<!-- END:nextjs-agent-rules -->
