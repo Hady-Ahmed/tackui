@@ -11,7 +11,8 @@ All notable changes to this project will be documented in this file. The format 
   with the builder PATCH/DELETE semantics (403 anyone-but-author, no
   admin override; 404 for missing/non-builder rows). Cheap gates run
   before anything is forwarded — exactly one of file/text/url, the
-  format allowlist, the 10 MB cap, URL shape, and the SSRF guard on URL
+  format allowlist, the 10 MB cap (oversized content-length rejected
+  before the body is buffered), URL shape, and the SSRF guard on URL
   uploads — then the upload is forwarded multipart with the author's own
   OpenAI key (`embedding_key`, resolved server-side from the credential
   store; rides in the request body only, never in a response, a log

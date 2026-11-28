@@ -1067,9 +1067,13 @@ half shipped in #235; the builder UI's Knowledge section and the run-gate
   for foreign rows). GET rides the `agentRead` bucket; POST/DELETE ride the
   dedicated `knowledgeMutate` bucket (20/min — corpus curation legitimately
   bursts with multi-file drops). Cheap gates run FIRST, before anything is
-  forwarded: exactly-one-of (file/text/url), the format allowlist, the 10 MB
-  cap (file byte size; text UTF-8 length), URL shape, then `assertSafeUrl`
-  for URL uploads. Chunk params are integers, `overlap < size`.
+  buffered or forwarded: the content-length header is rejected past 10.5 MB
+  (the multipart-overhead allowance above the 10 MB payload cap) BEFORE
+  `formData()` buffers the body, then exactly-one-of (file/text/url), the
+  format allowlist, the 10 MB cap (file byte size; text UTF-8 length —
+  chunked bodies and lying headers still meet it post-parse), URL shape,
+  then `assertSafeUrl` for URL uploads. Chunk params are integers,
+  `overlap < size`.
 - **The embedding key is the author's saved OpenAI key, resolved server-side**
   — `getCredentialSecrets(userId)["openai"]?.["api_key"]` (BYOK; the dep key
   the dispatcher resolves is `openai_api_key`). An author without the key
