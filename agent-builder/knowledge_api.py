@@ -66,7 +66,11 @@ MAX_UPLOAD_BYTES = 10 * 1024 * 1024  # 10 MB
 # ingesting noise. Must stay in lockstep with the reader packages declared in
 # pyproject.toml (the agno per-format extras): an accepted extension whose
 # reader package is missing would surface only at upload time as a FAILED row.
-ALLOWED_EXTENSIONS = (".pdf", ".csv", ".xlsx", ".xls", ".docx", ".doc", ".pptx", ".json", ".md", ".txt")
+# Legacy binary .doc is deliberately ABSENT: agno maps it to DocxReader, which
+# parses the modern OOXML .docx container, so a genuine .doc passed the
+# allowlist and then reliably FAILED on a python-docx parse error (#238) — a
+# clean 400 naming the accepted formats instead; re-save legacy .doc as .docx.
+ALLOWED_EXTENSIONS = (".pdf", ".csv", ".xlsx", ".xls", ".docx", ".pptx", ".json", ".md", ".txt")
 
 # When the client passes chunk_size/chunk_overlap without naming a chunker,
 # agno's stock flow would silently ignore them (its ``process_content`` only
