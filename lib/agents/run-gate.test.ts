@@ -1000,3 +1000,115 @@ describe("lib/agents/run-gate — knowledge", () => {
     expect(mockConsumeQuota).not.toHaveBeenCalled();
   });
 });
+
+// (appended) structural by-description dedupe of delivered items (#255)
+describe("lib/agents/run-gate — structural context-item dedupe", () => {
+  // The pairwise model-vs-knowledge dedupe covers exactly that one pair.
+  // A TOOL contract can still name a dep key another branch delivered,
+  // and two tool contracts can name the same key — the final
+  // by-description pass over contextItems makes single delivery
+  // structural: NO two delivered items ever share a description.
+  beforeEach(() => {
+    mockGetAgent.mockReset();
+    mockGetCredentialSecrets.mockReset();
+    mockGetConnectorsByIds.mockReset();
+    mockConsumeQuota.mockReset();
+    mockGetEnforcementLimits.mockReset();
+    mockConsumeQuota.mockReturnValue({ allowed: true, resetAt: Date.now() + 1000, used: 1 });
+    mockGetEnforcementLimits.mockResolvedValue({
+      plan: "free",
+      limits: {
+        maxAgents: 3, concurrentRuns: 1, runsPerMinute: 10,
+        platformDailyQuota: 50, maxMembers: 1, canCreateOrg: false, label: "Free",
+      },
+    });
+  });
+
+  afterEach(() => {
+    delete process.env.SAAS_MODE;
+    vi.resetModules();
+  });
+
+  it("delivers ONE openai_api_key when an OpenAI-keyed TOOL and OpenAI knowledge ride an OpenRouter model", async () => {
+    // The issue's exact collision: the model block (OpenRouter) pushes its
+    // own key, the knowledge block pushes openai_api_key, and the tool's
+    // legacy contract pushes the SAME openai_api_key again. The returned
+    // array's descriptions must be unique as a whole — not just "contains
+    // one openai_api_key somewhere".
+    mockGetAgent.mockResolvedValue(
+      builderAgent({
+        model: { provider: "openrouter", id: "anthropic/claude-3", platformTier: false, depKey: "openrouter_api_key", name: "OpenRouter" },
+        tools: [
+          {
+            name: "openai_tool",
+            label: "OpenAI tool",
+            requiresKey: "openai_api_key",
+            provider: "openai",
+            platformFallback: false,
+          },
+        ],
+        connectors: [],
+        knowledge: { provider: "openai", model: "text-embedding-3-small" },
+      }),
+    );
+    mockGetCredentialSecrets.mockResolvedValue({
+      openai: { api_key: "sk-openai" },
+      openrouter: { api_key: "sk-openrouter" },
+    });
+    const { checkBuilderRunGate } = await loadGate();
+    const result = await checkBuilderRunGate(
+      { id: "user-1", role: "member", name: "u", email: null, orgId: "org-1" },
+      "agent-1",
+    );
+    expect(result.response).toBeNull();
+    expect(result.contextItems).toEqual([
+      { description: "openrouter_api_key", value: "sk-openrouter" },
+      { description: "openai_api_key", value: "sk-openai" },
+    ]);
+    // The structural invariant, stated on its own: the whole array's
+    // descriptions are unique.
+    const descriptions = result.contextItems.map((i) => i.description);
+    expect(new Set(descriptions).size).toBe(descriptions.length);
+  });
+
+  it("two tool contracts naming the same dep key deliver it once (a shape the pairwise dedupe never saw)", async () => {
+    mockGetAgent.mockResolvedValue(
+      builderAgent({
+        model: { provider: "openai", id: "gpt-5", platformTier: false, depKey: "openai_api_key", name: "OpenAIChat" },
+        tools: [
+          {
+            name: "tool_a",
+            label: "Tool A",
+            requiresKey: "tavily_api_key",
+            provider: "tavily",
+            platformFallback: false,
+          },
+          {
+            name: "tool_b",
+            label: "Tool B",
+            requiresKey: "tavily_api_key",
+            provider: "tavily",
+            platformFallback: false,
+          },
+        ],
+        connectors: [],
+      }),
+    );
+    mockGetCredentialSecrets.mockResolvedValue({
+      openai: { api_key: "sk-runner" },
+      tavily: { api_key: "tvly-runner" },
+    });
+    const { checkBuilderRunGate } = await loadGate();
+    const result = await checkBuilderRunGate(
+      { id: "user-1", role: "member", name: "u", email: null, orgId: "org-1" },
+      "agent-1",
+    );
+    expect(result.response).toBeNull();
+    expect(result.contextItems).toEqual([
+      { description: "openai_api_key", value: "sk-runner" },
+      { description: "tavily_api_key", value: "tvly-runner" },
+    ]);
+    const descriptions = result.contextItems.map((i) => i.description);
+    expect(new Set(descriptions).size).toBe(descriptions.length);
+  });
+});

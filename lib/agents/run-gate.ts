@@ -326,9 +326,28 @@ export async function checkBuilderRunGate(
     };
   }
 
+  // Final by-description dedupe — the single-delivery invariant, made
+  // structural. The model-vs-knowledge check above dedupes only that one
+  // pair, and it establishes keep-the-FIRST-item as the convention (the
+  // model's delivery is pushed first; the knowledge branch pushes nothing
+  // when the model covers the key). A tool contract can still name a dep
+  // key another branch delivered (an OpenAI-keyed tool + OpenAI knowledge
+  // on an OpenRouter model → two `openai_api_key` items), and two tool
+  // contracts can share a key. agno's `extract_context` keys the deps
+  // dict by description (last-wins), so duplicates never changed what the
+  // run saw — but the gate itself delivers one item per dep key, whatever
+  // demanded it. Every branch resolves the same saved credential field
+  // for a given dep key, so the first occurrence is the right survivor.
+  const deliveredDepKeys = new Set<string>();
+  const dedupedContextItems = contextItems.filter((item) => {
+    if (deliveredDepKeys.has(item.description)) return false;
+    deliveredDepKeys.add(item.description);
+    return true;
+  });
+
   return {
     response: null,
-    contextItems,
+    contextItems: dedupedContextItems,
     platformKeyRun,
     reservedDepKeys: [...reservedDepKeys],
   };

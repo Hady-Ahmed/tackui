@@ -77,7 +77,11 @@ All notable changes to this project will be documented in this file. The format 
   resolves it; the demand is BYOK-only (embedding spend rides the
   runner's own key — no quota change), dedupes with the model's key
   demand when both need the same key, and delivers per-need when they
-  differ (an OpenRouter model + OpenAI knowledge delivers both keys).
+  differ (an OpenRouter model + OpenAI knowledge delivers both keys); a
+  final by-description pass over the delivered context items makes
+  single delivery structural — no dep key rides the run twice, whatever
+  demanded it (a tool contract naming a key another source already
+  demanded delivers once).
 - **Added: knowledge for builder agents — the service half (#233), now
   running at run time (#234).** Every builder component can now own a
   document corpus (uploaded files, pasted text, URLs) embedded into pgvector,

@@ -1152,7 +1152,12 @@ half shipped in #235; the builder UI's Knowledge section and the run-gate
   OpenRouter model + OpenAI knowledge), delivery is per-need: BOTH keys
   ride the run, and the knowledge demand gets its own
   `This agent uses knowledge — add your own <Provider> key to run it.`
-  line. Without knowledge in the snapshot the check is a passthrough.
+  line. A final by-description dedupe over the delivered context items
+  (#255) makes single delivery structural rather than pairwise: whatever
+  demanded a dep key — the model, the knowledge contract, or a tool
+  contract — exactly one item rides the run (the first delivery
+  survives, matching the model-wins convention above). Without knowledge
+  in the snapshot the check is a passthrough.
 - **The builder form's Knowledge section (#236)** — edit-mode only (docs
   attach to a SAVED component; create mode shows the one-line note). The
   section gates on the capability proxy `GET
