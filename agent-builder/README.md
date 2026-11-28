@@ -252,9 +252,10 @@ curl -X DELETE -H "Authorization: Bearer $SERVICE_TOKEN" \
 ## Knowledge store
 
 Every builder component can own a document corpus — uploaded files, pasted
-text, URLs — embedded into pgvector and retrievable at run time. This is the
-management half (`/platform/knowledge/*`); the run-time retrieval half (a
-component's corpus feeding its own agent) is a follow-up issue.
+text, URLs — embedded into pgvector and retrievable at run time. The
+management half is the `/platform/knowledge/*` routes below; the run-time
+half is the dispatcher's per-run attach ([Run-time
+attach](#run-time-attach-the-dispatcher)).
 
 **All corpora live in ONE shared table, isolated by agno's mechanics.** The
 `public.builder_knowledge` pgvector table holds every corpus's chunks. Each
@@ -273,10 +274,11 @@ table). Knowledge instances are constructed fresh per request — never
 shared or cached — so concurrent requests can never race embedder state.
 
 **Embeddings are BYOK with no platform fallback.** The embedding KEY is the
-creator's own, passed per upload as the required `embedding_key` form field
-(runs will resolve the runner's key per run); it is used for the embedding
-calls only — never persisted, never logged (nothing in this API logs a
-request body or form value). The embedding MODEL is platform
+caller's own: uploads carry the creator's key as the required `embedding_key`
+form field; runs resolve the RUNNER's key from that run's dependencies (see
+the run-time attach below). The key is used for the embedding calls only —
+never persisted, never logged (nothing in this service logs a request body or
+form value). The embedding MODEL is platform
 infrastructure, fixed per deployment by `KNOWLEDGE_EMBEDDER`
 (`<provider>:<model>`, default `openai:text-embedding-3-small`; v1 provider:
 OpenAI only). The vector column's dimensions are typed at first table
@@ -313,8 +315,9 @@ Multipart form: exactly ONE of `file` | `text_content` | `url`, plus
 processing (reader → chunking → embedding → upsert) runs as a background
 task off the event loop. Validation is fail-closed: no/|>1 sources, a
 missing or blank `embedding_key`, an unsupported format (the allowlist is
-`.pdf .csv .xlsx .xls .docx .doc .pptx .json .md .txt` — the 400 lists the
-accepted formats), an upload over 10 MB, a non-absolute or non-`http(s)`
+`.pdf .csv .xlsx .xls .docx .pptx .json .md .txt` — the 400 lists the
+accepted formats), an upload over 10 MB, a `name` over 300 characters, a
+non-absolute or non-`http(s)`
 URL (shape only — the SSRF decision is the frontend's client-side guard),
 and invalid chunk params (`chunk_overlap` must be smaller than
 `chunk_size`) are all clean 400s.
@@ -330,6 +333,51 @@ Idempotent: an unknown id is still `{"ok": true}` — the delete IS the
 state. A content id that exists but belongs to another corpus is 404 (with
 corpus-unique ids this cannot arise through the list endpoint; deleting it
 anyway would strip a foreign corpus's vectors).
+
+### Run-time attach (the dispatcher)
+
+A stored config references its corpus **by name**:
+`"knowledge": {"name": "kb-<component_id>"}`. Left in place, agno's
+rehydration would resolve that name through the registry — this service
+registers NO knowledge instances (they are per-run, key-carrying objects) —
+and, finding none, **skip it with a warning and run silently without
+knowledge** (fail-open). The dispatcher refuses that posture
+(`dispatcher.plan_per_run_knowledge`, mirroring `plan_per_run_tools`):
+
+- **Strip before rehydrate** — the `knowledge` key is removed from the
+  config before `Agent.from_dict`, so agno's registry lookup never happens;
+  the fresh instance is attached to the rehydrated agent afterwards
+  (`agent.knowledge` — agno builds its knowledge search tool from that
+  attribute per run; `search_knowledge` stays agno's default, agentic
+  retrieval).
+- **Per-run key, deps-only** — the attach builds a FRESH Knowledge instance
+  per run with the runner's embedding key, resolved from that run's
+  dependencies (`<provider>_api_key`, v1 `openai_api_key`) through the
+  shared `resolve_from_deps` funnel with deliberately NO env fallback: the
+  platform's `OPENAI_API_KEY` must never embed for a member run. Two
+  concurrent runs on one agent each get their own instance — the same rule
+  as per-run keyed-toolkit construction. The vector-store DSN is the same
+  `app.state.db_url` the knowledge routes resolve, threaded from the run
+  route; the construction (a vector-store round-trip) rides the same
+  off-loop `anyio.to_thread` hop as the rest of agent construction.
+- **Degradation is strip + warn, run without retrieval** — a run arriving
+  without the key (tackui's pre-run 402 gate is the real guard), a
+  misconfigured `KNOWLEDGE_EMBEDDER`, or an unreachable vector store all
+  degrade the same way: the reference is stripped, a warning names the
+  component, the run proceeds without retrieval. A management route 503s on
+  these conditions because it cannot do its job at all; a run can always do
+  its job without retrieval.
+- **The stored name wins on drift** — the dispatcher derives
+  `kb-<component_id>` from the run's agent id (the same id tackui's uploads
+  address), so config name and derivation agree by construction; when a
+  stored name doesn't match (an older naming scheme), it is attached
+  verbatim after a warning — the corpus was uploaded and `linked_to`-stamped
+  under it, and matching the derivation instead would address an empty (or
+  foreign) corpus.
+
+The attach is pinned by `tests/test_dispatcher_knowledge.py`: the fake
+factory seam for the key/strip/name decisions, plus a real-retrieval test
+proving the attached instance searches the corpus the uploads landed in.
 
 ### Authz and storage notes
 
@@ -404,6 +452,6 @@ page (or the `/platform/catalog` API directly).
 | `knowledge.py` | Knowledge store: embedder config parse, per-corpus construction, capability probe |
 | `knowledge_api.py` | `/platform/knowledge/*` routes (upload/list/delete/config) |
 | `models.py` | Generic per-run-key mixin + wrapper-class factory |
-| `dispatcher.py` | Stored-component runs; per-run keyed-toolkit delivery |
+| `dispatcher.py` | Stored-component runs; per-run keyed-toolkit + knowledge-attach delivery |
 | `credentials.py` | Per-run credential resolution (runner key wins, env falls back) |
 | `main.py` | Wiring, scope policy, the builder-facing endpoints |

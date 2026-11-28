@@ -575,3 +575,404 @@ export function extractErrorMessage(data: unknown, fallback: string): string {
   }
   return typeof record.error === "string" && record.error ? record.error : fallback;
 }
+
+/* ---------------------------------------------------------------------- */
+/* Knowledge — the corpus management half of the builder form (#236)       */
+/*                                                                        */
+/* Pure logic only: the wire shapes (mirroring the #235 clients/routes —   */
+/* KEEP IN SYNC), the capability-state branching, upload payload shaping,  */
+/* status-chip mapping, and the key badge's dedupe against the model      */
+/* badge. The node-only service contract stays in lib/agents/builder.ts.  */
+/* ---------------------------------------------------------------------- */
+
+/** The knowledge capability (GET /api/agents/[id]/knowledge/config —
+ *  the member-accessible proxy of the service's capability signal). */
+export interface KnowledgeCapability {
+  enabled: boolean;
+  provider: string;
+  model: string;
+  /** true = the service answered 404 (predates knowledge) — reachable
+   *  but unsupported. Distinct from enabled=false, which is "answered,
+   *  knowledge is off". */
+  unsupported?: boolean;
+}
+
+/** One content row of the corpus (GET /api/agents/[id]/knowledge —
+ *  camelCase, the #235 list route's shape; `status` is agno's
+ *  ContentStatus or null on a row predating a status write;
+ *  `statusMessage` is agno's classified failure reason — always present
+ *  on the wire, null on healthy rows — shown to the author so "Failed"
+ *  is never bare; `description` is agno's Content description, null when
+ *  absent (the service's own ingest never sets one) — the doc row
+ *  renders it as a muted second line under the name when present). */
+export interface KnowledgeDocRow {
+  id: string;
+  name: string;
+  description?: string | null;
+  status: string | null;
+  statusMessage?: string | null;
+  size: number | null;
+  createdAt: number;
+  updatedAt: number;
+}
+
+/**
+ * The upload allowlist — the SAME list the tackui route enforces
+ * (app/api/agents/[id]/knowledge/route.ts ALLOWED_EXTENSIONS; the
+ * service enforces it a second time). Mirrored here so the file picker's
+ * `accept` and the pre-check copy match the enforced gate without a
+ * server round-trip. Drift = a file the picker offered but the route
+ * 400s — keep both lists identical.
+ */
+export const KNOWLEDGE_ACCEPT_EXTENSIONS = [
+  ".pdf", ".csv", ".xlsx", ".xls", ".docx", ".doc", ".pptx", ".json", ".md", ".txt",
+];
+
+/** The file input's `accept` attribute value. */
+export const KNOWLEDGE_FILE_ACCEPT = KNOWLEDGE_ACCEPT_EXTENSIONS.join(",");
+
+/** The upload byte cap — mirrors the route's 10 MB request cap. */
+export const KNOWLEDGE_MAX_UPLOAD_BYTES = 10 * 1024 * 1024;
+
+/** How often the doc list re-polls while any row is still processing
+ *  (agno ingests async — processing can last seconds for big PDFs). */
+export const KNOWLEDGE_POLL_MS = 5000;
+
+/** Create-mode note — rides the INERT knowledge preview (the section
+ *  renders disabled in create mode so the capability is visible before
+ *  the first save; docs attach to a SAVED component's corpus). Upgraded
+ *  from a bare save-first reminder to a feature statement after the
+ *  Nov 26 demo: a reminder alone didn't register with first-time
+ *  builders — it now names what the agent will be able to search. */
+export const KNOWLEDGE_CREATE_NOTE =
+  "Save the agent first, then add documents it can search — PDFs, pasted text, or web pages.";
+
+/** The Files row's helper line — shared by the edit section AND the
+ *  create-mode preview so the two renderings cannot drift. */
+export const KNOWLEDGE_FILE_TYPE_HINT =
+  "PDF, CSV, Excel, Word, PowerPoint, JSON, Markdown, TXT — up to 10 MB each.";
+
+/** The Web page row's helper line — same shared-constant rule as the
+ *  Files hint (the preview must show the same copy the live row will). */
+export const KNOWLEDGE_URL_HINT =
+  "The page is fetched and read when it's added — not at run time.";
+
+/** The failed row's remedy microcopy — the upload creates a NEW content
+ *  row (there is no resume), so the fix is delete + re-upload. */
+export const KNOWLEDGE_FAILED_HINT =
+  "Processing failed — nothing was kept. Delete this document and upload it again (a re-upload creates a new one; there is no resume).";
+
+/**
+ * The capability gate's four states:
+ * - loading       — the config fetch is in flight (render nothing yet).
+ * - unreachable   — the fetch failed: the standard error banner, NOT a
+ *                   "knowledge is off" claim (empty-vs-unreachable
+ *                   distinction, same as the palette).
+ * - hidden        — the service answered and knowledge is off (or the
+ *                   deployment predates it): hidden with a one-line
+ *                   explanation.
+ * - available     — render the section.
+ */
+export type KnowledgeCapabilityState =
+  | { kind: "loading" }
+  | { kind: "unreachable"; error: string }
+  | { kind: "hidden"; reason: "unsupported" | "disabled" }
+  | { kind: "available"; provider: string; model: string };
+
+export function knowledgeCapabilityState(
+  capability: KnowledgeCapability | null,
+  error: string | null,
+): KnowledgeCapabilityState {
+  if (error !== null) return { kind: "unreachable", error };
+  if (capability === null) return { kind: "loading" };
+  if (!capability.enabled) {
+    return {
+      kind: "hidden",
+      reason: capability.unsupported ? "unsupported" : "disabled",
+    };
+  }
+  return { kind: "available", provider: capability.provider, model: capability.model };
+}
+
+/** The one-line explanation for a hidden section — a configuration
+ *  state, not an error (same honest copy discipline as the empty
+ *  catalogs: "the agent builder", never possessives). */
+export function knowledgeHiddenCopy(
+  reason: "unsupported" | "disabled",
+): string {
+  return reason === "unsupported"
+    ? "This deployment's agent builder predates knowledge — the knowledge section is unavailable here."
+    : "Knowledge isn't offered on this deployment — a platform admin enables it in Models & tools.";
+}
+
+/**
+ * Empty-corpus copy for the doc list — the no-docs state is its own copy
+ * (not an error, not loading). Null while loading, when populated, or
+ * when the list fetch failed (the unreachable banner covers that case).
+ */
+export function knowledgeListEmptyCopy(
+  rows: KnowledgeDocRow[] | null,
+  error: string | null,
+): string | null {
+  if (error !== null || rows === null || rows.length > 0) return null;
+  return "No documents yet — add files, paste text, or a URL below.";
+}
+
+/** One status chip's display shape (the tool palette's chip styling). */
+export interface KnowledgeStatusChip {
+  label: string;
+  className: string;
+}
+
+/**
+ * Status-chip mapping — agno's ContentStatus values as the list route
+ * delivers them: "processing" (ingest running), "completed" (→ Ready),
+ * "partial" (some chunks embedded, searchable but incomplete), "failed",
+ * or null (a row predating a status write). Null/unknown statuses get NO
+ * chip rather than a guessed label; "partial" gets its own amber chip —
+ * it is neither Ready nor Failed, and a "Ready" claim would be false.
+ */
+export function knowledgeStatusChip(
+  status: string | null,
+): KnowledgeStatusChip | null {
+  switch (status) {
+    case "processing":
+      return {
+        label: "Processing",
+        className: "bg-blue-100 text-blue-700 dark:bg-blue-950 dark:text-blue-300",
+      };
+    case "completed":
+      return {
+        label: "Ready",
+        className: "bg-green-100 text-green-700 dark:bg-green-950 dark:text-green-300",
+      };
+    case "partial":
+      return {
+        label: "Partial",
+        className: "bg-amber-100 text-amber-700 dark:bg-amber-950 dark:text-amber-300",
+      };
+    case "failed":
+      return {
+        label: "Failed",
+        className: "bg-red-100 text-red-700 dark:bg-red-950 dark:text-red-300",
+      };
+    default:
+      return null;
+  }
+}
+
+/**
+ * Whether any row is still processing — the list poll's gate. ONLY
+ * "processing" is pending: completed/partial/failed are settled states
+ * (partial and failed never change without a re-upload), and null is
+ * treated as settled too — polling forever on an unknown status would
+ * never stop.
+ */
+export function hasProcessingDocs(rows: KnowledgeDocRow[]): boolean {
+  return rows.some((r) => r.status === "processing");
+}
+
+/** Human-readable file size for a doc row; null when the service hasn't
+ *  recorded a size yet (a processing row can predate the write). */
+export function knowledgeSizeLabel(size: number | null): string | null {
+  if (size === null || size < 0) return null;
+  if (size < 1024) return `${size} B`;
+  const kb = size / 1024;
+  if (kb < 1024) {
+    const label = kb < 10 ? String(Math.round(kb * 10) / 10) : String(Math.round(kb));
+    return `${label} KB`;
+  }
+  return `${Math.round((kb / 1024) * 10) / 10} MB`;
+}
+
+/** The doc row's upload date (epoch seconds → a short date label). */
+export function knowledgeDateLabel(epochSeconds: number): string {
+  return new Date(epochSeconds * 1000).toLocaleDateString();
+}
+
+/** The first problem with a picked file (extension/size), or null — the
+ *  tackui route enforces the same gates; this pre-check gives instant
+ *  feedback instead of a round-trip 400. */
+export function knowledgeFileError(file: File): string | null {
+  const dot = file.name.lastIndexOf(".");
+  const suffix = dot > -1 ? file.name.slice(dot).toLowerCase() : "";
+  if (!KNOWLEDGE_ACCEPT_EXTENSIONS.includes(suffix)) {
+    return `“${file.name}” isn't a supported format — accepted: ${KNOWLEDGE_ACCEPT_EXTENSIONS.join(", ")}`;
+  }
+  if (file.size > KNOWLEDGE_MAX_UPLOAD_BYTES) {
+    return `“${file.name}” exceeds the ${KNOWLEDGE_MAX_UPLOAD_BYTES / (1024 * 1024)} MB upload cap.`;
+  }
+  return null;
+}
+
+/** The paste-text source's problems (empty text, over-cap), or null. */
+export function knowledgeTextError(text: string): string | null {
+  const trimmed = text.trim();
+  if (!trimmed) return "Add the text to upload first.";
+  if (new TextEncoder().encode(trimmed).byteLength > KNOWLEDGE_MAX_UPLOAD_BYTES) {
+    return `The text exceeds the ${KNOWLEDGE_MAX_UPLOAD_BYTES / (1024 * 1024)} MB request cap.`;
+  }
+  return null;
+}
+
+/** The URL source's problems, or null — shape only (absolute http(s));
+ *  the SSRF guard stays server-side (the client can't and must not
+ *  reimplement it). */
+export function knowledgeUrlError(url: string): string | null {
+  const trimmed = url.trim();
+  if (!trimmed) return "Add a URL first.";
+  try {
+    const parsed = new URL(trimmed);
+    if (parsed.protocol !== "http:" && parsed.protocol !== "https:") {
+      return "The URL must start with http:// or https://";
+    }
+  } catch {
+    return "The URL must be an absolute http(s) URL.";
+  }
+  return null;
+}
+
+/** The Advanced disclosure's chunk fields (parsed — both optional). */
+export interface KnowledgeChunkFields {
+  chunkSize?: number;
+  chunkOverlap?: number;
+}
+
+export type KnowledgeChunkParse =
+  | { ok: true; chunkSize?: number; chunkOverlap?: number }
+  | { ok: false; error: string };
+
+/**
+ * Parse the Advanced disclosure's two number fields. Blank = OMITTED —
+ * the service then applies agno's own defaults, which differ per chunker
+ * (the fixed chunker defaults 5000/0; the page reader 2000), so the UI
+ * shows blanks labelled "default" rather than inventing one number.
+ * Whole-number and overlap<size checks mirror the route's validation.
+ */
+export function parseKnowledgeChunkFields(
+  sizeText: string,
+  overlapText: string,
+): KnowledgeChunkParse {
+  const trimmedSize = sizeText.trim();
+  const trimmedOverlap = overlapText.trim();
+  let chunkSize: number | undefined;
+  let chunkOverlap: number | undefined;
+  if (trimmedSize) {
+    const n = Number(trimmedSize);
+    if (!Number.isInteger(n)) return { ok: false, error: "Chunk size must be a whole number." };
+    if (n < 1) return { ok: false, error: "Chunk size must be at least 1." };
+    chunkSize = n;
+  }
+  if (trimmedOverlap) {
+    const n = Number(trimmedOverlap);
+    if (!Number.isInteger(n)) return { ok: false, error: "Chunk overlap must be a whole number." };
+    if (n < 0) return { ok: false, error: "Chunk overlap must be 0 or more." };
+    chunkOverlap = n;
+  }
+  if (chunkSize !== undefined && chunkOverlap !== undefined && chunkOverlap >= chunkSize) {
+    return { ok: false, error: "Chunk overlap must be smaller than chunk size." };
+  }
+  return {
+    ok: true,
+    ...(chunkSize !== undefined ? { chunkSize } : {}),
+    ...(chunkOverlap !== undefined ? { chunkOverlap } : {}),
+  };
+}
+
+/** One upload's source — exactly one of file / text / url (the route's
+ *  exactly-one gate). */
+export type KnowledgeUploadSource =
+  | { kind: "file"; file: File }
+  | { kind: "text"; text: string; name: string }
+  | { kind: "url"; url: string };
+
+/**
+ * The browser → tackui-route multipart body for one upload. Field names
+ * are the tackui route's contract: `file` | `text` | `url` + optional
+ * `name` + optional `chunkSize`/`chunkOverlap` (camelCase — the route
+ * re-shapes them service-side and resolves the embedding key itself, so
+ * the browser never carries one). Exactly one source field is ever set;
+ * chunk fields ride every upload (the service applies them to files and
+ * pasted text; URL ingest ignores them — agno's URL auto-detection).
+ */
+export function buildKnowledgeUploadForm(
+  source: KnowledgeUploadSource,
+  chunk?: KnowledgeChunkFields,
+): FormData {
+  const form = new FormData();
+  if (source.kind === "file") {
+    form.set("file", source.file, source.file.name);
+  } else if (source.kind === "text") {
+    form.set("text", source.text);
+    if (source.name) form.set("name", source.name);
+  } else {
+    form.set("url", source.url);
+  }
+  if (chunk?.chunkSize !== undefined) form.set("chunkSize", String(chunk.chunkSize));
+  if (chunk?.chunkOverlap !== undefined) form.set("chunkOverlap", String(chunk.chunkOverlap));
+  return form;
+}
+
+/** The knowledge section header's key badge — tri-state like the tool
+ *  badges, with the dedupe rule against the model's badge:
+ *  - key connected + docs exist → the green "runs on" chip (the run
+ *    embeds queries with it).
+ *  - key connected + no docs → nothing (nothing uses the key yet).
+ *  - key missing + the MODEL badge doesn't already demand the same
+ *    provider's key → the "Needs your … key" badge + Connect shortcut
+ *    (uploads need the key even with an empty corpus — it's the curation
+ *    prerequisite — and runs need it once docs exist).
+ *  - key missing + the model badge already demands the same key (an
+ *    OpenAI model + OpenAI knowledge) → hidden: one identical line is
+ *    the noise the dedupe exists to kill; the model badge's Connect
+ *    flow fixes both.
+ */
+export interface KnowledgeKeyBadge {
+  show: boolean;
+  connected: boolean;
+  providerLabel: string;
+  /** Set only when the credentials catalog knows the provider — a
+   *  drifted slug would open an empty KeyForm (dead click). Mirrors
+   *  modelKeyState/toolKeyState's guard. */
+  provider: string | null;
+}
+
+export function knowledgeKeyBadge(
+  docs: KnowledgeDocRow[] | null,
+  provider: string,
+  credentials: CredentialsState | null,
+  modelState: ModelKeyState | null,
+): KnowledgeKeyBadge {
+  const meta = credentials ? providerMeta(credentials.catalog, provider) : null;
+  const providerLabel = meta?.label ?? prettySlug(provider);
+  const connected = credentials?.hasKey[provider] ?? false;
+  const connectable = meta ? provider : null;
+  if (connected) {
+    return {
+      show: (docs?.length ?? 0) > 0,
+      connected: true,
+      providerLabel,
+      provider: connectable,
+    };
+  }
+  const modelCoversIt =
+    modelState?.status === "missing" && modelState.provider === provider;
+  return {
+    show: !modelCoversIt,
+    connected: false,
+    providerLabel,
+    provider: connectable,
+  };
+}
+
+/**
+ * The detach-retry notice's copy (the row vanished; the config ref
+ *  detach didn't finish). The delete may have LANDED with the detach
+ *  publish failing (a 502/409 for an operation that did land — the #235
+ *  review note), so the re-fetched list is the truth: a vanished row
+ *  means the retry is safe and idempotent (the service delete is
+ *  {ok:true} on unknown ids) and finishes the agent's knowledge update.
+ */
+export const KNOWLEDGE_DETACH_RETRY_COPY =
+  "The document was removed, but finishing the agent's knowledge update didn't complete — retrying is safe.";
+

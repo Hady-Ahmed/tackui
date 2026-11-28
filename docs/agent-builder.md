@@ -202,8 +202,12 @@ bodies — so every route may render it verbatim. The upstream
 validation text rides in `AgentosError.detail` (parsed from the
 FastAPI `detail` field), and only admin-gated routes surface it:
 `/api/admin/platform/*` return `{error, detail}`, member routes return
-`error` alone. The full upstream body is always logged server-side for
-operators.
+`error` alone. The extracted upstream detail is always logged
+server-side for operators — with one exception: multipart (FormData)
+calls skip detail extraction entirely, because their bodies carry
+secrets (the knowledge ingest's `embedding_key`) and a service echoing
+form input in validation errors must not copy it into logs or
+`detail`; that log line keeps the method/path/status framing.
 
 ## Models & tools — the admin page (`/admin/platform`)
 
@@ -621,7 +625,10 @@ requirements; runners keep their keys here.
   the platform automatically adds it here. When the platform is
   unreachable, `fetchCredentialsCatalog` degrades to
   `{catalog: null, catalogError}` — never throws, so saved rows still
-  render.
+  render. The knowledge extension degrades independently: a failed
+  knowledge-signal fetch drops only the embedding provider's row (a
+  server warn makes it observable) — the rest of the catalog, and every
+  other provider's key-saving, stays live.
 - **The store is catalog-agnostic:** it accepts any slug-shaped provider
   (`providerSchema` is a loose slug regex) and a `kind` the route passes
   from the catalog. This is what makes provider removal graceful — see
@@ -884,14 +891,15 @@ The admin UI is the Connectors section on `/agents`
   ("Models & tools"); platform-admin gated, linked from the builder
   (admin-only) and from `/admin`'s header. See the section below.
 
-## Knowledge — the service half (#233)
+## Knowledge — the service half (#233) + the run-time attach (#234)
 
 Builder agents can own a knowledge corpus — uploaded files, pasted text,
-URLs — embedded into pgvector. The service half shipped here is the
-MANAGEMENT half: the `/platform/knowledge/*` routes tackui's server
-proxies with its service token. The follow-up half is run-time retrieval
-(a component's corpus feeding its own agent's runs) plus the tackui-side
-UI/proxy work — see the seam notes at the end.
+URLs — embedded into pgvector. The service half is the MANAGEMENT half
+(the `/platform/knowledge/*` routes tackui's server proxies with its
+service token) and the dispatcher's RUN-TIME attach (a component's corpus
+feeding its own agent's runs, below). The tackui-side proxy/server work
+shipped in #235; the builder UI's Knowledge section and the run-gate 402
+shipped in #236.
 
 ### Storage and isolation
 
@@ -923,7 +931,20 @@ delete scoping across corpora):
   is constructed per request, never shared or cached: the embedder carries a
   per-call API key, and a shared instance would race keys across concurrent
   requests. The cost is one vector-store round-trip per construction (the
-  probe that creates the table on first use); accepted deliberately.
+  probe that creates the table on first use); accepted deliberately. The
+  first-use probe is a check-then-create, so two concurrent first-use
+  constructions on a fresh deployment can race, and the loser's DDL fails
+  in one of two flavors: the duplicate-table server error (42P07) when the
+  winner's DDL already committed, or — when the two DDLs overlap — a
+  unique violation on a catalog unique (name, namespace) index (23505; on
+  pg16 the loser's row type in pg_type collides first,
+  `pg_type_typname_nsp_index`, and the concurrent `CREATE EXTENSION`
+  dies on `pg_extension_name_index`). The build layer absorbs those
+  provably-benign name conflicts with a single retry (the winner created
+  the object) and lets every other failure — including any data-level
+  unique violation — propagate to the degrade paths. A management route
+  answers any construction failure as a clean 503, mirroring the
+  dispatcher's strip+warn posture on the run path.
 
 Uploads land in the shared bucket (`user_id` NULL): pgvector's user scope
 matches `user_id = X OR user_id IS NULL`, so every scoped runner's search
@@ -956,15 +977,16 @@ catch-alls; the inventory is pinned in `tests/test_auth_lockdown.py`):
 | Route | Behavior |
 | --- | --- |
 | `GET /platform/knowledge/config` | `{enabled, provider, model}` — never errors; `enabled=false` (pgvector unreachable/extension unavailable, embedder not importable, malformed env with empty provider/model) is how tackui distinguishes "knowledge off" from "service unreachable" |
-| `GET /platform/knowledge/{component_id}` | `[{"id","name","status","size","createdAt","updatedAt"}]` — epoch seconds; failed/processing rows included (status chips); unknown corpus = `[]` (component existence is tackui's truth to gate) |
+| `GET /platform/knowledge/{component_id}` | `[{"id","name","description","status","statusMessage","size","createdAt","updatedAt"}]` — epoch seconds; `description`/`statusMessage` null when absent; failed/processing rows included (status chips); unknown corpus = `[]` (component existence is tackui's truth to gate) |
 | `POST /platform/knowledge/{component_id}/content` | Multipart: exactly one of `file`/`text_content`/`url` + required `embedding_key` + optional `name`/`chunk_size`/`chunk_overlap`; `202 {id, name, status: "processing"}`; processing runs as a background task OFF the event loop (agno's PDF/DOCX parsing must not stall concurrently streaming runs) |
 | `DELETE /platform/knowledge/{component_id}/content/{content_id}` | Idempotent (`{ok: true}` on unknown ids); a foreign-corpus id is 404 |
 
 Upload validation is fail-closed at the route: no/|>1 sources, missing or
 blank `embedding_key`, unsupported format (allowlist
-`.pdf .csv .xlsx .xls .docx .doc .pptx .json .md .txt` — the 400 lists the
+`.pdf .csv .xlsx .xls .docx .pptx .json .md .txt` — the 400 lists the
 formats; agno's own fallback would ingest garbage chunks from unknown
-extensions), an upload over 10 MB, a non-absolute/non-`http(s)` URL (shape
+extensions), an upload over 10 MB, a `name` over 300 characters, a
+non-absolute/non-`http(s)` URL (shape
 only — the SSRF decision is tackui's client-side guard), and invalid chunk
 params (`chunk_overlap < chunk_size`) are all 400s.
 
@@ -976,16 +998,219 @@ has no vector extension to load, and the capability probe reads
 `pg_available_extensions` — a plain-Postgres deployment answers
 `enabled: false` rather than failing uploads.
 
-### Seam for the follow-up issues
+### Run-time attach — the dispatcher (#234)
 
-- **Run-time retrieval**: the dispatcher resolves the corpus by the run's
-  agent id (the same `kb-<component_id>` naming), builds the Knowledge
-  instance with the runner's per-run embedding key, and searches with
-  `isolate_vector_search`'s server-side filter. The service half's
-  `build_knowledge_for` is the entry point both halves share.
-- **tackui half**: the builder's Knowledge section (gated on the capability
-  endpoint), the server-side proxy of these routes with the service token,
-  and `assertSafeUrl` before forwarding URL uploads.
+A stored config references its corpus **by name**:
+`"knowledge": {"name": "kb-<component_id>"}` (written by tackui at
+attach/detach time — see the lifecycle rules in the tackui-half seam notes).
+Left in place, agno's rehydration resolves the name through the registry —
+and this service registers NO knowledge instances (they are per-run,
+key-carrying objects, the same rule as keyed toolkits) — so agno logs
+`Knowledge '<name>' not found in registry, skipping` and the run proceeds
+**silently without knowledge**. The dispatcher refuses that posture
+(`dispatcher.plan_per_run_knowledge`, mirroring `plan_per_run_tools`):
+
+- **Strip before rehydrate** — the `knowledge` key is removed from the
+  stored config before `Agent.from_dict` (agno's registry lookup never
+  happens; the fail-open skip is unreachable), and the fresh Knowledge
+  instance is attached to the rehydrated agent afterwards
+  (`agent.knowledge` — agno builds its knowledge search tool from that
+  attribute per run; `search_knowledge` stays agno's default True — agentic
+  retrieval, not prompt injection: `add_knowledge_to_context` stays
+  untouched).
+- **Per-run key, deps-only (BYOK-only)** — the attach builds a FRESH
+  Knowledge instance per run with the runner's embedding key, resolved from
+  that run's dependencies (`<provider>_api_key`, v1 `openai_api_key`)
+  through the shared `resolve_from_deps` funnel with deliberately NO env
+  fallback — the platform's `OPENAI_API_KEY` is the platform's key and must
+  never embed for a member run. Two concurrent runs on one agent each get
+  their own instance (a shared one would race embedder keys). The
+  vector-store DSN is the same `app.state.db_url` the knowledge routes
+  resolve, threaded from the run route into
+  `build_agent_for_run(..., db_url=...)`; the construction rides the same
+  off-loop `anyio.to_thread` hop as the rest of agent construction.
+- **Degradation is strip + warn, run without retrieval** — a run arriving
+  without the key, a misconfigured `KNOWLEDGE_EMBEDDER`, or an unreachable
+  vector store all degrade the same way: strip, warn naming the component,
+  run without retrieval. A management route 503s on these conditions
+  because it cannot do its job at all; a run can always do its job without
+  retrieval. tackui's pre-run gate (its issue adds the knowledge 402) is
+  the primary guard — the service-side strip is belt-and-braces for runs
+  that slip past it.
+- **The stored name wins on drift** — the dispatcher derives
+  `kb-<component_id>` from the run's agent id, so config name and
+  derivation agree by construction; on drift (an older naming scheme) the
+  stored name is attached verbatim after a warning — the corpus was
+  uploaded and `linked_to`-stamped under it.
+
+Pinned by `tests/test_dispatcher_knowledge.py`: the fake
+`build_knowledge_for` seam for the key/strip/name decisions (with an
+`Agent.from_dict` spy making the strip observable), plus a real-retrieval
+test proving the attached instance searches the corpus the uploads landed
+in (FakeEmbedder at the provider seam, the pgvector testcontainer).
+
+### The tackui half (#235 — this repo's routes and lifecycle)
+
+The tackui side owns everything user-facing around this store. The server
+half shipped in #235; the builder UI's Knowledge section and the run-gate
+402 shipped in #236.
+
+- **Knowledge clients (`lib/agents/builder.ts`)** — the four service calls
+  ride the shared `agentosRequest` (fresh service token, sanitized
+  `AgentosError`): `fetchKnowledgeConfig` (the capability signal — a 404
+  degrades to `{enabled: false, unsupported: true}`, so a service that
+  predates knowledge reads as unsupported, NOT unreachable; a transport
+  failure still throws; an `enabled` answer naming no embedder is
+  rejected as a malformed payload — 502 — instead of poisoning the
+  attach write with a snapshot that can't parse; in the credentials
+  catalog BOTH failures degrade the knowledge extension independently —
+  the models/tools catalog stays live and every provider stays saveable,
+  only the knowledge row is absent until the signal recovers),
+  `fetchKnowledgeList` (camelCase rows, zod-validated),
+  `uploadKnowledgeContent` (multipart), `deleteKnowledgeContent` (idempotent).
+  `agentosRequest` grew a FormData branch: a form body passes through
+  UNTOUCHED with no Content-Type header (fetch derives the multipart
+  boundary) — never base64 a file into JSON — and a form body's 4xx/5xx
+  responses skip detail extraction entirely (the ingest's body carries
+  the embedding key; an echoing error body must not reach the logs).
+  `knowledgeCorpusName` derives
+  `kb-<component_id>` on both sides, so the config ref and the corpus agree
+  by construction.
+- **Proxy routes (`app/api/agents/[id]/knowledge/`)** — GET (list) +
+  POST (upload) + `[contentId]` DELETE, service-token'd server-side.
+  Author-gated with the builder PATCH/DELETE semantics: 403 anyone-but-author
+  (no admin override), 404 for missing/non-builder rows (no existence oracle
+  for foreign rows). GET rides the `agentRead` bucket; POST/DELETE ride the
+  dedicated `knowledgeMutate` bucket (20/min — corpus curation legitimately
+  bursts with multi-file drops). Cheap gates run FIRST, before anything is
+  buffered or forwarded: the content-length header is rejected past 10.5 MB
+  (the multipart-overhead allowance above the 10 MB payload cap) BEFORE
+  `formData()` buffers the body, then exactly-one-of (file/text/url), the
+  format allowlist, the 10 MB cap (file byte size; text UTF-8 length —
+  chunked bodies and lying headers still meet it post-parse), URL shape,
+  then `assertSafeUrl` for URL uploads. Chunk params are integers,
+  `overlap < size`; they ride file/text uploads only — the service
+  validates any shape but applies them only to `file_data` (agno's URL
+  auto-detection owns the reader and its chunking), so the route
+  validates but does not forward them on a URL upload.
+- **The embedding key is the author's saved OpenAI key, resolved server-side**
+  — `getCredentialSecrets(userId)["openai"]?.["api_key"]` (BYOK; the dep key
+  the dispatcher resolves is `openai_api_key`). An author without the key
+  cannot upload: 400 with copy pointing at the API-keys page. The key rides
+  in the multipart body ONLY — never in a response, a log line, or an error
+  detail (the ingest's error path skips upstream-detail extraction
+  entirely, so even a service echoing form input in validation errors
+  can't leak it). The credentials catalog grows an entry for the
+  embedding provider
+  when knowledge is enabled and no model carries it (otherwise the key could
+  never be saved — dead knowledge).
+- **Attach/detach lifecycle (`app/api/agents/[id]/knowledge/lifecycle.ts`)** —
+  the stored config references the corpus while ≥1 doc exists. The FIRST
+  upload on a knowledge-less agent publishes a config version WITH the ref
+  (`"knowledge": {"name": "kb-<component_id>"}`); deleting the LAST doc
+  publishes WITHOUT it. Both directions reuse the builder PATCH flow's
+  machinery: local snapshot first, then the guarded
+  `updateAgentosConfig(current_version)` publish, then the compensating
+  local revert on failure (a 409 is the "just updated by someone else —
+  reload" copy). The snapshot's `knowledge: {provider, model}` is captured
+  from `fetchKnowledgeConfig()` at attach time and re-derived through
+  `deriveRequirementsFromConfig`; when full re-derivation declines (a config
+  shape the catalogs can't map), the fallback applies the single-key diff to
+  the existing snapshot — the config diff IS only the knowledge key. The
+  uploaded doc is NEVER deleted as compensation: the service dedupes
+  re-uploads by content hash, so a retry re-runs the attach and converges.
+  Detach truth is the post-delete corpus list — a raced concurrent upload's
+  landed row keeps the ref. That guard is best-effort, not airtight: a
+  just-202'd upload inserts its contents row inside agno's background
+  `process_content`, so an upload+delete interleave can publish a ref-less
+  config while the doc exists (the run degrades to no retrieval — the
+  snapshot's `knowledge` leaves in the same publish, so the #236 run gate
+  doesn't 402 either). The `ref ⇔ docs` invariant self-heals on the next
+  curation action (the next upload re-attaches); airtight would need
+  row-insertion synchronous with the 202 — agno's shape, not ours.
+- **Config-publishing PATCHes preserve the ref** — the builder PATCH route
+  carries the knowledge ref (and the snapshot contract) through every
+  unrelated edit, re-deriving with the stored contract; otherwise a rename
+  would silently detach the corpus.
+- **Snapshot field** — `AgentRequirements.knowledge?: {provider, model}`,
+  optional WITHOUT a default in `requirementsSchema` (absent stays absent —
+  the run gate reads PRESENCE as "this agent embeds with the author's key");
+  the store round-trips it both directions (pinned in tests).
+- **Run gate (#236)** — `checkBuilderRunGate`'s gate phase reads the
+  snapshot's `knowledge.provider` and demands the embedding key exactly the
+  way the dispatcher resolves it: the dep key is
+  `<provider>_api_key` (dispatcher.py's
+  `resolve_from_deps(deps, f"{embedder_cfg.provider}_api_key")`, deps-only —
+  no platform-env fallback), so the gate delivers
+  `{description: "openai_api_key", value: <saved key>}` as a run context
+  item and reserves the dep key against client-sent context. BYOK-only:
+  embedding spend rides the runner's own key, so `platformKeyRun` stays
+  false and the (dormant) quota phase never fires. Dedupe against the model
+  demand: when the model already demanded the SAME dep key (an OpenAI model
+  + OpenAI knowledge), one blocker line covers both — the aggregated 402
+  never shows the identical remedy twice. When the dep keys differ (an
+  OpenRouter model + OpenAI knowledge), delivery is per-need: BOTH keys
+  ride the run, and the knowledge demand gets its own
+  `This agent uses knowledge — add your own <Provider> key to run it.`
+  line. A final by-description dedupe over the delivered context items
+  (#255) makes single delivery structural rather than pairwise: whatever
+  demanded a dep key — the model, the knowledge contract, or a tool
+  contract — exactly one item rides the run (the first delivery
+  survives, matching the model-wins convention above). Without knowledge
+  in the snapshot the check is a passthrough.
+- **The builder form's Knowledge section (#236)** — live curation is
+  edit-mode only (docs attach to a SAVED component; the corpus address
+  doesn't exist before the first save). Create mode instead renders the
+  section as an INERT PREVIEW (#259): the same header and the same three
+  upload rows the edit section carries, every control disabled and
+  nothing wired, with the note carrying the save-first explanation
+  ("Save the agent first, then add documents it can search — PDFs,
+  pasted text, or web pages."). No capability fetch fires in create
+  mode (there is no agent yet) — the preview assumes the deployment's
+  knowledge state is worth showing, and the live section's capability
+  gate takes over after the save. The live section gates on the
+  capability proxy `GET
+  /api/agents/[id]/knowledge/config` (member-accessible, `agentRead`
+  bucket, NOT author-gated — read-only capability metadata, same posture
+  as `/api/tools`' palette): `enabled` renders the section, `enabled:
+  false` hides it with a one-line explanation (`unsupported` = the
+  deployment predates knowledge vs `disabled` = a platform admin can turn
+  it on), and a fetch failure renders the error banner with Retry — a
+  transport failure must never read as "knowledge is off" (the
+  empty-vs-unreachable distinction the palette follows). The section
+  itself: multi-file upload (the picker's `accept` mirrors the route's
+  allowlist — the two lists are kept identical deliberately), paste-text
+  with a required name, a URL row; an Advanced disclosure for chunk
+  size/overlap where BLANK means "the platform's own defaults" (agno's
+  defaults differ per chunker, so the UI invents no number — fields ride
+  every upload and the service applies them to files and pasted text;
+  URL ingest is agno's auto-detected reader, capped to one page — the
+  website reader is constructed with `max_links=1` so a page's own
+  `#anchor` nav links are NOT re-fetched as separate documents
+  (Hady-Ahmed/tackui#260)). The doc list shows status
+  chips over agno's ContentStatus — `processing`, `completed` (rendered
+  "Ready"), `partial` (its own amber chip: searchable but incomplete —
+  never a false "Ready" — plus agno's classified partial `status_message`
+  rendered the same break-words way as the failed reason: "N of M chunks
+  were embedded; Z failed and are not retrievable…"), `failed` (the
+  captured failure reason when the
+  service stored one — agno's classified `status_message`, e.g. an
+  expired key's "authentication (HTTP 401)" — above the inline re-upload
+  guidance: delete + re-upload, there is no resume) — and polls the
+  list every 5s WHILE any row is processing, stopping the moment every
+  row settles (the interval
+  is torn down on unmount too). Delete confirms first; a delete that
+  LANDED with a failed detach publish (the 502/409 case) re-fetches the
+  list as the truth — a vanished row surfaces a retry-safe notice whose
+  Retry re-fires the idempotent DELETE without re-confirming (nothing
+  left to undo). The header's key badge dedupes against the model's:
+  connected + docs → the green "runs on" chip; missing →
+  "Needs your <Provider> key" with a connect shortcut — hidden when the
+  MODEL badge already demands the same provider's key (one line, not
+  two). The pure logic (wire types, capability branching, payload
+  shaping, chip mapping, badge dedupe) lives in
+  `components/builder/builder-config.ts` — client-safe, no service
+  imports.
 
 ## Not in Phase 1
 
@@ -997,7 +1222,11 @@ has no vector extension to load, and the capability probe reads
   all stay wired (snapshot fields, quota route wiring, plan limits) but
   builder runs are 100% BYOK today; the run gate ignores the tier
   fields and the quota phase never fires.
-- **Knowledge run-time retrieval** — the management half (the service's
-  `/platform/knowledge/*` routes and the corpus store) shipped (#233); what
-  remains is the tackui half (builder UI + proxying) and the run-time
-  retrieval half (a component's corpus feeding its own agent's runs).
+- **Knowledge — the knowledge phase is complete** — the service's
+  management routes shipped (#233), the dispatcher's run-time attach
+  shipped (#234), the tackui server half shipped (#235): the knowledge
+  clients, the author-gated proxy routes with the attach/detach lifecycle,
+  the `requirementsSchema.knowledge` snapshot field, and the
+  credentials-catalog extension. The builder UI's Knowledge section and
+  the run-gate 402 shipped (#236) — see the two #236 bullets in the
+  Knowledge section above.

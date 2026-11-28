@@ -4,13 +4,100 @@ All notable changes to this project will be documented in this file. The format 
 
 ## [Unreleased]
 
-- **Added: knowledge for builder agents — the service half (#233).** Every
-  builder component can now own a document corpus (uploaded files, pasted
-  text, URLs) embedded into pgvector, managed through new
-  `/platform/knowledge/*` routes on the agent-builder service (admin /
-  service-token scope; tackui proxies them — the builder UI and run-time
-  retrieval are follow-ups). All corpora share one `builder_knowledge`
-  vector table in the builder's Postgres, isolated per corpus by agno's
+- **Added: knowledge for builder agents — the tackui half (#235).** The
+  app now proxies the builder service's knowledge management routes for
+  the agent's author: `GET/POST /api/agents/[id]/knowledge` and
+  `DELETE .../knowledge/[contentId]` (list, upload, remove), author-gated
+  with the builder PATCH/DELETE semantics (403 anyone-but-author, no
+  admin override; 404 for missing/non-builder rows). Cheap gates run
+  before anything is forwarded — exactly one of file/text/url, the
+  format allowlist, the 10 MB cap (oversized content-length rejected
+  before the body is buffered), URL shape, and the SSRF guard on URL
+  uploads — then the upload is forwarded multipart with the author's own
+  OpenAI key (`embedding_key`, resolved server-side from the credential
+  store; rides in the request body only, never in a response, a log
+  line, or an error detail — the ingest's own error path skips upstream
+  detail extraction entirely, so even a service echoing form input in
+  validation errors can't leak it); an author without the key gets a 400
+  pointing at the API-keys page). `agentosRequest` grew a FormData
+  pass-through branch (no JSON encoding, no Content-Type — fetch sets
+  the multipart boundary). First upload on a knowledge-less agent
+  attaches the corpus: the stored config publishes a new version with
+  the `knowledge` ref (`kb-<component_id>` — both sides derive it from
+  the component id) and the requirements snapshot gains
+  `knowledge: {provider, model}` (a new optional-without-default
+  requirementsSchema field, round-tripped both ways); deleting the last
+  doc detaches both. Attach/detach reuse the builder PATCH flow's
+  local-first + guarded-publish + compensating-revert machinery, with
+  the uploaded doc never deleted as compensation (the service dedupes
+  re-uploads by content hash, so retries converge). Config-publishing
+  builder PATCHes preserve the ref through unrelated edits, and the
+  credentials catalog adds the embedding provider when knowledge is
+  enabled and no model carries it (otherwise the required key could
+  never be saved), and the knowledge signal degrades independently: a
+  failed knowledge fetch (transport or malformed payload) drops only
+  that extension row — the rest of the catalog stays live and every
+  other provider's key-saving is unaffected. The knowledge config's 404
+  reads as "unsupported" (the service predates knowledge), distinct
+  from unreachable; an `enabled` answer naming no embedder is rejected
+  at the read as a malformed payload (502) instead of failing the
+  attach later with a generic 500.
+- **Added: the builder UI's Knowledge section + the run-gate 402 for
+  knowledge-attached agents (#236).** The builder form (edit mode) now
+  curates the agent's knowledge corpus directly: multi-file upload (a
+  labeled picker row), paste text with a name, a URL (ingested as ONE
+  page — the site reader's link-crawl is capped at the submitted URL so
+  same-page `#anchor` links don't duplicate the page as extra documents;
+  Hady-Ahmed/tackui#260), and an Advanced disclosure for chunk size and
+  overlap (blank = the platform's own defaults; the params ride
+  file/text uploads only — a URL upload's chunking is the platform
+  reader's own, so the route validates but does not forward them). The
+  doc list shows status
+  chips (Processing / Ready / Partial / Failed) with a failed row also
+  showing the service's captured failure reason (e.g. an expired key's
+  "authentication (HTTP 401)") and a partial row showing agno's
+  classified partial reason (how many chunks embedded, how many failed
+  and are not retrievable), and each row also renders the
+  document's description as a muted second line under the name when one
+  is on the wire (pasted text carries none — the name is what the user
+  typed), and polls every 5s while
+  any row is processing; delete confirms first, and a delete that landed
+  with a failed detach publish re-fetches the list as the truth and
+  offers a retry-safe Retry (the service delete is idempotent). The
+  section gates on the capability proxy `GET
+  /api/agents/[id]/knowledge/config` (member-accessible, `agentRead`
+  bucket) — knowledge-off deployments hide it with a one-line
+  explanation, and a failed capability fetch renders an error banner,
+  never a false "knowledge is off". In create mode the section renders
+  as an inert preview (#259) — the same header and upload rows the edit
+  section carries, every control disabled and nothing wired, and the
+  note upgraded from a bare save-first reminder to a feature statement
+  ("Save the agent first, then add documents it can search — PDFs,
+  pasted text, or web pages.") — closing the live-demo discovery gap
+  where a first-time builder was never shown that knowledge exists. The
+  header's key badge demands the
+  embedding provider's key when missing ("Needs your OpenAI key" with a
+  connect shortcut) and hides itself when the model's badge already
+  demands the same key — one line, not two. The run gate now 402s a
+  knowledge-attached agent whose author has no embedding key
+  (`This agent uses knowledge — add your own <Provider> key to run it.`
+  in the aggregated requirements response), delivering the saved key as
+  the run's `<provider>_api_key` context item exactly as the dispatcher
+  resolves it; the demand is BYOK-only (embedding spend rides the
+  runner's own key — no quota change), dedupes with the model's key
+  demand when both need the same key, and delivers per-need when they
+  differ (an OpenRouter model + OpenAI knowledge delivers both keys); a
+  final by-description pass over the delivered context items makes
+  single delivery structural — no dep key rides the run twice, whatever
+  demanded it (a tool contract naming a key another source already
+  demanded delivers once).
+- **Added: knowledge for builder agents — the service half (#233), now
+  running at run time (#234).** Every builder component can now own a
+  document corpus (uploaded files, pasted text, URLs) embedded into pgvector,
+  managed through new `/platform/knowledge/*` routes on the agent-builder
+  service (admin / service-token scope; tackui proxies them — the builder UI
+  is a follow-up). All corpora share one `builder_knowledge` vector table in
+  the builder's Postgres, isolated per corpus by agno's
   `isolate_vector_search` mechanics (a server-side `linked_to` filter
   callers cannot bypass), with corpus-stamped upload metadata making content
   ids corpus-unique. Embeddings are BYOK with no platform fallback: uploads
@@ -18,8 +105,22 @@ All notable changes to this project will be documented in this file. The format 
   never persisted, never logged) while the embedding model is
   platform-fixed via `KNOWLEDGE_EMBEDDER` (default
   `openai:text-embedding-3-small`); a malformed value fails at use time,
-  never boot. Upload validation: format allowlist, 10 MB cap, URL shape
-  check; processing runs off the event loop. The builder's Postgres must be
+  never boot. The dispatcher attaches a component's corpus per run when its
+  stored config declares knowledge: the reference is stripped before agno's
+  rehydration (which would otherwise skip it silently, fail-open) and a
+  fresh Knowledge instance is built with the RUNNER's key — resolved from
+  that run's dependencies with deliberately no env fallback, one instance
+  per run (never shared between concurrent runs). A run without the key
+  degrades to strip + warn + no retrieval (the client's pre-run gate is the
+  real guard), as do a misconfigured embedder and an unreachable vector
+  store. The first-use table creation absorbs a cold-start
+  concurrent-construction race with one retry, and management routes answer
+  any construction failure as a clean 503. Upload validation: format
+  allowlist (legacy `.doc` rejected —
+  its reader only parses the OOXML `.docx` container; #238), 10 MB cap,
+  URL shape check, a 300-char name cap (#241); processing runs off the
+  event loop. The builder's
+  Postgres must be
   a pgvector image (`pgvector/pgvector:pg16` in the compose stacks and the
   test suite's container); the capability endpoint
   (`GET /platform/knowledge/config`) reports availability so the frontend

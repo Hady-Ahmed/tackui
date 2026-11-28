@@ -35,6 +35,8 @@ from fastapi.testclient import TestClient
 
 from catalog import CatalogDB, ModelRow
 
+import knowledge as knowledge_store
+
 # Default test catalog mirroring the pre-DB offering: both model providers
 # enabled with today's ids, plus the two keyless toolkits. Keyed toolkits
 # are never registry members (per-run delivery), so only keyless ones are
@@ -92,6 +94,28 @@ def postgres_dsn():
         yield f"postgresql://{user}:{password}@{host}:{port}/{dbname}"
     finally:
         container.stop()
+
+
+@pytest.fixture(autouse=True)
+def hermetic_embedder_env(monkeypatch):
+    """Scrub the ambient ``KNOWLEDGE_EMBEDDER`` for every test (#240).
+
+    The embedder config is parsed AT CALL TIME from ``os.environ`` — by the
+    capability payload, ``build_knowledge_for``, and the dispatcher's per-run
+    attach — so a developer shell exporting a malformed value (or a valid
+    non-default one) flips every default-config knowledge test onto the
+    documented degradation paths (503 / run-without-retrieval) instead of the
+    successes they pin. Scrubbing here makes the suite hermetic against the
+    developer's shell in one place. Nothing is masked: tests that pin a
+    specific value ``setenv`` it explicitly (that runs after this scrub —
+    same ``monkeypatch`` instance), and the parse contract's own tests pass
+    explicit mappings.
+
+    Args:
+        monkeypatch: pytest's patcher (the ambient value is restored after
+            the test).
+    """
+    monkeypatch.delenv(knowledge_store.EMBEDDER_ENV_VAR, raising=False)
 
 
 @pytest.fixture(autouse=True)

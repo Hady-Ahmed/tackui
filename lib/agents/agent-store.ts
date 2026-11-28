@@ -78,6 +78,16 @@ export const requirementsSchema = z.object({
   connectors: z.array(
     z.object({ id: z.string().min(1), name: z.string().min(1) }),
   ),
+  // The knowledge/embedding contract — present ⇔ the stored config
+  // references a knowledge corpus. OPTIONAL WITHOUT A DEFAULT: an
+  // undeclared field is silently stripped on EVERY store write AND read
+  // (the zod round-trip gotcha), which would turn the run gate's
+  // embedding-key demand into dead code; a default would materialize the
+  // field on snapshots that never had it. Both directions are pinned in
+  // the store round-trip tests.
+  knowledge: z
+    .object({ provider: z.string().min(1), model: z.string().min(1) })
+    .optional(),
 });
 
 // Shared field definitions — used by the create + update input schemas

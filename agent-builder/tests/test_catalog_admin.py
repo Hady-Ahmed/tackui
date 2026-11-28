@@ -768,9 +768,7 @@ def test_put_clears_rows_for_unavailable_offerings(bare_client, bare_app):
 # ---------------------------------------------------------------------------
 
 
-def test_rebuild_skips_unconstructible_rows_with_warning(bare_app, caplog, monkeypatch):
-    # agno's logger does not propagate; mirror it into the capture handler.
-    monkeypatch.setattr(logging.getLogger("agno"), "propagate", True)
+def test_rebuild_skips_unconstructible_rows_with_warning(bare_app, caplog):
     db = bare_app.state.catalog.db
     # Bypass the admin API: write a row the scan cannot construct.
     db.replace_providers_and_models(
@@ -881,12 +879,11 @@ def test_on_conflict_upsert_writes_win(postgres_dsn):
     assert rows[0].tier is True
 
 
-def test_rebuild_skips_rows_with_credential_attrs(bare_app, caplog, monkeypatch):
+def test_rebuild_skips_rows_with_credential_attrs(bare_app, caplog):
     """_validate_attrs re-applies the credential-attribute rejection to rows
     written by other means (direct DB edits, downgrades): a row carrying a
     plaintext secret is skipped with a warning instead of being served as a
     shared platform fallback key through PlatformMixin."""
-    monkeypatch.setattr(logging.getLogger("agno"), "propagate", True)
     db = bare_app.state.catalog.db
     db.replace_providers_and_models(
         [("openai-chat", True)],
@@ -903,8 +900,7 @@ def test_rebuild_skips_rows_with_credential_attrs(bare_app, caplog, monkeypatch)
     assert any("api_key" in r.message for r in caplog.records)
 
 
-def test_rebuild_skips_enabled_tools_no_longer_available(bare_app, caplog, monkeypatch):
-    monkeypatch.setattr(logging.getLogger("agno"), "propagate", True)
+def test_rebuild_skips_enabled_tools_no_longer_available(bare_app, caplog):
     db = bare_app.state.catalog.db
     db.replace_tools(["calculator", "ghost_tool"])
     with caplog.at_level(logging.WARNING, logger="agno"):

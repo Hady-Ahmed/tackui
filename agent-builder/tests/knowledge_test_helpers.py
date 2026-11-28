@@ -14,6 +14,7 @@ import re
 from dataclasses import dataclass
 from typing import List, Optional, Tuple
 
+from agno.exceptions import EmbeddingError
 from agno.knowledge.embedder.base import Embedder
 
 import knowledge as knowledge_store
@@ -99,6 +100,78 @@ class FakeEmbedder(Embedder):
             ``(vector, None)``.
         """
         return self._vector(text), None
+
+
+class RejectingEmbedder(FakeEmbedder):
+    """A ``FakeEmbedder`` whose embed calls FAIL — the provider-rejection
+    shape (an expired key's 401) without network. Construction succeeds (the
+    embedder builds fine); every embed attempt raises the SAME exception
+    class a real provider embedder raises (agno's ``EmbeddingError``, which
+    agno's ingest path catches to write the CLASSIFIED status message — a
+    bare ``RuntimeError`` would take the generic upsert-failure branch and
+    the test would pin a message, not the classified one). 401 classifies
+    to reason ``authentication`` — the live-demo expired-key shape.
+    """
+
+    def _reject(self, text: str) -> List[float]:
+        """The failure itself (every path routes here).
+
+        Args:
+            text: The text the caller tried to embed.
+
+        Raises:
+            EmbeddingError: Always — the simulated provider rejection (an
+                expired key's 401).
+        """
+        raise EmbeddingError("Your API key has expired.", status_code=401)
+
+    def get_embedding(self, text: str) -> List[float]:
+        """Fail the sync embed (see ``_reject``).
+
+        Args:
+            text: The text the caller tried to embed.
+
+        Raises:
+            EmbeddingError: The simulated provider rejection.
+        """
+        self._reject(text)
+        raise AssertionError("unreachable")
+
+    def get_embedding_and_usage(self, text: str) -> Tuple[List[float], Optional[dict]]:
+        """Fail the sync embed-with-usage (see ``_reject``).
+
+        Args:
+            text: The text the caller tried to embed.
+
+        Raises:
+            EmbeddingError: The simulated provider rejection.
+        """
+        self._reject(text)
+        raise AssertionError("unreachable")
+
+    async def async_get_embedding(self, text: str) -> List[float]:
+        """Fail the async embed (see ``_reject``).
+
+        Args:
+            text: The text the caller tried to embed.
+
+        Raises:
+            EmbeddingError: The simulated provider rejection.
+        """
+        self._reject(text)
+        raise AssertionError("unreachable")
+
+    async def async_get_embedding_and_usage(self, text: str) -> Tuple[List[float], Optional[dict]]:
+        """Fail the async embed-with-usage (see ``_reject``).
+
+        Args:
+            text: The text the caller tried to embed.
+
+        Raises:
+            EmbeddingError: The simulated provider rejection.
+        """
+        self._reject(text)
+        raise AssertionError("unreachable")
 
 
 def build_fake_knowledge(component_id: str, db, db_url: str):
