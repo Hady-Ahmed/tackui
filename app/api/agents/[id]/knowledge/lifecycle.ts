@@ -245,9 +245,19 @@ export async function ensureKnowledgeAttached(
 /**
  * Drop the agent's config knowledge ref once its corpus is empty — called
  * after a successful content delete. The corpus list (fetched AFTER the
- * delete, so a raced concurrent upload keeps the ref) is the truth about
- * "last doc". The list fetch failure propagates (the route maps it): the
- * delete succeeded, the retry is idempotent and re-runs the detach.
+ * delete, so a raced concurrent upload's landed row keeps the ref) is the
+ * truth about "last doc" — best-effort, not airtight: a just-202'd upload
+ * inserts its contents row inside agno's background process_content, so
+ * until it lands the doc is invisible to this list and an upload+delete
+ * interleave can publish a ref-less config while the doc exists (the run
+ * degrades to no retrieval — the snapshot's knowledge leaves in the same
+ * publish, so the run gate doesn't 402 either). The invariant self-heals
+ * on the next curation action (the next upload re-attaches); airtight
+ * would need the service to insert the row synchronously with the 202,
+ * which is agno's shape, not ours.
+ *
+ * The list fetch failure propagates (the route maps it): the delete
+ * succeeded, the retry is idempotent and re-runs the detach.
  */
 export async function maybeDetachKnowledge(
   agent: AgentEntry,

@@ -229,9 +229,18 @@ describe("DELETE /api/agents/[id]/knowledge/[contentId]", () => {
     expect(stored?.requirements?.model.id).toBe("gpt-4o-mini");
   });
 
-  it("keeps the ref when a raced concurrent upload re-populated the corpus", async () => {
-    // The corpus list is fetched AFTER the delete — a doc that landed in
-    // between keeps the ref (the invariant: ref ⇔ docs exist).
+  it("keeps the ref when a raced concurrent upload's row is already visible", async () => {
+    // The corpus list is fetched AFTER the delete, so a doc whose row the
+    // list can see keeps the ref. That pins the VISIBLE-row case only —
+    // the ref ⇔ docs invariant is best-effort, not airtight: a just-202'd
+    // upload inserts its contents row inside agno's background
+    // process_content, so until it lands the doc is invisible to this
+    // list and an upload+delete interleave can publish a ref-less config
+    // while the doc exists (the run degrades to no retrieval — the
+    // snapshot's knowledge leaves in the same publish, so the #236 gate
+    // doesn't 402 either). It self-heals on the next curation action
+    // (the next upload re-attaches); airtight would need row-insertion
+    // synchronous with the 202, which is agno's shape, not ours.
     mockFetchKnowledgeList.mockResolvedValue([KNOWLEDGE_ROWS[0]]);
     const res = await deleteContent(agent.id);
     expect(res.status).toBe(200);

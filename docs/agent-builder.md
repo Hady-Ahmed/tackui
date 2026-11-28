@@ -1080,8 +1080,15 @@ half shipped in #235; the builder UI's Knowledge section and the run-gate
   the existing snapshot — the config diff IS only the knowledge key. The
   uploaded doc is NEVER deleted as compensation: the service dedupes
   re-uploads by content hash, so a retry re-runs the attach and converges.
-  Detach truth is the post-delete corpus list, so a raced concurrent upload
-  keeps the ref.
+  Detach truth is the post-delete corpus list — a raced concurrent upload's
+  landed row keeps the ref. That guard is best-effort, not airtight: a
+  just-202'd upload inserts its contents row inside agno's background
+  `process_content`, so an upload+delete interleave can publish a ref-less
+  config while the doc exists (the run degrades to no retrieval — the
+  snapshot's `knowledge` leaves in the same publish, so the #236 run gate
+  doesn't 402 either). The `ref ⇔ docs` invariant self-heals on the next
+  curation action (the next upload re-attaches); airtight would need
+  row-insertion synchronous with the 202 — agno's shape, not ours.
 - **Config-publishing PATCHes preserve the ref** — the builder PATCH route
   carries the knowledge ref (and the snapshot contract) through every
   unrelated edit, re-deriving with the stored contract; otherwise a rename
