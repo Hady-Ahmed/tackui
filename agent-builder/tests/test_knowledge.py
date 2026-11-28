@@ -271,6 +271,281 @@ async def test_shared_bucket_retrieval(agno_db, postgres_dsn):
     assert kb.search("rocket propellant", user_id=None, max_results=5)
 
 
+# -- the cold-start table-creation race (#243) --------------------------------
+
+
+def test_cold_start_duplicate_table_race_retries_cleanly(postgres_dsn, agno_db, monkeypatch):
+    """The deterministic cold-start race: a first-use construction whose probe reads
+    the table ABSENT while a concurrent winner creates it — the loser's ``CREATE TABLE``
+    fails with the REAL psycopg DuplicateTable (SQLAlchemy-wrapped) and the build
+    absorbs it with one retry, ending with a usable instance.
+
+    The interleave is forced, not lucky: the loser's vector store (created inside
+    ``build_knowledge``) is the first instance to call ``table_exists`` — its first
+    two reads are forced absent (the second is ``create()``'s re-check, the TOCTOU
+    stale snapshot) while a REAL sibling ``PgVector.create`` — the concurrent winner,
+    running the genuine extension + ``CREATE TABLE`` flow — brings the table into
+    existence underneath. Without the retry the second forced-absent read leads to a
+    DuplicateTable ``ProgrammingError`` propagating out of ``build_knowledge``; with
+    it, construction succeeds and the instance is usable. The forced reads are
+    consumed exactly (``left == 0``) — the retry path is proven taken, not skipped."""
+    import psycopg
+
+    from agno.vectordb.pgvector import PgVector
+
+    # The fresh-table premise must hold in ANY suite ordering: ``clean_database``
+    # TRUNCATEs but never drops, so earlier tests in this file may have left the
+    # shared table behind (which would make the winner's create() a no-op and
+    # the forced race vacuous). Drop it — the winner below genuinely creates it.
+    with psycopg.connect(postgres_dsn) as conn:
+        conn.execute(f"DROP TABLE IF EXISTS public.{knowledge_store.KNOWLEDGE_TABLE}")
+        conn.commit()
+
+    real_table_exists = PgVector.table_exists
+    component_id = "race-retry-agent"
+    state = {"loser": None, "left": 0}
+
+    def raced_table_exists(self):
+        """Force the loser's two absent reads; let every other instance read for real."""
+        if state["loser"] is None:
+            state["loser"] = self
+            state["left"] = 2
+        if self is state["loser"] and state["left"] > 0:
+            state["left"] -= 1
+            if state["left"] == 1:
+                # The concurrent winner: creates the shared table NOW (the real
+                # CREATE EXTENSION + CREATE TABLE flow) while the loser's snapshot
+                # still reads absent — the TOCTOU window, materialized.
+                PgVector(
+                    table_name=knowledge_store.KNOWLEDGE_TABLE,
+                    schema=knowledge_store.KNOWLEDGE_SCHEMA,
+                    db_url=postgres_dsn,
+                    embedder=FakeEmbedder(),
+                ).create()
+            return False
+        return real_table_exists(self)
+
+    monkeypatch.setattr(PgVector, "table_exists", raced_table_exists)
+    knowledge = knowledge_store.build_knowledge(
+        component_id, agno_db, FakeEmbedder(), db_url=postgres_dsn
+    )
+
+    assert knowledge.name == knowledge_store.corpus_name(component_id)
+    # Both forced-absent reads were consumed (the stale probe AND create()'s
+    # re-check) — the CREATE TABLE really raced, the retry really fired.
+    assert state["left"] == 0
+    # The table exists (the winner made it; the retry's probe saw it) and the
+    # absorbed instance is usable end to end: its contents-db round-trip works.
+    assert knowledge.vector_db.table_exists() is True
+    contents, _count = knowledge.get_content()
+    assert contents == []
+
+
+def test_parallel_cold_constructions_on_fresh_table_both_succeed(postgres_dsn, agno_db):
+    """The real concurrency shape (against the container): TWO threads constructing
+    the SAME corpus on a fresh table, released together — both constructions succeed
+    (a landed race is absorbed by the retry; a serialized one succeeds plainly) and
+    both instances see the shared table."""
+    import psycopg
+    from threading import Barrier, Thread
+
+    # The fresh-table premise must hold in ANY suite ordering: ``clean_database``
+    # TRUNCATEs but never drops, so an earlier test's table would make both
+    # threads probe PRESENT (no DDL, no race, zero regression power). Drop it —
+    # the constructions below genuinely race the first-use creation.
+    with psycopg.connect(postgres_dsn) as conn:
+        conn.execute(f"DROP TABLE IF EXISTS public.{knowledge_store.KNOWLEDGE_TABLE}")
+        conn.commit()
+
+    built = []
+
+    def construct():
+        """One concurrent first-use construction of the SAME corpus."""
+        barrier.wait()
+        built.append(
+            knowledge_store.build_knowledge(
+                "race-par-agent", agno_db, FakeEmbedder(), db_url=postgres_dsn
+            )
+        )
+
+    barrier = Barrier(2, timeout=30)
+    threads = [Thread(target=construct) for _ in range(2)]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join(30)
+
+    assert len(built) == 2, "both constructions succeeded (no exception escaped)"
+    assert [k.name for k in built] == ["kb-race-par-agent", "kb-race-par-agent"]
+    assert all(k.vector_db.table_exists() is True for k in built)
+
+
+def test_cold_start_retry_pins_the_duplicate_table_flavor(monkeypatch):
+    """Offline simulation pinning WHAT the build retries on: a construction attempt
+    failing with SQLAlchemy's ProgrammingError whose DBAPI error is psycopg's
+    DuplicateTable (SQLSTATE 42P07) is absorbed with EXACTLY ONE retry; nothing else
+    would be. The real race raises the same wrapper shape (verified against the
+    container in ``test_cold_start_duplicate_table_race_retries_cleanly``)."""
+    import psycopg
+    from sqlalchemy.exc import ProgrammingError
+
+    duplicate = psycopg.errors.DuplicateTable(
+        'relation "public.builder_knowledge" already exists'
+    )
+    calls = []
+
+    class RacedKnowledge:
+        """The construction whose first attempt loses the race."""
+
+        def __init__(self, **kwargs):
+            calls.append(kwargs)
+            if len(calls) == 1:
+                raise ProgrammingError(
+                    "CREATE TABLE public.builder_knowledge ...", {}, duplicate
+                )
+            self.kwargs = kwargs
+
+    monkeypatch.setattr(knowledge_store, "Knowledge", RacedKnowledge)
+    fake_db = object()  # unused — Knowledge is faked; only its construction is simulated
+
+    knowledge = knowledge_store.build_knowledge(
+        "sim-race-agent", fake_db, FakeEmbedder(), db_url="postgresql://u:p@localhost:1/offline"
+    )
+
+    assert isinstance(knowledge, RacedKnowledge)
+    assert knowledge.kwargs["name"] == "kb-sim-race-agent"
+    assert len(calls) == 2, "the duplicate-table failure is absorbed by exactly one retry"
+    assert calls[0] == calls[1], "the retry re-runs the SAME construction"
+
+
+def _offline_unique_violation(constraint_name):
+    """A psycopg3 ``UniqueViolation`` (SQLSTATE 23505) reporting ``constraint_name``,
+    exactly as a server-raised error does. Offline, ``diag`` is a read-only
+    property (the real Diagnostic is populated by libpq at raise time), so the
+    subclass pins the name the production guard reads
+    (``.diag.constraint_name``) — the same surface a real pg_class/pg_extension
+    name conflict carries."""
+    import psycopg
+    from types import SimpleNamespace
+
+    class NamedUniqueViolation(psycopg.errors.UniqueViolation):
+        @property
+        def diag(self):
+            return SimpleNamespace(constraint_name=constraint_name)
+
+    return NamedUniqueViolation("duplicate key value violates unique constraint")
+
+
+def test_cold_start_retry_pins_the_catalog_name_conflict_flavor(monkeypatch):
+    """The OVERLAPPING-DDL race flavor, pinned offline: when the winner's DDL is
+    still uncommitted, Postgres blocks the loser's ``CREATE TABLE`` on a catalog
+    unique index and fails it with a unique violation (23505) — NOT the friendly
+    duplicate_table 42P07, which arrives only when the conflicting table was
+    already committed. Empirically (pgvector/pg16, verified live) the loser dies
+    on ``pg_type_typname_nsp_index`` (its row type in pg_type collides first) and
+    the concurrent ``CREATE EXTENSION IF NOT EXISTS vector`` on
+    ``pg_extension_name_index``; ``pg_class_relname_nsp_index`` is the same
+    benign shape, kept as defense. All three flavors are absorbed with EXACTLY
+    ONE retry, same args — and a data-level 23505 is NOT (see
+    ``test_cold_start_retry_never_masks_other_programming_errors``)."""
+    from sqlalchemy.exc import IntegrityError
+
+    for constraint in (
+        "pg_type_typname_nsp_index",
+        "pg_extension_name_index",
+        "pg_class_relname_nsp_index",
+    ):
+        calls = []
+
+        class RacedKnowledge:
+            """The construction whose first attempt loses the overlap race."""
+
+            def __init__(self, **kwargs):
+                calls.append(kwargs)
+                if len(calls) == 1:
+                    raise IntegrityError(
+                        "CREATE TABLE public.builder_knowledge ...",
+                        {},
+                        _offline_unique_violation(constraint),
+                    )
+                self.kwargs = kwargs
+
+        monkeypatch.setattr(knowledge_store, "Knowledge", RacedKnowledge)
+        knowledge = knowledge_store.build_knowledge(
+            "sim-overlap-agent",
+            object(),  # unused — Knowledge is faked; only its construction is simulated
+            FakeEmbedder(),
+            db_url="postgresql://u:p@localhost:1/offline",
+        )
+
+        assert isinstance(knowledge, RacedKnowledge)
+        assert knowledge.kwargs["name"] == "kb-sim-overlap-agent"
+        assert len(calls) == 2, (
+            f"the catalog name-conflict ({constraint}) is absorbed by exactly one retry"
+        )
+        assert calls[0] == calls[1], "the retry re-runs the SAME construction"
+
+
+def test_cold_start_retry_never_masks_other_programming_errors(monkeypatch):
+    """The flip side: a construction failure that is NOT the duplicate-table flavor
+    (a genuine misconfiguration — a syntax-level ProgrammingError, a DBAPI error
+    carrying no SQLSTATE at all) — and NOT a catalog name-conflict — propagates
+    untouched after the FIRST attempt — no retry masks a real failure, so the
+    callers' degrade paths still see it. Data-level unique violations (23505 on
+    any constraint other than the catalog name-conflict indexes) stay LOUD:
+    a constraint like ``users_pkey`` is a real integrity failure, not the race's
+    good news, and is never retried."""
+    import psycopg
+    from sqlalchemy.exc import IntegrityError, ProgrammingError
+
+    syntax = psycopg.errors.SyntaxError("syntax error in CREATE TABLE")
+    assert syntax.sqlstate == "42601" and syntax.sqlstate != knowledge_store.DUPLICATE_TABLE_SQLSTATE
+
+    for orig in (syntax, RuntimeError("no SQLSTATE at all")):
+        calls = []
+
+        class FailingKnowledge:
+            """The construction failing with a NON-duplicate-table error."""
+
+            def __init__(self, **kwargs):
+                calls.append(kwargs)
+                raise ProgrammingError("CREATE TABLE public.builder_knowledge ...", {}, orig)
+
+        monkeypatch.setattr(knowledge_store, "Knowledge", FailingKnowledge)
+        with pytest.raises(ProgrammingError):
+            knowledge_store.build_knowledge(
+                "sim-fail-agent",
+                object(),  # unused — the faked construction raises before any db use
+                FakeEmbedder(),
+                db_url="postgresql://u:p@localhost:1/offline",
+            )
+        assert len(calls) == 1, "a non-duplicate-table failure is never retried"
+
+    for constraint in ("users_pkey", "synthetic_data_constraint_idx"):
+        calls = []
+
+        class DataViolatingKnowledge:
+            """The construction failing with a DATA-level unique violation."""
+
+            def __init__(self, **kwargs):
+                calls.append(kwargs)
+                raise IntegrityError(
+                    "INSERT INTO ai.agno_knowledge ...",
+                    {},
+                    _offline_unique_violation(constraint),
+                )
+
+        monkeypatch.setattr(knowledge_store, "Knowledge", DataViolatingKnowledge)
+        with pytest.raises(IntegrityError):
+            knowledge_store.build_knowledge(
+                "sim-data-violation-agent",
+                object(),  # unused — the faked construction raises before any db use
+                FakeEmbedder(),
+                db_url="postgresql://u:p@localhost:1/offline",
+            )
+        assert len(calls) == 1, f"a data-level 23505 ({constraint}) is never retried"
+
+
 # -- capability probe ---------------------------------------------------------
 
 

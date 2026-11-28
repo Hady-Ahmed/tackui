@@ -260,6 +260,30 @@ def test_upload_on_malformed_embedder_env_is_a_clean_use_time_error(client, monk
     assert client.get("/platform/knowledge/route-agent", headers=admin_headers()).status_code == 503
 
 
+def test_persistent_construction_failure_is_a_clean_503_on_every_route(client, monkeypatch):
+    """A construction failure that is NOT an OperationalError (a reachable store whose
+    first-use table creation failed persistently — a missing pgvector extension,
+    permission denied; the cold-start duplicate-table race is absorbed upstream by
+    the build layer's one retry) answers a clean 503 on EVERY management route,
+    never a raw 500 — the dispatcher-aligned degrade posture (#243)."""
+    def failing_construction(component_id, db, api_key=None, *, db_url=None, name=None):
+        """The sibling DBAPI failure (the shape the dispatcher also degrades on)."""
+        raise RuntimeError("simulated persistent CREATE TABLE failure")
+
+    monkeypatch.setattr(knowledge_store, "build_knowledge_for", failing_construction)
+    listed = client.get("/platform/knowledge/route-agent", headers=admin_headers())
+    assert listed.status_code == 503
+    assert listed.json()["detail"] == "knowledge storage failed to initialize"
+    upload = _post_text(client, text="The rye harvest ripens.")
+    assert upload.status_code == 503
+    assert upload.json()["detail"] == "knowledge storage failed to initialize"
+    deleted = client.delete(
+        "/platform/knowledge/route-agent/content/whatever", headers=admin_headers()
+    )
+    assert deleted.status_code == 503
+    assert deleted.json()["detail"] == "knowledge storage failed to initialize"
+
+
 # -- the full route lifecycle (upload → list → delete) ------------------------
 
 

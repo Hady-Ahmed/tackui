@@ -85,7 +85,10 @@ All notable changes to this project will be documented in this file. The format 
   per run (never shared between concurrent runs). A run without the key
   degrades to strip + warn + no retrieval (the client's pre-run gate is the
   real guard), as do a misconfigured embedder and an unreachable vector
-  store. Upload validation: format allowlist (legacy `.doc` rejected —
+  store. The first-use table creation absorbs a cold-start
+  concurrent-construction race with one retry, and management routes answer
+  any construction failure as a clean 503. Upload validation: format
+  allowlist (legacy `.doc` rejected —
   its reader only parses the OOXML `.docx` container; #238), 10 MB cap,
   URL shape check, a 300-char name cap (#241); processing runs off the
   event loop. The builder's
