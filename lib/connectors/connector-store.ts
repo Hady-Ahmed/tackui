@@ -81,11 +81,10 @@ export const nameSchema = z
 // scheme boundary at INPUT — a non-http(s) URL that passes the route used
 // to be stored and only fail here (or as a run-time fetch error).
 export const urlSchema = z
-  .string()
   .url()
   .max(2000)
   .refine((u) => /^https?:$/.test(new URL(u).protocol), {
-    message: "URL must be http(s)",
+    error: "URL must be http(s)",
   });
 
 function rowToConnector(row: ConnectorRow): Connector {

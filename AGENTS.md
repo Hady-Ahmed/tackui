@@ -52,6 +52,13 @@ no Docker required, no cleanup between runs (see `vitest.config.ts`).
 - **Store / library functions** — unit-test each exported function. Cover
   happy paths, edge cases (missing records, duplicates), and zod validation
   rejections.
+- **Components** — for effect/wiring coverage the unit layer can't reach,
+  use `@testing-library/react` in a `*.test.tsx` file next to the
+  component, with `// @vitest-environment jsdom` as its FIRST line (the
+  suite stays node by default; only component files opt in). Mock the
+  page-data hooks at the module boundary (`vi.mock`), and call
+  `cleanup()` in `afterEach` — vitest's `globals: false` disables RTL's
+  auto-cleanup. Template: `components/builder/builder-form.test.tsx`.
 - **Test files** — place `*.test.ts` next to the file under test (e.g.
   `lib/agents/agent-store.test.ts`, `app/api/agents/route.test.ts`).
 - **External calls** — mock with `vi.stubGlobal` (e.g. `fetch` in
@@ -114,12 +121,22 @@ no Docker required, no cleanup between runs (see `vitest.config.ts`).
   bug".
 - **`"user"` is a reserved word in Postgres** — double-quote it in all raw
   SQL (`SELECT * FROM "user"`), including in Better Auth hook queries.
+- **Better Auth `databaseHooks` run inside Better Auth's transaction** —
+  writes in a hook MUST go through Better Auth's transaction-scoped
+  adapter (`getCurrentAdapter(ctx.context.adapter)`), never the app's
+  shared `query()` pool. A pool write cannot see the rows Better Auth's
+  signup transaction created on its own connection — the first signup's
+  `member.userId` FK check fails and rolls back the whole signup (#208).
+  See `lib/auth/personal-org.ts`.
 - **Agent `id` is server-generated** (12-char random hex) — never
   client-supplied, immutable after creation. The PK is composite `(id,
   org_id)`: the same id can exist in different orgs.
 - **Agent `jwtSecret` is write-only** — accepted on POST/PATCH, never
-  returned in GET responses (`PublicAgent.hasJwtSecret: boolean` replaces
-  it). A blank submit on the edit form preserves the existing value. The
+  returned in GET responses (`PublicAgent.hasJwtSecret: boolean` for
+  presence, `jwtSecretStatus` for the none/set/undecryptable tri-state).
+  A blank submit on the edit form preserves the existing value. Row
+  mapping is presence-only (`AgentEntry.jwtSecretStored`) — decrypt via
+  `resolveAgentSecret()` only where the plaintext is consumed; the
   encryption-at-rest boundary lives entirely inside
   `lib/agents/agent-store.ts`.
 - **SSRF guard on any endpoint-accepting route:** any route that takes a
@@ -142,6 +159,23 @@ no Docker required, no cleanup between runs (see `vitest.config.ts`).
   response bodies must be wrapped with `wrapStreamWithRelease` so the
   concurrent counter decrements on close/error/cancel. Solo-mode bypass is
   centralized in the middleware — don't add per-route `AUTH_DISABLED` checks.
+- **`withKeyedLock` waits are bounded** (`lib/db/keyed-lock.ts`): a
+  same-key waiter times out after 30s (default) and the queue caps at
+  32 waiters — contended calls reject with `KeyedLockUnavailableError`
+  (`code` `KEYED_LOCK_UNAVAILABLE`), and callers holding the lock must
+  surface it as retryable (routes map it to a 503 "please try again",
+  never the generic 500). An operation that can legitimately exceed 30s
+  under contention needs a larger per-call `waitTimeoutMs` (or
+  `Infinity`).
+- **Knowledge-attached builder agents demand the embedding provider's key
+  at run time** — the run gate 402s without it and delivers the saved key
+  as the `<provider>_api_key` context item the dispatcher resolves the
+  embedder from (deps-only; the gate's delivery and its 402 line both
+  dedupe against the model's key demand when they need the same key). The
+  demand only exists when `requirementsSchema` declares `knowledge` — the
+  zod schema strips undeclared fields on EVERY write AND read (the
+  round-trip test pins it), so removing the field silently drops the
+  contract and the run gate never fires. See docs/agent-builder.md.
 - **AG-UI protocol spec:** https://docs.ag-ui.com — see
   [Events](https://docs.ag-ui.com/concepts/events),
   [Messages](https://docs.ag-ui.com/concepts/messages), and
@@ -198,3 +232,13 @@ full how-it-works detail this file deliberately omits:
 - **`docs/e2e.md`** — the Playwright E2E smoke suite: the real-app harness
   (web-server lifecycle, seeding, mock agent), the 8 Tier 1 tests, locator
   discipline, and the breakage-test contract
+
+<!-- BEGIN:nextjs-agent-rules -->
+
+## This is NOT the Next.js you know
+
+This version has breaking changes — APIs, conventions, and file structure may all differ from your training data. Read the relevant guide in `node_modules/next/dist/docs/` (resolved from this file's directory; in monorepos the `next` package may not be visible from the repo root) before writing any code. Heed deprecation notices.
+
+This block is written and re-added by `next dev` — verify at `node_modules/next/dist/server/lib/generate-agent-files.js`. Removing it from a diff only re-creates the uncommitted change; committing it with your work keeps the tree clean.
+
+<!-- END:nextjs-agent-rules -->

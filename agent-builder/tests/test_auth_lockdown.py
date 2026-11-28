@@ -24,6 +24,11 @@ PLATFORM_ADMIN_REQUESTS = [
     ("DELETE", "/platform/connectors/{connector_id}", None),
     ("GET", "/platform/models", None),
     ("GET", "/platform/tools", None),
+    # Knowledge (#233) — admin/service-token scope only (tackui proxies).
+    ("GET", "/platform/knowledge/config", None),
+    ("GET", "/platform/knowledge/{component_id}", None),
+    ("POST", "/platform/knowledge/{component_id}/content", None),
+    ("DELETE", "/platform/knowledge/{component_id}/content/{content_id}", None),
 ]
 
 

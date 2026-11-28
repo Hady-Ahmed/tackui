@@ -1,0 +1,687 @@
+name: Iterate agent PRs
+
+# Comment-driven iteration: `/agent fix <instruction>` on any open PR makes
+# the agent apply that change to the PR's existing branch — preserving the
+# already-reviewed work instead of a full re-label redo.
+#
+# The trust process is identical to fresh runs, not weaker: implementer pass
+# (instruction + diff + PR context) -> reviewer pass scoped to the delta ->
+# bounded fix pass on blocking findings -> re-review -> gates re-run by THIS
+# workflow -> PR body recomposed from the updated summary -> append-only
+# push (never --force) -> result comment tagging the requester.
+#
+# Guardrails:
+#   - Only comments from users with write access trigger. The bot's own
+#     comments never match the command, so it cannot loop itself.
+#   - Ambiguous instructions follow the same questions sentinel: ambiguous
+#     parts are NOT guessed at — nothing is pushed; questions are posted as
+#     a PR comment.
+#   - PR-body recomposition happens ONLY for bot-authored PRs. A human
+#     author's description is their prose — the agent never rewrites it;
+#     its iteration lives in the commit + result comment.
+#   - In-flight guard: if an "Issue Agent — #N" run is in progress for the
+#     issue linked to this PR's branch, iteration waits (the run owns the
+#     branch). Runs identify themselves via agent.yml's dynamic run-name.
+#   - Failures after work: nothing is pushed; a failure comment says the
+#     instruction can be re-issued. A failed iteration never lands red
+#     code on a reviewed PR.
+#
+# Required repo secrets (same as agent.yml):
+#   APP_ID / APP_PRIVATE_KEY     — tackui-agent GitHub App
+#   AGENT_OPENCODE_CONFIG        — opencode config JSON (model + provider)
+#   AGENT_MODEL (optional var)   — override model, "provider/model" format
+
+on:
+  issue_comment:
+    types: [created]
+
+concurrency:
+  # One iteration at a time per PR; queued, not cancelled.
+  group: agent-iterate-${{ github.event.issue.number }}
+  cancel-in-progress: false
+
+# GITHUB_TOKEN: read-only. All mutations go through the app token.
+permissions:
+  contents: read
+  pull-requests: read
+  actions: read
+
+jobs:
+  iterate:
+    # PR comments only (issue.pull_request is null on plain issues), only
+    # the command, never the bot's own comments.
+    if: >-
+      github.event.issue.pull_request != null &&
+      startsWith(github.event.comment.body, '/agent fix') &&
+      github.event.comment.user.login != 'tackui-agent'
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - name: Auth as tackui-agent
+        id: app-token
+        uses: actions/create-github-app-token@v2
+        with:
+          app-id: ${{ secrets.APP_ID }}
+          private-key: ${{ secrets.APP_PRIVATE_KEY }}
+          owner: Hady-Ahmed
+          repositories: tackui
+
+      - name: Guard — command sender must have write access
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+        run: |
+          set -euo pipefail
+          sender="${{ github.event.comment.user.login }}"
+          perm="$(gh api "repos/${GITHUB_REPOSITORY}/collaborators/${sender}/permission" --jq '.permission')"
+          echo "sender ${sender} has permission: ${perm}"
+          case "$perm" in
+            admin|write) ;;
+            *)
+              echo "::error::'/agent fix' commenter ${sender} lacks write access (${perm}) — refusing to run."
+              exit 1
+              ;;
+          esac
+
+      - name: Load PR context and guard
+        id: pr
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+          PR_NUMBER: ${{ github.event.issue.number }}
+        run: |
+          set -euo pipefail
+          # Instruction = the comment minus the "/agent fix" command line.
+          printf '%s\n' "${{ github.event.comment.body }}" | sed -E '1s|^/agent fix[[:space:]]*||' > /tmp/instruction.md
+          echo "--- instruction ---"; cat /tmp/instruction.md
+
+          read -r state branch author <<<"$(gh pr view "$PR_NUMBER" --repo "$GITHUB_REPOSITORY" \
+            --json state,headRefName,author \
+            --jq '"\(.state) \(.headRefName) \(.author.login)"')"
+          if [ "$state" != "OPEN" ]; then
+            echo "::notice::PR #${PR_NUMBER} is ${state} — nothing to iterate on."
+            exit 0
+          fi
+          echo "PR #${PR_NUMBER}: branch=${branch} author=${author}"
+
+          # In-flight guard: a feature run for the PR's linked issue owns
+          # the branch. Human PRs (no agent/issue-N- branch) have no link
+          # to check.
+          n_issue="$(printf '%s' "$branch" | sed -n 's|^agent/issue-\([0-9]*\)-.*|\1|p' || true)"
+          if [ -n "$n_issue" ]; then
+            inflight="$(gh run list --repo "$GITHUB_REPOSITORY" \
+              --workflow "Issue Agent" --status in_progress --json displayTitle \
+              --jq '[.[].displayTitle | capture("#(?<n>[0-9]+)$").n] | join(" ")' 2>/dev/null || echo "")"
+            case " ${inflight} " in
+              *" $n_issue "*)
+                echo "::notice::Issue #${n_issue} has an agent run in flight — iteration skipped; try again when it finishes."
+                exit 0
+                ;;
+            esac
+          fi
+
+          gh pr view "$PR_NUMBER" --repo "$GITHUB_REPOSITORY" --json body --jq .body > /tmp/pr-body-current.md
+          gh api "repos/${GITHUB_REPOSITORY}/issues/${PR_NUMBER}/comments" \
+            --jq '.[] | "### Comment by \(.user.login)\n\(.body)"' > /tmp/comments.md
+
+          {
+            echo "BRANCH=${branch}"
+            echo "AUTHOR=${author}"
+            echo "ISSUE_NUM=${n_issue}"
+          } >> "$GITHUB_OUTPUT"
+
+      # From here on, benign skips have already exited 0 — a red run means
+      # a real failure (or a security guard trip).
+      - uses: actions/checkout@v7
+        with:
+          token: ${{ steps.app-token.outputs.token }}
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Check out the PR branch
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+          BRANCH: ${{ steps.pr.outputs.BRANCH }}
+        run: |
+          set -euo pipefail
+          URL="https://x-access-token:${GH_TOKEN}@github.com/${GITHUB_REPOSITORY}.git"
+          git fetch "$URL" "$BRANCH"
+          git checkout -B "$BRANCH" "$(git rev-parse FETCH_HEAD)"
+          git config user.name "tackui-agent[bot]"
+          git config user.email "tackui-agent[bot]@users.noreply.github.com"
+          echo "PRE_HEAD=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 24
+
+      - name: Install opencode
+        run: npm i -g @opencode/cli
+
+      - name: Configure opencode (model + credentials + unattended permissions)
+        env:
+          AGENT_OPENCODE_CONFIG: ${{ secrets.AGENT_OPENCODE_CONFIG }}
+        run: |
+          set -euo pipefail
+          if [ -z "$AGENT_OPENCODE_CONFIG" ]; then
+            echo "::error::AGENT_OPENCODE_CONFIG secret is not set."
+            exit 1
+          fi
+          mkdir -p ~/.config/opencode
+          # Same V2 unattended permission layer as agent.yml (see its
+          # comment for the battery-established layering facts): the
+          # @opencode/cli V2 binary defaults every agent to allow-all
+          # except .env reads (ask) and the shipped build agent's
+          # question-allow — both session-visible rejections in
+          # unattended runs, so both are hard-denied at the agent level
+          # (global rules can be shadowed by a built-in agent's policy).
+          # `del` strips both permission shapes the secret might carry
+          # so nothing inherited can weaken this layer.
+          jq 'del(.permission, .permissions) * {
+            permissions: [
+              { action: "question",          resource: "*",         effect: "deny" },
+              { action: "read",              resource: "*.env",     effect: "deny" },
+              { action: "read",              resource: "*.env.*",   effect: "deny" },
+              { action: "read",              resource: "*.env.example", effect: "allow" },
+              { action: "external_directory", resource: "*",        effect: "allow" }
+            ],
+            agents: {
+              build: {
+                permissions: [
+                  { action: "question", resource: "*",   effect: "deny" },
+                  { action: "read",     resource: "*.env",   effect: "deny" },
+                  { action: "read",     resource: "*.env.*", effect: "deny" }
+                ]
+              },
+              explore: {
+                mode: "all",
+                permissions: [
+                  { action: "question", resource: "*",   effect: "deny" },
+                  { action: "read",     resource: "*.env",   effect: "deny" },
+                  { action: "read",     resource: "*.env.*", effect: "deny" }
+                ]
+              }
+            }
+          }' <<< "$AGENT_OPENCODE_CONFIG" > ~/.config/opencode/opencode.json
+          chmod 600 ~/.config/opencode/opencode.json
+          grep -q '"question"' ~/.config/opencode/opencode.json \
+            || { echo "::error::Permission layer missing from the written opencode config — the jq merge produced an unexpected shape."; exit 1; }
+
+      # ------------------------------------------------------------------
+      # Phase 1 — implementer (iteration pass)
+      # ------------------------------------------------------------------
+      - name: Build implementer prompt
+        env:
+          PR_NUMBER: ${{ github.event.issue.number }}
+          BRANCH: ${{ steps.pr.outputs.BRANCH }}
+          ISSUE_NUM: ${{ steps.pr.outputs.ISSUE_NUM }}
+        run: |
+          set -euo pipefail
+          if [ ! -f .github/PULL_REQUEST_TEMPLATE.md ]; then
+            echo "::error::.github/PULL_REQUEST_TEMPLATE.md not found — the summary format has no source of truth."
+            exit 1
+          fi
+          cat > /tmp/prompt.md <<EOF
+          You are iterating on open pull request #${PR_NUMBER} (branch
+          ${BRANCH}) in the tackui repository, in response to a maintainer's
+          comment. The PR's existing work is already reviewed — your job is
+          to apply the requested change on top of it, nothing more.
+
+          ## The requested change (verbatim)
+
+          $(cat /tmp/instruction.md)
+
+          ## Read the house rules FIRST, before any code
+
+          - Read AGENTS.md at the repository root and follow it: testing
+            conventions, ground rules, gotchas, changelog discipline.
+          - Read CONTRIBUTING.md for commit and PR conventions — including
+            which checks to run before pushing; run those gates yourself.
+            (The workflow re-runs them on the final code regardless.)
+          - Identify which area(s) the change touches, read the matching
+            deep-dive docs under docs/ (index at the bottom of AGENTS.md).
+
+          ## Context you have
+
+          - The PR's current description is in /tmp/pr-body-current.md —
+            the state of the work so far (for a human-authored PR this is
+            the author's own prose: context, not a template to imitate).
+          - The PR's full diff against main: git diff "$(git merge-base main HEAD)" HEAD
+          - The PR's comment thread is in /tmp/comments.md — it may hold
+            the review discussion that led to this instruction.
+          EOF
+          if [ -n "${ISSUE_NUM}" ]; then
+            cat >> /tmp/prompt.md <<EOF
+          - This PR implements issue #${ISSUE_NUM}; its body and comments
+            are part of the context above.
+          EOF
+          fi
+          cat >> /tmp/prompt.md <<EOF
+
+          ## Iteration rules
+
+          - Change ONLY what the requested change requires. Every unrelated
+            edit is scope creep on a reviewed PR. Do not refactor beyond
+            the instruction.
+          - If any part of the instruction is ambiguous, do NOT guess:
+            implement the unambiguous part, and write the open questions to
+            AGENT_QUESTIONS.md in the repository root, one per line,
+            prefixed "- ". If NOTHING is unambiguous, make no code changes
+            and write only questions. Ambiguity resolves to asking — a
+            wrong guess lands on a reviewed PR.
+          - If a test fails, determine whether YOUR change caused it or it
+            is an environment flake before changing any code to "fix" it.
+          - Gates before considering the work done (a fresh checkout has no
+            node_modules — run npm ci before any npm gate):
+              1. npm run lint
+              2. npx tsc --noEmit
+              3. npm run test   (the full vitest suite — all tiers)
+              4. If — and only if — you changed anything under
+                 agent-builder/, install uv (curl -LsSf
+                 https://astral.sh/uv/install.sh | sh then export
+                 PATH="$HOME/.local/bin:$PATH") and run:
+                 cd agent-builder && uv run pytest
+          - Do NOT run the repo's formal E2E suite (npm run test:e2e and
+            the specs under e2e/), do NOT modify anything under e2e/ or
+            playwright.config.*, and do NOT build or boot any Docker
+            image. Those are CI-only. This does NOT ban a throwaway
+            Playwright script of your own — see the UI verification rule.
+          - If the change affects anything a user sees or clicks in a
+            browser (components/, app pages, the builder interface),
+            VERIFY IT IN A REAL BROWSER before considering the work done:
+              1. npm ci if you have not already, then start the dev server
+                 in the background:
+                 (npm run dev -- --hostname 127.0.0.1 --port 3123 &> /tmp/dev.log &)
+                 If it needs env vars, write minimal throwaway values into
+                 .env.local (git-ignored; NEVER commit it) and restart it.
+              2. npx playwright install --with-deps chromium — browsers are
+                 not preinstalled on the runner.
+              3. Write a THROWAWAY script (e.g. /tmp/verify.mjs) that
+                 imports playwright, opens the page(s) you changed,
+                 performs the requested interaction, and asserts the
+                 expected behavior.
+              4. Run it headless. Record exactly what you ran and what
+                 rendered.
+              5. Kill the dev server and delete the script — it is scratch,
+                 not a deliverable. NEVER commit it, never add it to e2e/.
+            In AGENT_SUMMARY.md's Test plan, keep three verification tiers
+            strictly separate and never blur them:
+              - "Verified by unit tests: <what>" — what the suite proves.
+              - "Verified in a headless browser: <what, plus the exact
+                steps the script performed>" — ONLY if a browser script
+                actually ran in this session.
+              - "To confirm by hand: <what>" — what a human should click
+                and expect to see.
+            NEVER write a first-person line describing a manual check you
+            did not perform.
+          - You may also write follow-up findings (real problems you
+            noticed that are OUT of the instruction's scope) to
+            AGENT_FOLLOWUP.md in the repository root — they will be filed
+            as a separate issue. Do not fix them yourself.
+          - Do NOT push, do NOT open pull requests, do NOT merge, and do
+            NOT touch anything under .github/ — the workflow owns those.
+          - Commit every change with a conventional-commit message
+            (e.g. "fix: <what> (PR #${PR_NUMBER})"). Your deliverable is a
+            local commit; the workflow handles everything public.
+          - Every file you write (AGENT_SUMMARY.md, AGENT_FOLLOWUP.md,
+            AGENT_QUESTIONS.md) and every PR-facing sentence is ENGLISH,
+            always — these are read by humans in an English-language
+            review flow.
+          - FINAL STEP, always: update AGENT_SUMMARY.md in the repository
+            root — the FULL template-shaped summary of the PR's current
+            TOTAL state (not just your delta): read
+            .github/PULL_REQUEST_TEMPLATE.md and CONTRIBUTING.md's "Pull
+            requests" section FIRST, then write AGENT_SUMMARY.md in that
+            structure, then append the Convention attestations section
+            (same shape as feature runs: tests, eslint-disable/any, TODOs,
+            docs, changelog, security-sensitive files, env vars). Leave
+            EVERY Checklist box unticked — the workflow ticks the three
+            gate boxes itself with its verification note. If the iteration
+            changed nothing material in an attestation, keep its claim;
+            update any claim your delta changed. Every claim in the file
+            is verified against the actual diff by the reviewer pass — do
+            not write anything you did not do.
+          EOF
+
+      - name: Run implementer (opencode)
+        run: |
+          set -euo pipefail
+          args=(run --agent build)
+          if [ -n "${AGENT_MODEL:-}" ]; then args+=(--model "$AGENT_MODEL"); fi
+          timeout 20m opencode "${args[@]}" "$(cat /tmp/prompt.md)" 2>&1 | tee /tmp/opencode.log
+          # Same aborted-session tripwire as agent.yml: a permission
+          # rejection kills the session while the CLI exits 0 — without
+          # this the run would report a benign "no changes". V2 adds an
+          # in-session rejection signature (asks no longer abort; the
+          # tool call is rejected and the session continues), so trip on
+          # both — either means the permission layer failed its job.
+          if grep -q "The user rejected permission" /tmp/opencode.log \
+            || grep -q "rejected in this session" /tmp/opencode.log; then
+            echo "::error::Implementer hit a permission ask/rejection — no trustworthy work. The opencode permission layer must produce zero asks in unattended runs."
+            exit 1
+          fi
+        env:
+          AGENT_MODEL: ${{ vars.AGENT_MODEL }}
+
+      - name: Preserve agent artifacts
+        run: |
+          set -euo pipefail
+          if [ -f AGENT_QUESTIONS.md ]; then
+            touch /tmp/has-questions
+            cp AGENT_QUESTIONS.md /tmp/questions-comment.md
+          fi
+          if [ -f AGENT_FOLLOWUP.md ]; then
+            cat AGENT_FOLLOWUP.md > /tmp/followup.md
+          fi
+          if [ -f AGENT_SUMMARY.md ]; then
+            cp AGENT_SUMMARY.md /tmp/summary.md
+          fi
+
+      - name: Check for changes
+        id: changes
+        env:
+          PRE_HEAD: ${{ steps.checkout.outputs.PRE_HEAD }}
+        run: |
+          set -euo pipefail
+          committed="$(git diff --name-only "${PRE_HEAD}" HEAD | wc -l)"
+          uncommitted="$(git status --porcelain --untracked-files=no | wc -l)"
+          echo "CHANGES=$((committed + uncommitted))" >> "$GITHUB_OUTPUT"
+
+      # ------------------------------------------------------------------
+      # Phase 2 — reviewer (fresh context, scoped to the delta)
+      # ------------------------------------------------------------------
+      - name: Build reviewer prompt
+        env:
+          PR_NUMBER: ${{ github.event.issue.number }}
+          PRE_HEAD: ${{ steps.checkout.outputs.PRE_HEAD }}
+        run: |
+          set -euo pipefail
+          {
+            echo "You are reviewing an ITERATION on pull request #${PR_NUMBER}"
+            echo "in the tackui repository. A maintainer requested a change"
+            echo "with this instruction (verbatim):"
+            echo
+            sed 's/^/    /' /tmp/instruction.md
+            echo
+            echo "The iteration's delta — exactly what the implementer changed"
+            echo "in response — is: git diff ${PRE_HEAD} HEAD"
+            echo "The PR's full diff against main provides surrounding context:"
+            echo "git diff \"\$(git merge-base main HEAD)\" HEAD"
+            echo
+            echo "Look for, in order:"
+            echo "1. The instruction was implemented faithfully — no more, no"
+            echo "   less. Silent reinterpretation of the request is a finding."
+            echo "2. The delta breaks nothing: regressions to existing behavior"
+            echo "   in the changed files, missing tests for new paths, security"
+            echo "   issues."
+            echo "3. No scope creep: files unrelated to the instruction are"
+            echo "   untouched."
+            echo "4. The updated AGENT_SUMMARY.md's claims match the actual"
+            echo "   delta — it describes the PR's total state; any claim the"
+            echo "   diff does not support is a blocking finding, as is any"
+            echo "   claim of browser verification without script evidence in"
+            echo "   /tmp/opencode.log."
+            echo
+            echo "Write the report in English — it is read by humans in an"
+            echo "English-language flow."
+            echo "Write your report to AGENT_REVIEW.md in the repository root"
+            echo "with one line per finding, prefixed '- blocking: ' for things"
+            echo "that MUST be fixed before this iteration can land, and"
+            echo "'- follow-up: ' for real problems that are OUT of the"
+            echo "instruction's scope (they will be filed as a separate issue)."
+            echo "If everything passes, write exactly: 'No blocking findings.'"
+          } > /tmp/reviewer-prompt.md
+
+      - name: Run reviewer (opencode, read-only)
+        run: |
+          set -euo pipefail
+          args=(run --agent explore)
+          if [ -n "${AGENT_MODEL:-}" ]; then args+=(--model "$AGENT_MODEL"); fi
+          timeout 10m opencode "${args[@]}" "$(cat /tmp/reviewer-prompt.md)" 2>&1 | tee /tmp/opencode-reviewer.log
+        env:
+          AGENT_MODEL: ${{ vars.AGENT_MODEL }}
+
+      - name: Snapshot first review
+        run: |
+          set -euo pipefail
+          if [ -f AGENT_REVIEW.md ]; then
+            cp AGENT_REVIEW.md /tmp/review-1.md
+          fi
+
+      - name: Fix pass (if the reviewer found blocking issues)
+        if: steps.changes.outputs.CHANGES != '0'
+        env:
+          PR_NUMBER: ${{ github.event.issue.number }}
+        run: |
+          set -euo pipefail
+          if ! grep -q "^- blocking" /tmp/review-1.md; then
+            echo "No blocking findings — skipping fix pass."
+            exit 0
+          fi
+          cat > /tmp/fix-prompt.md <<EOF
+          You are fixing the blocking findings from a review of your own
+          iteration on pull request #${PR_NUMBER} (tackui repository). Fix
+          ONLY the blocking findings below — a follow-up item is NOT a fix —
+          revert it, note it in AGENT_FOLLOWUP.md instead. Do not add new
+          questions (AGENT_QUESTIONS.md is off-limits in the fix pass). Do
+          not refactor beyond the findings. Re-run the gates you changed
+          code for. Update AGENT_SUMMARY.md if your fix changes any claim
+          in it. Commit with a conventional-commit message. Do NOT push.
+
+          The blocking findings (verbatim from the review):
+
+          $(cat /tmp/review-1.md)
+          EOF
+          args=(run --agent build)
+          if [ -n "${AGENT_MODEL:-}" ]; then args+=(--model "$AGENT_MODEL"); fi
+          timeout 15m opencode "${args[@]}" "$(cat /tmp/fix-prompt.md)" 2>&1 | tee /tmp/opencode-fix.log
+          # Same aborted-session tripwire as the implementer step (V1
+          # abort signature + V2 in-session ask-rejection signature).
+          if grep -q "The user rejected permission" /tmp/opencode-fix.log \
+            || grep -q "rejected in this session" /tmp/opencode-fix.log; then
+            echo "::error::Fix-pass hit a permission ask/rejection — the fix is not trustworthy. Re-issue /agent fix after checking the permission layer."
+            exit 1
+          fi
+
+      - name: Re-snapshot follow-ups
+        if: steps.changes.outputs.CHANGES != '0'
+        run: |
+          set -euo pipefail
+          if [ -f AGENT_FOLLOWUP.md ]; then
+            cat AGENT_FOLLOWUP.md > /tmp/followup.md
+          fi
+          if [ -f AGENT_SUMMARY.md ]; then
+            cp AGENT_SUMMARY.md /tmp/summary.md
+          fi
+
+      - name: Re-review the fix (opencode, read-only)
+        if: steps.changes.outputs.CHANGES != '0'
+        env:
+          PR_NUMBER: ${{ github.event.issue.number }}
+          PRE_HEAD: ${{ steps.checkout.outputs.PRE_HEAD }}
+        run: |
+          set -euo pipefail
+          if ! grep -q "^- blocking" /tmp/review-1.md; then
+            echo "No first review or no blocking findings — skipping re-review."
+            exit 0
+          fi
+          {
+            echo "You re-review an ITERATION fix on pull request #${PR_NUMBER}"
+            echo "(tackui repository). The iteration delta is"
+            echo "git diff ${PRE_HEAD} HEAD. Verify each blocking finding"
+            echo "below is resolved by the current code — an unfixed finding"
+            echo "stays blocking. New problems introduced by the fix are"
+            echo "blocking too. Write AGENT_REVIEW.md in the same format; if"
+            echo "everything passes, write exactly: 'No blocking findings.'"
+            echo
+            echo "The findings you are verifying (verbatim):"
+            echo
+            sed 's/^/    /' /tmp/review-1.md
+          } > /tmp/rereview-prompt.md
+          args=(run --agent explore)
+          if [ -n "${AGENT_MODEL:-}" ]; then args+=(--model "$AGENT_MODEL"); fi
+          timeout 10m opencode "${args[@]}" "$(cat /tmp/rereview-prompt.md)" 2>&1 | tee /tmp/opencode-rereview.log
+
+      - name: Snapshot second review
+        if: steps.changes.outputs.CHANGES != '0'
+        run: |
+          set -euo pipefail
+          if [ -f AGENT_REVIEW.md ] && grep -q "^- blocking" AGENT_REVIEW.md; then
+            sed -n '/^- blocking/p' AGENT_REVIEW.md > /tmp/unresolved-findings.md
+          fi
+
+      # ------------------------------------------------------------------
+      # Phase 3 — gates (always the workflow, never the agent's word)
+      # ------------------------------------------------------------------
+      - name: Re-run gates (lint, typecheck, tests)
+        if: steps.changes.outputs.CHANGES != '0'
+        run: |
+          set -euo pipefail
+          npm ci
+          npm run lint
+          npx tsc --noEmit
+          npm run test
+          if git diff --name-only "$(git merge-base main HEAD)" HEAD | grep -q '^agent-builder/'; then
+            echo "agent-builder/ changed — running Python tests"
+            if ! command -v uv >/dev/null; then
+              curl -LsSf https://astral.sh/uv/install.sh | sh
+              echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+            fi
+            (cd agent-builder && uv run pytest)
+          fi
+
+      # ------------------------------------------------------------------
+      # Phase 4 — outcome
+      # ------------------------------------------------------------------
+      - name: Decide outcome
+        id: decide
+        env:
+          PRE_HEAD: ${{ steps.checkout.outputs.PRE_HEAD }}
+        run: |
+          set -euo pipefail
+          committed="$(git diff --name-only "${PRE_HEAD}" HEAD | wc -l)"
+          uncommitted="$(git status --porcelain --untracked-files=no | wc -l)"
+          has_changes=$((committed + uncommitted))
+          rm -f AGENT_QUESTIONS.md AGENT_REVIEW.md AGENT_FOLLOWUP.md AGENT_SUMMARY.md
+          if [ "$has_changes" -gt 0 ]; then
+            echo "OUTCOME=push" >> "$GITHUB_OUTPUT"
+            if [ -f /tmp/has-questions ]; then
+              echo "HAS_QUESTIONS=1" >> "$GITHUB_OUTPUT"
+            fi
+          elif [ -f /tmp/has-questions ]; then
+            echo "OUTCOME=questions" >> "$GITHUB_OUTPUT"
+          else
+            echo "OUTCOME=nothing" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Push iteration, update body, comment result
+        if: steps.decide.outputs.OUTCOME == 'push'
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+          PR_NUMBER: ${{ github.event.issue.number }}
+          BRANCH: ${{ steps.pr.outputs.BRANCH }}
+          AUTHOR: ${{ steps.pr.outputs.AUTHOR }}
+          ISSUE_NUM: ${{ steps.pr.outputs.ISSUE_NUM }}
+          REQUESTER: ${{ github.event.comment.user.login }}
+          PRE_HEAD: ${{ steps.checkout.outputs.PRE_HEAD }}
+        run: |
+          set -euo pipefail
+          URL="https://x-access-token:${GH_TOKEN}@github.com/${GITHUB_REPOSITORY}.git"
+
+          git add -A
+          git commit -m "fix: apply iteration feedback (PR #${PR_NUMBER})" \
+            || echo "::notice::Nothing to commit — the implementer already committed all changes."
+
+          # Append-only: a plain push. If the branch moved under us, this
+          # fails loudly instead of clobbering anyone's work.
+          if ! git push "$URL" "$BRANCH:refs/heads/$BRANCH"; then
+            gh pr comment "$PR_NUMBER" --repo "$GITHUB_REPOSITORY" \
+              --body "$(printf 'The iteration could not be pushed — the branch moved while the agent was working (cc @%s). Re-issue `/agent fix` to retry on the current branch.' "$REQUESTER")" \
+              > /dev/null
+            echo "::warning::Push rejected — branch moved. Commented on the PR."
+            exit 0
+          fi
+
+          # Body recomposition: bot-authored PRs only. A human author's
+          # description is their prose — the agent never rewrites it.
+          case "$AUTHOR" in
+            tackui-agent)
+              bash .github/scripts/compose-pr-body.sh
+              gh pr edit "$PR_NUMBER" --repo "$GITHUB_REPOSITORY" --body-file /tmp/pr-body.md
+              echo "PR body recomposed from the updated summary."
+              ;;
+            *)
+              echo "Human-authored PR — body left as-is."
+              ;;
+          esac
+
+          # Follow-up findings the reviewer graded out-of-scope become a
+          # filed issue (same rule as feature runs).
+          if [ -f /tmp/followup.md ] && [ -s /tmp/followup.md ]; then
+            follow_title="$(gh issue create --repo "$GITHUB_REPOSITORY" \
+              --title "agent: follow-up findings from iteration on #$PR_NUMBER" \
+              --body "$(printf 'Out-of-scope findings from a `/agent fix` iteration on PR #%s:\n\n%s' "$PR_NUMBER" "$(cat /tmp/followup.md)")" \
+              --label "agent" 2>/dev/null | tail -1 || true)"
+            if [ -n "$follow_title" ]; then
+              echo "Filed follow-up issue: ${follow_title}"
+            fi
+          fi
+
+          {
+            printf 'Iteration applied — cc @%s (requested), @%s (author).\n\n' "$REQUESTER" "$AUTHOR"
+            echo "**Requested:**"
+            echo
+            sed 's/^/> /' /tmp/instruction.md
+            echo
+            echo "**Delta commits:**"
+            echo
+            echo '```'
+            git log --oneline "${PRE_HEAD}..HEAD"
+            echo '```'
+            echo
+            echo "**Gates re-run by this workflow:** $(cat /tmp/gates-run.txt)"
+            if [ -f /tmp/unresolved-findings.md ]; then
+              echo
+              echo "**Unresolved review findings** — still flagged after the fix pass; judge them yourself:"
+              echo
+              echo '```'
+              cat /tmp/unresolved-findings.md
+              echo '```'
+            fi
+            echo
+            echo "<sub>CI re-runs on the new commit automatically. Review the delta commits before approving.</sub>"
+          } > /tmp/result-comment.md
+          gh pr comment "$PR_NUMBER" --repo "$GITHUB_REPOSITORY" --body-file /tmp/result-comment.md
+
+      - name: Comment questions on the PR
+        if: steps.decide.outputs.OUTCOME == 'questions'
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+          PR_NUMBER: ${{ github.event.issue.number }}
+          AUTHOR: ${{ steps.pr.outputs.AUTHOR }}
+          REQUESTER: ${{ github.event.comment.user.login }}
+        run: |
+          set -euo pipefail
+          gh pr comment "$PR_NUMBER" --repo "$GITHUB_REPOSITORY" \
+            --body "$(printf 'The agent has questions before changing this PR (cc @%s, @%s) — nothing was pushed:\n\n%s\n\n<sub>Answer in a reply, then re-issue `/agent fix`.</sub>' "$REQUESTER" "$AUTHOR" "$(cat /tmp/questions-comment.md)")"
+
+      - name: Comment nothing-to-change on the PR
+        if: steps.decide.outputs.OUTCOME == 'nothing'
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+          PR_NUMBER: ${{ github.event.issue.number }}
+        run: |
+          set -euo pipefail
+          gh pr comment "$PR_NUMBER" --repo "$GITHUB_REPOSITORY" \
+            --body "The agent reviewed the instruction and made no changes — the request appears to already hold or be out of scope for this PR. See the run log for reasoning."
+
+      # A red run after work started: nothing was pushed (push happens
+      # only after gates), so the PR is untouched — say so loudly.
+      - name: Comment failure on the PR
+        if: failure()
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+          PR_NUMBER: ${{ github.event.issue.number }}
+        run: |
+          set -euo pipefail
+          gh pr comment "$PR_NUMBER" --repo "$GITHUB_REPOSITORY" \
+            --body "Auto-iteration failed before anything was pushed — the PR is untouched. Re-issue \`/agent fix\` to retry, or check the run log for what went wrong." \
+            || true

@@ -20,6 +20,16 @@ vi.mock("@/lib/ratelimit/middleware", () => ({
   checkUserLimit: vi.fn().mockReturnValue(null),
 }));
 
+// Passthrough wrapper around @/lib/db/keyed-lock that counts nothing but
+// lets a test inject a lock-wait rejection once — the real updateTemplate
+// still runs, so the store surface stays exercised everywhere else.
+const mockWithKeyedLock = vi.hoisted(() => vi.fn());
+vi.mock("@/lib/db/keyed-lock", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("@/lib/db/keyed-lock")>();
+  mockWithKeyedLock.mockImplementation(actual.withKeyedLock);
+  return { ...actual, withKeyedLock: mockWithKeyedLock };
+});
+
 import { GET, PATCH, DELETE } from "./route";
 import {
   createTemplate,
@@ -29,6 +39,7 @@ import {
   deleteTemplate,
   installTemplate,
 } from "@/lib/catalog/template-store";
+import { KeyedLockUnavailableError } from "@/lib/db/keyed-lock";
 import { runMigrations } from "@/lib/db/migrate";
 import { assertSafeUrl, UnsafeUrlError } from "@/lib/net/safe-fetch";
 
@@ -206,6 +217,54 @@ describe("PATCH /api/catalog/[id]", () => {
       ctx(other.id),
     );
     expect(res.status).toBe(409);
+  });
+
+  it("maps both keyed-lock wait failures to 503 (retryable), not the generic 500", async () => {
+    const errSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    const tpl = await createTemplate(validInput);
+    mockWithKeyedLock
+      .mockRejectedValueOnce(
+        new KeyedLockUnavailableError(
+          "wait-timeout",
+          'keyed-lock: timed out after 30000ms waiting for key "agent_templates:x"',
+        ),
+      )
+      .mockRejectedValueOnce(
+        new KeyedLockUnavailableError(
+          "queue-full",
+          'keyed-lock: wait queue for key "agent_templates:x" is full (32 waiters, cap 32)',
+        ),
+      );
+    for (const body of [{ name: "X" }, { name: "Y" }]) {
+      const res = await PATCH(
+        new Request("http://localhost/api/catalog/x", {
+          method: "PATCH",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(body),
+        }),
+        ctx(tpl.id),
+      );
+      expect(res.status).toBe(503);
+      expect((await res.json()).error).toBe("Couldn't update the template — please try again.");
+    }
+    errSpy.mockRestore();
+  });
+
+  it("still 500s on an unexpected store failure — the 503 mapping is keyed-lock only", async () => {
+    const errSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    const tpl = await createTemplate(validInput);
+    mockWithKeyedLock.mockRejectedValueOnce(new Error("db down"));
+    const res = await PATCH(
+      new Request("http://localhost/api/catalog/x", {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ name: "X" }),
+      }),
+      ctx(tpl.id),
+    );
+    expect(res.status).toBe(500);
+    expect((await res.json()).error).toBe("Couldn't update the template — please try again.");
+    errSpy.mockRestore();
   });
 });
 

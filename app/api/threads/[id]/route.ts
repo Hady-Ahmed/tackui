@@ -3,6 +3,7 @@ import { z } from "zod";
 import { runner } from "@/lib/agents/runner-instance";
 import { getCurrentUser } from "@/lib/auth/context";
 import { checkUserLimit } from "@/lib/ratelimit/middleware";
+import { validationFailedResponse } from "@/lib/api/validation";
 
 const renameSchema = z.object({
   title: z.string().min(1).max(200),
@@ -30,10 +31,7 @@ export async function PATCH(
 
   const parsed = renameSchema.safeParse(body);
   if (!parsed.success) {
-    return NextResponse.json(
-      { error: "Validation failed", details: parsed.error.flatten() },
-      { status: 400 },
-    );
+    return validationFailedResponse(parsed.error);
   }
 
   const ok = await runner.renameThread(id, parsed.data.title, user.id, user.orgId);

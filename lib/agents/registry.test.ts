@@ -1,4 +1,4 @@
-import { describe, it, expect, vi, beforeEach } from "vitest";
+import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import jwt from "jsonwebtoken";
 import type { AgentEntry } from "./agents.config";
 import type { RequestUser, RunContextItem } from "@/lib/auth/request-context";
@@ -32,9 +32,22 @@ vi.mock("@/lib/auth/request-context", () => ({
 }));
 
 // Mock listAgents so we don't touch the DB. We control entries per-test
-// via the mock's return value.
-vi.mock("./agent-store", () => ({
-  listAgents: vi.fn(),
+// via the mock's return value. Everything else (resolveAgentSecret) is
+// the real implementation — the secret-resolution contract is under test
+// here too.
+vi.mock("./agent-store", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("./agent-store")>();
+  return {
+    ...actual,
+    listAgents: vi.fn(),
+  };
+});
+
+// The catalog live-resolve path (template endpoint/auth override). Tests
+// without template agents never see it (the default mock returns []); the
+// catalog tests below override the return per-test.
+vi.mock("@/lib/catalog/template-store", () => ({
+  getTemplatesByIds: vi.fn(() => Promise.resolve([])),
 }));
 
 // The SSRF guard does real DNS lookups; test endpoints are fake hostnames
@@ -67,6 +80,7 @@ vi.hoisted(() => {
 
 import { getAgents } from "./registry";
 import { listAgents } from "./agent-store";
+import { getTemplatesByIds } from "@/lib/catalog/template-store";
 import { getRequestUser } from "@/lib/auth/context";
 import { assertSafeUrl, fetchGuardedRedirects } from "@/lib/net/safe-fetch";
 
@@ -84,6 +98,8 @@ beforeEach(() => {
   vi.mocked(listAgents).mockReset();
   vi.mocked(getRequestUser).mockReset();
   vi.mocked(getRequestUser).mockResolvedValue(testUser);
+  vi.mocked(getTemplatesByIds).mockReset();
+  vi.mocked(getTemplatesByIds).mockResolvedValue([]);
   getRunContextItems.mockReset();
   getRunContextItems.mockReturnValue([]);
   getReservedDepKeys.mockReset();
@@ -302,6 +318,10 @@ describe("getAgents", () => {
   describe("JWT auth (authMode: 'jwt')", () => {
     const TEST_SECRET = "test-secret-at-least-32-chars-long!!";
 
+    afterEach(() => {
+      vi.restoreAllMocks();
+    });
+
     it("sets Authorization: Bearer header on the HttpAgent when authMode is jwt", async () => {
       vi.mocked(listAgents).mockResolvedValue([
         aguiEntry({ id: "ag1", authMode: "jwt", jwtSecret: TEST_SECRET }),
@@ -355,6 +375,40 @@ describe("getAgents", () => {
       expect(decoded.scopes).toEqual(["agents:run", "app:superadmin"]);
     });
 
+    it("builder tokens bind the target component (agent_id claim = remoteAgentId)", async () => {
+      vi.mocked(listAgents).mockResolvedValue([
+        aguiEntry({ id: "b1", origin: "builder", remoteAgentId: "r1" }),
+      ]);
+      const map = await getAgents(new Request("http://localhost"));
+      const agent = map["b1"];
+
+      const headers = (agent as unknown as { headers: Record<string, string> }).headers;
+      const token = headers.Authorization.replace("Bearer ", "");
+      // Builder tokens are signed with the platform secret (AGENTOS_JWT_SECRET
+      // from the vi.hoisted env), not a stored per-agent secret.
+      const decoded = jwt.verify(token, "test-agentos-secret", { algorithms: ["HS256"] }) as jwt.JwtPayload;
+
+      expect(decoded.sub).toBe("u-123");
+      expect(decoded.agent_id).toBe("r1");
+      expect(decoded.scopes).toEqual(["app:user"]);
+    });
+
+    it("manual/template tokens carry no agent_id claim", async () => {
+      vi.mocked(listAgents).mockResolvedValue([
+        aguiEntry({ id: "ag1", authMode: "jwt", jwtSecret: TEST_SECRET, origin: "manual" }),
+      ]);
+      const map = await getAgents(new Request("http://localhost"));
+      const agent = map["ag1"];
+
+      const headers = (agent as unknown as { headers: Record<string, string> }).headers;
+      const token = headers.Authorization.replace("Bearer ", "");
+      const decoded = jwt.verify(token, TEST_SECRET, { algorithms: ["HS256"] }) as jwt.JwtPayload;
+
+      // The claim is builder-only: it means nothing to third-party backends,
+      // and the dispatcher's verify is only defined for builder runs.
+      expect(decoded.agent_id).toBeUndefined();
+    });
+
     it("does NOT set Authorization header when authMode is none", async () => {
       vi.mocked(listAgents).mockResolvedValue([
         aguiEntry({ id: "ag1", authMode: "none" }),
@@ -396,6 +450,136 @@ describe("getAgents", () => {
         } as never,
       );
       expect(captured.forwardedProps?.user_id).toBe("u-123");
+    });
+
+    it("mints from a legacy plaintext stored secret (decrypt-on-demand path)", async () => {
+      // Row mapping is presence-only: a stored secret rides `jwtSecretStored`
+      // and is decrypted only where it is consumed — here, minting for a
+      // self-managed agent. A legacy (pre-encryption) plaintext value needs
+      // no key and must mint exactly like an injected secret.
+      vi.mocked(listAgents).mockResolvedValue([
+        aguiEntry({ id: "ag1", authMode: "jwt", jwtSecretStored: "p".repeat(32) }),
+      ]);
+      const map = await getAgents(new Request("http://localhost"));
+      const headers = (map["ag1"] as unknown as {
+        headers: Record<string, string>;
+      }).headers;
+      const decoded = jwt.verify(
+        headers.Authorization.replace("Bearer ", ""),
+        "p".repeat(32),
+        { algorithms: ["HS256"] },
+      ) as jwt.JwtPayload;
+      expect(decoded.sub).toBe("u-123");
+    });
+
+    it("resolves the row copy for a tombstoned catalog install (template gone → fallback auth)", async () => {
+      // A tombstoned template no longer resolves, so the row's last-synced
+      // config is the run-time source of truth — including its secret. The
+      // row copy must be decrypted on demand and mint from.
+      vi.mocked(listAgents).mockResolvedValue([
+        aguiEntry({
+          id: "t1",
+          authMode: "jwt",
+          sourceTemplateId: "tpl-gone",
+          jwtSecretStored: "legacy-fallback-secret-32-chars!!",
+        }),
+      ]);
+      const map = await getAgents(new Request("http://localhost"));
+      const headers = (map["t1"] as unknown as {
+        headers: Record<string, string>;
+      }).headers;
+      const decoded = jwt.verify(
+        headers.Authorization.replace("Bearer ", ""),
+        "legacy-fallback-secret-32-chars!!",
+        { algorithms: ["HS256"] },
+      ) as jwt.JwtPayload;
+      expect(decoded.sub).toBe("u-123");
+    });
+
+    it("catalog installs mint from the LIVE template secret, never the row copy", async () => {
+      // The row copy exists for admin surfaces (and the tombstone
+      // fallback); live catalog agents resolve auth from the template.
+      // Even an UNDECRYPTABLE row copy must not affect the mint — and
+      // must not log (the row copy is never decrypted here).
+      const errSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+      vi.mocked(listAgents).mockResolvedValue([
+        aguiEntry({
+          id: "c1",
+          authMode: "jwt",
+          sourceTemplateId: "tpl-1",
+          jwtSecretStored: "enc:v1:AAAAAAAAAAAAAAAA:AAAA:AAAAAAAAAAAAAAAAAAAAAA==",
+        }),
+      ]);
+      vi.mocked(getTemplatesByIds).mockResolvedValue([
+        {
+          id: "tpl-1",
+          slug: "tpl-1",
+          name: "Template",
+          tagline: "",
+          description: "",
+          endpoint: "http://template.example/agent",
+          authMode: "jwt",
+          jwtSecret: TEST_SECRET,
+          sortOrder: 0,
+          isActive: true,
+          createdAt: new Date().toISOString(),
+          updatedAt: new Date().toISOString(),
+        },
+      ]);
+      const map = await getAgents(new Request("http://localhost"));
+      const headers = (map["c1"] as unknown as {
+        headers: Record<string, string>;
+      }).headers;
+      const decoded = jwt.verify(
+        headers.Authorization.replace("Bearer ", ""),
+        TEST_SECRET,
+        { algorithms: ["HS256"] },
+      ) as jwt.JwtPayload;
+      expect(decoded.sub).toBe("u-123");
+      expect(errSpy).not.toHaveBeenCalled();
+    });
+
+    it("fails runs fast with an actionable error when the stored secret is undecryptable", async () => {
+      // An undecryptable secret is NOT secret-less: the agent stays
+      // listed (a skip would crash the client's "Agent not found after
+      // runtime sync"), but the run must fail fast with a re-save nudge
+      // instead of silently going headerless and letting the backend 401.
+      vi.spyOn(console, "error").mockImplementation(() => {});
+      vi.mocked(listAgents).mockResolvedValue([
+        aguiEntry({
+          id: "u1",
+          authMode: "jwt",
+          jwtSecretStored: "enc:v1:AAAAAAAAAAAAAAAA:AAAA:AAAAAAAAAAAAAAAAAAAAAA==",
+        }),
+      ]);
+      const map = await getAgents(new Request("http://localhost"));
+      // Listing stays healthy.
+      const agent = map["u1"];
+      expect(agent).toBeDefined();
+      // No Authorization header — the broken credential is never minted.
+      const headers = (agent as unknown as {
+        headers: Record<string, string>;
+      }).headers;
+      expect(headers.Authorization).toBeUndefined();
+      // The guard middleware is the FIRST entry (registered before the
+      // context middleware) and throws the actionable message at run time.
+      const guard = (agent as unknown as {
+        middlewares: { run: (input: unknown, next: { run: (i: unknown) => unknown }) => unknown }[];
+      }).middlewares[0];
+      expect(() =>
+        guard.run(
+          {
+            threadId: "t1",
+            runId: "r1",
+            messages: [],
+            tools: [],
+            context: [],
+            state: {},
+            forwardedProps: {},
+          },
+          { run: () => ({ subscribe: () => {} }) } as never,
+        ),
+      ).toThrow(/can't be decrypted[\s\S]*re-save/);
     });
   });
 

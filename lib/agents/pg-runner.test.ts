@@ -1,10 +1,16 @@
 import { describe, it, expect, beforeEach, beforeAll, afterAll, vi } from "vitest";
 import { EventType, type BaseEvent, type Message } from "@ag-ui/core";
 import { verifyEvents, type AbstractAgent } from "@ag-ui/client";
-import { from } from "rxjs";
+import { from, ReplaySubject, Subject } from "rxjs";
 import { PostgresAgentRunner, redactReservedContext, redactReservedEvent } from "./pg-runner";
 import { runWithUser, runWithRunnerContext, type RequestUser } from "@/lib/auth/request-context";
-import { query, withTransaction } from "@/lib/db/pg";
+import {
+  query,
+  withTransaction,
+  setTestDb,
+  getPoolOrTestClient,
+  type PgClient,
+} from "@/lib/db/pg";
 import { runMigrations } from "@/lib/db/migrate";
 import { useRealPostgres } from "@/lib/db/test-postgres";
 
@@ -704,6 +710,38 @@ describe("PostgresAgentRunner — connect() smart replay", () => {
     expect(idxOf(EventType.RUN_STARTED, "run-b")).toBeLessThan(idxOf(EventType.RUN_FINISHED, "run-b"));
   });
 
+  it("replay includes a run persisted immediately before the connect (no settle window)", async (ctx) => {
+    ctx.skip(!pgStarted, "Real Postgres (Docker) unavailable");
+    // #66 item 2: the pre-launch review premised a `now() - interval
+    // '5 seconds'` grace/settle window in the historic read that could
+    // exclude events persisted inside it, truncating the replay tail on
+    // reconnect. getHistoricRuns carries no time filter — every persisted
+    // run replays, however recently it was written — so silent truncation
+    // via a settle window is impossible by construction. This pins it:
+    // the fixture is committed in the statement immediately preceding
+    // connect() (age ≈ 0 — inside any settle window a regression would
+    // reintroduce) and the FULL event list must come back in order.
+    const events: BaseEvent[] = [
+      { type: EventType.RUN_STARTED, threadId: "t-tail-pin", runId: "run-tail-pin" } as unknown as BaseEvent,
+      { type: EventType.TEXT_MESSAGE_START, messageId: "m1", role: "assistant" } as unknown as BaseEvent,
+      { type: EventType.TEXT_MESSAGE_CONTENT, messageId: "m1", delta: "tail content" } as unknown as BaseEvent,
+      { type: EventType.TEXT_MESSAGE_END, messageId: "m1" } as unknown as BaseEvent,
+      { type: EventType.RUN_FINISHED, threadId: "t-tail-pin", runId: "run-tail-pin" } as unknown as BaseEvent,
+    ];
+    await insertRun("t-tail-pin", "run-tail-pin", events);
+
+    const received = await collectReplay("t-tail-pin");
+
+    expect(received.map((e) => e.type)).toEqual(events.map((e) => e.type));
+    expect(
+      received.some(
+        (e) =>
+          e.type === EventType.TEXT_MESSAGE_CONTENT &&
+          (e as { delta?: string }).delta === "tail content",
+      ),
+    ).toBe(true);
+  });
+
   it("replay closes a REASONING_* sequence an errored run left open, before the next run", async (ctx) => {
     ctx.skip(!pgStarted, "Real Postgres (Docker) unavailable");
     // agno backends can leave a reasoning block open on exception paths —
@@ -950,6 +988,175 @@ describe("PostgresAgentRunner — connect() smart replay", () => {
     expect(stepFinishIdx).toBeGreaterThan(0);
     expect(synthFinishIdx).toBeGreaterThan(stepFinishIdx);
     expect(retryStartIdx).toBeGreaterThan(synthFinishIdx);
+    expect(await verifierRejection(received)).toBeNull();
+  });
+
+  // #151 — the duplicate-active / stray-terminator drop policy. The
+  // verifier rejects each raw fixture below outright, so replaying it
+  // verbatim poisons the whole reconnect; the replay must drop the
+  // invalid extras (never synthesize a START to legalize a stray
+  // FINISHED) and survive verifier-clean, in order. Each fixture first
+  // pins its own poisoning premise: the RAW record must trip the
+  // verifier.
+  it("replay drops a duplicate STEP_STARTED for an already-active step", async (ctx) => {
+    ctx.skip(!pgStarted, "Real Postgres (Docker) unavailable");
+    // #142's openSteps.add() no-ops on a duplicate, so the second
+    // STEP_STARTED used to pass through to the replay — and the verifier
+    // rejects it ("Step \"plan\" is already active"), poisoning the
+    // reconnect even after #142's closure fix.
+    const events: BaseEvent[] = [
+      { type: EventType.RUN_STARTED, threadId: "t-dup-step", runId: "run-dup-step" } as unknown as BaseEvent,
+      { type: EventType.STEP_STARTED, stepName: "plan" } as unknown as BaseEvent,
+      { type: EventType.STEP_STARTED, stepName: "plan" } as unknown as BaseEvent,
+      { type: EventType.STEP_FINISHED, stepName: "plan" } as unknown as BaseEvent,
+      { type: EventType.RUN_FINISHED, threadId: "t-dup-step", runId: "run-dup-step" } as unknown as BaseEvent,
+    ];
+    await insertRun("t-dup-step", "run-dup-step", events);
+    expect(await verifierRejection(events)).not.toBeNull();
+
+    const received = await collectReplay("t-dup-step");
+    expect(received.map((e) => e.type)).toEqual([
+      EventType.RUN_STARTED,
+      EventType.STEP_STARTED,
+      EventType.STEP_FINISHED,
+      EventType.RUN_FINISHED,
+    ]);
+    expect(await verifierRejection(received)).toBeNull();
+  });
+
+  it("replay drops a STEP_FINISHED for a step that is not currently active", async (ctx) => {
+    ctx.skip(!pgStarted, "Real Postgres (Docker) unavailable");
+    // Both stray-finish shapes in one policy branch: a finish for a step
+    // that was never started ("ghost") and a duplicate finish after the
+    // legit close. Both are verifier-rejected ("that was not started");
+    // the repair is the drop, never a synthesized START.
+    const events: BaseEvent[] = [
+      { type: EventType.RUN_STARTED, threadId: "t-stray-fin", runId: "run-stray-fin" } as unknown as BaseEvent,
+      { type: EventType.STEP_FINISHED, stepName: "ghost" } as unknown as BaseEvent,
+      { type: EventType.STEP_STARTED, stepName: "plan" } as unknown as BaseEvent,
+      { type: EventType.STEP_FINISHED, stepName: "plan" } as unknown as BaseEvent,
+      { type: EventType.STEP_FINISHED, stepName: "plan" } as unknown as BaseEvent,
+      { type: EventType.RUN_FINISHED, threadId: "t-stray-fin", runId: "run-stray-fin" } as unknown as BaseEvent,
+    ];
+    await insertRun("t-stray-fin", "run-stray-fin", events);
+    expect(await verifierRejection(events)).not.toBeNull();
+
+    const received = await collectReplay("t-stray-fin");
+    expect(received.map((e) => e.type)).toEqual([
+      EventType.RUN_STARTED,
+      EventType.STEP_STARTED,
+      EventType.STEP_FINISHED,
+      EventType.RUN_FINISHED,
+    ]);
+    // The legit pair survived untouched, in order.
+    const stepStart = received.find((e) => e.type === EventType.STEP_STARTED);
+    expect((stepStart as { stepName?: string }).stepName).toBe("plan");
+    expect(await verifierRejection(received)).toBeNull();
+  });
+
+  it("replay drops a duplicate TEXT_MESSAGE_START for an already-active message", async (ctx) => {
+    ctx.skip(!pgStarted, "Real Postgres (Docker) unavailable");
+    // The duplicate START lands BETWEEN content deltas — the surviving
+    // replay must keep every delta, in order, with one START.
+    const events: BaseEvent[] = [
+      { type: EventType.RUN_STARTED, threadId: "t-dup-msg", runId: "run-dup-msg" } as unknown as BaseEvent,
+      { type: EventType.TEXT_MESSAGE_START, messageId: "m1", role: "assistant" } as unknown as BaseEvent,
+      { type: EventType.TEXT_MESSAGE_CONTENT, messageId: "m1", delta: "a" } as unknown as BaseEvent,
+      { type: EventType.TEXT_MESSAGE_START, messageId: "m1", role: "assistant" } as unknown as BaseEvent,
+      { type: EventType.TEXT_MESSAGE_CONTENT, messageId: "m1", delta: "b" } as unknown as BaseEvent,
+      { type: EventType.TEXT_MESSAGE_END, messageId: "m1" } as unknown as BaseEvent,
+      { type: EventType.RUN_FINISHED, threadId: "t-dup-msg", runId: "run-dup-msg" } as unknown as BaseEvent,
+    ];
+    await insertRun("t-dup-msg", "run-dup-msg", events);
+    expect(await verifierRejection(events)).not.toBeNull();
+
+    const received = await collectReplay("t-dup-msg");
+    expect(received.map((e) => e.type)).toEqual([
+      EventType.RUN_STARTED,
+      EventType.TEXT_MESSAGE_START,
+      EventType.TEXT_MESSAGE_CONTENT,
+      EventType.TEXT_MESSAGE_END,
+      EventType.RUN_FINISHED,
+    ]);
+    expect(received.filter((e) => e.type === EventType.TEXT_MESSAGE_START)).toHaveLength(1);
+    // Order-preserving: both deltas survived, in stream order (compaction
+    // merges same-message deltas into one CONTENT event).
+    expect(
+      received.find((e) => e.type === EventType.TEXT_MESSAGE_CONTENT),
+    ).toMatchObject({ delta: "ab" });
+    expect(await verifierRejection(received)).toBeNull();
+  });
+
+  it("replay drops a TEXT_MESSAGE_END for a message that is not currently active", async (ctx) => {
+    ctx.skip(!pgStarted, "Real Postgres (Docker) unavailable");
+    // Both stray-terminator shapes: an END for a message that was never
+    // started ("ghost") and a duplicate END after the legit close. The
+    // dropped stray must not take the legit message's content with it.
+    const events: BaseEvent[] = [
+      { type: EventType.RUN_STARTED, threadId: "t-stray-end", runId: "run-stray-end" } as unknown as BaseEvent,
+      { type: EventType.TEXT_MESSAGE_END, messageId: "ghost" } as unknown as BaseEvent,
+      { type: EventType.TEXT_MESSAGE_START, messageId: "m1", role: "assistant" } as unknown as BaseEvent,
+      { type: EventType.TEXT_MESSAGE_CONTENT, messageId: "m1", delta: "hi" } as unknown as BaseEvent,
+      { type: EventType.TEXT_MESSAGE_END, messageId: "m1" } as unknown as BaseEvent,
+      { type: EventType.TEXT_MESSAGE_END, messageId: "m1" } as unknown as BaseEvent,
+      { type: EventType.RUN_FINISHED, threadId: "t-stray-end", runId: "run-stray-end" } as unknown as BaseEvent,
+    ];
+    await insertRun("t-stray-end", "run-stray-end", events);
+    expect(await verifierRejection(events)).not.toBeNull();
+
+    const received = await collectReplay("t-stray-end");
+    expect(received.map((e) => e.type)).toEqual([
+      EventType.RUN_STARTED,
+      EventType.TEXT_MESSAGE_START,
+      EventType.TEXT_MESSAGE_CONTENT,
+      EventType.TEXT_MESSAGE_END,
+      EventType.RUN_FINISHED,
+    ]);
+    expect(received.filter((e) => e.type === EventType.TEXT_MESSAGE_END)).toHaveLength(1);
+    expect(
+      received.find((e) => e.type === EventType.TEXT_MESSAGE_CONTENT),
+    ).toMatchObject({ delta: "hi" });
+    expect(await verifierRejection(received)).toBeNull();
+  });
+
+  it("replay keys steps per lane — the same stepName under the parent agent and a subagent survives intact", async (ctx) => {
+    ctx.skip(!pgStarted, "Real Postgres (Docker) unavailable");
+    // The verifier tracks steps per lane, keyed by (subagentRunId,
+    // stepName): the same stepName may be open concurrently under the
+    // parent agent and a subagent, and a STEP_FINISHED must come from
+    // whoever started it. This record is verifier-legal — replaying it
+    // verbatim (the pre-#151 behavior) was clean. Plain stepName keying
+    // over-dropped it into a poisoned replay: the s1 START dropped on the
+    // plain-name collision, the s1 FINISHED was kept (plain "plan" still
+    // open), and the parent FINISHED was dropped. The builder must key
+    // lanes the way the verifier does and attribute the synthesized
+    // closures to the lane that started the step.
+    const events: BaseEvent[] = [
+      { type: EventType.RUN_STARTED, threadId: "t-lane-step", runId: "run-lane-step" } as unknown as BaseEvent,
+      { type: EventType.STEP_STARTED, stepName: "plan" } as unknown as BaseEvent,
+      { type: EventType.STEP_STARTED, stepName: "plan", subagentRunId: "s1" } as unknown as BaseEvent,
+      { type: EventType.STEP_FINISHED, stepName: "plan", subagentRunId: "s1" } as unknown as BaseEvent,
+      { type: EventType.STEP_FINISHED, stepName: "plan" } as unknown as BaseEvent,
+      { type: EventType.RUN_FINISHED, threadId: "t-lane-step", runId: "run-lane-step" } as unknown as BaseEvent,
+    ];
+    await insertRun("t-lane-step", "run-lane-step", events);
+    // The poisoning premise inverted: this record is verifier-legal raw.
+    expect(await verifierRejection(events)).toBeNull();
+
+    const received = await collectReplay("t-lane-step");
+    expect(received.map((e) => e.type)).toEqual([
+      EventType.RUN_STARTED,
+      EventType.STEP_STARTED,
+      EventType.STEP_STARTED,
+      EventType.STEP_FINISHED,
+      EventType.STEP_FINISHED,
+      EventType.RUN_FINISHED,
+    ]);
+    // Both lanes' STARTs survived (the lane keying kept them distinct).
+    const laneStarts = received.filter((e) => e.type === EventType.STEP_STARTED);
+    expect(
+      laneStarts.map((e) => (e as { subagentRunId?: string }).subagentRunId),
+    ).toEqual([undefined, "s1"]);
     expect(await verifierRejection(received)).toBeNull();
   });
 });
@@ -2400,6 +2607,68 @@ describe("PostgresAgentRunner — deleted-thread tombstones (delete vs run)", ()
     );
     expect(rows.rows.map((r) => r.thread_id)).toEqual(["t-sweep"]);
   });
+
+  it("deleteThread's sweep clears run_state rows orphaned behind tombstoned ids", async (ctx) => {
+    ctx.skip(!pgStarted, "Real Postgres (Docker) unavailable");
+    // Issue #140 item 1. teardownRun's re-release is guarded by
+    // current_run_id, but a delete committing between the guard SELECT and
+    // setRunState's upsert re-inserts a bare (is_running=false,
+    // current_run_id=NULL) row for the deleted id. The orphan is invisible
+    // today (boot reset clears it; startRun refuses the id) — the sweep
+    // pins that it never survives past the next delete, while the
+    // tombstone itself keeps gating the id until its age prunes it.
+    await query(`INSERT INTO deleted_threads (thread_id) VALUES ($1)`, ["t-orphan"]);
+    await query(
+      `INSERT INTO run_state (thread_id, is_running, current_run_id)
+       VALUES ('t-orphan', false, NULL)`,
+    );
+    // An aged tombstone with the same orphan: its tombstone is pruned AND
+    // its run_state row swept in the same transaction.
+    await query(
+      `INSERT INTO deleted_threads (thread_id, deleted_at)
+       VALUES ('t-ancient', now() - interval '40 days')`,
+    );
+    await query(
+      `INSERT INTO run_state (thread_id, is_running, current_run_id)
+       VALUES ('t-ancient', true, 'run-ancient')`,
+    );
+
+    // Positive control: a live thread's lock row is NOT the sweep's
+    // business — only tombstoned ids are.
+    await seedThread(runner, "t-live", "agent-a", "Live chat", user1.id);
+    await query(
+      `INSERT INTO run_state (thread_id, is_running, current_run_id)
+       VALUES ('t-live', false, NULL)`,
+    );
+
+    const deleted = await runWithUser(user1, () =>
+      runner.deleteThread("t-live", user1.id, user1.orgId),
+    );
+    expect(deleted).toBe(true);
+
+    // The orphan rows are gone — both the fresh tombstone's and the aged
+    // one's — while the tombstones themselves survive until age prunes
+    // them (the aged one was pruned by the same transaction).
+    const orphan = await query<{ c: number }>(
+      `SELECT count(*)::int AS c FROM run_state WHERE thread_id = 't-orphan'`,
+    );
+    const ancient = await query<{ c: number }>(
+      `SELECT count(*)::int AS c FROM run_state WHERE thread_id = 't-ancient'`,
+    );
+    expect(orphan.rows[0]?.c).toBe(0);
+    expect(ancient.rows[0]?.c).toBe(0);
+    const tombs = await query<{ thread_id: string }>(
+      `SELECT thread_id FROM deleted_threads ORDER BY thread_id`,
+    );
+    expect(tombs.rows.map((r) => r.thread_id)).toEqual(["t-live", "t-orphan"]);
+
+    // End state: nothing else in run_state — the deleted thread's own row
+    // went with the delete and nothing re-created it.
+    const state = await query<{ c: number }>(
+      `SELECT count(*)::int AS c FROM run_state`,
+    );
+    expect(state.rows[0]?.c).toBe(0);
+  });
 });
 
 describe("PostgresAgentRunner — sync cache reads (getThreadMessages / getThreadState)", () => {
@@ -2712,5 +2981,613 @@ describe("PostgresAgentRunner — redaction chain integration (live ALS → stre
     expect(storedRaw).not.toContain("tvly-secret-value");
     // The client's own context item survives in the persisted input.
     expect(storedRaw).toContain("not-a-secret");
+  });
+});
+
+describe("PostgresAgentRunner — messageCache capture-vs-connect race (#141)", () => {
+  // The read-through message write in startConnect can regress below a
+  // concurrent run's captureThreadData write: the connect's
+  // `SELECT messages FROM thread_messages` RESOLUTION can land after the
+  // capture's cache write while its statement snapshot predates the
+  // capture's commit — the stale fetch then clobbers the fresh capture,
+  // and the sync readers (getThreadMessages → /threads/:id/messages)
+  // serve history missing the just-finished run until the next write on
+  // the thread. Messages carry no version and the stale SELECT cannot
+  // know it is stale, so the eventsCache guard's data comparison has no
+  // message-side equivalent — the fix is serialization (a per-thread
+  // keyed lock around both messageCache writers). Deterministic repro
+  // (#141): a promise gate parks the RESOLUTION of that SELECT while
+  // run-2 completes its persistence window; on unfixed code the capture's
+  // cache write lands during the park and the released stale fetch
+  // clobbers it. Real Postgres: the replay path's recursive CTE (same
+  // skip discipline as the suites above).
+  let runner: PostgresAgentRunner;
+
+  beforeEach(async () => {
+    runner = makeRunner();
+    await runner.awaitRefreshed();
+  });
+
+  let pgStarted = false;
+  let restorePg: (() => void) | null = null;
+
+  beforeAll(async () => {
+    restorePg = await useRealPostgres();
+    pgStarted = restorePg !== null;
+  });
+
+  afterAll(() => {
+    restorePg?.();
+    restorePg = null;
+  });
+
+  function insertRun(threadId: string, runId: string, events: BaseEvent[]): Promise<unknown> {
+    return query(
+      `INSERT INTO agent_runs (thread_id, run_id, parent_run_id, events, input, version)
+       VALUES ($1, $2, NULL, $3::jsonb, $4::jsonb, 1)`,
+      [threadId, runId, JSON.stringify(events), JSON.stringify({})],
+    );
+  }
+
+  // An agent carrying the `messages` property captureThreadData reads for
+  // its thread_messages + messageCache writes (the shape real agents
+  // carry).
+  function messagesAgent(threadId: string, runId: string, messages: Message[]) {
+    return {
+      agentId: "agent-a",
+      agentName: "A",
+      abortRun: vi.fn(),
+      messages,
+      runAgent: async (
+        _input: unknown,
+        hooks: { onEvent: (e: { event: BaseEvent }) => void },
+      ) => {
+        hooks.onEvent({
+          event: { type: EventType.RUN_STARTED, threadId, runId } as unknown as BaseEvent,
+        });
+        hooks.onEvent({
+          event: { type: EventType.RUN_FINISHED, threadId, runId } as unknown as BaseEvent,
+        });
+      },
+    } as unknown as AbstractAgent;
+  }
+
+  it("a stale connect fetch cannot clobber a concurrent run's fresh capture", async (ctx) => {
+    ctx.skip(!pgStarted, "Real Postgres (Docker) unavailable");
+    const threadId = "t-msg-race";
+    const run1Events: BaseEvent[] = [
+      { type: EventType.RUN_STARTED, threadId, runId: "run-1" } as unknown as BaseEvent,
+      { type: EventType.RUN_FINISHED, threadId, runId: "run-1" } as unknown as BaseEvent,
+    ];
+    await insertRun(threadId, "run-1", run1Events);
+    const preRunMessages: Message[] = [
+      { id: "m0", role: "user", content: "pre-run message" } as Message,
+    ];
+    await query(
+      `INSERT INTO thread_messages (thread_id, messages) VALUES ($1, $2::jsonb)`,
+      [threadId, JSON.stringify(preRunMessages)],
+    );
+    await query(
+      `INSERT INTO thread_metadata (thread_id, agent_id, title, user_id, org_id)
+       VALUES ($1, 'agent-a', 'Race chat', $2, 'org-1')`,
+      [threadId, user1.id],
+    );
+    // The pre-run world the connect reads: owner-visible thread, run-1
+    // history, the pre-run messages already cached.
+    seedThreadCache(runner, threadId, "agent-a", "Race chat", user1.id);
+    caches(runner).eventsCache.set(threadId, run1Events);
+    caches(runner).messageCache.set(threadId, preRunMessages);
+
+    // Gate: hold the RESOLUTION (not the execution) of the thread_messages
+    // SELECT, so startConnect stays parked before its cache writes while
+    // the statement snapshot is already fixed pre-run-2.
+    const previous = getPoolOrTestClient() as unknown as PgClient;
+    let enteredResolve!: () => void;
+    const entered = new Promise<void>((r) => (enteredResolve = r));
+    let releaseResolve!: () => void;
+    const released = new Promise<void>((r) => (releaseResolve = r));
+    const gatedClient = {
+      query: async (text: string, values?: unknown[]) => {
+        if (text.startsWith("SELECT messages FROM thread_messages")) {
+          const result = await previous.query(text, values);
+          enteredResolve();
+          await released;
+          return result;
+        }
+        return previous.query(text, values);
+      },
+      release: () => {},
+    } as unknown as PgClient;
+    setTestDb(gatedClient);
+
+    try {
+      const connectDone = new Promise<void>((resolve) => {
+        runWithUser(user1, () => runner.connect({ threadId })).subscribe({
+          next: () => {},
+          complete: () => resolve(),
+          error: () => resolve(),
+        });
+      });
+      await entered;
+
+      // Fire run-2 while the connect is parked. Its persistence window
+      // lands while the gate holds: storeRun merges run-2 into
+      // eventsCache, captureThreadData commits the fresh messages to PG
+      // and then reaches its cache write.
+      const oldCacheStamp = caches(runner).threadCache.get(threadId)!.updatedAt;
+      const run2 = new Promise<{ completed: boolean; error: unknown }>((resolve) => {
+        let completed = false;
+        runWithUser(user1, () =>
+          runner.run({
+            threadId,
+            agent: messagesAgent(threadId, "run-2", [
+              { id: "m1", role: "user", content: "hello" } as Message,
+              { id: "m2", role: "assistant", content: "fresh reply" } as Message,
+            ]),
+            input: runInput(threadId, "run-2"),
+          }),
+        ).subscribe({
+          next: () => {},
+          error: (err) => resolve({ completed, error: err }),
+          complete: () => {
+            completed = true;
+            resolve({ completed, error: null });
+          },
+        });
+      });
+      // The capture has reached its cache-write section (the threadCache
+      // write is the step right before the serialized messageCache write;
+      // its DB writes necessarily committed before it). Same signal works
+      // fixed and unfixed: the threadCache write is outside the
+      // serialization section in both.
+      await vi.waitFor(() => {
+        const entry = caches(runner).threadCache.get(threadId)!;
+        if (!(entry.updatedAt > oldCacheStamp)) {
+          throw new Error("capture's cache write has not landed yet");
+        }
+      });
+
+      releaseResolve();
+      await Promise.all([connectDone, run2]);
+
+      // Sanity: the eventsCache guard held — run-2 stays in the cache
+      // (the parked connect's snapshot lacks it).
+      expect(
+        caches(runner)
+          .eventsCache.get(threadId)!
+          .some(
+            (e) =>
+              e.type === EventType.RUN_STARTED &&
+              (e as { runId?: string }).runId === "run-2",
+          ),
+      ).toBe(true);
+      // The capture's fresh messages survived the parked connect's stale
+      // read-through write: the sync readers must not regress to pre-run
+      // history.
+      const served = runWithUser(user1, () => runner.getThreadMessages(threadId));
+      expect(
+        served.some((m) => (m as { content?: string }).content === "fresh reply"),
+      ).toBe(true);
+    } finally {
+      releaseResolve();
+      setTestDb(previous);
+    }
+  });
+});
+
+describe("PostgresAgentRunner — run-subject observer teardown (#66 item 3)", () => {
+  // Two uncaptured .subscribe() bridges on run subjects could leak:
+  // (a) the prev-run bridge in startRun — a run starting while a
+  //     predecessor's connection still sits in ACTIVE_CONNECTIONS bridges
+  //     the predecessor's subject into its own stream;
+  // (b) the in-flight-run bridge in startConnect — the replaying client's
+  //     connection subscribes to the in-flight run's subject.
+  // Each must be disposed on its real lifecycle: (a) on the run's
+  // teardown (the always-runs cleanup every exit path goes through),
+  // (b) when the connect stream's consumer unsubscribes — the SSE
+  // runtime's client-disconnect hook (verified against
+  // @copilotkit/runtime's createSseEventResponse: exactly one subscribe
+  // per connect, unsubscribe on request.signal abort).
+  // Real Postgres: same skip discipline as the suites above.
+  let runner: PostgresAgentRunner;
+
+  beforeEach(async () => {
+    runner = makeRunner();
+    await runner.awaitRefreshed();
+  });
+
+  let pgStarted = false;
+  let restorePg: (() => void) | null = null;
+
+  beforeAll(async () => {
+    restorePg = await useRealPostgres();
+    pgStarted = restorePg !== null;
+  });
+
+  afterAll(() => {
+    restorePg?.();
+    restorePg = null;
+  });
+
+  // An agent whose stream the test drives step by step: RUN_STARTED on
+  // start, then each pushed event in order, then RUN_FINISHED on end().
+  function steppableAgent(threadId: string, runId: string) {
+    const queue: (BaseEvent | "end")[] = [];
+    const waiters: ((item: BaseEvent | "end") => void)[] = [];
+    const deliver = (item: BaseEvent | "end") => {
+      const waiter = waiters.shift();
+      if (waiter) waiter(item);
+      else queue.push(item);
+    };
+    const agent = {
+      agentId: "agent-a",
+      agentName: "A",
+      abortRun: vi.fn(() => deliver("end")),
+      runAgent: async (
+        _input: unknown,
+        hooks: { onEvent: (e: { event: BaseEvent }) => void },
+      ) => {
+        hooks.onEvent({
+          event: { type: EventType.RUN_STARTED, threadId, runId } as unknown as BaseEvent,
+        });
+        for (;;) {
+          const item = await (queue.length
+            ? Promise.resolve(queue.shift()!)
+            : new Promise<BaseEvent | "end">((r) => waiters.push(r)));
+          if (item === "end") break;
+          hooks.onEvent({ event: item });
+        }
+        hooks.onEvent({
+          event: { type: EventType.RUN_FINISHED, threadId, runId } as unknown as BaseEvent,
+        });
+      },
+    } as unknown as AbstractAgent;
+    return { agent, push: (event: BaseEvent) => deliver(event), end: () => deliver("end") };
+  }
+
+  function startSteppable(threadId: string, runId: string) {
+    const { agent, push, end } = steppableAgent(threadId, runId);
+    let startedResolve!: () => void;
+    let settledResolve!: () => void;
+    const started = new Promise<void>((r) => (startedResolve = r));
+    const settled = new Promise<void>((r) => (settledResolve = r));
+    runWithUser(user1, () =>
+      runner.run({ threadId, agent, input: runInput(threadId, runId) }),
+    ).subscribe({
+      next: (event) => {
+        if (event.type === EventType.RUN_STARTED) startedResolve();
+      },
+      complete: () => settledResolve(),
+      error: () => settledResolve(),
+    });
+    return { push, end, started, settled };
+  }
+
+  it("teardownRun disposes the prev-run bridge subscription it is handed", async (ctx) => {
+    ctx.skip(!pgStarted, "Real Postgres (Docker) unavailable");
+    // The mechanism half of (a): teardownRun — the always-runs cleanup
+    // every run exit path (success, mid-run failure, pre-run failure)
+    // goes through — must unsubscribe the prev-run bridge its connection
+    // carries. The wiring half (startRun capturing the live bridge) is
+    // pinned by the next test; the leak itself is not observable
+    // end-to-end because the run's own subject completes right after the
+    // teardown and swallows late forwarded events either way — this
+    // direct probe is the only honest window on the disposal.
+    const probeSource = new Subject<BaseEvent>();
+    const forwarded: BaseEvent[] = [];
+    const bridge = probeSource.subscribe({
+      next: (e) => forwarded.push(e),
+    });
+    const connection = {
+      subject: new ReplaySubject<BaseEvent>(Infinity),
+      prevBridge: bridge,
+    };
+    const pushEvent = () =>
+      probeSource.next({ type: EventType.STATE_SNAPSHOT, snapshot: {} } as unknown as BaseEvent);
+
+    pushEvent();
+    expect(forwarded).toHaveLength(1);
+
+    await (
+      runner as unknown as {
+        teardownRun: (
+          threadId: string,
+          connection: unknown,
+          runId: string,
+        ) => Promise<void>;
+      }
+    ).teardownRun("t-bridge-dispose", connection, "run-x");
+
+    pushEvent();
+    expect(forwarded).toHaveLength(1);
+  });
+
+  it("a run starting over a lingering predecessor bridges the predecessor's subject", async (ctx) => {
+    ctx.skip(!pgStarted, "Real Postgres (Docker) unavailable");
+    // The wiring half of (a): when startRun runs while a predecessor's
+    // connection still sits in ACTIVE_CONNECTIONS (here via the stale-lock
+    // steal — the one deterministic path a successor can start while the
+    // map entry lingers), it must bridge the predecessor's subject into
+    // its own stream: events pushed to the predecessor reach the bridged
+    // connect stream while both run.
+    const threadId = "t-prev-bridge";
+    seedThreadCache(runner, threadId, "agent-a", "Bridged chat", user1.id);
+    await query(
+      `INSERT INTO thread_metadata (thread_id, agent_id, title, user_id, org_id)
+       VALUES ($1, 'agent-a', 'Bridged chat', $2, 'org-1')`,
+      [threadId, user1.id],
+    );
+
+    const run1 = startSteppable(threadId, "run-prev");
+    await run1.started;
+
+    // The state the stale-lock steal expects: the row has moved on (a
+    // different current_run_id, aged past the grace) while the
+    // predecessor's map entry still lingers.
+    await query(
+      `UPDATE run_state SET current_run_id = 'run-ghost', updated_at = now() - interval '60 seconds'
+       WHERE thread_id = $1`,
+      [threadId],
+    );
+
+    const run2 = startSteppable(threadId, "run-next");
+    await run2.started;
+
+    const received: BaseEvent[] = [];
+    const connectDone = new Promise<void>((resolve) => {
+      runWithUser(user1, () => runner.connect({ threadId })).subscribe({
+        next: (e) => received.push(e),
+        complete: () => resolve(),
+        error: () => resolve(),
+      });
+    });
+    await vi.waitFor(() => {
+      if (
+        !received.some(
+          (e) =>
+            e.type === EventType.RUN_STARTED &&
+            (e as { runId?: string }).runId === "run-next",
+        )
+      ) {
+        throw new Error("bridged connect has not seen run-next's RUN_STARTED yet");
+      }
+    });
+
+    run1.push({
+      type: EventType.TEXT_MESSAGE_START,
+      messageId: "from-prev",
+    } as unknown as BaseEvent);
+    await vi.waitFor(() => {
+      if (!received.some((e) => (e as { messageId?: string }).messageId === "from-prev")) {
+        throw new Error("predecessor event did not reach the bridged connect stream");
+      }
+    });
+
+    run2.end();
+    run1.end();
+    await connectDone;
+    await run1.settled;
+  });
+
+  it("a cancelled connect's in-flight bridge is disposed — post-cancel events never reach the stream", async (ctx) => {
+    ctx.skip(!pgStarted, "Real Postgres (Docker) unavailable");
+    // The client-cancel half of (b): when the SSE runtime unsubscribes
+    // from connect()'s observable (client disconnect), the in-flight
+    // bridge inside startConnect must go with it — unfixed, it stays
+    // attached to the run's subject until the run ends, forwarding events
+    // into a dead stream. Observed through the ReplaySubject underneath:
+    // after the cancel, events pushed to the in-flight run must NOT
+    // appear when re-subscribing to the same observable (a leaked bridge
+    // would have buffered them).
+    const threadId = "t-obs-cancel";
+    seedThreadCache(runner, threadId, "agent-a", "Observed chat", user1.id);
+    await query(
+      `INSERT INTO thread_metadata (thread_id, agent_id, title, user_id, org_id)
+       VALUES ($1, 'agent-a', 'Observed chat', $2, 'org-1')`,
+      [threadId, user1.id],
+    );
+
+    const live = startSteppable(threadId, "run-live");
+    await live.started;
+
+    const obs = runWithUser(user1, () => runner.connect({ threadId }));
+    const first: BaseEvent[] = [];
+    const subscription = obs.subscribe({ next: (e) => first.push(e) });
+    // The bridge is attached once the replay lands and run-live's
+    // RUN_STARTED has streamed through it.
+    await vi.waitFor(() => {
+      if (
+        !first.some(
+          (e) =>
+            e.type === EventType.RUN_STARTED &&
+            (e as { runId?: string }).runId === "run-live",
+        )
+      ) {
+        throw new Error("bridge not streaming yet");
+      }
+    });
+
+    subscription.unsubscribe();
+
+    live.push({
+      type: EventType.TEXT_MESSAGE_START,
+      messageId: "after-cancel",
+    } as unknown as BaseEvent);
+    // Let the run settle so an unfixed leaked bridge would deterministically
+    // have forwarded (and buffered) the post-cancel event before this point.
+    live.end();
+    await live.settled;
+
+    const second: BaseEvent[] = [];
+    obs.subscribe({ next: (e) => second.push(e) });
+    // The replay is delivered synchronously on subscribe.
+    expect(second.length).toBeGreaterThan(0);
+    // Sanity: the pre-cancel traffic (run-live's RUN_STARTED) replays.
+    expect(
+      second.some(
+        (e) =>
+          e.type === EventType.RUN_STARTED &&
+          (e as { runId?: string }).runId === "run-live",
+      ),
+    ).toBe(true);
+    // The post-cancel push never reached the torn-down stream.
+    expect(
+      second.some((e) => (e as { messageId?: string }).messageId === "after-cancel"),
+    ).toBe(false);
+  });
+});
+
+describe("PostgresAgentRunner — refreshCacheFromDB swap (#66 item 4)", () => {
+  // refreshCacheFromDB wholesale-clears threadCache (and, historically,
+  // messageCache) before repopulating from PG: a write landing inside the
+  // clear→fill window is clobbered by the stale snapshot rows, and warm
+  // message caches were wiped to empty. Boot-time the maps are empty so
+  // it is harmless, but the documented future-timer use makes the window
+  // real. The refresh now builds the fresh map completely, carries
+  // forward any cache entry fresher than its DB row (a write that landed
+  // after the snapshot), swaps the reference atomically, and leaves
+  // messageCache alone — its data is owned by capture/connect, never by
+  // refresh. Real Postgres: same skip discipline as the suites above.
+  let runner: PostgresAgentRunner;
+
+  beforeEach(async () => {
+    runner = makeRunner();
+    await runner.awaitRefreshed();
+  });
+
+  let pgStarted = false;
+  let restorePg: (() => void) | null = null;
+
+  beforeAll(async () => {
+    restorePg = await useRealPostgres();
+    pgStarted = restorePg !== null;
+  });
+
+  afterAll(() => {
+    restorePg?.();
+    restorePg = null;
+  });
+
+  function callRefresh(): Promise<void> {
+    return (
+      runner as unknown as { refreshCacheFromDB: () => Promise<void> }
+    ).refreshCacheFromDB();
+  }
+
+  it("a capture landing mid-refresh survives the swap (its cache entry is fresher than the snapshot row)", async (ctx) => {
+    ctx.skip(!pgStarted, "Real Postgres (Docker) unavailable");
+    const threadId = "t-refresh-race";
+    // DB state the refresh's SELECT will snapshot: a run row aged an hour
+    // (so the row's last_created predates everything that follows) and
+    // metadata titled "old title". The cache mirrors the same stale world.
+    await query(
+      `INSERT INTO agent_runs (thread_id, run_id, parent_run_id, events, input, version, created_at)
+       VALUES ($1, 'run-old', NULL, $2::jsonb, $3::jsonb, 1, now() - interval '1 hour')`,
+      [threadId, JSON.stringify([]), JSON.stringify({})],
+    );
+    await query(
+      `INSERT INTO thread_metadata (thread_id, agent_id, title, user_id, org_id)
+       VALUES ($1, 'agent-a', 'old title', $2, 'org-1')`,
+      [threadId, user1.id],
+    );
+    const stale = new Date(Date.now() - 3_600_000).toISOString();
+    caches(runner).threadCache.set(threadId, {
+      id: threadId,
+      name: "old title",
+      agentId: "agent-a",
+      organizationId: "org-1",
+      createdById: user1.id,
+      archived: false,
+      createdAt: stale,
+      updatedAt: stale,
+    });
+    caches(runner).messageCache.set(threadId, [
+      { id: "m0", role: "user", content: "cached before refresh" } as Message,
+    ]);
+
+    // Park the refresh inside its SELECT: the statement snapshot is fixed
+    // before everything below commits.
+    const previous = getPoolOrTestClient() as unknown as PgClient;
+    let enteredResolve!: () => void;
+    const entered = new Promise<void>((r) => (enteredResolve = r));
+    let releaseResolve!: () => void;
+    const released = new Promise<void>((r) => (releaseResolve = r));
+    const gatedClient = {
+      query: async (text: string, values?: unknown[]) => {
+        if (text.includes("ar.first_created")) {
+          const result = await previous.query(text, values);
+          enteredResolve();
+          await released;
+          return result;
+        }
+        return previous.query(text, values);
+      },
+      release: () => {},
+    } as unknown as PgClient;
+    setTestDb(gatedClient);
+
+    try {
+      const refresh = callRefresh();
+      await entered;
+
+      // A rename and a capture land INSIDE the parked window — both
+      // commit after the snapshot. The capture's cache write is the state
+      // the swap must not drop.
+      const renamed = await runner.renameThread(threadId, "Renamed Title", user1.id, user1.orgId);
+      expect(renamed).toBe(true);
+      await runWithUser(user1, () =>
+        (
+          runner as unknown as {
+            captureThreadData: (request: unknown) => Promise<void>;
+          }
+        ).captureThreadData({
+          threadId,
+          agent: {
+            agentId: "agent-a",
+            messages: [{ id: "m1", role: "user", content: "captured during refresh" }],
+          },
+          input: runInput(threadId, "run-refresh"),
+        }),
+      );
+
+      releaseResolve();
+      await refresh;
+
+      // The stale snapshot row (title "old title", last_created an hour
+      // ago) must not win: the cache entry the rename+capture refreshed
+      // postdates it.
+      const served = runWithUser(user1, () => runner.listThreads());
+      expect(served.find((t) => t.id === threadId)?.name).toBe("Renamed Title");
+      // messageCache untouched — the capture's messages survived the
+      // refresh entirely.
+      expect(
+        runner
+          .getThreadMessages(threadId)
+          .some((m) => (m as { content?: string }).content === "captured during refresh"),
+      ).toBe(true);
+    } finally {
+      releaseResolve();
+      setTestDb(previous);
+    }
+  });
+
+  it("a refresh leaves messageCache contents untouched", async (ctx) => {
+    ctx.skip(!pgStarted, "Real Postgres (Docker) unavailable");
+    const threadId = "t-refresh-msgs";
+    await query(
+      `INSERT INTO agent_runs (thread_id, run_id, parent_run_id, events, input, version)
+       VALUES ($1, 'run-r', NULL, $2::jsonb, $3::jsonb, 1)`,
+      [threadId, JSON.stringify([]), JSON.stringify({})],
+    );
+    const seeded: Message[] = [
+      { id: "m1", role: "user", content: "warm cache" } as Message,
+    ];
+    caches(runner).messageCache.set(threadId, seeded);
+
+    await callRefresh();
+
+    // The refresh's clear-then-fill used to wipe warm message caches; the
+    // map's data belongs to capture/connect, so a refresh must not touch it.
+    expect(runner.getThreadMessages(threadId)).toEqual(seeded);
   });
 });

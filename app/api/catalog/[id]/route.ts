@@ -11,6 +11,8 @@ import { getCurrentUser } from "@/lib/auth/context";
 import { assertSafeUrl, UnsafeUrlError } from "@/lib/net/safe-fetch";
 import { checkUserLimit } from "@/lib/ratelimit/middleware";
 import { SSRF_REJECTION_MESSAGE } from "@/lib/config/saas";
+import { validationFailedResponse } from "@/lib/api/validation";
+import { KeyedLockUnavailableError } from "@/lib/db/keyed-lock";
 
 function isPlatformAdmin(role: string): boolean {
   return role === "admin";
@@ -69,10 +71,7 @@ export async function PATCH(
 
   const parsed = updateTemplateBodySchema.safeParse(body);
   if (!parsed.success) {
-    return NextResponse.json(
-      { error: "Validation failed", details: parsed.error.flatten() },
-      { status: 400 },
-    );
+    return validationFailedResponse(parsed.error);
   }
 
   // SSRF guard: only when the endpoint is being changed (same rule as
@@ -99,6 +98,15 @@ export async function PATCH(
       return NextResponse.json(
         { error: "A template with that slug already exists." },
         { status: 409 },
+      );
+    }
+    // The lock's bounded-wait failure (waiter timeout / queue cap, #153)
+    // is retryable contention, not a server fault — 503 with the same
+    // "please try again" copy, never the generic 500.
+    if (err instanceof KeyedLockUnavailableError) {
+      return NextResponse.json(
+        { error: "Couldn't update the template — please try again." },
+        { status: 503 },
       );
     }
     console.error("[catalog] update failed", {

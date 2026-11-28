@@ -101,11 +101,30 @@ secret stores whose boundaries are worth stating explicitly:
   is acquired BEFORE the transaction, so writers blocked on the row
   queue in-process without pinning a pool connection (same mechanism as
   `updateTemplate` — see [catalog.md](./catalog.md) "Concurrent template
-  edits serialize"). The
+  edits serialize"). The wait is also bounded (#153) so a wedged lock
+  holder can't accumulate waiters forever: a waiter times out after 30s
+  and the same-key queue caps at 32, failing fast with
+  `KeyedLockUnavailableError`, which the routes surface as a 503
+  "please try again" instead of the generic 500. The
   decrypted key is consumed exclusively by the run path and delivered
   per-run as an AG-UI context item — never persisted AgentOS-side, never
   cached agent-side. Rows are scoped `UNIQUE (user_id, provider)`; no FK
   to the Better Auth runtime table (same convention as `agents.org_id`).
+- **Knowledge embedding key — the same key, a new consumer with a new
+  boundary.** A knowledge upload embeds the document with the AUTHOR's
+  saved `openai` key (`api_key` field), resolved server-side by the
+  knowledge POST route (`getCredentialSecrets(userId)["openai"]?.["api_key"]`)
+  and sent to the builder service as the multipart `embedding_key` field.
+  The key is resolved server-side — never to the browser — and lives in
+  the request body ONLY: it is never returned in a response, never logged
+  (a credential-read failure logs the error message, never the fields),
+  and never appears in an error detail. The run path consumes the same
+  key per-run as the `openai_api_key` dependency (the dispatcher resolves
+  it with deliberately no env fallback — see
+  [agent-builder.md](./agent-builder.md#knowledge--the-service-half-233--the-run-time-attach-234));
+  the upload path is the only other consumer. An author without the key
+  cannot upload (a curation prerequisite — the key is demanded at
+  upload time, not hidden behind the run gate).
 - **Connectors** (`lib/connectors/connector-store.ts`) — org-scoped MCP
   server registry. Writes are org-admin gated (`canManageAgents`); reads
   are member-accessible (rate-limited via the `agentRead` bucket) so the
@@ -174,7 +193,11 @@ endpoint URL to validate. The outbound AgentOS URL is platform config
 so the guard's threat model (user-controlled URL reaching internal
 services) doesn't apply. The guard still applies to every route where
 the endpoint comes from the user (admin agent create/edit, the
-reachability probe, catalog templates, **`PUT /api/connectors`**).
+reachability probe, catalog templates, **`PUT /api/connectors`**, and
+**`POST /api/agents/[id]/knowledge`** — URL uploads hand the service a
+user-supplied URL to fetch from inside the deployment, the exact threat
+model; the guard runs before anything is forwarded, alongside the
+scheme/shape checks).
 
 Two further lines of defense on the run path (both from the same
 review that added the connector guard):
@@ -212,6 +235,15 @@ review that added the connector guard):
   unstoppable stops). The copilotkit route refuses it unconditionally —
   before auth, before rate-limit accounting — since nothing in the app
   calls it.
+- **Run tokens are component-bound (defense-in-depth)** — tackui mints
+  builder run tokens with an `agent_id` claim naming the target
+  component, and the dispatcher verifies it against the addressed
+  component after signature verification, refusing a mismatch with 403
+  before anything runs. Tokens without the claim (legacy mints, service
+  tokens, anonymous callers) keep today's behavior — fail open on
+  absence, fail closed on mismatch — so both deploy orders stay safe
+  (verify-first serves legacy tokens; mint-first makes the claim merely
+  decorative until the other side catches up).
 - **The live run stream is redacted like persistence** — the `RUN_STARTED`
   fill (emitted when the backend doesn't echo the input) copies
   `request.input`, whose context carries the gate-injected secrets; every
@@ -219,8 +251,10 @@ review that added the connector guard):
   applies, before any subscriber sees it.
 
 **Trust model:** org isolation is entirely tackui-side. The AgentOS is an
-explicitly multi-tenant execution service with no org concept — any valid
-`app:user` token can run any stored component. tackui is the policy
+explicitly multi-tenant execution service with no org concept — a valid
+`app:user` run token runs the component its `agent_id` claim names; a
+claim-less token (legacy mint or service token) can still run any stored
+component. tackui is the policy
 layer: org scoping, connector registration, run gates, and identity
 minting all happen there. The dispatcher's per-run credential ContextVar
 (set/reset per stream) and the session-write check (`assert_session_writable`)

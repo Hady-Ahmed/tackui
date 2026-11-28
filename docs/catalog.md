@@ -39,7 +39,11 @@ there is no path from a builder agent to a template.
   acquired BEFORE the transaction opens: writers blocked on the row
   queue in-process holding no pool connection, so a pile-up on one
   template can't exhaust `PG_POOL_MAX` — writers to different templates
-  never block each other.
+  never block each other. The wait is bounded (#153): a waiter gives up
+  after 30s (default) or when the same-key queue reaches 32 waiters,
+  rejecting with `KeyedLockUnavailableError`, which the PATCH route maps
+  to a 503 "please try again" instead of the generic 500 — a wedged
+  holder can stall editors briefly, but never parks them forever.
 - Installing creates an org-scoped `agents` row via `installTemplate()`
   — but the row is an **entitlement/reference, not a config copy**.
   The runtime resolves endpoint/auth **live from the template** on every
@@ -95,10 +99,12 @@ changes the org's agent list) → `checkTemplateInstall` (plan gate) →
   NULLs distinct).
 - **The installed row can vanish mid-call** (its org deletes the agent
   between the lookup that produced the id and the re-sync's final read —
-  nothing holds the row). The re-sync surfaces that as a typed error the
-  route maps to 409, retryable: the retry's lookup now returns null, so
-  it takes the fresh-install path and creates a new copy. Previously the
-  missing row surfaced as a bare 500.
+  or between the fresh install's own INSERT commit and that path's final
+  read — nothing holds the row). Both paths surface that as a typed
+  error the route maps to 409, retryable: a retry's lookup now returns
+  null (the vanished id is gone), so the retry takes the fresh-install
+  path and recreates the copy. Previously the missing row surfaced as a
+  bare 500.
   Known residual edge: `checkAgentCountLimit` is still check-then-act, so
   N concurrent installs of *different* templates at the cap boundary can
   briefly overshoot the plan's agent cap by N−1 rows — accepted (no data

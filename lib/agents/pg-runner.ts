@@ -7,7 +7,7 @@ import {
   type AgentRunnerStopRequest,
   type LocalThreadEndpointRecord,
 } from "@copilotkit/runtime/v2";
-import { Observable, ReplaySubject } from "rxjs";
+import { Observable, ReplaySubject, Subscription } from "rxjs";
 import {
   AbstractAgent,
   BaseEvent,
@@ -18,6 +18,7 @@ import {
 } from "@ag-ui/client";
 import type { Message } from "@ag-ui/core";
 import { query, withTransaction } from "@/lib/db/pg";
+import { withKeyedLock } from "@/lib/db/keyed-lock";
 import { getReservedDepKeys, getRunnerUser } from "@/lib/auth/request-context";
 
 interface AgentRunRecord {
@@ -57,6 +58,16 @@ interface ActiveConnectionContext {
    * startRun gate.
    */
   threadDeleted?: boolean;
+  /**
+   * The prev-run bridge subscription created in startRun when a
+   * predecessor's connection still sat in ACTIVE_CONNECTIONS (its
+   * subject is replayed into this run's stream). Lives in this run's
+   * scope: teardownRun — the always-runs cleanup every exit path goes
+   * through — disposes it, so a leaked observer can't keep receiving
+   * the predecessor's events and holding its subject alive after this
+   * run has ended.
+   */
+  prevBridge?: Subscription;
 }
 
 // Active connections for streaming events and stop support. Owned by this
@@ -64,6 +75,20 @@ interface ActiveConnectionContext {
 // in @copilotkit/sqlite-runner, which forced the old PersistentAgentRunner to
 // reach into the parent's private `db` field via a TS escape hatch).
 const ACTIVE_CONNECTIONS = new Map<string, ActiveConnectionContext>();
+
+/**
+ * Per-thread key serializing the two messageCache writers (#141): the
+ * connect()'s read-through fetch+write and captureThreadData's write. The
+ * fetch's statement snapshot can predate a run's capture commit while its
+ * resolution lands after the capture's cache write — messages carry no
+ * version, so there is no data-comparison guard; holding the lock across
+ * fetch and write makes the capture's queued write land after any stale
+ * set. Hold times are one fast SELECT — the keyed lock's 30s waiter
+ * timeout is irrelevant here, and this is deliberately NOT the run-state
+ * lock (that one is held for an entire run's duration; connect must never
+ * contend with it).
+ */
+const msgCacheKey = (threadId: string): string => `pg-runner:msg-cache:${threadId}`;
 
 const SCHEMA_VERSION = 1;
 
@@ -87,7 +112,8 @@ const STALE_LOCK_GRACE_MS = 10_000;
  * ids are client-generated UUIDs, so no legitimate flow re-creates a
  * deleted one). Pruned opportunistically inside deleteThread's
  * transaction: every delete sweeps rows older than this — no background
- * timer.
+ * timer. The same transaction also clears run_state rows for tombstoned
+ * ids (orphans a delete-vs-teardown race can leave behind; see #140).
  */
 const TOMBSTONE_RETENTION_MS = 30 * 24 * 60 * 60 * 1000;
 
@@ -181,6 +207,38 @@ export function redactReservedEvent<E extends object>(
  *   and a producer must close what it opened before a new RUN_STARTED in
  *   the same stream. The bridge supplies the "later RUN_STARTED" the
  *   synthesis exists for — it just isn't in the persisted history list.
+ * - Duplicate actives and stray terminators in the STEP_* and
+ *   TEXT_MESSAGE_* lifecycles are DROPPED rather than replayed: a START
+ *   for a step/message that is already active and a terminator for one
+ *   that is not currently active (never started, or already closed) are
+ *   each rejected outright by the @ag-ui/client verifier, so replaying
+ *   either poisons the whole reconnect replay. A terminator whose id
+ *   cannot be tracked is likewise rejected — but a START with a
+ *   non-string id is NOT: the verifier accepts it and tracks it under
+ *   the raw key, so the drop for those rests on schema enforcement
+ *   instead (TextMessageStartEventSchema/StepStartedEventSchema require
+ *   the id, and the client's enforceEvents boundary parses every event
+ *   before it can be persisted — untrackable-id STARTs never reach a
+ *   persisted record). This is the complement of the closure rule
+ *   above: missing terminators are synthesized for
+ *   sequences the replay actually opened; invalid extras are dropped,
+ *   never legalized by inventing a missing START (that would fabricate
+ *   an open step/message). Closing an id frees it — a later START for the
+ *   same id is kept, matching the verifier (which accepts a reopened id
+ *   and resets all lifecycle state at each RUN_STARTED, as this builder
+ *   does per run segment). Message ids are keyed plainly; step state is
+ *   keyed the way the verifier keys steps — per lane, by
+ *   (subagentRunId, stepName) — so the same stepName may be open
+ *   concurrently under the parent agent and a subagent without
+ *   colliding, a STEP_FINISHED only closes its own lane's step ("A step
+ *   must be finished by whoever started it"), and the synthesized
+ *   closures in closeOpenSequences carry the originating lane's
+ *   subagentRunId. Events without a subagentRunId — and with null, which
+ *   the verifier's null-stripper removes — share the parent lane. Our
+ *   own pipeline cannot emit any of these
+ *   shapes (the CopilotKit runtime stream is conforming) — this protects
+ *   replays of records written by non-conforming third-party backends or
+ *   seeded by hand.
  *
  * The synthesized tool-call results carry status "error": for an errored
  * run that reads as failed, as intended. For a finished run whose record
@@ -214,11 +272,16 @@ function buildReplayEvents(
   // REASONING_END for each open block.
   const openReasoningMessages = new Set<string>();
   const openReasoningBlocks = new Set<string>();
-  // Open STEP_* sequences, keyed by stepName. A step groups a phase of a
-  // run — its messages and tool calls — so in closeOpenSequences it is
-  // closed LAST, after the inner sequences it wraps (see the closure-order
-  // note there).
-  const openSteps = new Set<string>();
+  // Open STEP_* sequences, keyed per lane the way the verifier tracks
+  // steps: (subagentRunId, stepName). A step groups a phase of a run — its
+  // messages and tool calls — so in closeOpenSequences it is closed LAST,
+  // after the inner sequences it wraps (see the closure-order note there).
+  // Lane key: the subagentRunId string, or "" for the parent lane (events
+  // without a subagentRunId, and with null — which the verifier's
+  // null-stripper removes — both belong to the parent lane).
+  const openSteps = new Map<string, Set<string>>();
+  const stepLane = (subagentRunId: unknown): string =>
+    typeof subagentRunId === "string" ? subagentRunId : "";
 
   const closeOpenSequences = (): void => {
     // Closure order: inner sequences first — reasoning messages, then
@@ -261,8 +324,18 @@ function buildReplayEvents(
         } as unknown as BaseEvent);
       }
     }
-    for (const stepName of openSteps) {
-      out.push({ type: EventType.STEP_FINISHED, stepName } as unknown as BaseEvent);
+    for (const [lane, names] of openSteps) {
+      for (const stepName of names) {
+        // The closure carries the originating lane's subagentRunId — the
+        // verifier requires a step to be finished by whoever started it,
+        // so a parent-lane STEP_FINISHED would be rejected while the
+        // subagent lane's step is the one still open.
+        out.push(
+          (lane
+            ? { type: EventType.STEP_FINISHED, stepName, subagentRunId: lane }
+            : { type: EventType.STEP_FINISHED, stepName }) as unknown as BaseEvent,
+        );
+      }
     }
     openReasoningMessages.clear();
     openReasoningBlocks.clear();
@@ -350,11 +423,24 @@ function buildReplayEvents(
       const id = (event as { messageId?: unknown }).messageId;
       if (typeof id === "string") openReasoningBlocks.delete(id);
     } else if (event.type === EventType.TEXT_MESSAGE_START) {
+      // Drop policy (duplicate actives + stray terminators — see this
+      // function's doc comment): a message START for an id that is
+      // already active is verifier-rejected, so it is dropped instead of
+      // replayed. (A START with a non-string id is NOT verifier-rejected
+      // — the verifier accepts it and tracks it under the raw key — but
+      // schema enforcement requires the id, so conforming records never
+      // carry one; see the doc comment.)
       const id = (event as { messageId?: unknown }).messageId;
-      if (typeof id === "string") openMessageIds.add(id);
+      if (typeof id !== "string" || openMessageIds.has(id)) continue;
+      openMessageIds.add(id);
     } else if (event.type === EventType.TEXT_MESSAGE_END) {
+      // A terminator for a message that is not currently open (never
+      // started, already closed, or untrackable) is verifier-rejected —
+      // dropped. A legit close frees the id, so a later START for the
+      // same id is kept (the verifier accepts a reopened id too).
       const id = (event as { messageId?: unknown }).messageId;
-      if (typeof id === "string") openMessageIds.delete(id);
+      if (typeof id !== "string" || !openMessageIds.has(id)) continue;
+      openMessageIds.delete(id);
     } else if (event.type === EventType.TOOL_CALL_START) {
       const id = (event as { toolCallId?: unknown }).toolCallId;
       if (typeof id === "string") openToolCalls.set(id, { hasEnd: false, hasResult: false });
@@ -367,11 +453,39 @@ function buildReplayEvents(
       const info = typeof id === "string" ? openToolCalls.get(id) : undefined;
       if (info) info.hasResult = true;
     } else if (event.type === EventType.STEP_STARTED) {
+      // Drop policy, step lifecycle: a START for a (subagentRunId,
+      // stepName) pair that is already active is verifier-rejected —
+      // dropped. #142's `add()` no-op kept the duplicate in the replay,
+      // so a single poisoned record still rejected the whole reconnect.
+      // (A START with a non-string name is NOT verifier-rejected — the
+      // verifier tracks it under the raw key — but schema enforcement
+      // requires the name, so conforming records never carry one; see the
+      // doc comment.)
       const name = (event as { stepName?: unknown }).stepName;
-      if (typeof name === "string") openSteps.add(name);
+      if (typeof name !== "string") continue;
+      const lane = stepLane((event as { subagentRunId?: unknown }).subagentRunId);
+      let laneSteps = openSteps.get(lane);
+      if (laneSteps?.has(name)) continue;
+      if (!laneSteps) {
+        laneSteps = new Set<string>();
+        openSteps.set(lane, laneSteps);
+      }
+      laneSteps.add(name);
     } else if (event.type === EventType.STEP_FINISHED) {
+      // Drop policy, step lifecycle: a FINISHED for a step that its lane
+      // does not currently hold (finish-without-start or a duplicate
+      // finish) is verifier-rejected — dropped, never legalized by
+      // synthesizing a missing START (that would invent an open step).
+      // The same stepName being open in ANOTHER lane does not legalize it
+      // ("A step must be finished by whoever started it"). A legit finish
+      // frees the (lane, name) pair, so a later START for it is kept.
       const name = (event as { stepName?: unknown }).stepName;
-      if (typeof name === "string") openSteps.delete(name);
+      if (typeof name !== "string") continue;
+      const lane = stepLane((event as { subagentRunId?: unknown }).subagentRunId);
+      const laneSteps = openSteps.get(lane);
+      if (!laneSteps?.has(name)) continue;
+      laneSteps.delete(name);
+      if (laneSteps.size === 0) openSteps.delete(lane);
     }
     out.push(event);
   }
@@ -772,9 +886,13 @@ export class PostgresAgentRunner extends AgentRunner {
     };
 
     // Bridge previous events if a prior subject exists (e.g. reconnect
-    // during an in-flight run on the same thread).
+    // during an in-flight run on the same thread). The subscription is
+    // captured on THIS run's connection: teardownRun disposes it on every
+    // exit path, so the bridge cannot outlive the run it serves — an
+    // uncaptured one would keep receiving the predecessor's events for a
+    // dead stream and hold its subject alive.
     if (prevSubject) {
-      prevSubject.subscribe({
+      myConnection.prevBridge = prevSubject.subscribe({
         next: (e) => nextSubject.next(e),
         error: (err) => nextSubject.error(err),
         complete: () => {
@@ -804,17 +922,50 @@ export class PostgresAgentRunner extends AgentRunner {
     // async DB work inside startConnect(), fired fire-and-forget — same
     // pattern as run(). The subject receives events once the async work
     // resolves.
+    //
+    // startConnect must be INVOKED here — inside the caller's ALS scope —
+    // not deferred to subscribe-time: its cross-tenant read guard reads
+    // the request context via getRunnerUser(), and the SSE runtime
+    // subscribes outside that scope. The fire-and-forget chain created
+    // inside this call carries the scope into its async continuations;
+    // a subscribe-time invocation would lose it and fail the guard open.
+    //
+    // The returned Observable's teardown is the client-disconnect hook:
+    // the SSE runtime subscribes exactly once per connect and
+    // unsubscribes on request.signal abort (verified against
+    // @copilotkit/runtime's createSseEventResponse), so the teardown
+    // runs when this stream's consumer leaves. It disposes the
+    // in-flight-run bridge startConnect may have attached — an
+    // uncaptured bridge would keep receiving events for a dead stream
+    // and hold the run's subject (and the emittedMessageIds closure)
+    // alive until run end. A teardown that lands before startConnect
+    // resolves disposes the freshly created bridge immediately.
     const connectionSubject = new ReplaySubject<BaseEvent>(Infinity);
-    this.startConnect(request, connectionSubject).catch((err) => {
-      connectionSubject.error(err);
+    let disposed = false;
+    let disposeBridge: (() => void) | undefined;
+    this.startConnect(request, connectionSubject)
+      .then((dispose) => {
+        if (disposed) dispose();
+        else disposeBridge = dispose;
+      })
+      .catch((err) => {
+        connectionSubject.error(err);
+      });
+    const replayable = connectionSubject.asObservable();
+    return new Observable<BaseEvent>((subscriber) => {
+      const upstream = replayable.subscribe(subscriber);
+      return () => {
+        disposed = true;
+        upstream.unsubscribe();
+        disposeBridge?.();
+      };
     });
-    return connectionSubject.asObservable();
   }
 
   private async startConnect(
     request: AgentRunnerConnectRequest,
     connectionSubject: ReplaySubject<BaseEvent>,
-  ): Promise<void> {
+  ): Promise<() => void> {
     // ─── Cross-tenant read guard ─────────────────────────────────────────
     // Same visibility rule as the sync readers (getThreadEvents et al):
     // an authenticated caller is denied for a thread unknown to this
@@ -830,7 +981,7 @@ export class PostgresAgentRunner extends AgentRunner {
       const cached = this.threadCache.get(request.threadId);
       if (!cached || !this.threadVisible(cached, runnerUser)) {
         connectionSubject.complete();
-        return;
+        return () => {};
       }
     }
 
@@ -860,7 +1011,6 @@ export class PostgresAgentRunner extends AgentRunner {
     // subscription every decision is synchronous off these values.
     const activeConnection = ACTIVE_CONNECTIONS.get(request.threadId);
     const runState = await this.getRunState(request.threadId);
-    const messages = await this.fetchThreadMessages(request.threadId);
 
     // willBridge: an in-flight run exists and the snapshot does NOT
     // cover it — the bridge will append its buffered events (first: its
@@ -887,10 +1037,24 @@ export class PostgresAgentRunner extends AgentRunner {
     // STATE_SNAPSHOT) until the next write on the thread. A cache
     // holding a runId absent from the snapshot proves a newer write
     // landed: skip and let the newer value stand.
-    if (!this.cacheHoldsRunOutsideSnapshot(request.threadId, snapshotRunIds)) {
-      this.eventsCache.set(request.threadId, compactedEvents);
-    }
-    if (messages.length > 0) this.messageCache.set(request.threadId, messages);
+    //
+    // The message half needs serialization instead of a data guard
+    // (#141): the fetch's statement snapshot can predate a run's
+    // captureThreadData commit while its resolution lands after the
+    // capture's messageCache write — the stale fetch would clobber the
+    // fresh capture. Messages carry no version, so there is nothing to
+    // compare; the keyed lock (see msgCacheKey) held across fetch and
+    // write queues the capture's write behind this section, so the fresh
+    // value always lands last. Deliberately NOT the run-state lock —
+    // that one is held for an entire run; connect must never contend
+    // with it.
+    await withKeyedLock(msgCacheKey(request.threadId), async () => {
+      const messages = await this.fetchThreadMessages(request.threadId);
+      if (!this.cacheHoldsRunOutsideSnapshot(request.threadId, snapshotRunIds)) {
+        this.eventsCache.set(request.threadId, compactedEvents);
+      }
+      if (messages.length > 0) this.messageCache.set(request.threadId, messages);
+    });
 
     const emittedMessageIds = new Set<string>();
     for (const event of compactedEvents) {
@@ -928,7 +1092,12 @@ export class PostgresAgentRunner extends AgentRunner {
       !replayCoversActiveRun &&
       (runState.isRunning || activeConnection.stopRequested)
     ) {
-      activeConnection.subject.subscribe({
+      // Captured and returned for disposal: connect()'s Observable
+      // teardown (the SSE runtime's client-disconnect hook) unsubscribes
+      // it, so a cancelled client's stream cannot keep draining the
+      // in-flight run's subject until run end. On the source's own
+      // terminal (complete/error) rxjs already disposes it.
+      const bridge = activeConnection.subject.subscribe({
         next: (event) => {
           // Skip message events we already emitted from historic replay.
           if (
@@ -943,9 +1112,10 @@ export class PostgresAgentRunner extends AgentRunner {
         complete: () => connectionSubject.complete(),
         error: (err) => connectionSubject.error(err),
       });
-    } else {
-      connectionSubject.complete();
+      return () => bridge.unsubscribe();
     }
+    connectionSubject.complete();
+    return () => {};
   }
 
   async isRunning(
@@ -1180,10 +1350,14 @@ export class PostgresAgentRunner extends AgentRunner {
          LEFT JOIN thread_metadata tm ON ar.thread_id = tm.thread_id
          ORDER BY ar.last_created DESC`);
 
-    this.threadCache.clear();
-    this.messageCache.clear();
+    // Build-then-swap: the whole fresh map is built from the snapshot
+    // BEFORE any mutation, then swapped in by reference — no clear→fill
+    // window in which concurrent writers could be clobbered by stale
+    // rows (boot-time both maps are empty, but the documented
+    // future-timer use would make the window real).
+    const next = new Map<string, LocalThreadEndpointRecord>();
     for (const row of result.rows) {
-      this.threadCache.set(row.thread_id, {
+      next.set(row.thread_id, {
         id: row.thread_id,
         name: row.title,
         agentId: row.agent_id ?? "default",
@@ -1193,10 +1367,21 @@ export class PostgresAgentRunner extends AgentRunner {
         createdAt: new Date(row.first_created).toISOString(),
         updatedAt: new Date(row.last_created).toISOString(),
       });
-      // Messages are loaded lazily by startConnect() — only fetch them
-      // here if they're cheap. For now, leave messageCache empty until
-      // a connect() or captureThreadData() populates it.
     }
+    // Carve-out for writes that landed after the snapshot: a
+    // captureThreadData (or rename) committing while this SELECT was in
+    // flight updated the live cache with fresher data than the rows read
+    // here — keep it (it also preserves threads seeded in-memory by
+    // startRun whose first capture hasn't persisted yet). messageCache is
+    // left alone entirely: its data is owned by capture/connect, never by
+    // this refresh.
+    for (const [threadId, record] of this.threadCache) {
+      const snapshotRow = next.get(threadId);
+      if (!snapshotRow || record.updatedAt > snapshotRow.updatedAt) {
+        next.set(threadId, record);
+      }
+    }
+    this.threadCache = next;
   }
 
   private async fetchThreadMessages(threadId: string): Promise<Message[]> {
@@ -1260,6 +1445,21 @@ export class PostgresAgentRunner extends AgentRunner {
         `INSERT INTO deleted_threads (thread_id) VALUES ($1)
          ON CONFLICT (thread_id) DO NOTHING`,
         [threadId],
+      );
+      // Sweep orphaned run_state rows behind tombstoned ids (#140): a
+      // delete committing between teardownRun's re-release guard SELECT
+      // and setRunState's upsert leaves a bare row for the deleted id —
+      // invisible (boot reset clears it; startRun refuses the id) but
+      // garbage that would otherwise outlive the tombstone. Runs BEFORE
+      // the age prune below: the prune removes aged tombstones from the
+      // table, and a sweep ordered after it would miss their run_state
+      // rows. Sweeping every tombstoned id — not just the pruned ones —
+      // cleans the orphan on the next delete; a tombstoned id's run_state
+      // row is always orphaned (the delete tx removed it, startRun
+      // refuses the id), so nothing load-bearing is touched.
+      await client.query(
+        `DELETE FROM run_state
+         WHERE thread_id IN (SELECT thread_id FROM deleted_threads)`,
       );
       await client.query(
         `DELETE FROM deleted_threads WHERE deleted_at < $1`,
@@ -1589,6 +1789,12 @@ export class PostgresAgentRunner extends AgentRunner {
     connection: ActiveConnectionContext,
     runId: string,
   ): Promise<void> {
+    // The prev-run bridge lives in this run's scope — dispose it on every
+    // exit path, before anything else (unconditional: even when a
+    // replacement run has already replaced the map entry, the bridge is
+    // still THIS run's and must not outlive it).
+    connection.prevBridge?.unsubscribe();
+    connection.prevBridge = undefined;
     try {
       const state = await this.getRunState(threadId);
       if (state.currentRunId === runId) {
@@ -1707,7 +1913,13 @@ export class PostgresAgentRunner extends AgentRunner {
       updatedAt: nowIso,
     });
     if (messages && messages.length > 0) {
-      this.messageCache.set(request.threadId, messages);
+      // Serialized against startConnect's read-through fetch+write (see
+      // msgCacheKey): a connect whose message SELECT snapshot predates
+      // this capture's commit can still be parked mid-fetch — its stale
+      // write must land BEFORE this fresh one, never after.
+      await withKeyedLock(msgCacheKey(request.threadId), async () => {
+        this.messageCache.set(request.threadId, messages);
+      });
     }
   }
 

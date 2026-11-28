@@ -1,7 +1,7 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
-import { randomUUID } from "node:crypto";
 import { query } from "@/lib/db/pg";
-import { getEnabledProviders } from "./auth";
+import { auth, getEnabledProviders } from "./auth";
+import { sessionCreateBeforeHook } from "./personal-org";
 
 // The databaseHooks tests below re-extract hook logic and exercise it against
 // pg-mem rather than driving the Better Auth instance: the hooks are small and
@@ -13,6 +13,11 @@ import { getEnabledProviders } from "./auth";
 // If `auth.ts` changes a hook, the corresponding test must be updated. That
 // coupling is acceptable — the hooks are small and the tests serve as
 // regression guards.
+//
+// The session.create.before hook (personal-org) lives in its own module with
+// its own test file: its regression tests need a real Postgres (pg-mem cannot
+// emulate cross-connection transaction visibility — see
+// lib/auth/personal-org.test.ts).
 
 async function runCreateAfterHook(user: { id: string }): Promise<void> {
   const row = await query<{ count: number }>(
@@ -26,65 +31,21 @@ async function runCreateAfterHook(user: { id: string }): Promise<void> {
   }
 }
 
-async function runSessionCreateBeforeHook(session: {
-  userId: string;
-}): Promise<{ activeOrganizationId: string | null }> {
-  const memberRow = await query<{ organizationId: string }>(
-    `SELECT "organizationId" FROM member
-     WHERE "userId" = $1 AND role = 'owner'
-     ORDER BY "createdAt" ASC LIMIT 1`,
-    [session.userId],
-  );
-
-  let orgId = memberRow.rows[0]?.organizationId ?? null;
-
-  if (!orgId) {
-    orgId = randomUUID();
-
-    const userRow = await query<{ name: string | null; email: string | null }>(
-      `SELECT name, email FROM "user" WHERE id = $1`,
-      [session.userId],
-    );
-    const userName =
-      userRow.rows[0]?.name ?? userRow.rows[0]?.email ?? "My";
-    const orgName = `${userName}'s workspace`;
-    const slug = `personal-${session.userId.slice(0, 8)}`;
-
-    await query(
-      `INSERT INTO organization (id, name, slug, "createdAt")
-       VALUES ($1, $2, $3, now())`,
-      [orgId, orgName, slug],
-    );
-    await query(
-      `INSERT INTO member (id, "organizationId", "userId", role, "createdAt")
-       VALUES ($1, $2, $3, $4, now())`,
-      [randomUUID(), orgId, session.userId, "owner"],
-    );
-  }
-
-  return { activeOrganizationId: orgId };
-}
-
 async function ensureTables() {
   // pg-mem's `CREATE TABLE IF NOT EXISTS` parser doesn't handle the
   // IF NOT EXISTS branch on an existing table (see lib/db/migrate.ts).
-  for (const [table, ddl] of [
-    ["user", `CREATE TABLE "user" (id TEXT PRIMARY KEY, email TEXT, name TEXT, role TEXT)`],
-    ["organization", `CREATE TABLE organization (id TEXT PRIMARY KEY, name TEXT, slug TEXT, "createdAt" TIMESTAMPTZ)`],
-    ["member", `CREATE TABLE member (id TEXT PRIMARY KEY, "organizationId" TEXT, "userId" TEXT, role TEXT, "createdAt" TIMESTAMPTZ)`],
-  ] as const) {
-    const exists = await query<{ exists: number }>(
-      `SELECT count(*)::int as exists FROM information_schema.tables WHERE table_name = $1`,
-      [table],
+  const exists = await query<{ exists: number }>(
+    `SELECT count(*)::int as exists FROM information_schema.tables WHERE table_name = 'user'`,
+  );
+  if ((exists.rows[0]?.exists ?? 0) === 0) {
+    await query(
+      `CREATE TABLE "user" (id TEXT PRIMARY KEY, email TEXT, name TEXT, role TEXT)`,
     );
-    if ((exists.rows[0]?.exists ?? 0) === 0) await query(ddl);
   }
 }
 
 beforeEach(async () => {
   await ensureTables();
-  await query(`DELETE FROM member`);
-  await query(`DELETE FROM organization`);
   await query(`DELETE FROM "user"`);
 });
 
@@ -147,98 +108,6 @@ describe("databaseHooks.user.create.after — first-user-is-admin", () => {
       ["only"],
     );
     expect(result.rows[0].role).toBe("admin");
-  });
-});
-
-describe("databaseHooks.session.create.before — personal org creation", () => {
-  it("creates a personal org + owner member when none exists (first signup)", async () => {
-    await query(
-      `INSERT INTO "user" (id, email, name, role) VALUES ($1, $2, $3, $4)`,
-      ["u-1", "alice@test.com", "Alice", "user"],
-    );
-
-    const result = await runSessionCreateBeforeHook({ userId: "u-1" });
-
-    expect(result.activeOrganizationId).toBeTruthy();
-
-    // Org was created with Alice's name
-    const orgs = await query<{ name: string; slug: string }>(
-      `SELECT name, slug FROM organization WHERE id = $1`,
-      [result.activeOrganizationId],
-    );
-    expect(orgs.rows[0].name).toBe("Alice's workspace");
-    expect(orgs.rows[0].slug).toBe("personal-u-1");
-
-    // Member was created with owner role
-    const members = await query<{ role: string; "userId": string }>(
-      `SELECT role, "userId" FROM member WHERE "organizationId" = $1`,
-      [result.activeOrganizationId],
-    );
-    expect(members.rows).toHaveLength(1);
-    expect(members.rows[0].role).toBe("owner");
-    expect(members.rows[0].userId).toBe("u-1");
-  });
-
-  it("reuses existing org on subsequent login (does not create a duplicate)", async () => {
-    await query(
-      `INSERT INTO "user" (id, email, name, role) VALUES ($1, $2, $3, $4)`,
-      ["u-1", "alice@test.com", "Alice", "user"],
-    );
-    // Simulate a prior signup that already created the org + member
-    const orgId = randomUUID();
-    await query(
-      `INSERT INTO organization (id, name, slug, "createdAt") VALUES ($1, $2, $3, now())`,
-      [orgId, "Alice's workspace", "personal-u-1"],
-    );
-    await query(
-      `INSERT INTO member (id, "organizationId", "userId", role, "createdAt") VALUES ($1, $2, $3, $4, now())`,
-      [randomUUID(), orgId, "u-1", "owner"],
-    );
-
-    const result = await runSessionCreateBeforeHook({ userId: "u-1" });
-
-    expect(result.activeOrganizationId).toBe(orgId);
-
-    // No duplicate org or member created
-    const orgCount = await query<{ count: number }>(
-      `SELECT COUNT(*)::int as count FROM organization WHERE slug = 'personal-u-1'`,
-    );
-    expect(orgCount.rows[0].count).toBe(1);
-
-    const memberCount = await query<{ count: number }>(
-      `SELECT COUNT(*)::int as count FROM member WHERE "userId" = 'u-1'`,
-    );
-    expect(memberCount.rows[0].count).toBe(1);
-  });
-
-  it("falls back to email for org name when user has no name", async () => {
-    await query(
-      `INSERT INTO "user" (id, email, name, role) VALUES ($1, $2, $3, $4)`,
-      ["u-2", "bob@test.com", null, "user"],
-    );
-
-    const result = await runSessionCreateBeforeHook({ userId: "u-2" });
-
-    const orgs = await query<{ name: string }>(
-      `SELECT name FROM organization WHERE id = $1`,
-      [result.activeOrganizationId],
-    );
-    expect(orgs.rows[0].name).toBe("bob@test.com's workspace");
-  });
-
-  it("falls back to 'My' when user has no name or email", async () => {
-    await query(
-      `INSERT INTO "user" (id, email, name, role) VALUES ($1, $2, $3, $4)`,
-      ["u-3", null, null, "user"],
-    );
-
-    const result = await runSessionCreateBeforeHook({ userId: "u-3" });
-
-    const orgs = await query<{ name: string }>(
-      `SELECT name FROM organization WHERE id = $1`,
-      [result.activeOrganizationId],
-    );
-    expect(orgs.rows[0].name).toBe("My's workspace");
   });
 });
 
@@ -329,5 +198,20 @@ describe("advanced.database.validateSchema — boot-time advisory off", () => {
   it("is explicitly disabled", async () => {
     const { auth: fresh } = await import("./auth");
     expect(fresh.options.advanced?.database?.validateSchema).toBe(false);
+  });
+});
+
+describe("databaseHooks.session.create.before — wiring", () => {
+  // The hook's body lives in lib/auth/personal-org.ts (its behavior tests
+  // are there). This pins the WIRING: the Better Auth instance must use the
+  // transaction-adapter-aware hook, not an inline re-implementation — an
+  // inline pool-based hook is exactly the #208 bug shape, and the
+  // behavior tests below wouldn't see a swap back because they call the
+  // module's own export.
+  it("wires the personal-org hook into the Better Auth instance", () => {
+    const hooks = auth.options.databaseHooks as {
+      session?: { create?: { before?: unknown } };
+    };
+    expect(hooks?.session?.create?.before).toBe(sessionCreateBeforeHook);
   });
 });

@@ -3,6 +3,7 @@ import {
   BUILDER_CONNECTORS_MAX,
   buildCreatePayload,
   buildEditPayload,
+  buildKnowledgeUploadForm,
   buildUpdatePayload,
   catalogEmptyCopy,
   catalogErrorCopy,
@@ -12,7 +13,20 @@ import {
   findModel,
   groupModelsByProvider,
   groupToolsByToolkit,
+  hasProcessingDocs,
+  knowledgeCapabilityState,
+  knowledgeDateLabel,
+  knowledgeFileError,
+  knowledgeHiddenCopy,
+  knowledgeKeyBadge,
+  knowledgeListEmptyCopy,
+  knowledgeSizeLabel,
+  knowledgeStatusChip,
+  knowledgeTextError,
+  knowledgeUrlError,
+  KNOWLEDGE_MAX_UPLOAD_BYTES,
   modelKeyState,
+  parseKnowledgeChunkFields,
   pickDefaultModel,
   providerForDepKeyInCatalog,
   staleModelCopy,
@@ -22,6 +36,10 @@ import {
   type BuilderFormState,
   type BuilderToolOption,
   type CredentialCatalog,
+  type CredentialsState,
+  type KnowledgeCapability,
+  type KnowledgeDocRow,
+  type ModelKeyState,
   type PlatformModel,
 } from "./builder-config";
 
@@ -581,6 +599,64 @@ describe("filterTools", () => {
   });
 });
 
+/**
+ * The composed pipeline the builder form renders —
+ * `groupToolsByToolkit(filterTools(tools, query))`. Regression pin for
+ * #187: a group's tools are the FILTERED subset, so the toolkit
+ * checkbox's select-all (which maps `group.tools`) can only ever touch
+ * the tools the filter shows — checking a toolkit under an active
+ * filter cannot select tools the search hides. A refactor that made
+ * groups hold the full toolkit while filtering only the rendered rows
+ * would silently reintroduce that hidden-selection surprise.
+ */
+describe("toolkit select-all under an active filter", () => {
+  const gh = (name: string, label: string): BuilderToolOption => ({
+    name,
+    label,
+    requiresKey: null,
+    platformFallback: false,
+    toolkit: "github",
+    credentials: [],
+  });
+  const catalog: BuilderToolOption[] = [
+    gh("gh_create_issue", "Create an issue"),
+    gh("gh_list_issues", "List issues"),
+    gh("gh_get_issue", "Get an issue"),
+    gh("gh_create_repository", "Create a repository"),
+    gh("gh_get_repository", "Get a repository"),
+    gh("gh_list_repositories", "List repositories"),
+    gh("gh_create_pull", "Create a pull request"),
+    gh("gh_merge_pull", "Merge a pull request"),
+    gh("gh_star_repository", "Star a repository"),
+    gh("gh_fork_repository", "Fork a repository"),
+  ];
+
+  it("checking a toolkit under a filter selects only the visible tools", () => {
+    const groups = groupToolsByToolkit(filterTools(catalog, "issue"));
+    const github = groups.find((g) => g.toolkit === "github");
+    // The names toggleToolkit maps over — exactly the matching subset,
+    // never the toolkit's hidden members.
+    expect(github?.tools.map((t) => t.name)).toEqual([
+      "gh_create_issue",
+      "gh_get_issue",
+      "gh_list_issues",
+    ]);
+  });
+
+  it("the header count reads the filtered subset, not the full toolkit", () => {
+    const groups = groupToolsByToolkit(filterTools(catalog, "issue"));
+    const github = groups.find((g) => g.toolkit === "github");
+    expect(github?.tools).toHaveLength(3);
+    expect(catalog).toHaveLength(10);
+  });
+
+  it("a toolkit-slug filter shows the whole toolkit, so select-all still attaches all of it", () => {
+    const groups = groupToolsByToolkit(filterTools(catalog, "github"));
+    const github = groups.find((g) => g.toolkit === "github");
+    expect(github?.tools).toHaveLength(10);
+  });
+});
+
 describe("validateBuilderForm", () => {
   it("accepts a valid create form", () => {
     expect(validateBuilderForm(validForm, "create")).toEqual({});
@@ -822,3 +898,320 @@ describe("createBlockedByEmptyModels — empty catalog can't produce a create", 
     expect(createBlockedByEmptyModels("edit", MODELS, null)).toBe(false);
   });
 });
+
+/* ---------------------------------------------------------------------- */
+/* Knowledge — the corpus section's pure logic (#236)                      */
+/* ---------------------------------------------------------------------- */
+
+const KNOWLEDGE_ENABLED: KnowledgeCapability = {
+  enabled: true,
+  provider: "openai",
+  model: "text-embedding-3-small",
+};
+const KNOWLEDGE_DISABLED: KnowledgeCapability = {
+  enabled: false,
+  provider: "openai",
+  model: "text-embedding-3-small",
+};
+const KNOWLEDGE_UNSUPPORTED: KnowledgeCapability = {
+  enabled: false,
+  provider: "",
+  model: "",
+  unsupported: true,
+};
+
+const docRow = (overrides: Partial<KnowledgeDocRow> = {}): KnowledgeDocRow => ({
+  id: "row-1",
+  name: "Handbook.pdf",
+  status: "completed",
+  size: 1536,
+  createdAt: 1764000000,
+  updatedAt: 1764000000,
+  ...overrides,
+});
+
+describe("knowledgeCapabilityState — the section's gate", () => {
+  it("loading while the capability fetch is in flight", () => {
+    expect(knowledgeCapabilityState(null, null)).toEqual({ kind: "loading" });
+  });
+
+  it("unreachable on a fetch failure — never read as 'knowledge is off'", () => {
+    const state = knowledgeCapabilityState(null, "Couldn't reach the server");
+    expect(state).toEqual({ kind: "unreachable", error: "Couldn't reach the server" });
+    // An error beats a stale capability — the banner wins.
+    expect(knowledgeCapabilityState(KNOWLEDGE_ENABLED, "boom")).toEqual({
+      kind: "unreachable",
+      error: "boom",
+    });
+  });
+
+  it("hidden when the service answers with knowledge off (enabled=false)", () => {
+    expect(knowledgeCapabilityState(KNOWLEDGE_DISABLED, null)).toEqual({
+      kind: "hidden",
+      reason: "disabled",
+    });
+  });
+
+  it("hidden with the unsupported reason when the deployment predates knowledge", () => {
+    expect(knowledgeCapabilityState(KNOWLEDGE_UNSUPPORTED, null)).toEqual({
+      kind: "hidden",
+      reason: "unsupported",
+    });
+  });
+
+  it("available when enabled — carrying the embedding contract", () => {
+    expect(knowledgeCapabilityState(KNOWLEDGE_ENABLED, null)).toEqual({
+      kind: "available",
+      provider: "openai",
+      model: "text-embedding-3-small",
+    });
+  });
+});
+
+describe("knowledgeHiddenCopy — the hidden section's one-liner", () => {
+  it("gives a plain explanation for both reasons, never possessive", () => {
+    for (const reason of ["disabled", "unsupported"] as const) {
+      const copy = knowledgeHiddenCopy(reason);
+      expect(copy.toLowerCase()).not.toContain("your ");
+      expect(copy.toLowerCase()).toContain("knowledge");
+    }
+  });
+
+  it("names the agent builder, never a bare 'platform'", () => {
+    expect(knowledgeHiddenCopy("unsupported")).toContain("agent builder");
+  });
+});
+
+describe("knowledgeListEmptyCopy", () => {
+  it("copy on an empty, successfully loaded list", () => {
+    expect(knowledgeListEmptyCopy([], null)).not.toBeNull();
+  });
+
+  it("null while loading, populated, or on fetch failure", () => {
+    expect(knowledgeListEmptyCopy(null, null)).toBeNull();
+    expect(knowledgeListEmptyCopy([docRow()], null)).toBeNull();
+    expect(knowledgeListEmptyCopy([], "boom")).toBeNull();
+  });
+});
+
+describe("knowledgeStatusChip — agno's ContentStatus values", () => {
+  it("maps processing / completed→Ready / partial / failed", () => {
+    expect(knowledgeStatusChip("processing")).toMatchObject({ label: "Processing" });
+    expect(knowledgeStatusChip("completed")).toMatchObject({ label: "Ready" });
+    expect(knowledgeStatusChip("partial")).toMatchObject({ label: "Partial" });
+    expect(knowledgeStatusChip("failed")).toMatchObject({ label: "Failed" });
+  });
+
+  it("gives Ready the settled-green class and Partial its own amber (never a false Ready)", () => {
+    expect(knowledgeStatusChip("completed")!.className).toContain("green");
+    expect(knowledgeStatusChip("partial")!.className).toContain("amber");
+  });
+
+  it("no chip for null (a row predating a status write) or an unknown value", () => {
+    expect(knowledgeStatusChip(null)).toBeNull();
+    expect(knowledgeStatusChip("mysterious")).toBeNull();
+  });
+});
+
+describe("hasProcessingDocs — the poll gate", () => {
+  it("true only while a row is processing", () => {
+    expect(hasProcessingDocs([docRow({ status: "processing" })])).toBe(true);
+  });
+
+  it("false on settled rows (completed, partial, failed, null) and the empty list", () => {
+    // partial and failed never change without a re-upload — polling
+    // forever on them would never stop.
+    expect(hasProcessingDocs([])).toBe(false);
+    expect(hasProcessingDocs([docRow({ status: "completed" })])).toBe(false);
+    expect(hasProcessingDocs([docRow({ status: "partial" })])).toBe(false);
+    expect(hasProcessingDocs([docRow({ status: "failed" })])).toBe(false);
+    expect(hasProcessingDocs([docRow({ status: null })])).toBe(false);
+  });
+});
+
+describe("knowledgeSizeLabel / knowledgeDateLabel", () => {
+  it("formats bytes, KB and MB; null stays null", () => {
+    expect(knowledgeSizeLabel(null)).toBeNull();
+    expect(knowledgeSizeLabel(512)).toBe("512 B");
+    expect(knowledgeSizeLabel(1536)).toBe("1.5 KB");
+    expect(knowledgeSizeLabel(10240)).toBe("10 KB");
+    expect(knowledgeSizeLabel(2_621_440)).toBe("2.5 MB");
+  });
+
+  it("refuses nonsense (negative)", () => {
+    expect(knowledgeSizeLabel(-5)).toBeNull();
+  });
+
+  it("dates format from epoch seconds", () => {
+    expect(knowledgeDateLabel(1764000000)).toBe(
+      new Date(1764000000 * 1000).toLocaleDateString(),
+    );
+  });
+});
+
+describe("knowledgeFileError / knowledgeTextError / knowledgeUrlError", () => {
+  it("rejects an unsupported extension, naming the file and the accepted set", () => {
+    const file = new File(["x"], "virus.exe");
+    const error = knowledgeFileError(file);
+    expect(error).toContain("virus.exe");
+    expect(error).toContain(".pdf");
+  });
+
+  it("rejects an oversized file with the MB cap", () => {
+    const file = new File([new ArrayBuffer(11)], "big.pdf");
+    Object.defineProperty(file, "size", { value: 11 * 1024 * 1024 });
+    expect(knowledgeFileError(file)).toContain("10 MB");
+  });
+
+  it("accepts an in-cap, allowed file", () => {
+    const file = new File(["x"], "notes.md");
+    Object.defineProperty(file, "size", { value: 12 });
+    expect(knowledgeFileError(file)).toBeNull();
+  });
+
+  it("paste-text: empty rejected, in-cap accepted, oversize rejected", () => {
+    expect(knowledgeTextError("   ")).not.toBeNull();
+    expect(knowledgeTextError("hello")).toBeNull();
+    const big = "x".repeat(KNOWLEDGE_MAX_UPLOAD_BYTES + 1);
+    expect(knowledgeTextError(big)).toContain("10 MB");
+  });
+
+  it("url: blank, relative, and non-http schemes rejected; http(s) accepted", () => {
+    expect(knowledgeUrlError("")).not.toBeNull();
+    expect(knowledgeUrlError("not-a-url")).not.toBeNull();
+    expect(knowledgeUrlError("ftp://example.com/x")).toContain("http");
+    expect(knowledgeUrlError("https://example.com/doc")).toBeNull();
+    expect(knowledgeUrlError("http://example.com/doc")).toBeNull();
+  });
+});
+
+describe("parseKnowledgeChunkFields — blank = omitted (agno's own defaults)", () => {
+  it("omits both when blank — no invented defaults", () => {
+    expect(parseKnowledgeChunkFields("", "")).toEqual({ ok: true });
+  });
+
+  it("parses integers; junk and out-of-range rejected", () => {
+    expect(parseKnowledgeChunkFields("500", "0")).toEqual({ ok: true, chunkSize: 500, chunkOverlap: 0 });
+    expect(parseKnowledgeChunkFields("500.5", "")).toEqual({
+      ok: false,
+      error: "Chunk size must be a whole number.",
+    });
+    expect(parseKnowledgeChunkFields("0", "")).toEqual({
+      ok: false,
+      error: "Chunk size must be at least 1.",
+    });
+    expect(parseKnowledgeChunkFields("", "-1")).toEqual({
+      ok: false,
+      error: "Chunk overlap must be 0 or more.",
+    });
+  });
+
+  it("enforces overlap < size (mirrors the route)", () => {
+    expect(parseKnowledgeChunkFields("500", "500")).toEqual({
+      ok: false,
+      error: "Chunk overlap must be smaller than chunk size.",
+    });
+    expect(parseKnowledgeChunkFields("500", "600")).toEqual({
+      ok: false,
+      error: "Chunk overlap must be smaller than chunk size.",
+    });
+  });
+});
+
+describe("buildKnowledgeUploadForm — the multipart payload shapes", () => {
+  it("file source: exactly the file field (plus optional chunk fields)", () => {
+    const file = new File(["x"], "notes.md");
+    const bare = buildKnowledgeUploadForm({ kind: "file", file });
+    // FormData clones stored values — compare structurally.
+    expect(bare.get("file")).toStrictEqual(file);
+    expect(bare.get("text")).toBeNull();
+    expect(bare.get("url")).toBeNull();
+    expect(bare.get("name")).toBeNull();
+
+    const chunked = buildKnowledgeUploadForm(
+      { kind: "file", file },
+      { chunkSize: 500, chunkOverlap: 0 },
+    );
+    // camelCase — the tackui route re-shapes them service-side.
+    expect(chunked.get("chunkSize")).toBe("500");
+    expect(chunked.get("chunkOverlap")).toBe("0");
+  });
+
+  it("text source: text + name; url source: url only", () => {
+    const text = buildKnowledgeUploadForm(
+      { kind: "text", text: "hello", name: "Pasted notes" },
+      { chunkSize: 500 },
+    );
+    expect(text.get("text")).toBe("hello");
+    expect(text.get("name")).toBe("Pasted notes");
+    expect(text.get("file")).toBeNull();
+    expect(text.get("chunkSize")).toBe("500");
+
+    const url = buildKnowledgeUploadForm({ kind: "url", url: "https://example.com" });
+    expect(url.get("url")).toBe("https://example.com");
+    expect(url.get("file")).toBeNull();
+    expect(url.get("text")).toBeNull();
+  });
+
+  it("never carries an embedding key — the author's key is resolved server-side", () => {
+    const form = buildKnowledgeUploadForm({ kind: "text", text: "x", name: "n" });
+    for (const key of form.keys()) {
+      expect(key.toLowerCase()).not.toContain("key");
+    }
+  });
+});
+
+describe("knowledgeKeyBadge — the section header's badge, deduped", () => {
+  const creds = (providers: string[]): CredentialsState => ({
+    hasKey: Object.fromEntries(providers.map((p) => [p, true])),
+    catalog: CATALOG,
+  });
+  const missingModel = (provider: string): ModelKeyState => ({
+    status: "missing",
+    providerLabel: "Whatever",
+    provider,
+  });
+
+  it("connected + docs → the green 'runs on' chip", () => {
+    expect(
+      knowledgeKeyBadge([docRow()], "openai", creds(["openai"]), null),
+    ).toMatchObject({ show: true, connected: true, providerLabel: "Openai" });
+  });
+
+  it("connected + no docs → nothing (nothing uses the key yet)", () => {
+    expect(knowledgeKeyBadge([], "openai", creds(["openai"]), null)).toMatchObject({
+      show: false,
+      connected: true,
+    });
+  });
+
+  it("missing key → the demand + Connect, even with an empty corpus (uploads need it too)", () => {
+    expect(knowledgeKeyBadge([], "openai", creds([]), null)).toMatchObject({
+      show: true,
+      connected: false,
+      provider: "openai",
+    });
+    expect(knowledgeKeyBadge([docRow()], "openai", creds([]), null)).toMatchObject({
+      show: true,
+      connected: false,
+    });
+  });
+
+  it("DEDUPE: the model badge already demanding the same provider's key hides this one (one line, not two)", () => {
+    expect(
+      knowledgeKeyBadge([docRow()], "openai", creds([]), missingModel("openai")),
+    ).toMatchObject({ show: false });
+  });
+
+  it("a different provider's model badge does NOT suppress it (per-need display)", () => {
+    expect(
+      knowledgeKeyBadge([docRow()], "openai", creds([]), missingModel("openrouter")),
+    ).toMatchObject({ show: true, connected: false });
+  });
+
+  it("a provider the catalog doesn't know gets a prettified label and NO connect flow", () => {
+    const badge = knowledgeKeyBadge([docRow()], "weirdo", creds([]), null);
+    expect(badge).toMatchObject({ show: true, connected: false, provider: null, providerLabel: "Weirdo" });
+  });
+});
+

@@ -24,6 +24,7 @@ import {
   putPlatformCatalogTools,
   AgentosError,
 } from "@/lib/agents/builder";
+import { validationFailedResponse } from "@/lib/api/validation";
 
 const putBodySchema = z
   .object({
@@ -46,7 +47,7 @@ const putBodySchema = z
       .optional(),
   })
   .refine((body) => body.providers !== undefined || body.tools !== undefined, {
-    message: "Nothing to update — send providers, tools, or both",
+    error: "Nothing to update — send providers, tools, or both",
   });
 
 export async function GET() {
@@ -92,10 +93,7 @@ export async function PUT(request: NextRequest) {
   const body = await request.json().catch(() => null);
   const parsed = putBodySchema.safeParse(body);
   if (!parsed.success) {
-    return NextResponse.json(
-      { error: "Validation failed", details: parsed.error.flatten() },
-      { status: 400 },
-    );
+    return validationFailedResponse(parsed.error);
   }
 
   // Tracks whether the providers PUT succeeded — visible in the catch so a

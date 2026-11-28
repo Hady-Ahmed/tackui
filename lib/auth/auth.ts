@@ -6,6 +6,7 @@ import { verificationEmail, passwordResetEmail, invitationEmail } from "@/lib/em
 import { getMembershipLimit } from "@/lib/billing/subscription-store";
 import { TRUST_CF_CONNECTING_IP } from "@/lib/ratelimit/client-ip";
 import { maxFromEnv } from "@/lib/ratelimit/limits";
+import { sessionCreateBeforeHook } from "./personal-org";
 
 const AUTH_DISABLED = process.env.AUTH_DISABLED === "true";
 
@@ -263,63 +264,14 @@ export const auth = betterAuth({
     },
     session: {
       create: {
-        async before(session) {
-          // Auto-set activeOrganizationId on new sessions by looking up
-          // the user's personal org (their owner membership).
-          //
-          // If the membership doesn't exist yet (first signup — the
-          // user.create.after hook is deferred to post-transaction by
-          // Better Auth, so it hasn't run yet), create the org + member
-          // rows right here in-transaction. This ensures every auth path
-          // (email signup, email login, social signup, social login, OIDC
-          // SSO) gets a correct activeOrganizationId on the session.
-          const memberRow = await query<{
-            "organizationId": string;
-          }>(
-            `SELECT "organizationId" FROM member
-             WHERE "userId" = $1 AND role = 'owner'
-             ORDER BY "createdAt" ASC LIMIT 1`,
-            [session.userId],
-          );
-
-          let orgId = memberRow.rows[0]?.organizationId ?? null;
-
-          if (!orgId) {
-            // First signup: user.create.after hasn't run yet (deferred
-            // to post-transaction). Create the personal org + owner
-            // membership now, in-transaction, so the session row gets
-            // a valid activeOrganizationId.
-            const { randomUUID } = await import("node:crypto");
-            orgId = randomUUID();
-
-            const userRow = await query<{ name: string | null; email: string | null }>(
-              `SELECT name, email FROM "user" WHERE id = $1`,
-              [session.userId],
-            );
-            const userName =
-              userRow.rows[0]?.name ?? userRow.rows[0]?.email ?? "My";
-            const orgName = `${userName}'s workspace`;
-            const slug = `personal-${session.userId.slice(0, 8)}`;
-
-            await query(
-              `INSERT INTO organization (id, name, slug, "createdAt")
-               VALUES ($1, $2, $3, now())`,
-              [orgId, orgName, slug],
-            );
-            await query(
-              `INSERT INTO member (id, "organizationId", "userId", role, "createdAt")
-               VALUES ($1, $2, $3, $4, now())`,
-              [randomUUID(), orgId, session.userId, "owner"],
-            );
-          }
-
-          return {
-            data: {
-              ...session,
-              activeOrganizationId: orgId,
-            },
-          };
-        },
+        // Auto-set activeOrganizationId on new sessions by looking up
+        // the user's personal org (their owner membership), creating the
+        // org + owner membership on first signup. The hook runs inside
+        // Better Auth's own transaction, so its writes MUST go through
+        // Better Auth's transaction-scoped adapter — see
+        // lib/auth/personal-org.ts for why the app pool cannot be used
+        // here (cross-connection FK failure on first signup, #208).
+        before: sessionCreateBeforeHook,
       },
     },
   },

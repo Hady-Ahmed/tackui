@@ -5,7 +5,9 @@ export default defineConfig({
   test: {
     environment: "node",
     setupFiles: ["./vitest.setup.ts"],
-    include: ["**/*.test.ts"],
+    // .tsx covers component tests (@testing-library/react needs JSX to
+    // express component wiring — see components/builder/builder-form.test.tsx).
+    include: ["**/*.test.ts", "**/*.test.tsx"],
     isolate: true,
     // The real-Postgres (testcontainers) tests pay a container-start cost
     // on their first test — a few seconds that stretches well past the

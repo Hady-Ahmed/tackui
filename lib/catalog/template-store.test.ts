@@ -16,7 +16,7 @@ import {
   getRunUsage,
   annotateAgentTemplateState,
 } from "./template-store";
-import { toPublicAgent } from "@/lib/agents/agent-store";
+import { toPublicAgent, resolveAgentSecret } from "@/lib/agents/agent-store";
 import type { CreateTemplateInput } from "./template-store";
 import { TemplateInstallConflictError, TemplateInstallVanishedError } from "./template-store";
 import type { AgentTemplate } from "./catalog.config";
@@ -878,7 +878,10 @@ describe("installTemplate (idempotent upsert)", () => {
     expect(result.agent.name).toBe(template.name);
     expect(result.agent.endpoint).toBe(template.endpoint);
     expect(result.agent.authMode).toBe("jwt");
-    expect(result.agent.jwtSecret).toBe("s".repeat(32));
+    expect(resolveAgentSecret(result.agent)).toMatchObject({
+      status: "set",
+      secret: "s".repeat(32),
+    });
     expect(result.agent.jwtScopes).toEqual(["agents:run"]);
     expect(result.agent.sourceTemplateId).toBe(template.id);
     expect(result.agent.installedTemplateUpdatedAt).toBe(template.updatedAt);
@@ -903,7 +906,10 @@ describe("installTemplate (idempotent upsert)", () => {
     expect(second.updated).toBe(true);
     expect(second.agent.id).toBe(originalId);
     expect(second.agent.endpoint).toBe("http://localhost:9000/agent");
-    expect(second.agent.jwtSecret).toBe("rotated".padEnd(32, "x"));
+    expect(resolveAgentSecret(second.agent)).toMatchObject({
+      status: "set",
+      secret: "rotated".padEnd(32, "x"),
+    });
     expect(await listAgents(TEST_ORG)).toHaveLength(1);
   });
 
@@ -920,7 +926,10 @@ describe("installTemplate (idempotent upsert)", () => {
       jwtSecret: "s".repeat(32),
     });
     const first = await installTemplate(template, TEST_ORG);
-    expect(first.agent.jwtSecret).toBe("s".repeat(32));
+    expect(resolveAgentSecret(first.agent)).toMatchObject({
+      status: "set",
+      secret: "s".repeat(32),
+    });
 
     await query(
       `UPDATE agent_templates SET jwt_secret = 'enc:v1:AAAAAAAAAAAAAAAA:AAAA:AAAAAAAAAAAAAAAAAAAAAA==' WHERE id = $1`,
@@ -931,7 +940,10 @@ describe("installTemplate (idempotent upsert)", () => {
 
     const second = await installTemplate(reread!, TEST_ORG);
     expect(second.installed).toBe(false);
-    expect(second.agent.jwtSecret).toBe("s".repeat(32));
+    expect(resolveAgentSecret(second.agent)).toMatchObject({
+      status: "set",
+      secret: "s".repeat(32),
+    });
     expect(second.agent.authMode).toBe("jwt");
     errSpy.mockRestore();
   });
@@ -1057,6 +1069,31 @@ describe("installTemplate (idempotent upsert)", () => {
     } finally {
       pgScript.queryScript = null;
     }
+  });
+
+  it("fresh install: the just-created row vanishing before the final read surfaces as the same typed error", async () => {
+    const template = await createTemplate(validInput);
+    // The row the fresh-INSERT path creates is unprotected after commit:
+    // its org can delete it between the INSERT's commit and the path's
+    // final read (nothing holds the row). Script: the lookup misses for
+    // real (fresh path) and the INSERT lands for real, but the final
+    // read sees the row gone. This used to blow up on a non-null
+    // assertion — getAgent returned null, the route's catch-all turned
+    // the missing agent into a bare 500.
+    pgScript.queryScript = (text) => {
+      if (text.includes("id = $1 AND org_id = $2")) return { rows: [] };
+      return undefined;
+    };
+    try {
+      await expect(installTemplate(template, TEST_ORG)).rejects.toBeInstanceOf(
+        TemplateInstallVanishedError,
+      );
+    } finally {
+      pgScript.queryScript = null;
+    }
+    // The INSERT itself landed — the vanish is post-commit, so a retry
+    // finds the row and takes the plain re-sync path.
+    expect(await listAgents(TEST_ORG)).toHaveLength(1);
   });
 
   it("loses-race fallback: the winner's row vanishing mid-call surfaces as the same typed error", async () => {

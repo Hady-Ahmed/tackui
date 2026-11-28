@@ -35,6 +35,8 @@ from fastapi.testclient import TestClient
 
 from catalog import CatalogDB, ModelRow
 
+import knowledge as knowledge_store
+
 # Default test catalog mirroring the pre-DB offering: both model providers
 # enabled with today's ids, plus the two keyless toolkits. Keyed toolkits
 # are never registry members (per-run delivery), so only keyless ones are
@@ -70,7 +72,11 @@ def postgres_dsn():
         from testcontainers.postgres import PostgresContainer
 
     try:
-        container = PostgresContainer("postgres:16-alpine")
+        # The pgvector image, NOT plain postgres (alpine Postgres has no
+        # pgvector extension to install at runtime — the knowledge tests
+        # build the shared `builder_knowledge` vector table, whose
+        # `CREATE EXTENSION vector` must succeed at first use, #233).
+        container = PostgresContainer("pgvector/pgvector:pg16")
         container.start()
     except Exception as e:
         raise RuntimeError(
@@ -91,10 +97,33 @@ def postgres_dsn():
 
 
 @pytest.fixture(autouse=True)
+def hermetic_embedder_env(monkeypatch):
+    """Scrub the ambient ``KNOWLEDGE_EMBEDDER`` for every test (#240).
+
+    The embedder config is parsed AT CALL TIME from ``os.environ`` — by the
+    capability payload, ``build_knowledge_for``, and the dispatcher's per-run
+    attach — so a developer shell exporting a malformed value (or a valid
+    non-default one) flips every default-config knowledge test onto the
+    documented degradation paths (503 / run-without-retrieval) instead of the
+    successes they pin. Scrubbing here makes the suite hermetic against the
+    developer's shell in one place. Nothing is masked: tests that pin a
+    specific value ``setenv`` it explicitly (that runs after this scrub —
+    same ``monkeypatch`` instance), and the parse contract's own tests pass
+    explicit mappings.
+
+    Args:
+        monkeypatch: pytest's patcher (the ambient value is restored after
+            the test).
+    """
+    monkeypatch.delenv(knowledge_store.EMBEDDER_ENV_VAR, raising=False)
+
+
+@pytest.fixture(autouse=True)
 def clean_database(postgres_dsn):
     """Hermetic per-test state: truncate every user table in `public` (the
-    catalog) and `ai` (agno components/sessions) before each test. Tables
-    that do not exist yet (first use) are simply absent from the list."""
+    catalog + the knowledge vector table) and `ai` (agno
+    components/sessions/knowledge contents) before each test. Tables that do
+    not exist yet (first use) are simply absent from the list."""
     with psycopg.connect(postgres_dsn) as conn:
         tables = [
             f'"{schema}"."{name}"'
@@ -114,8 +143,8 @@ def clean_database(postgres_dsn):
 @pytest.fixture(scope="session")
 def platform_main(postgres_dsn):
     """The service module, imported once DATABASE_URL points at the container
-    (main.py builds the real app at import time, so the env must be set
-    before the first import)."""
+    (the env must be set before the first import — build_app reads env at
+    build time; the module deliberately builds nothing at import)."""
     os.environ["DATABASE_URL"] = postgres_dsn
     # Re-assert our agent dir at the front of sys.path and evict a foreign
     # cached `main`: other suites' test modules prepend their own agent dir
@@ -141,6 +170,21 @@ def app(platform_main, clean_database):
 def bare_app(platform_main, clean_database):
     """An app with EMPTY catalog tables — no enabled models or tools."""
     return platform_main.build_app(db_url=os.environ["DATABASE_URL"])
+
+
+@pytest.fixture
+def agno_db(postgres_dsn):
+    """A fresh agno PostgresDb over the throwaway container.
+
+    The knowledge store's CONTENTS db (the `ai.agno_knowledge` rows agno keeps
+    status/size/dates in) — what the knowledge-layer tests hand to
+    ``build_knowledge``/``build_fake_knowledge`` so they exercise the same
+    construction the routes perform, without booting the whole app.
+    """
+    from agno.db.postgres import PostgresDb
+    from agno.db.postgres.engine import create_postgres_engine
+
+    return PostgresDb(id="test-agno-db", db_engine=create_postgres_engine(postgres_dsn))
 
 
 @pytest.fixture

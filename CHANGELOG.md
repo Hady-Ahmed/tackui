@@ -4,6 +4,226 @@ All notable changes to this project will be documented in this file. The format 
 
 ## [Unreleased]
 
+- **Added: knowledge for builder agents — the tackui half (#235).** The
+  app now proxies the builder service's knowledge management routes for
+  the agent's author: `GET/POST /api/agents/[id]/knowledge` and
+  `DELETE .../knowledge/[contentId]` (list, upload, remove), author-gated
+  with the builder PATCH/DELETE semantics (403 anyone-but-author, no
+  admin override; 404 for missing/non-builder rows). Cheap gates run
+  before anything is forwarded — exactly one of file/text/url, the
+  format allowlist, the 10 MB cap (oversized content-length rejected
+  before the body is buffered), URL shape, and the SSRF guard on URL
+  uploads — then the upload is forwarded multipart with the author's own
+  OpenAI key (`embedding_key`, resolved server-side from the credential
+  store; rides in the request body only, never in a response, a log
+  line, or an error detail — the ingest's own error path skips upstream
+  detail extraction entirely, so even a service echoing form input in
+  validation errors can't leak it); an author without the key gets a 400
+  pointing at the API-keys page). `agentosRequest` grew a FormData
+  pass-through branch (no JSON encoding, no Content-Type — fetch sets
+  the multipart boundary). First upload on a knowledge-less agent
+  attaches the corpus: the stored config publishes a new version with
+  the `knowledge` ref (`kb-<component_id>` — both sides derive it from
+  the component id) and the requirements snapshot gains
+  `knowledge: {provider, model}` (a new optional-without-default
+  requirementsSchema field, round-tripped both ways); deleting the last
+  doc detaches both. Attach/detach reuse the builder PATCH flow's
+  local-first + guarded-publish + compensating-revert machinery, with
+  the uploaded doc never deleted as compensation (the service dedupes
+  re-uploads by content hash, so retries converge). Config-publishing
+  builder PATCHes preserve the ref through unrelated edits, and the
+  credentials catalog adds the embedding provider when knowledge is
+  enabled and no model carries it (otherwise the required key could
+  never be saved), and the knowledge signal degrades independently: a
+  failed knowledge fetch (transport or malformed payload) drops only
+  that extension row — the rest of the catalog stays live and every
+  other provider's key-saving is unaffected. The knowledge config's 404
+  reads as "unsupported" (the service predates knowledge), distinct
+  from unreachable; an `enabled` answer naming no embedder is rejected
+  at the read as a malformed payload (502) instead of failing the
+  attach later with a generic 500.
+- **Added: the builder UI's Knowledge section + the run-gate 402 for
+  knowledge-attached agents (#236).** The builder form (edit mode) now
+  curates the agent's knowledge corpus directly: multi-file upload (a
+  labeled picker row), paste text with a name, a URL (ingested as ONE
+  page — the site reader's link-crawl is capped at the submitted URL so
+  same-page `#anchor` links don't duplicate the page as extra documents;
+  Hady-Ahmed/tackui#260), and an Advanced disclosure for chunk size and
+  overlap (blank = the platform's own defaults; the params ride
+  file/text uploads only — a URL upload's chunking is the platform
+  reader's own, so the route validates but does not forward them). The
+  doc list shows status
+  chips (Processing / Ready / Partial / Failed) with a failed row also
+  showing the service's captured failure reason (e.g. an expired key's
+  "authentication (HTTP 401)") and a partial row showing agno's
+  classified partial reason (how many chunks embedded, how many failed
+  and are not retrievable), and each row also renders the
+  document's description as a muted second line under the name when one
+  is on the wire (pasted text carries none — the name is what the user
+  typed), and polls every 5s while
+  any row is processing; delete confirms first, and a delete that landed
+  with a failed detach publish re-fetches the list as the truth and
+  offers a retry-safe Retry (the service delete is idempotent). The
+  section gates on the capability proxy `GET
+  /api/agents/[id]/knowledge/config` (member-accessible, `agentRead`
+  bucket) — knowledge-off deployments hide it with a one-line
+  explanation, and a failed capability fetch renders an error banner,
+  never a false "knowledge is off". In create mode the section renders
+  as an inert preview (#259) — the same header and upload rows the edit
+  section carries, every control disabled and nothing wired, and the
+  note upgraded from a bare save-first reminder to a feature statement
+  ("Save the agent first, then add documents it can search — PDFs,
+  pasted text, or web pages.") — closing the live-demo discovery gap
+  where a first-time builder was never shown that knowledge exists. The
+  header's key badge demands the
+  embedding provider's key when missing ("Needs your OpenAI key" with a
+  connect shortcut) and hides itself when the model's badge already
+  demands the same key — one line, not two. The run gate now 402s a
+  knowledge-attached agent whose author has no embedding key
+  (`This agent uses knowledge — add your own <Provider> key to run it.`
+  in the aggregated requirements response), delivering the saved key as
+  the run's `<provider>_api_key` context item exactly as the dispatcher
+  resolves it; the demand is BYOK-only (embedding spend rides the
+  runner's own key — no quota change), dedupes with the model's key
+  demand when both need the same key, and delivers per-need when they
+  differ (an OpenRouter model + OpenAI knowledge delivers both keys); a
+  final by-description pass over the delivered context items makes
+  single delivery structural — no dep key rides the run twice, whatever
+  demanded it (a tool contract naming a key another source already
+  demanded delivers once).
+- **Added: knowledge for builder agents — the service half (#233), now
+  running at run time (#234).** Every builder component can now own a
+  document corpus (uploaded files, pasted text, URLs) embedded into pgvector,
+  managed through new `/platform/knowledge/*` routes on the agent-builder
+  service (admin / service-token scope; tackui proxies them — the builder UI
+  is a follow-up). All corpora share one `builder_knowledge` vector table in
+  the builder's Postgres, isolated per corpus by agno's
+  `isolate_vector_search` mechanics (a server-side `linked_to` filter
+  callers cannot bypass), with corpus-stamped upload metadata making content
+  ids corpus-unique. Embeddings are BYOK with no platform fallback: uploads
+  carry the creator's key (`embedding_key`, used for embedding calls only —
+  never persisted, never logged) while the embedding model is
+  platform-fixed via `KNOWLEDGE_EMBEDDER` (default
+  `openai:text-embedding-3-small`); a malformed value fails at use time,
+  never boot. The dispatcher attaches a component's corpus per run when its
+  stored config declares knowledge: the reference is stripped before agno's
+  rehydration (which would otherwise skip it silently, fail-open) and a
+  fresh Knowledge instance is built with the RUNNER's key — resolved from
+  that run's dependencies with deliberately no env fallback, one instance
+  per run (never shared between concurrent runs). A run without the key
+  degrades to strip + warn + no retrieval (the client's pre-run gate is the
+  real guard), as do a misconfigured embedder and an unreachable vector
+  store. The first-use table creation absorbs a cold-start
+  concurrent-construction race with one retry, and management routes answer
+  any construction failure as a clean 503. Upload validation: format
+  allowlist (legacy `.doc` rejected —
+  its reader only parses the OOXML `.docx` container; #238), 10 MB cap,
+  URL shape check, a 300-char name cap (#241); processing runs off the
+  event loop. The builder's
+  Postgres must be
+  a pgvector image (`pgvector/pgvector:pg16` in the compose stacks and the
+  test suite's container); the capability endpoint
+  (`GET /platform/knowledge/config`) reports availability so the frontend
+  can gate the feature.
+- **Security: builder run tokens are bound to their target component
+  (#75).** The run tokens tackui mints for agent-builder runs now carry
+  an `agent_id` claim naming the component they were minted for, and the
+  dispatcher refuses (403) a token addressed at any other component
+  before anything runs. Tokens without the claim — legacy tokens minted
+  before this change, service tokens — keep working unchanged, so both
+  deploy orders are safe (deploy the dispatcher first or the app first;
+  the one-hour token TTL closes the no-claim window on its own).
+- **Fixed: a thread view could briefly serve history missing a
+  just-finished run (#66, #141).** A reconnect's message fetch could
+  land its stale read-through cache write after a concurrent run's
+  capture — the sync readers then regressed to pre-run history until
+  the next write on the thread. The two cache writers are now
+  serialized per thread. Related run-lifecycle hardening in the same
+  change: a cancelled (disconnected) replay stream no longer keeps
+  draining the in-flight run's event subject, a run's bridge from a
+  predecessor's subject is disposed when the run ends, and the boot
+  cache refresh no longer wipes warm message caches or drops writes
+  landing mid-refresh.
+- **Changed: agent JWT secrets are decrypted on demand, and a secret
+  that can't be decrypted now reports itself instead of masquerading as
+  "no secret" (#82).** Reading agents no longer decrypts every stored
+  secret — the plaintext is resolved only where it is consumed (run-token
+  minting, the admin edit form). After a `DB_ENCRYPTION_KEY` rotation,
+  affected agents surface an explicit "undecryptable — re-save the
+  secret" state in the admin edit form (and `jwtSecretStatus` on the
+  API), instead of the misleading secret-less badge; self-managed JWT
+  agents in that state fail their runs with an actionable message
+  instead of calling the backend without credentials and getting a
+  confusing 401. Catalog-installed agents are unaffected (their auth
+  comes from the live template). Broken secrets log once per process
+  instead of on every agents-list load.
+- **Fixed: a replay of a persisted history containing a duplicate active
+  `STEP_STARTED`/`TEXT_MESSAGE_START` (or a stray terminator for either)
+  was rejected outright by the AG-UI verifier, poisoning the whole
+  reconnect replay (#151).** Such records can only come from
+  non-conforming third-party agent backends or hand-seeded data — the
+  app's own runtime stream cannot produce them. The replay builder now
+  drops lifecycle events that are invalid for the state built so far
+  (the complement of synthesizing missing terminators), so reconnects
+  on affected threads render cleanly.
+- **Fixed: deleting a thread could leave an orphaned `run_state` row
+  behind the deleted id (#140).** When a thread's delete committed
+  between a finishing run's lock-release check and its release write,
+  the release re-inserted a bare lock row for the now-deleted id. It
+  was harmless (boot reset cleared it and the tombstone gate refuses
+  starts on deleted ids) but it survived until the next restart.
+  `deleteThread`'s retention transaction now also sweeps `run_state`
+  rows for tombstoned ids, so the orphan is cleaned on the next delete.
+
+- **Fixed: first sign-up on a fresh database without SMTP failed with a
+  500 and left an orphan organization row behind (#208).** The session
+  hook that creates the personal workspace wrote through the shared
+  connection pool, so its `member` insert could not see the
+  still-uncommitted user row inside Better Auth's signup transaction and
+  the FK check rolled everything back. Only fresh installs without
+  email verification were affected (with SMTP configured, signup creates
+  no session); existing deployments are unaffected. The hook now writes
+  through Better Auth's transaction-scoped adapter, so user, org,
+  membership, and session commit atomically. Also fixes
+  `npm run create-admin` on a fresh database, which goes through the
+  same code path.
+
+- **Changed: keyed-lock waits are bounded — a wedged lock holder can no
+  longer park same-key writers forever (#153).** Writers serialized by
+  `withKeyedLock` (the credentials PUT and the catalog template PATCH)
+  now time out after 30 seconds waiting for the lock, and the per-key
+  queue caps at 32 waiters (both configurable per call). Giving up
+  fails with a typed `KeyedLockUnavailableError`, which both routes
+  surface as a 503 "please try again" instead of the generic 500.
+  Happy paths are unchanged — the bounds only bite when a holder is
+  wedged or the pile-up is pathological.
+
+- **Fixed: /agents fired its catalog fetches (/api/models, /api/tools,
+  /api/credentials, /api/connectors) for anonymous visitors before the
+  login redirect.** The fetch gate waited only for the session check to
+  finish, so an anonymous visitor (or an expired session) still
+  produced four guaranteed 401s and error states on a page about to
+  redirect. The fetches now wait for the same signed-in condition the
+  page renders by — signed in, or AUTH_DISABLED solo mode — so
+  anonymous visitors get zero catalog requests before the redirect.
+
+- **Fixed: /api/org loaded on every mount of a consumer instead of once
+  per page load.** The org hook's cache only seeded the initial state —
+  the mount effect ignored it — so mounting the upgrade dialog (e.g.
+  opening the /agents add panel or flipping its tabs), the members or
+  invitations page, or the invite dialog re-requested /api/org each
+  time. The mount effect now skips when the cached result exists, same
+  as the billing and can-manage hooks; `refresh()` after org switches,
+  invites, and seat changes still reloads.
+
+- **agent-builder: a stale catalog-load error no longer suppresses the
+  builder form's notices after a successful retry.** When the models or
+  tools catalog fetch failed once and a retry via the banner succeeded,
+  the leftover error state kept hiding the empty-catalog notices and the
+  removed-model notice for the whole /agents visit, and left Create
+  enabled on an empty model catalog. The loaders clear the error on
+  success, so the notices re-evaluate against the loaded catalogs.
+
 - **agent-builder: toolkit-grouped tool palette; the 10-tool cap is
   gone (#176).** The palette renders one row per toolkit — checkbox +
   label + "N tools" count + key badge + expand chevron — collapsed by
@@ -22,8 +242,10 @@ All notable changes to this project will be documented in this file. The format 
   the create-mode model default is key-aware.** The add/edit panel
   re-ran all four catalog fetches on every interaction — dialog open,
   kind toggle — flashing the provider select and popping the palette
-  empty→filled. Models and tools now load once on the /agents page;
-  credentials and connectors keep their form-owned loads. The
+  empty→filled. All four loads (models, tools, credentials, connectors)
+  now happen once on the /agents page and feed the builder form and the
+  connectors admin from the same state, so the model picker renders its
+  preselection on first paint. The
   create-mode default no longer picks "the first model" blindly: it
   picks the first model whose provider credential is already connected,
   and with no keys connected there is no default — the old dead-end
@@ -33,12 +255,14 @@ All notable changes to this project will be documented in this file. The format 
 - **agent-builder: the tool palette shows the tool's description, not the
   full docstring.** Agno toolkits carry no explicit function description,
   so the discovery scan fell back to `inspect.getdoc` and served the raw
-  Google-style docstring — `Args:` / `Returns:` sections and all — to the
-  palette rows. The scan now cuts the resolved description at the first
-  section marker (`Args` / `Returns` / `Raises` / `Yields` / `Examples`,
-  case-insensitive); explicit `fn.description` still wins. Runtime
-  schemas keep the full docstring. Palette search no longer matches
-  argument names (an accident of the old behavior, never designed).
+  docstring — `Args:` / `Returns:` sections and all — to the palette
+  rows. The scan now cuts the resolved description at the first section
+  marker of either docstring dialect: Google-style markers (`Args` /
+  `Returns` / `Raises` / `Yields` / `Examples`) and reST/Sphinx field
+  lines (`:param x:`, `:returns:`, `:rtype:`, …), case-insensitive;
+  explicit `fn.description` still wins. Runtime schemas keep the full
+  docstring. Palette search no longer matches argument names (an
+  accident of the old behavior, never designed).
 
 - **auth: silence better-auth's misleading boot-time schema-mismatch ERROR.**
   better-auth 1.7's runtime schema check logs "Database schema mismatch …
@@ -176,6 +400,13 @@ All notable changes to this project will be documented in this file. The format 
   lookup and the re-sync read, the install route surfaced the missing row
   as a bare 500. It now answers 409 with a retryable message — a retry
   takes the fresh-install path and recreates the copy.
+
+- **A fresh template install whose just-created agent row vanished before
+  the final read no longer 500s (#147).** Nothing holds the new row after
+  the INSERT commits, so its org could delete it before
+  `installTemplate`'s closing read, surfacing the missing row as a bare
+  500. It now answers 409 with a retryable message — a retry takes the
+  fresh-install path and recreates the copy.
 
 - **Connector names are slug-validated at the route before any side
   effect (#136).** `PUT /api/connectors` reused the store's http(s)-only

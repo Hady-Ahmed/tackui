@@ -38,11 +38,22 @@ vi.mock("@/lib/db/pg", async (importOriginal) => {
   };
 });
 
+// Passthrough wrapper around @/lib/db/keyed-lock — a test can inject a
+// lock-wait rejection once while every other path (including the
+// real-Postgres pool-exhaustion tests) keeps the real semaphore.
+const mockWithKeyedLock = vi.hoisted(() => vi.fn());
+vi.mock("@/lib/db/keyed-lock", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("@/lib/db/keyed-lock")>();
+  mockWithKeyedLock.mockImplementation(actual.withKeyedLock);
+  return { ...actual, withKeyedLock: mockWithKeyedLock };
+});
+
 import { GET, PUT } from "./route";
 import { DELETE as DELETE_PROVIDER } from "./[provider]/route";
 import { runMigrations } from "@/lib/db/migrate";
 import { query, withTransaction } from "@/lib/db/pg";
 import { useRealPostgres } from "@/lib/db/test-postgres";
+import { KeyedLockUnavailableError } from "@/lib/db/keyed-lock";
 import { checkUserLimit } from "@/lib/ratelimit/middleware";
 import { setCredential, getCredentialSecrets } from "@/lib/credentials/credential-store";
 import type { NextRequest } from "next/server";
@@ -667,6 +678,22 @@ describe("PUT /api/credentials", () => {
       [USER_ID],
     );
     expect(rows.rows).toHaveLength(0);
+  });
+
+  it("maps a keyed-lock wait failure to 503 (retryable), not the generic 500 — nothing stored", async () => {
+    const errSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    mockWithKeyedLock.mockRejectedValueOnce(
+      new KeyedLockUnavailableError(
+        "wait-timeout",
+        'keyed-lock: timed out after 30000ms waiting for key "credentials:user:openai"',
+      ),
+    );
+    const res = await put({ provider: "openai", fields: { api_key: "sk-x" } });
+    expect(res.status).toBe(503);
+    expect((await res.json()).error).toBe("Couldn't save the credential — please try again.");
+    const rows = await query(`SELECT provider FROM credentials WHERE user_id = $1`, [USER_ID]);
+    expect(rows.rows).toHaveLength(0);
+    errSpy.mockRestore();
   });
 
   it("rejects a malformed body (400)", async () => {

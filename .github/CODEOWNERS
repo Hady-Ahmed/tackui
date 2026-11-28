@@ -1,0 +1,5 @@
+# Default owner for everything
+*          @Hady-Ahmed
+
+# Workflows and repo config always need the owner
+.github/   @Hady-Ahmed

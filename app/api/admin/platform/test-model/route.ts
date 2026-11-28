@@ -16,6 +16,7 @@ import { z } from "zod";
 import { getCurrentUser } from "@/lib/auth/context";
 import { checkUserLimit } from "@/lib/ratelimit/middleware";
 import { testPlatformModel, AgentosError } from "@/lib/agents/builder";
+import { validationFailedResponse } from "@/lib/api/validation";
 
 const testBodySchema = z.object({
   entry: z.string().trim().min(1).max(300),
@@ -33,10 +34,7 @@ export async function POST(request: NextRequest) {
   const body = await request.json().catch(() => null);
   const parsed = testBodySchema.safeParse(body);
   if (!parsed.success) {
-    return NextResponse.json(
-      { error: "Validation failed", details: parsed.error.flatten() },
-      { status: 400 },
-    );
+    return validationFailedResponse(parsed.error);
   }
 
   try {

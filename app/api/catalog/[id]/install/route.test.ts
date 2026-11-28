@@ -48,7 +48,12 @@ import {
   TemplateInstallConflictError,
   TemplateInstallVanishedError,
 } from "@/lib/catalog/template-store";
-import { listAgents, deleteAgent, getAgent } from "@/lib/agents/agent-store";
+import {
+  listAgents,
+  deleteAgent,
+  getAgent,
+  resolveAgentSecret,
+} from "@/lib/agents/agent-store";
 import { runMigrations } from "@/lib/db/migrate";
 import { checkTemplateInstall, checkAgentCountLimit } from "@/lib/plans/enforcement";
 import { checkUserLimit } from "@/lib/ratelimit/middleware";
@@ -123,7 +128,10 @@ describe("POST /api/catalog/[id]/install", () => {
     expect(data.agent.authMode).toBe("jwt");
     expect(data.agent.hasJwtSecret).toBe(true);
     const stored = await getAgent(data.agent.id, "org-1");
-    expect(stored?.jwtSecret).toBe("s".repeat(32));
+    expect(resolveAgentSecret(stored!)).toMatchObject({
+      status: "set",
+      secret: "s".repeat(32),
+    });
     expect(stored?.jwtScopes).toEqual(["agents:run"]);
   });
 

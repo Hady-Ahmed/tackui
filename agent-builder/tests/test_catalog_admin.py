@@ -195,7 +195,8 @@ def test_discovery_tools_shape_and_contracts():
 def test_display_description_trims_docstring_sections():
     """The palette shows the description, not the docstring's parameter
     documentation: explicit fn.description wins, otherwise the entrypoint
-    docstring is cut at the first Google-style section marker. The palette
+    docstring is cut at the first section marker of either dialect
+    (Google-style ``Args:`` or reST ``:param x:`` fields). The palette
     is this payload's only audience — the runtime schemas keep the full
     docstring (they are built from the real toolkit instances, not here)."""
     import inspect
@@ -258,6 +259,51 @@ def test_display_description_trims_docstring_sections():
     fn = Function(name="examples", description="Summary.\n\nExamples:\n    >>> x")
     assert _display_description(fn) == "Summary."
 
+    # reST/Sphinx field lines (":param x:") trim the same way — an additive
+    # alternation branch: a leading colon can never match the Google names,
+    # so without the branch such toolkits (agno vendors third-party code,
+    # e.g. airflow's read_dag_file) served their full docstring to the
+    # palette. Covered fields are the display-informational ones, not
+    # type/keyword minutiae.
+    fn = Function(name="rest", description="Search.\n\n:param query: The query to search for.\n\n:returns: The results.")
+    assert _display_description(fn) == "Search."
+
+    # Every reST field name is live (a typo in one branch would otherwise
+    # pass the suite). Non-standard lookalikes ("parameters", "return_type")
+    # stay untouched: the field set is exact.
+    for field in (
+        "param x", "parameter x", "arg x", "argument x",
+        "returns", "return", "rtype",
+        "raises ValueError", "raise ValueError", "except ValueError",
+        "exception ValueError", "yields", "yield",
+    ):
+        fn = Function(name="rest_field", description=f"Summary.\n\n:{field}: docs")
+        assert _display_description(fn) == "Summary.", field
+    for lookalike in ("parameters", "return_type"):
+        fn = Function(name="rest_lookalike", description=f"Summary.\n\n:{lookalike}: docs")
+        assert _display_description(fn) == f"Summary.\n\n:{lookalike}: docs", lookalike
+
+    # Case-insensitive like the Google branch (shared flag): agno ships
+    # lowercase fields, but the flag is shared, so upper-case fields trim
+    # the same way.
+    fn = Function(name="rest_upper", description="Summary.\n\n:PARAM X: docs")
+    assert _display_description(fn) == "Summary."
+
+    # Line-anchored: prose that merely MENTIONS a reST field inline is
+    # not cut.
+    fn = Function(name="rest_inline", description="Summary.\nSee the :param x: field below.")
+    assert _display_description(fn) == "Summary.\nSee the :param x: field below."
+
+    # No head-scan special case: the split is the first marker line wherever
+    # it appears. reST fields may legally PRECEDE the prose — the post-field
+    # prose truncates (acceptable for a two-line-clamped palette row), and a
+    # docstring that OPENS with a field keeps its full text (empty head,
+    # same fallback as the Google opens-with-marker case above).
+    fn = Function(name="rest_fields_mid", description="Intro.\n:param x: docs\nProse after the fields.")
+    assert _display_description(fn) == "Intro."
+    fn = Function(name="rest_fields_first", description=":param x: docs\nProse after the fields.")
+    assert _display_description(fn) == ":param x: docs\nProse after the fields."
+
     # Neither explicit description nor entrypoint → None stays None.
     fn = Function(name="bare")
     assert _display_description(fn) is None
@@ -272,6 +318,21 @@ def test_display_description_on_discovered_tavily_function():
     assert schema["description"]
     assert "\nArgs:" not in schema["description"]
     assert "\nReturns:" not in schema["description"]
+
+
+def test_display_description_trims_rest_fields_on_discovered_function():
+    """Pinned against the real scan: agno vendors third-party toolkits whose
+    docstrings use reST fields (":param x:") — airflow's read_dag_file
+    among them. Before the reST alternation branch such docstrings served
+    their FULL text to the palette; now only the summary head survives,
+    non-empty. Same display-only trim as the Google case above — runtime
+    schemas are untouched."""
+    disc = discover()
+    schema = next(f for f in disc.tool("airflow").functions if f["name"] == "read_dag_file")
+    assert schema["description"]
+    assert ":param" not in schema["description"]
+    assert ":returns:" not in schema["description"]
+    assert ":rtype:" not in schema["description"]
 
 
 def test_discovery_dedupes_identical_function_sets():
@@ -707,9 +768,7 @@ def test_put_clears_rows_for_unavailable_offerings(bare_client, bare_app):
 # ---------------------------------------------------------------------------
 
 
-def test_rebuild_skips_unconstructible_rows_with_warning(bare_app, caplog, monkeypatch):
-    # agno's logger does not propagate; mirror it into the capture handler.
-    monkeypatch.setattr(logging.getLogger("agno"), "propagate", True)
+def test_rebuild_skips_unconstructible_rows_with_warning(bare_app, caplog):
     db = bare_app.state.catalog.db
     # Bypass the admin API: write a row the scan cannot construct.
     db.replace_providers_and_models(
@@ -820,12 +879,11 @@ def test_on_conflict_upsert_writes_win(postgres_dsn):
     assert rows[0].tier is True
 
 
-def test_rebuild_skips_rows_with_credential_attrs(bare_app, caplog, monkeypatch):
+def test_rebuild_skips_rows_with_credential_attrs(bare_app, caplog):
     """_validate_attrs re-applies the credential-attribute rejection to rows
     written by other means (direct DB edits, downgrades): a row carrying a
     plaintext secret is skipped with a warning instead of being served as a
     shared platform fallback key through PlatformMixin."""
-    monkeypatch.setattr(logging.getLogger("agno"), "propagate", True)
     db = bare_app.state.catalog.db
     db.replace_providers_and_models(
         [("openai-chat", True)],
@@ -842,8 +900,7 @@ def test_rebuild_skips_rows_with_credential_attrs(bare_app, caplog, monkeypatch)
     assert any("api_key" in r.message for r in caplog.records)
 
 
-def test_rebuild_skips_enabled_tools_no_longer_available(bare_app, caplog, monkeypatch):
-    monkeypatch.setattr(logging.getLogger("agno"), "propagate", True)
+def test_rebuild_skips_enabled_tools_no_longer_available(bare_app, caplog):
     db = bare_app.state.catalog.db
     db.replace_tools(["calculator", "ghost_tool"])
     with caplog.at_level(logging.WARNING, logger="agno"):

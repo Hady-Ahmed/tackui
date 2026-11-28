@@ -4,12 +4,13 @@ import { getCurrentUser } from "@/lib/auth/context";
 import { SSRF_REJECTION_MESSAGE } from "@/lib/config/saas";
 import { assertSafeUrl, UnsafeUrlError } from "@/lib/net/safe-fetch";
 import { checkUserLimit } from "@/lib/ratelimit/middleware";
+import { validationFailedResponse } from "@/lib/api/validation";
 
 // Note: no `kind` field — the probe never used it (it was validated and
 // discarded). Unknown body fields are stripped by zod, so legacy clients
 // that still send `kind` keep working.
 const testSchema = z.object({
-  endpoint: z.string().url(),
+  endpoint: z.url(),
 });
 
 export async function POST(request: Request) {
@@ -30,10 +31,7 @@ export async function POST(request: Request) {
 
   const parsed = testSchema.safeParse(body);
   if (!parsed.success) {
-    return NextResponse.json(
-      { error: "Validation failed", details: parsed.error.flatten() },
-      { status: 400 },
-    );
+    return validationFailedResponse(parsed.error);
   }
 
   const { endpoint } = parsed.data;

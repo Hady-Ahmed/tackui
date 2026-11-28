@@ -11,6 +11,19 @@ import type { RequiredPlan } from "@/lib/catalog/catalog.config";
 export type AgentAuthMode = "none" | "jwt";
 
 /**
+ * The honest state of an agent's stored per-agent JWT secret:
+ * - "none"          — no secret was ever stored; calling the backend
+ *                     without the per-agent auth header is correct by design.
+ * - "set"           — a secret is stored AND decryptable.
+ * - "undecryptable" — a secret is stored but cannot be recovered (the
+ *                     encryption key was rotated/lost, or the value was
+ *                     tampered with). NOT the same as "none": runs of
+ *                     self-managed JWT agents fail fast with a re-save
+ *                     nudge instead of silently going headerless.
+ */
+export type AgentSecretStatus = "none" | "set" | "undecryptable";
+
+/**
  * Agent provenance:
  * - "manual"   — added via the admin /agents page (default).
  * - "template" — legacy label kept for rows created before migration 0013
@@ -98,6 +111,16 @@ export interface AgentRequirements {
    * name is for gate copy and display only.
    */
   connectors: { id: string; name: string }[];
+  /**
+   * The knowledge/embedding contract — present ⇔ the agent's stored
+   * config references a knowledge corpus (`{provider, model}` from the
+   * platform's knowledge capability at attach time; the corpus ref in
+   * the config is `{name: "kb-<component_id>"}`). Absent = no knowledge.
+   * The snapshot schema must declare this field (no default) or zod
+   * silently strips it on every store write AND read — the run gate's
+   * embedding-key demand would become dead code while tests stay green.
+   */
+  knowledge?: { provider: string; model: string };
 }
 
 export interface AgentEntry {
@@ -125,8 +148,23 @@ export interface AgentEntry {
    * (HS256 needs ≥256 bits). Set this to the same value as the agent
    * backend's JWT verification key (e.g. Agno's `JWT_VERIFICATION_KEY`).
    * Blank submit on PATCH preserves the existing value.
+   *
+   * NOT populated by row mapping — the store maps rows presence-only
+   * (`jwtSecretStored`) and decryption happens on demand via
+   * `resolveAgentSecret()`. This field holds RESOLVED plaintext runtime
+   * material only: the registry's template/builder overrides, a previous
+   * on-demand resolution, or a caller that already holds plaintext.
    */
   jwtSecret?: string;
+  /**
+   * The RAW stored secret exactly as it sits in the `jwt_secret` column
+   * (AES-256-GCM ciphertext, or legacy plaintext for pre-encryption
+   * rows). Populated by row mapping WITHOUT decrypting — determining
+   * presence is cheap, decryption is not, and most reads never need the
+   * plaintext. Server-side only (stripped from PublicAgent like
+   * `jwtSecret`); decrypt via `resolveAgentSecret()`.
+   */
+  jwtSecretStored?: string;
   /**
    * Optional JWT `scopes` claim — a list of permission scopes included
    * in the JWT payload when the agent's backend has `authorization=True`
@@ -209,7 +247,19 @@ export interface PublicAgent {
   endpoint?: string;
   orgId: string;
   authMode: AgentAuthMode;
+  /**
+   * Whether a secret is stored at all (presence — true also when the
+   * stored value is undecryptable). The honest per-state view is
+   * `jwtSecretStatus`.
+   */
   hasJwtSecret: boolean;
+  /**
+   * The honest tri-state of the stored secret (none / set /
+   * undecryptable) — "undecryptable" means a secret exists but cannot be
+   * decrypted (key rotated/lost): the admin UI surfaces a re-save nudge
+   * and self-managed runs fail fast instead of going headerless.
+   */
+  jwtSecretStatus: AgentSecretStatus;
   jwtScopes?: string[];
   sourceTemplateId?: string;
   /** Builder provenance (absent = "manual"). */

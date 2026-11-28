@@ -11,6 +11,7 @@ import { assertSafeUrl, UnsafeUrlError } from "@/lib/net/safe-fetch";
 import { checkUserLimit } from "@/lib/ratelimit/middleware";
 import { SSRF_REJECTION_MESSAGE } from "@/lib/config/saas";
 import { checkAgentCountLimit } from "@/lib/plans/enforcement";
+import { validationFailedResponse } from "@/lib/api/validation";
 
 export async function GET() {
   const user = await getCurrentUser();
@@ -52,10 +53,7 @@ export async function POST(request: Request) {
 
   const parsed = createAgentBodySchema.safeParse(body);
   if (!parsed.success) {
-    return NextResponse.json(
-      { error: "Validation failed", details: parsed.error.flatten() },
-      { status: 400 },
-    );
+    return validationFailedResponse(parsed.error);
   }
 
   // SSRF guard: reject endpoints that resolve to private/internal IPs
