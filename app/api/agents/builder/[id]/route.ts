@@ -32,6 +32,7 @@ import {
   updateAgentosConfig,
   deleteAgentosComponent,
   deriveRequirementsFromConfig,
+  knowledgeCorpusName,
   AgentosError,
   BuilderValidationError,
 } from "@/lib/agents/builder";
@@ -272,16 +273,32 @@ export async function PATCH(
       tools,
       connectors: connectorRefs,
     };
+    // Knowledge ref preservation: the stored config references the corpus
+    // while ≥1 doc exists (the knowledge routes' attach/detach lifecycle
+    // owns the key) — a config-publishing PATCH must carry it through, or
+    // every unrelated edit (a rename of instructions) would silently
+    // detach the corpus. The snapshot is the local projection of the
+    // attach state; the ref name derives from the component id, so both
+    // sides agree by construction. The {provider, model} contract rides
+    // the snapshot (captured from fetchKnowledgeConfig() at attach time).
+    const knowledge = existing.requirements?.knowledge;
+    const knowledgeRef = knowledge
+      ? { name: knowledgeCorpusName(existing.remoteAgentId) }
+      : undefined;
     try {
       nextConfig = buildComponentConfig(
         existing.remoteAgentId,
-        { ...spec, connectorIds },
+        { ...spec, connectorIds, ...(knowledgeRef ? { knowledgeRef } : {}) },
         model,
         platformTools,
       );
       // Same tool validation as buildComponentConfig — guarded too so a
       // stale tool name can never escape as a raw 500.
-      nextRequirements = buildRequirements(spec, model, platformTools);
+      nextRequirements = buildRequirements(
+        { ...spec, ...(knowledge ? { knowledge } : {}) },
+        model,
+        platformTools,
+      );
     } catch (err) {
       if (err instanceof BuilderValidationError) {
         return NextResponse.json({ error: err.message }, { status: 400 });
@@ -395,6 +412,13 @@ export async function PATCH(
             models,
             tools,
             new Map(connectors.map((c) => [c.id, c.name] as const)),
+            // The knowledge contract rides the snapshot: when the
+            // platform's current config references the corpus, the
+            // re-derived snapshot must carry the embedding contract (a
+            // ref without it refuses the derivation — the fallback
+            // below then preserves the pre-patch snapshot, which is
+            // exactly the "pre-patch shape intact" contract).
+            existing.requirements?.knowledge,
           );
         } catch (err) {
           console.warn(

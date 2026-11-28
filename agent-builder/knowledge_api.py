@@ -60,13 +60,23 @@ import knowledge as knowledge_store
 # agno truncates nothing, so this is the practical request-size bound.
 MAX_UPLOAD_BYTES = 10 * 1024 * 1024  # 10 MB
 
+# The optional display name lands verbatim in the contents row and feeds the
+# content-hash input — unbounded it would let a multi-MB string reach both.
+# Bounded for symmetry with the other validated inputs, not a quota (#241):
+# 300 chars is generous for a display name.
+MAX_NAME_CHARS = 300
+
 # Format allowlist: only extensions agno ships a real reader for. agno itself
 # silently falls back to the plain-text reader on unknown extensions, which
 # turns a binary file into garbage chunks — this service rejects instead of
 # ingesting noise. Must stay in lockstep with the reader packages declared in
 # pyproject.toml (the agno per-format extras): an accepted extension whose
 # reader package is missing would surface only at upload time as a FAILED row.
-ALLOWED_EXTENSIONS = (".pdf", ".csv", ".xlsx", ".xls", ".docx", ".doc", ".pptx", ".json", ".md", ".txt")
+# Legacy binary .doc is deliberately ABSENT: agno maps it to DocxReader, which
+# parses the modern OOXML .docx container, so a genuine .doc passed the
+# allowlist and then reliably FAILED on a python-docx parse error (#238) — a
+# clean 400 naming the accepted formats instead; re-save legacy .doc as .docx.
+ALLOWED_EXTENSIONS = (".pdf", ".csv", ".xlsx", ".xls", ".docx", ".pptx", ".json", ".md", ".txt")
 
 # When the client passes chunk_size/chunk_overlap without naming a chunker,
 # agno's stock flow would silently ignore them (its ``process_content`` only
@@ -125,6 +135,16 @@ def _knowledge_for(request: Request, component_id: str, api_key: Optional[str]):
     the construction round-trip is off-loop there; the async upload route wraps
     THIS helper in ``anyio.to_thread``.
 
+    The construction catch mirrors the dispatcher's broadened degrade posture
+    (``dispatcher.plan_per_run_knowledge``): any construction failure maps to
+    a clean 503, never a raw 500 — a management route cannot do its job
+    without its storage, so (unlike a run) it degrades by refusing, but the
+    refusal must be an operator-readable signal, not a stack trace. The db
+    resolution is kept OUTSIDE the try so its HTTPExceptions (503 no-DSN /
+    no-db) can never be caught by a future catch-all added here — a trap
+    this hoist removes (in the baseline they passed through unchanged only
+    because they matched no except clause, not by design).
+
     Args:
         request: The current request.
         component_id: The component whose corpus to resolve.
@@ -137,16 +157,22 @@ def _knowledge_for(request: Request, component_id: str, api_key: Optional[str]):
 
     Raises:
         HTTPException: 503 with an operator-readable, client-safe detail when
-            ``KNOWLEDGE_EMBEDDER`` is malformed or the vector store is
-            unreachable. The malformed-env message deliberately does not echo
-            the configured value (the detail reaches browsers via tackui).
+            ``KNOWLEDGE_EMBEDDER`` is malformed or the vector store cannot be
+            initialized (unreachable, or a first-use table-creation failure —
+            the cold-start duplicate-table race is absorbed by
+            :func:`knowledge.build_knowledge`'s one retry; a persistent
+            failure surfaces as 503). The malformed-env message deliberately
+            does not echo the configured value (the detail reaches browsers
+            via tackui).
     """
+    contents_db = _contents_db(request)
+    url = _db_url(request)
     try:
         return knowledge_store.build_knowledge_for(
             component_id,
-            _contents_db(request),
+            contents_db,
             api_key,
-            db_url=_db_url(request),
+            db_url=url,
         )
     except knowledge_store.KnowledgeConfigError as e:
         log_error(f"knowledge: embedder misconfigured — {e}")
@@ -154,6 +180,17 @@ def _knowledge_for(request: Request, component_id: str, api_key: Optional[str]):
     except OperationalError as e:
         log_error(f"knowledge: vector store unreachable: {type(e).__name__}")
         raise HTTPException(status_code=503, detail="knowledge storage is unreachable")
+    except Exception as e:
+        # Sibling DBAPI failures degrade the same way (the except above is
+        # not the whole surface): a reachable store whose first-use table
+        # creation failed persistently (CREATE EXTENSION permission denied,
+        # a plain Postgres without pgvector — the duplicate-table race is
+        # absorbed by the build layer's retry). Type name only — never the
+        # exception text, which can carry DSN detail.
+        log_error(f"knowledge: vector store failed to initialize: {type(e).__name__}")
+        raise HTTPException(
+            status_code=503, detail="knowledge storage failed to initialize"
+        )
 
 
 def _capability_payload() -> Dict[str, Any]:
@@ -181,15 +218,26 @@ def _content_entry(content) -> Dict[str, Any]:
         content: The agno ``Content`` (from the corpus's linked_to-scoped list).
 
     Returns:
-        ``{id, name, status, size, createdAt, updatedAt}`` — epoch-second
-        timestamps (agno-native), ``size`` possibly null, ``status`` one of
-        agno's ``ContentStatus`` values (``processing``/``completed``/
-        ``partial``/``failed``) or null when the row predates a status write.
+        ``{id, name, description, status, statusMessage, size, createdAt,
+        updatedAt}`` — epoch-second timestamps (agno-native), ``size``
+        possibly null, ``status`` one of agno's ``ContentStatus`` values
+        (``processing``/``completed``/``partial``/``failed``) or null when
+        the row predates a status write, ``description`` agno's Content
+        description (null when absent — this service's own ingest never
+        sets one, but rows written through agno's other flows may carry
+        it, and the UI renders it as the doc row's second line when
+        present), and ``statusMessage`` agno's classified failure reason
+        (``status_message`` — e.g. "authentication (HTTP 401) ... Check
+        the embedder's API key and permissions"), null unless the row
+        failed. Shown to the author on the failed row in the builder
+        form; contains no credential material.
     """
     return {
         "id": content.id,
         "name": content.name,
+        "description": (content.description or "").strip() or None,
         "status": content.status.value if content.status is not None else None,
+        "statusMessage": content.status_message or None,
         "size": content.size,
         "createdAt": content.created_at,
         "updatedAt": content.updated_at,
@@ -292,9 +340,9 @@ def attach_knowledge_routes(app: FastAPI) -> None:
         Raises:
             HTTPException: 400 for a missing/misshapen request (no source,
                 multiple sources, missing key, oversized upload, rejected
-                format, malformed URL, invalid chunk params); 503 for
-                service-side conditions (misconfigured embedder, unreachable
-                storage) via :func:`_knowledge_for`.
+                format, over-long name, malformed URL, invalid chunk
+                params); 503 for service-side conditions (misconfigured
+                embedder, unreachable storage) via :func:`_knowledge_for`.
         """
         sources = [bool(file), bool(text_content), bool(url and url.strip())]
         if sum(sources) == 0:
@@ -308,6 +356,11 @@ def attach_knowledge_routes(app: FastAPI) -> None:
             raise HTTPException(
                 status_code=400,
                 detail="embedding_key is required — uploads are embedded with the creator's own key (BYOK).",
+            )
+        if name is not None and len(name) > MAX_NAME_CHARS:
+            raise HTTPException(
+                status_code=400,
+                detail=f"name exceeds the {MAX_NAME_CHARS}-character cap.",
             )
         if chunk_size is not None and chunk_size < 1:
             raise HTTPException(status_code=400, detail="chunk_size must be at least 1.")

@@ -1,12 +1,25 @@
-import { describe, expect, it, vi } from "vitest";
+import { describe, expect, it, vi, afterEach } from "vitest";
 import type { AgentosModel, AgentosTool } from "@/lib/agents/builder";
 import {
   deriveCredentialsCatalog,
+  fetchCredentialsCatalog,
   fieldForDepKey,
   prettifyProviderLabel,
   prettifyFieldLabel,
   providerForDepKey,
 } from "./catalog";
+
+// fetchCredentialsCatalog live-fetches the platform catalogs; the pure
+// derivation tests above stay mock-free, so the builder module is mocked
+// at the boundary and only the fetch tests vary it.
+const mockFetchModels = vi.fn();
+const mockFetchTools = vi.fn();
+const mockFetchKnowledgeConfig = vi.fn();
+vi.mock("@/lib/agents/builder", () => ({
+  fetchAgentosModels: (...a: unknown[]) => mockFetchModels(...a),
+  fetchBuilderTools: (...a: unknown[]) => mockFetchTools(...a),
+  fetchKnowledgeConfig: (...a: unknown[]) => mockFetchKnowledgeConfig(...a),
+}));
 
 const MODELS: AgentosModel[] = [
   { provider: "openai", id: "gpt-4o-mini", platform_tier: true, requires_key: true, dep_key: "openai_api_key", name: "OpenAIChat" },
@@ -48,6 +61,14 @@ const TOOLS: AgentosTool[] = [
       { dep_key: "x_access_token_secret", label: "X access token secret" },
     ],
   },
+];
+
+/** The models catalog with NO OpenAI provider — the knowledge extension
+ *  row is the only way OpenAI can appear, so its presence/absence is
+ *  observable in fetch tests (with MODELS the extension is a passthrough). */
+const NO_OPENAI_MODELS: AgentosModel[] = [
+  { provider: "openrouter", id: "z-ai/glm-5.3-flash", platform_tier: false, requires_key: true, dep_key: "openrouter_api_key", name: "OpenRouter" },
+  { provider: "ollama", id: "llama3", platform_tier: false, requires_key: false, dep_key: null, name: "Ollama" },
 ];
 
 describe("deriveCredentialsCatalog", () => {
@@ -204,5 +225,107 @@ describe("prettifyFieldLabel", () => {
     // Unknown words pass through untouched (case included).
     expect(prettifyFieldLabel("consumer key")).toBe("consumer key");
     expect(prettifyFieldLabel("X consumer secret")).toBe("X consumer secret");
+  });
+});
+
+describe("knowledge embedding provider extension", () => {
+  // The gap case: a deployment whose models carry NO OpenAI provider (a
+  // pure-OpenRouter/Ollama shop) but whose knowledge capability IS enabled
+  // — without the entry the author could never save the key the uploads
+  // demand (dead knowledge).
+  const noOpenAiModels = NO_OPENAI_MODELS;
+  const knowledgeEnabled = { enabled: true, provider: "openai", model: "text-embedding-3-small" };
+
+  it("adds the embedding provider when knowledge is enabled and no model provides it", () => {
+    const catalog = deriveCredentialsCatalog(noOpenAiModels, [], knowledgeEnabled);
+    expect(catalog.openai).toEqual({
+      provider: "openai",
+      kind: "tool",
+      keyName: "openai_api_key",
+      label: "OpenAI",
+      fields: [{ key: "api_key", label: "API key" }],
+    });
+    // The rest of the catalog is untouched.
+    expect(catalog.openrouter).toBeDefined();
+  });
+
+  it("does nothing when the models catalog already includes the provider (passthrough)", () => {
+    const catalog = deriveCredentialsCatalog(MODELS, [], knowledgeEnabled);
+    expect(catalog.openai).toMatchObject({ kind: "llm", keyName: "openai_api_key" });
+    expect(catalog.openai.fields).toEqual([{ key: "api_key", label: "API key" }]);
+  });
+
+  it("adds nothing when knowledge is disabled, unsupported, or unknown", () => {
+    expect(deriveCredentialsCatalog(noOpenAiModels, [], { enabled: false, provider: "", model: "" }).openai).toBeUndefined();
+    expect(deriveCredentialsCatalog(noOpenAiModels, [], { enabled: false, provider: "", model: "", unsupported: true }).openai).toBeUndefined();
+    expect(deriveCredentialsCatalog(noOpenAiModels, []).openai).toBeUndefined();
+  });
+});
+
+describe("fetchCredentialsCatalog", () => {
+  afterEach(() => {
+    vi.clearAllMocks();
+  });
+
+  it("degrades to catalogError when the platform is unreachable (saved keys unaffected)", async () => {
+    mockFetchModels.mockRejectedValue(new Error("down"));
+    const result = await fetchCredentialsCatalog();
+    expect(result.catalog).toBeNull();
+    expect(result.catalogError).toBeTruthy();
+  });
+
+  it("includes the knowledge embedding provider when the capability is enabled", async () => {
+    mockFetchModels.mockResolvedValue(MODELS);
+    mockFetchTools.mockResolvedValue(TOOLS);
+    mockFetchKnowledgeConfig.mockResolvedValue({ enabled: true, provider: "openai", model: "text-embedding-3-small" });
+    const { catalog, catalogError } = await fetchCredentialsCatalog();
+    expect(catalogError).toBeUndefined();
+    expect(catalog?.openai).toMatchObject({ kind: "llm", keyName: "openai_api_key" });
+  });
+
+  it("keeps the catalog working when the knowledge config 404-degrades (unsupported ≠ unreachable)", async () => {
+    mockFetchModels.mockResolvedValue(MODELS);
+    mockFetchTools.mockResolvedValue(TOOLS);
+    mockFetchKnowledgeConfig.mockResolvedValue({ enabled: false, provider: "", model: "", unsupported: true });
+    const { catalog } = await fetchCredentialsCatalog();
+    expect(catalog?.openai).toMatchObject({ kind: "llm" });
+  });
+
+  it("includes the knowledge extension row end-to-end when the signal is fine and no model carries it", async () => {
+    mockFetchModels.mockResolvedValue(NO_OPENAI_MODELS);
+    mockFetchTools.mockResolvedValue(TOOLS);
+    mockFetchKnowledgeConfig.mockResolvedValue({ enabled: true, provider: "openai", model: "text-embedding-3-small" });
+    const { catalog, catalogError } = await fetchCredentialsCatalog();
+    expect(catalogError).toBeUndefined();
+    expect(catalog?.openai).toMatchObject({ kind: "tool", keyName: "openai_api_key" });
+  });
+
+  it("degrades ONLY the knowledge row when the knowledge signal rejects — models/tools survive", async () => {
+    mockFetchModels.mockResolvedValue(NO_OPENAI_MODELS);
+    mockFetchTools.mockResolvedValue(TOOLS);
+    mockFetchKnowledgeConfig.mockRejectedValue(new Error("knowledge signal down"));
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const { catalog, catalogError } = await fetchCredentialsCatalog();
+    // Reachable-but-degraded, not unreachable: no error-banner copy.
+    expect(catalog).not.toBeNull();
+    expect(catalogError).toBeUndefined();
+    // The knowledge extension row is absent...
+    expect(catalog?.openai).toBeUndefined();
+    // ...and every other provider survives — the API-keys page loses
+    // nothing but the knowledge row (it returns when the signal does).
+    expect(catalog?.openrouter).toBeDefined();
+    expect(catalog?.tavily).toBeDefined();
+    expect(catalog?.x).toBeDefined();
+    // The degradation is loud, not silent.
+    expect(warn).toHaveBeenCalledTimes(1);
+    warn.mockRestore();
+  });
+
+  it("still nulls when the tools signal fails — models/tools stay all-or-nothing", async () => {
+    mockFetchModels.mockResolvedValue(MODELS);
+    mockFetchTools.mockRejectedValue(new Error("down"));
+    const result = await fetchCredentialsCatalog();
+    expect(result.catalog).toBeNull();
+    expect(result.catalogError).toBeTruthy();
   });
 });

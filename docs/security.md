@@ -110,6 +110,21 @@ secret stores whose boundaries are worth stating explicitly:
   per-run as an AG-UI context item — never persisted AgentOS-side, never
   cached agent-side. Rows are scoped `UNIQUE (user_id, provider)`; no FK
   to the Better Auth runtime table (same convention as `agents.org_id`).
+- **Knowledge embedding key — the same key, a new consumer with a new
+  boundary.** A knowledge upload embeds the document with the AUTHOR's
+  saved `openai` key (`api_key` field), resolved server-side by the
+  knowledge POST route (`getCredentialSecrets(userId)["openai"]?.["api_key"]`)
+  and sent to the builder service as the multipart `embedding_key` field.
+  The key is resolved server-side — never to the browser — and lives in
+  the request body ONLY: it is never returned in a response, never logged
+  (a credential-read failure logs the error message, never the fields),
+  and never appears in an error detail. The run path consumes the same
+  key per-run as the `openai_api_key` dependency (the dispatcher resolves
+  it with deliberately no env fallback — see
+  [agent-builder.md](./agent-builder.md#knowledge--the-service-half-233--the-run-time-attach-234));
+  the upload path is the only other consumer. An author without the key
+  cannot upload (a curation prerequisite — the key is demanded at
+  upload time, not hidden behind the run gate).
 - **Connectors** (`lib/connectors/connector-store.ts`) — org-scoped MCP
   server registry. Writes are org-admin gated (`canManageAgents`); reads
   are member-accessible (rate-limited via the `agentRead` bucket) so the
@@ -178,7 +193,11 @@ endpoint URL to validate. The outbound AgentOS URL is platform config
 so the guard's threat model (user-controlled URL reaching internal
 services) doesn't apply. The guard still applies to every route where
 the endpoint comes from the user (admin agent create/edit, the
-reachability probe, catalog templates, **`PUT /api/connectors`**).
+reachability probe, catalog templates, **`PUT /api/connectors`**, and
+**`POST /api/agents/[id]/knowledge`** — URL uploads hand the service a
+user-supplied URL to fetch from inside the deployment, the exact threat
+model; the guard runs before anything is forwarded, alongside the
+scheme/shape checks).
 
 Two further lines of defense on the run path (both from the same
 review that added the connector guard):

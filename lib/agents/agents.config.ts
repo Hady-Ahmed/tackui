@@ -111,6 +111,16 @@ export interface AgentRequirements {
    * name is for gate copy and display only.
    */
   connectors: { id: string; name: string }[];
+  /**
+   * The knowledge/embedding contract — present ⇔ the agent's stored
+   * config references a knowledge corpus (`{provider, model}` from the
+   * platform's knowledge capability at attach time; the corpus ref in
+   * the config is `{name: "kb-<component_id>"}`). Absent = no knowledge.
+   * The snapshot schema must declare this field (no default) or zod
+   * silently strips it on every store write AND read — the run gate's
+   * embedding-key demand would become dead code while tests stay green.
+   */
+  knowledge?: { provider: string; model: string };
 }
 
 export interface AgentEntry {

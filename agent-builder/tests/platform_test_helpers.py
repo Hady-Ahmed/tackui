@@ -68,6 +68,7 @@ def component_payload(
     tools: Optional[list] = None,
     model: Optional[dict] = None,
     connectors: Optional[list] = None,
+    knowledge: Optional[dict] = None,
 ) -> dict:
     """A POST /components payload for a minimal agent component."""
     config = {
@@ -87,6 +88,11 @@ def component_payload(
         # Mirrors the frontend's builder: connector NAMES in the stored config —
         # the dispatcher's run-time allowlist for wire mcp_connectors.
         config["connectors"] = connectors
+    if knowledge:
+        # Mirrors the frontend's builder: the knowledge reference is a NAME
+        # ("kb-<component_id>") — the dispatcher strips it pre-rehydration
+        # and attaches a fresh per-run Knowledge instance (#234).
+        config["knowledge"] = knowledge
     return {
         "name": "Test Agent",
         "component_id": component_id,

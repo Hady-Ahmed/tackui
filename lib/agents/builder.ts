@@ -216,6 +216,11 @@ function extractDetail(raw: string): string | undefined {
  * 10s timeout — the AgentOS is same-host infrastructure; a hung call
  * should fail the builder request, not hold it open.
  *
+ * Bodies: JSON objects are serialized and sent with the application/json
+ * Content-Type; a FormData body (the knowledge multipart uploads) passes
+ * through UNTOUCHED with no Content-Type — fetch derives the multipart
+ * boundary itself. Never base64 a file into JSON.
+ *
  * Error copy discipline: `message` is end-user-safe (the platform is
  * called "the agent builder" — never "the agent platform", never
  * "AgentOS", never method/path/status framing, never a raw body). The
@@ -245,15 +250,23 @@ export async function agentosRequest<T>(
   if (!/^\/[A-Za-z0-9._~/%-]*$/.test(path)) {
     throw new AgentosError(500, "Internal error building the platform request.");
   }
+  // A FormData body is passed through as-is (fetch sets the multipart
+  // boundary); anything else is JSON-serialized. The flag also gates the
+  // error path below: a form body may carry a secret (the knowledge
+  // ingest rides the creator's embedding key), so its error detail is
+  // never extracted.
+  const isForm = body instanceof FormData;
   let res: Response;
   try {
     res = await fetch(`${AGENTOS_BASE_URL}${path}`, {
       method,
       headers: {
         Authorization: `Bearer ${mintServiceToken()}`,
-        ...(body !== undefined ? { "Content-Type": "application/json" } : {}),
+        ...(body !== undefined && !isForm
+          ? { "Content-Type": "application/json" }
+          : {}),
       },
-      ...(body !== undefined ? { body: JSON.stringify(body) } : {}),
+      ...(body !== undefined ? { body: isForm ? body : JSON.stringify(body) } : {}),
       signal: AbortSignal.timeout(10_000),
       cache: "no-store",
     });
@@ -264,10 +277,22 @@ export async function agentosRequest<T>(
     );
   }
   if (!res.ok) {
-    const detail = extractDetail(await res.text().catch(() => ""));
+    // Detail extraction is skipped for form bodies: the multipart ingest
+    // carries the creator's embedding key in its body ONLY (the module
+    // invariant), while extractDetail copies upstream error bodies into
+    // the server log and admin-facing `detail` — a foreign/future
+    // service that echoes form input in validation errors would copy
+    // the key with it. Skipping the whole extraction is airtight; a
+    // scrub would bet the invariant on matching every echo shape
+    // (FastAPI 422 entry arrays, encodings, truncation slices). The
+    // operator keeps the method/path/status framing on the same line.
+    const detail = isForm
+      ? undefined
+      : extractDetail(await res.text().catch(() => ""));
     const status = res.status === 401 || res.status === 403 ? 502 : res.status;
-    // Log the full body server-side (it keeps method/path framing — that's
-    // for operators reading logs, not for the browser).
+    // Log the error server-side (it keeps method/path framing — that's
+    // for operators reading logs, not for the browser; form bodies skip
+    // the detail, see above).
     console.error(`[agentos] ${method} ${path} failed (${res.status})${detail ? `: ${detail}` : ""}`);
     if (status < 500) {
       throw new AgentosError(
@@ -320,6 +345,227 @@ export async function fetchBuilderTools(): Promise<AgentosTool[]> {
     "/platform/tools",
   );
   return body?.tools ?? [];
+}
+
+/* ---------------------------------------------------------------------- */
+/* Knowledge clients (the corpus management half of the builder service)   */
+/* ---------------------------------------------------------------------- */
+
+/**
+ * The knowledge capability signal — GET /platform/knowledge/config. The
+ * service NEVER errors on this route: `enabled=false` with the config
+ * echoed is "the service answered, knowledge is off", while a failed
+ * fetch (AgentosError) is "the service is unreachable" — distinct states
+ * the builder UI must tell apart (same degradation thinking as the
+ * catalog's `{catalog: null, catalogError}`).
+ *
+ * `unsupported` marks a 404: the service predates knowledge, so an old
+ * deployment reads as unsupported — not broken.
+ */
+export interface KnowledgeConfig {
+  enabled: boolean;
+  provider: string;
+  model: string;
+  /** true = the service answered 404 (predates knowledge) — reachable but unsupported. */
+  unsupported?: boolean;
+}
+
+const knowledgeConfigSchema = z
+  .object({
+    enabled: z.boolean(),
+    provider: z.string(),
+    model: z.string(),
+  })
+  // A capability answer claiming enabled WITHOUT naming the embedder
+  // would survive this read and then fail requirementsSchema's min(1)
+  // at the attach write — a generic 500 with the corpus already
+  // uploaded. The disabled answer legitimately carries empty strings
+  // (the service blanks them), so the check is conditional: enabled +
+  // empty is an upstream bug, rejected here with the same 502 posture
+  // as any malformed payload.
+  .refine(
+    (cfg) => !cfg.enabled || (cfg.provider.length > 0 && cfg.model.length > 0),
+    "enabled knowledge requires a provider and a model",
+  );
+
+/** GET /platform/knowledge/config — never throws for a 404 (unsupported);
+ *  transport/5xx failures and a payload that fails the schema (including
+ *  an enabled answer naming no embedder) propagate as AgentosError. */
+export async function fetchKnowledgeConfig(): Promise<KnowledgeConfig> {
+  try {
+    const body = await agentosRequest<unknown>(
+      "GET",
+      "/platform/knowledge/config",
+    );
+    const parsed = knowledgeConfigSchema.safeParse(body);
+    if (!parsed.success) {
+      throw new AgentosError(
+        502,
+        "The agent builder is unavailable right now — please try again shortly.",
+      );
+    }
+    return parsed.data;
+  } catch (err) {
+    if (err instanceof AgentosError && err.status === 404) {
+      // The service predates knowledge — an old deployment reads as
+      // unsupported, not broken.
+      return { enabled: false, provider: "", model: "", unsupported: true };
+    }
+    throw err;
+  }
+}
+
+/**
+ * One content row of a corpus (GET /platform/knowledge/{id} — camelCase,
+ * the frontend consumes these directly). `status` mirrors agno's
+ * ContentStatus (processing/completed/partial/failed) or null on a row
+ * that predates a status write; `statusMessage` is agno's classified
+ * failure reason (null on healthy rows — the service normalizes agno's
+ * empty-string default to null); `description` is agno's Content
+ * description (null when absent — the service's own ingest never sets
+ * one; the builder form renders it as the doc row's second line when a
+ * row carries it); `createdAt`/`updatedAt` are epoch seconds. Unknown
+ * extra fields are tolerated (zod strips them).
+ */
+export interface KnowledgeContentRow {
+  id: string;
+  name: string;
+  description?: string | null;
+  status: string | null;
+  statusMessage?: string | null;
+  size: number | null;
+  createdAt: number;
+  updatedAt: number;
+}
+
+const knowledgeContentRowSchema = z.object({
+  id: z.string(),
+  name: z.string(),
+  description: z.string().nullable().optional(),
+  status: z.string().nullable(),
+  statusMessage: z.string().nullable().optional(),
+  size: z.number().nullable(),
+  createdAt: z.number(),
+  updatedAt: z.number(),
+});
+
+/** GET /platform/knowledge/{id} — the corpus's content list (unknown/empty
+ *  corpus is an empty list; component existence is tackui's gate). */
+export async function fetchKnowledgeList(
+  componentId: string,
+): Promise<KnowledgeContentRow[]> {
+  const body = await agentosRequest<unknown>(
+    "GET",
+    `/platform/knowledge/${encodeURIComponent(componentId)}`,
+  );
+  const parsed = z.array(knowledgeContentRowSchema).safeParse(body ?? []);
+  if (!parsed.success) {
+    // A 2xx with a body that isn't the contracted shape is an upstream
+    // bug — the same end-user-safe failure as any transport error.
+    throw new AgentosError(
+      502,
+      "The agent builder is unavailable right now — please try again shortly.",
+    );
+  }
+  return parsed.data;
+}
+
+/** 202 response of the upload route — the caller's content handle. */
+export interface KnowledgeUploadResult {
+  id: string;
+  name?: string;
+  status?: string;
+}
+
+const knowledgeUploadResponseSchema = z.object({
+  id: z.string().min(1),
+  name: z.string().optional(),
+  status: z.string().optional(),
+});
+
+export interface KnowledgeUploadInput {
+  componentId: string;
+  /** Exactly one of file/text/url (the route's validation runs first —
+   *  this client forwards whatever it's given). */
+  file?: File;
+  text?: string;
+  url?: string;
+  name?: string;
+  chunkSize?: number;
+  chunkOverlap?: number;
+  /**
+   * The creator's embedding key (BYOK) — rides in the multipart body ONLY.
+   * Never logged, never persisted, never echoed in a response or error.
+   */
+  embeddingKey: string;
+}
+
+/**
+ * POST /platform/knowledge/{id}/content — the multipart ingest. The body
+ * is built here as FormData and passed through agentosRequest untouched
+ * (no JSON encoding, no Content-Type — fetch sets the boundary);
+ * `embedding_key` rides in the body only.
+ */
+export async function uploadKnowledgeContent(
+  input: KnowledgeUploadInput,
+): Promise<KnowledgeUploadResult> {
+  const form = new FormData();
+  if (input.file) {
+    form.set("file", input.file, input.file.name);
+  } else if (input.text !== undefined) {
+    form.set("text_content", input.text);
+  } else if (input.url !== undefined) {
+    form.set("url", input.url);
+  }
+  if (input.name) form.set("name", input.name);
+  if (input.chunkSize !== undefined) form.set("chunk_size", String(input.chunkSize));
+  if (input.chunkOverlap !== undefined) form.set("chunk_overlap", String(input.chunkOverlap));
+  form.set("embedding_key", input.embeddingKey);
+  const body = await agentosRequest<unknown>(
+    "POST",
+    `/platform/knowledge/${encodeURIComponent(input.componentId)}/content`,
+    form,
+  );
+  const parsed = knowledgeUploadResponseSchema.safeParse(body);
+  if (!parsed.success) {
+    throw new AgentosError(
+      502,
+      "The agent builder is unavailable right now — please try again shortly.",
+    );
+  }
+  return parsed.data;
+}
+
+/**
+ * DELETE /platform/knowledge/{id}/content/{content_id} — idempotent
+ * service-side (an unknown id is still {ok: true}); a foreign-corpus id
+ * is a 404, surfaced through the normal AgentosError shaping.
+ */
+export async function deleteKnowledgeContent(input: {
+  componentId: string;
+  contentId: string;
+}): Promise<void> {
+  const body = await agentosRequest<unknown>(
+    "DELETE",
+    `/platform/knowledge/${encodeURIComponent(input.componentId)}/content/${encodeURIComponent(input.contentId)}`,
+  );
+  const parsed = z.object({ ok: z.boolean() }).safeParse(body);
+  if (!parsed.success) {
+    throw new AgentosError(
+      502,
+      "The agent builder is unavailable right now — please try again shortly.",
+    );
+  }
+}
+
+/**
+ * The corpus name a builder agent's knowledge ref carries:
+ * `kb-<component_id>`. BOTH sides derive it from the component id —
+ * tackui's attach here, the dispatcher's run-time attach there — so the
+ * config's ref and the corpus agree by construction.
+ */
+export function knowledgeCorpusName(componentId: string): string {
+  return `kb-${componentId}`;
 }
 
 /* ---------------------------------------------------------------------- */
@@ -428,6 +674,15 @@ export function buildComponentConfig(
      * never carries one.
      */
     connectorIds: string[];
+    /**
+     * The knowledge ref to carry in the config — present ⇔ the agent's
+     * corpus has ≥1 doc (the knowledge routes' attach/detach lifecycle
+     * owns this key; the builder create path passes nothing, since a
+     * fresh component has no corpus). A config-publishing PATCH must
+     * carry the ref through, or every unrelated edit would silently
+     * detach the corpus.
+     */
+    knowledgeRef?: { name: string };
   },
   model: AgentosModel,
   tools: AgentosTool[],
@@ -466,6 +721,7 @@ export function buildComponentConfig(
     // token — URLs live in the registry, tokens stay run-scoped deps.
     ...(spec.connectorIds.length ? { connectors: spec.connectorIds } : {}),
     ...(resolvedTools.length ? { tools: resolvedTools } : {}),
+    ...(spec.knowledgeRef ? { knowledge: spec.knowledgeRef } : {}),
   };
 }
 
@@ -475,6 +731,14 @@ export function buildRequirements(
     tools: Array<{ name: string }>;
     /** Resolved connector refs — the org's stable ids + org-facing names. */
     connectors: Array<{ id: string; name: string }>;
+    /**
+     * The knowledge contract attached in this same save — present ⇔ the
+     * config being published carries the knowledge ref. `{provider, model}`
+     * comes from fetchKnowledgeConfig() at attach time (the knowledge
+     * routes), or from the snapshot's own copy when a builder PATCH
+     * preserves the ref through an unrelated edit.
+     */
+    knowledge?: { provider: string; model: string };
   },
   model: AgentosModel,
   tools: AgentosTool[],
@@ -551,6 +815,11 @@ export function buildRequirements(
     // reference (stored config + dispatcher wire contract), the name is
     // for gate copy.
     connectors: spec.connectors,
+    // The knowledge contract — present ⇔ the published config references
+    // the corpus. Absent must stay absent (no default materializes): the
+    // run gate reads this field's PRESENCE as "this agent needs the
+    // embedding provider's key".
+    ...(spec.knowledge ? { knowledge: spec.knowledge } : {}),
   };
   // Write-boundary validation: the snapshot must parse with the SAME
   // schema every read applies. A malformed platform-catalog row (empty
@@ -681,6 +950,15 @@ export function deriveRequirementsFromConfig(
   models: AgentosModel[],
   tools: AgentosTool[],
   connectorIdToName: Map<string, string>,
+  /**
+   * The knowledge contract for the config's knowledge ref — REQUIRED
+   * when the config references knowledge (a ref without the embedding
+   * contract can't produce a truthful snapshot: refuse the derivation
+   * and let the caller fall back, never write a lossy snapshot). When
+   * the config references NO knowledge, the field stays absent even
+   * when a contract is supplied (detach-time re-derivation).
+   */
+  knowledge?: { provider: string; model: string },
 ): AgentRequirements | null {
   try {
     if (!config) return null;
@@ -699,6 +977,24 @@ export function deriveRequirementsFromConfig(
       models.find((m) => m.id === modelRef.id && m.name === modelRef.name) ??
       models.find((m) => m.id === modelRef.id);
     if (!model) return null;
+
+    // The knowledge ref mirrors the config exactly: a well-formed ref
+    // demands the embedding contract, a missing ref stays absent, a
+    // malformed ref refuses the whole derivation (fail-closed).
+    const knowledgeRef = config.knowledge as { name?: unknown } | null | undefined;
+    let knowledgeContract: { provider: string; model: string } | undefined;
+    if (knowledgeRef !== undefined && knowledgeRef !== null) {
+      if (
+        typeof knowledgeRef !== "object" ||
+        Array.isArray(knowledgeRef) ||
+        typeof knowledgeRef.name !== "string" ||
+        !knowledgeRef.name
+      ) {
+        return null;
+      }
+      if (!knowledge) return null;
+      knowledgeContract = knowledge;
+    }
 
     const toolNames = Array.isArray(config.tools)
       ? config.tools
@@ -724,7 +1020,11 @@ export function deriveRequirementsFromConfig(
     }
 
     return buildRequirements(
-      { tools: toolNames.map((name) => ({ name })), connectors: connectorRefs },
+      {
+        tools: toolNames.map((name) => ({ name })),
+        connectors: connectorRefs,
+        ...(knowledgeContract ? { knowledge: knowledgeContract } : {}),
+      },
       model,
       tools,
     );
