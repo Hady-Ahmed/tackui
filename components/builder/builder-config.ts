@@ -638,10 +638,24 @@ export const KNOWLEDGE_MAX_UPLOAD_BYTES = 10 * 1024 * 1024;
  *  (agno ingests async — processing can last seconds for big PDFs). */
 export const KNOWLEDGE_POLL_MS = 5000;
 
-/** Create-mode note — docs attach to a SAVED component, so the section
- *  itself only exists in edit mode. */
+/** Create-mode note — rides the INERT knowledge preview (the section
+ *  renders disabled in create mode so the capability is visible before
+ *  the first save; docs attach to a SAVED component's corpus). Upgraded
+ *  from a bare save-first reminder to a feature statement after the
+ *  Nov 26 demo: a reminder alone didn't register with first-time
+ *  builders — it now names what the agent will be able to search. */
 export const KNOWLEDGE_CREATE_NOTE =
-  "Knowledge attaches after the agent is saved — save the agent first, then add documents.";
+  "Save the agent first, then add documents it can search — PDFs, pasted text, or web pages.";
+
+/** The Files row's helper line — shared by the edit section AND the
+ *  create-mode preview so the two renderings cannot drift. */
+export const KNOWLEDGE_FILE_TYPE_HINT =
+  "PDF, CSV, Excel, Word, PowerPoint, JSON, Markdown, TXT — up to 10 MB each.";
+
+/** The Web page row's helper line — same shared-constant rule as the
+ *  Files hint (the preview must show the same copy the live row will). */
+export const KNOWLEDGE_URL_HINT =
+  "The page is fetched and read when it's added — not at run time.";
 
 /** The failed row's remedy microcopy — the upload creates a NEW content
  *  row (there is no resume), so the fix is delete + re-upload. */
