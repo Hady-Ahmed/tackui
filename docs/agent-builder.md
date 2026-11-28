@@ -965,7 +965,8 @@ Upload validation is fail-closed at the route: no/|>1 sources, missing or
 blank `embedding_key`, unsupported format (allowlist
 `.pdf .csv .xlsx .xls .docx .pptx .json .md .txt` — the 400 lists the
 formats; agno's own fallback would ingest garbage chunks from unknown
-extensions), an upload over 10 MB, a non-absolute/non-`http(s)` URL (shape
+extensions), an upload over 10 MB, a `name` over 300 characters, a
+non-absolute/non-`http(s)` URL (shape
 only — the SSRF decision is tackui's client-side guard), and invalid chunk
 params (`chunk_overlap < chunk_size`) are all 400s.
 

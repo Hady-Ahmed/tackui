@@ -164,7 +164,7 @@ def test_upload_rejects_unknown_file_formats_with_the_allowlist(client):
     )
     assert res.status_code == 400
     detail = res.json()["detail"]
-    for fmt in (".pdf", ".csv", ".xlsx", ".docx", ".pptx", ".json", ".md", ".txt"):
+    for fmt in (".pdf", ".csv", ".xlsx", ".xls", ".docx", ".pptx", ".json", ".md", ".txt"):
         assert fmt in detail, fmt
 
 
@@ -216,6 +216,19 @@ def test_upload_rejects_malformed_urls(client):
             data={"embedding_key": "k", "url": bad},
         )
         assert res.status_code == 400, bad
+
+
+def test_upload_rejects_an_over_long_name(client, offline_embedder):
+    """The optional display name is bounded (#241): it lands verbatim in the
+    contents row and feeds the content-hash input, so a multi-MB name is a
+    clean 400 — symmetric with the other request-shape validations. Exactly
+    at the cap is accepted: a cap, not a ban."""
+    res = _post_text(client, name="x" * 301)
+    assert res.status_code == 400
+    assert "300" in res.json()["detail"]
+    res = _post_text(client, component_id="name-cap-boundary", name="x" * 300, text="The rye harvest ripens.")
+    assert res.status_code == 202
+    assert res.json()["name"] == "x" * 300
 
 
 def test_upload_rejects_invalid_chunk_params(client):
