@@ -82,13 +82,13 @@ function knowledgeRefOf(
 }
 
 /** The snapshot minus its knowledge field (the detach diff — exact, since
- *  attach/detach change nothing else in the config). */
+ *  attach/detach change nothing else in the config). Rest, not a hand-listed
+ *  shape: a future AgentRequirements field must survive the fallback, not
+ *  be silently dropped with knowledge. */
 function withoutKnowledge(requirements: AgentRequirements): AgentRequirements {
-  return {
-    model: requirements.model,
-    tools: requirements.tools,
-    connectors: requirements.connectors,
-  };
+  const rest: AgentRequirements = { ...requirements };
+  delete rest.knowledge;
+  return rest;
 }
 
 /**
